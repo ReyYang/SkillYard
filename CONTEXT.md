@@ -32,6 +32,10 @@ _Avoid_: Exposure, active skill, installed skill
 A declaration that a Library skill is made available to a specific Host and scope. Exposure is the relationship between one Library Entry and one Host Entry Name.
 _Avoid_: Install, copy, subscription
 
+**Exposure Scope**:
+The level at which an Exposure is written for a Host. First-version scopes are `user` and `project`; project scope records a `projectRoot`.
+_Avoid_: Skill type, Library type
+
 **Exposure Mode**:
 The mechanism an Exposure uses to make a Library skill visible to a Host. The default mode is `symlink`; `snapshot` is a compatibility fallback.
 _Avoid_: Install type, source type
@@ -47,6 +51,10 @@ _Avoid_: Alias
 **Host Entry Conflict**:
 A pre-write condition where a Host and scope already contain the Host Entry Name needed by a different Library Entry. The tool refuses to write until the user explicitly chooses a resolution.
 _Avoid_: Blocked Exposure, background reconciliation
+
+**Unmanaged Host Entry**:
+A skill entry found in a Host directory that is not represented by a SkillYard Exposure. Doctor reports it and offers choices to keep it unmanaged, import it into the Library, or replace it with a managed Exposure.
+_Avoid_: Broken entry, project skill
 
 **Conflict Prompt**:
 The Chinese user-facing prompt shown when a Host Entry Conflict occurs. It explains the existing entry, the new entry, and explicit choices such as using a recommended name, replacing the existing entry, or skipping the exposure.
@@ -79,6 +87,26 @@ _Avoid_: Plugin when referring to built-in host support
 **Discovery Provider**:
 An external source used to find candidate skills before importing them into the Library. `gh skill` is a Discovery Provider, not the Library's state manager.
 _Avoid_: State File, Source Tree manager
+
+**AI Assist**:
+An optional, explicit feature that explains skills, summarizes findings, or helps infer unknown provenance. AI Assist can suggest and annotate, but it must not mutate the State File, Source Trees, Exposures, or Host directories.
+_Avoid_: Core dependency, automatic decision-maker
+
+**Provenance Inference**:
+An AI-assisted investigation used when a skill's source is unknown. It compares local skill content, metadata, filenames, and public sources to suggest likely origins with evidence and confidence, without recording the guess as confirmed provenance.
+_Avoid_: Provenance, source of truth
+
+**Captured Install**:
+A flow where SkillYard runs an external installer command, snapshots Host skill directories before and after, and converts newly created Host entries into managed Library state. The external installer performs the download; SkillYard captures the result and records provenance.
+_Avoid_: Delegated install, unmanaged install
+
+**Install Receipt**:
+The recorded evidence from a Captured Install, including the command, package or provider identity, resolved version, source metadata, and Host entries created or changed. It is used to infer Library Identity and Source Tree provenance.
+_Avoid_: Event, provenance guess
+
+**Package Source Tree**:
+A Source Tree materialized from a package registry artifact such as an npm tarball. It records package name, version, registry metadata, tarball URL, integrity, and repository metadata when available.
+_Avoid_: Git Source Tree, adopted source
 
 **Command Surface**:
 The first-version CLI command set: `init`, `import`, `expose`, `doctor`, `update`, and `serve`. It defines the product's initial operational boundary.
