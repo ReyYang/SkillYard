@@ -22,4 +22,20 @@ It keeps a unified local Library of skill Source Trees, then exposes selected Li
 
 ## Current Status
 
-This repository currently contains the product definition and architectural decisions for the first version.
+This repository contains the product definition, architectural decisions, and a first runnable Python implementation.
+
+## Development
+
+Run the CLI from the repository root:
+
+```bash
+python3 -m skillyard --home /tmp/skillyard init --yes
+```
+
+Run tests:
+
+```bash
+python3 -m unittest discover
+```
+
+The CLI uses Plan -> Apply for write operations. Omit `--yes` to inspect the Plan without applying it.
