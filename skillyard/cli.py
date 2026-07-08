@@ -10,7 +10,7 @@ from .app import HostEntryConflict, SkillYardApp, write_json
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="skillyard")
-    parser.add_argument("--home", type=Path, default=Path.home() / "Library/Application Support/SkillYard")
+    parser.add_argument("--home", type=Path, default=Path.home() / ".skillyard")
     parser.add_argument("--host-home", type=Path)
     parser.add_argument("--json", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
