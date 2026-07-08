@@ -64,7 +64,13 @@ skillyard --help
 The default State File location is:
 
 ```text
-~/Library/Application Support/SkillYard/state.sqlite3
+~/.skillyard/state.sqlite3
+```
+
+The default Library location is:
+
+```text
+~/.skillyard/library/
 ```
 
 For development and testing, pass `--home` with a temporary directory so real local state is not touched.

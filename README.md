@@ -64,7 +64,13 @@ skillyard --help
 默认 State File 位于：
 
 ```text
-~/Library/Application Support/SkillYard/state.sqlite3
+~/.skillyard/state.sqlite3
+```
+
+默认 Library 位于：
+
+```text
+~/.skillyard/library/
 ```
 
 开发和测试时建议使用 `--home` 指向临时目录，避免影响真实本机 Library。

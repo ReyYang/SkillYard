@@ -73,6 +73,25 @@ class CliTests(unittest.TestCase):
             self.assertNotEqual(0, failed.returncode)
             self.assertFalse((home / "state.sqlite3").exists())
 
+    def test_default_home_is_dot_skillyard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {**os.environ, "HOME": str(root), "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+            result = subprocess.run(
+                [sys.executable, "-m", "skillyard", "--json", "init", "--yes"],
+                cwd=root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["result"]["ok"])
+            self.assertTrue((root / ".skillyard" / "state.sqlite3").exists())
+            self.assertTrue((root / ".skillyard" / "library").is_dir())
+
 
 def _cli(cwd: Path, *args: str) -> dict:
     repo_root = Path(__file__).resolve().parents[1]
