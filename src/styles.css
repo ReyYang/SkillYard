@@ -34,6 +34,7 @@ button:focus-visible {
 .onboarding-shell,
 .inventory-shell,
 .install-shell,
+.mount-shell,
 .state-page {
   min-height: 100vh;
 }
@@ -187,6 +188,7 @@ code {
 
 .inventory-shell,
 .install-shell,
+.mount-shell,
 .state-page {
   max-width: 980px;
   margin: 0 auto;
@@ -234,8 +236,13 @@ code {
   max-width: 860px;
 }
 
-.install-shell h1 {
+.install-shell h1,
+.mount-shell h1 {
   font-size: clamp(2.7rem, 6vw, 4.5rem);
+}
+
+.mount-shell {
+  max-width: 860px;
 }
 
 .install-plan {
@@ -642,6 +649,152 @@ code {
   color: #667069;
   background: rgb(244 246 239 / 82%);
   font-size: 0.68rem;
+}
+
+.mount-card-controls {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.45rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgb(50 70 56 / 8%);
+}
+
+.mount-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.mount-badge,
+.mount-empty {
+  padding: 0.3rem 0.5rem;
+  border-radius: 999px;
+  color: #42604a;
+  background: #e2eddc;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.mount-badge.missing,
+.mount-badge.conflict {
+  color: #784433;
+  background: #f1ddd4;
+}
+
+.mount-empty {
+  color: #737b74;
+  background: #eceee8;
+  font-weight: 600;
+}
+
+.compact-action,
+.danger-outline-action {
+  flex: 0 0 auto;
+  padding: 0.48rem 0.68rem;
+  border: 1px solid rgb(43 68 47 / 16%);
+  border-radius: 8px;
+  color: #294632;
+  background: rgb(255 255 251 / 82%);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 720;
+}
+
+.mount-panel {
+  margin-top: 2rem;
+  padding: 1.25rem;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 18px;
+  background: rgb(255 255 251 / 78%);
+  box-shadow: 0 18px 48px rgb(34 57 41 / 7%);
+}
+
+.mount-panel h2 {
+  margin: 0;
+  font-size: 1.4rem;
+  letter-spacing: -0.025em;
+}
+
+.mount-empty-copy,
+.mount-project-hint,
+.mount-confirm-warning {
+  margin: 0.85rem 0 0;
+  color: #69736b;
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.mount-list {
+  display: grid;
+  gap: 0.7rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mount-list li {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem;
+  border-radius: 12px;
+  background: #f2f4ed;
+}
+
+.mount-list li > div {
+  display: grid;
+  gap: 0.28rem;
+  min-width: 0;
+}
+
+.mount-list li span {
+  color: #717a72;
+  font-size: 0.76rem;
+}
+
+.danger-outline-action {
+  color: #834537;
+  border-color: rgb(131 69 55 / 20%);
+}
+
+.compact-action:disabled,
+.danger-outline-action:disabled,
+.mount-target:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.mount-target-list {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.mount-target {
+  display: grid;
+  gap: 0.25rem;
+  width: 100%;
+  padding: 0.9rem;
+  border: 1px solid rgb(43 68 47 / 12%);
+  border-radius: 12px;
+  color: #294632;
+  background: #f3f6ef;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mount-target span,
+.mount-target code {
+  color: #707a72;
+  font-size: 0.76rem;
+  font-weight: 500;
+}
+
+.mount-confirm-warning {
+  color: #715926;
 }
 
 .management-direction {

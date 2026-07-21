@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { FolderInstallPlan, UiOutcome } from "./domain";
+import type {
+  FolderInstallPlan,
+  MountPlan,
+  MountScope,
+  SupportedAppId,
+  UiOutcome,
+} from "./domain";
 
 export interface SkillYardClient {
   getStartupState(): Promise<UiOutcome>;
@@ -11,6 +17,15 @@ export interface SkillYardClient {
     planId: string,
     selectedCandidateIds: string[],
   ): Promise<UiOutcome>;
+  chooseAndRegisterProject(): Promise<UiOutcome | null>;
+  createMountPlan(
+    memberId: string,
+    appId: SupportedAppId,
+    scope: MountScope,
+    projectId: string | null,
+  ): Promise<MountPlan>;
+  createRemoveMountPlan(mountId: string): Promise<MountPlan>;
+  confirmMountPlan(planId: string): Promise<UiOutcome>;
 }
 
 // 前端只知道任务级命令；文件夹路径由 Rust 原生选择器产生，不开放通用文件能力。
@@ -25,4 +40,17 @@ export const tauriSkillYardClient: SkillYardClient = {
       planId,
       selectedCandidateIds,
     }),
+  chooseAndRegisterProject: () =>
+    invoke<UiOutcome | null>("choose_and_register_project"),
+  createMountPlan: (memberId, appId, scope, projectId) =>
+    invoke<MountPlan>("create_mount_plan", {
+      memberId,
+      appId,
+      scope,
+      projectId,
+    }),
+  createRemoveMountPlan: (mountId) =>
+    invoke<MountPlan>("create_remove_mount_plan", { mountId }),
+  confirmMountPlan: (planId) =>
+    invoke<UiOutcome>("confirm_mount_plan", { planId }),
 };

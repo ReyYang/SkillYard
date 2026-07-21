@@ -80,4 +80,60 @@ describe("Tauri IPC contract", () => {
       selectedCandidateIds: ["candidate-1"],
     });
   });
+
+  it("只通过原生任务命令选择并登记 Project", async () => {
+    mocks.invoke.mockResolvedValue(null);
+
+    await tauriSkillYardClient.chooseAndRegisterProject();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("choose_and_register_project");
+  });
+
+  it("创建 Mount Plan 时提交明确的 member、应用和 scope", async () => {
+    mocks.invoke.mockResolvedValue({ id: "mount-plan-1" });
+
+    await tauriSkillYardClient.createMountPlan(
+      "member-1",
+      "codex",
+      "project",
+      "project-1",
+    );
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_mount_plan", {
+      memberId: "member-1",
+      appId: "codex",
+      scope: "project",
+      projectId: "project-1",
+    });
+  });
+
+  it("移除 Mount 也必须先创建 opaque Plan", async () => {
+    mocks.invoke.mockResolvedValue({ id: "remove-plan-1" });
+
+    await tauriSkillYardClient.createRemoveMountPlan("mount-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_remove_mount_plan", {
+      mountId: "mount-1",
+    });
+  });
+
+  it("确认 Mount 事务时只提交 opaque Plan ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+    });
+
+    await tauriSkillYardClient.confirmMountPlan("mount-plan-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("confirm_mount_plan", {
+      planId: "mount-plan-1",
+    });
+  });
 });

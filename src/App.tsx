@@ -2,8 +2,15 @@ import { useEffect, useState } from "react";
 
 import { InventoryPage } from "./components/InventoryPage";
 import { InstallFolderPage } from "./components/InstallFolderPage";
+import { MountManagementPage } from "./components/MountManagementPage";
+import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
-import type { FolderInstallPlan, UiOutcome } from "./domain";
+import type {
+  FolderInstallPlan,
+  MountPlan,
+  MountScope,
+  UiOutcome,
+} from "./domain";
 import {
   tauriSkillYardClient,
   type SkillYardClient,
@@ -28,6 +35,13 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     useState<FolderInstallPlan | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
+  const [isAddingProject, setIsAddingProject] = useState(false);
+  const [projectError, setProjectError] = useState<string | null>(null);
+  const [managedMemberId, setManagedMemberId] = useState<string | null>(null);
+  const [pendingMountPlan, setPendingMountPlan] = useState<MountPlan | null>(null);
+  const [isPlanningMount, setIsPlanningMount] = useState(false);
+  const [isConfirmingMount, setIsConfirmingMount] = useState(false);
+  const [mountError, setMountError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -116,6 +130,92 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
+  const chooseAndRegisterProject = async () => {
+    if (isAddingProject) return;
+    setIsAddingProject(true);
+    setProjectError(null);
+    try {
+      const outcome = await client.chooseAndRegisterProject();
+      // 取消原生选择器返回 null；现有清单和登记状态保持不变。
+      if (outcome) setViewState({ status: "ready", outcome });
+    } catch (error) {
+      setProjectError(formatError(error));
+    } finally {
+      setIsAddingProject(false);
+    }
+  };
+
+  const openMountManager = (memberId: string) => {
+    setMountError(null);
+    setManagedMemberId(memberId);
+  };
+
+  const createMountPlan = async (
+    scope: MountScope,
+    projectId: string | null,
+  ) => {
+    if (!managedMemberId || isPlanningMount) return;
+    setIsPlanningMount(true);
+    setMountError(null);
+    try {
+      const plan = await client.createMountPlan(
+        managedMemberId,
+        "codex",
+        scope,
+        projectId,
+      );
+      setPendingMountPlan(plan);
+    } catch (error) {
+      // Plan 生成失败没有生命周期写入，保留已加载清单和当前管理页。
+      setMountError(formatError(error));
+    } finally {
+      setIsPlanningMount(false);
+    }
+  };
+
+  const createRemoveMountPlan = async (mountId: string) => {
+    if (isPlanningMount) return;
+    setIsPlanningMount(true);
+    setMountError(null);
+    try {
+      const plan = await client.createRemoveMountPlan(mountId);
+      setPendingMountPlan(plan);
+    } catch (error) {
+      setMountError(formatError(error));
+    } finally {
+      setIsPlanningMount(false);
+    }
+  };
+
+  const confirmMount = async () => {
+    if (!pendingMountPlan || isConfirmingMount) return;
+    setIsConfirmingMount(true);
+    setMountError(null);
+    try {
+      const outcome = await client.confirmMountPlan(pendingMountPlan.id);
+      setPendingMountPlan(null);
+      setManagedMemberId(null);
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      const message = formatError(error);
+      // 确认后 Plan 可能已经消费；必须重读 Rust 最终状态，不能重试旧 Plan。
+      setPendingMountPlan(null);
+      setManagedMemberId(null);
+      try {
+        const outcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome });
+        setMountError(message);
+      } catch (recoveryError) {
+        setViewState({
+          status: "error",
+          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+        });
+      }
+    } finally {
+      setIsConfirmingMount(false);
+    }
+  };
+
   if (viewState.status === "loading") {
     return (
       <main className="state-page" aria-label="SkillYard 正在启动">
@@ -144,6 +244,16 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           setPendingInstallPlan(null);
         }}
         onConfirm={confirmInstall}
+      />
+    );
+  }
+  if (pendingMountPlan) {
+    return (
+      <MountPlanPage
+        plan={pendingMountPlan}
+        isConfirming={isConfirmingMount}
+        onBack={() => setPendingMountPlan(null)}
+        onConfirm={confirmMount}
       />
     );
   }
@@ -178,15 +288,46 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     );
   }
 
+  const managedEntry = managedMemberId
+    ? viewState.outcome.entries.find(
+        (entry) =>
+          entry.managementKind === "skillYardManaged" &&
+          entry.memberId === managedMemberId,
+      )
+    : null;
+
+  if (managedEntry) {
+    return (
+      <MountManagementPage
+        entry={managedEntry}
+        projects={viewState.outcome.projects}
+        mounts={viewState.outcome.mounts}
+        isPlanning={isPlanningMount}
+        error={mountError}
+        onBack={() => {
+          setMountError(null);
+          setManagedMemberId(null);
+        }}
+        onCreate={createMountPlan}
+        onRemove={createRemoveMountPlan}
+      />
+    );
+  }
+
   return (
     <InventoryPage
       outcome={viewState.outcome}
       isRefreshing={isRefreshing}
       isChoosingFolder={isChoosingFolder}
+      isAddingProject={isAddingProject}
       refreshError={refreshError}
       installError={installError}
+      projectError={projectError}
+      mountError={mountError}
       onRefresh={refreshLocalInventory}
       onInstall={chooseFolderInstallPlan}
+      onAddProject={chooseAndRegisterProject}
+      onManageMount={openMountManager}
     />
   );
 }

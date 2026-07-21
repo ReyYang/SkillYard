@@ -33,6 +33,7 @@ export interface InventoryObservation {
   bundleDisplayName?: string | null;
   sourceDisplayName?: string | null;
   projectDisplayName?: string | null;
+  memberId?: string | null;
 }
 
 export interface LocalRefreshSummary {
@@ -57,6 +58,45 @@ export interface RecoveryIssue {
   id: string;
   bundleDisplayName: string;
   message: string;
+}
+
+export type MountScope = "global" | "project";
+export type MountHealth = "healthy" | "missing" | "conflict";
+
+export interface ProjectSummary {
+  id: string;
+  displayName: string;
+  rootPath: string;
+}
+
+export interface MountSummary {
+  id: string;
+  memberId: string;
+  skillName: string;
+  appId: SupportedAppId;
+  scope: MountScope;
+  projectId: string | null;
+  projectDisplayName: string | null;
+  targetPath: string;
+  expectedTarget: string;
+  health: MountHealth;
+}
+
+export interface MountPlan {
+  id: string;
+  operation: "create" | "remove";
+  mountId: string;
+  memberId: string;
+  skillName: string;
+  appId: SupportedAppId;
+  scope: MountScope;
+  projectId: string | null;
+  projectDisplayName: string | null;
+  targetPath: string;
+  expectedTarget: string;
+  targetHealth: MountHealth;
+  createdAt: number;
+  expiresAt: number;
 }
 
 export interface FolderInstallPlan {
@@ -103,8 +143,14 @@ export type UiOutcome =
       lastLocalRefresh: LocalRefreshSummary | null;
       scanIssues: ScanIssue[];
       recoveryIssues: RecoveryIssue[];
+      projects: ProjectSummary[];
+      mounts: MountSummary[];
     }
   | {
       type: "folderInstallPlan";
       plan: FolderInstallPlan;
+    }
+  | {
+      type: "mountPlan";
+      plan: MountPlan;
     };

@@ -6,6 +6,8 @@ import { App } from "./App";
 import type {
   FolderInstallPlan,
   InventoryObservation,
+  MountPlan,
+  MountSummary,
   UiOutcome,
 } from "./domain";
 import type { SkillYardClient } from "./skillyardClient";
@@ -301,6 +303,241 @@ describe("本机清单", () => {
     expect(client.confirmInstallPlan).not.toHaveBeenCalled();
   });
 
+  it("取消 Project 原生选择器时保持当前清单", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createEntry({ skillName: "preserved" })]),
+    );
+    vi.mocked(client.chooseAndRegisterProject).mockResolvedValue(null);
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "添加项目" }));
+
+    expect(client.chooseAndRegisterProject).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("preserved")).toBeInTheDocument();
+    expect(client.createMountPlan).not.toHaveBeenCalled();
+  });
+
+  it("受管 Skill 卡直接显示当前 Codex global 和 project Mount", async () => {
+    const client = createClient(
+      inventoryOutcome(
+        [createManagedEntry()],
+        null,
+        {
+          mounts: [
+            createMount({ id: "mount-global", scope: "global" }),
+            createMount({
+              id: "mount-project",
+              scope: "project",
+              projectId: "project-1",
+              projectDisplayName: "SkillYard",
+              targetPath: "/tmp/SkillYard/.codex/skills/example",
+            }),
+          ],
+        },
+      ),
+    );
+
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", { name: "example-bundle" });
+    expect(bundle).toHaveTextContent("Codex · 全局");
+    expect(bundle).toHaveTextContent("Codex · SkillYard");
+    expect(within(bundle).getByRole("button", { name: "管理挂载" })).toBeEnabled();
+  });
+
+  it("创建 global Mount 前先生成并确认精确 Plan", async () => {
+    const user = userEvent.setup();
+    let finishMount: ((outcome: UiOutcome) => void) | undefined;
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const mounted = inventoryOutcome(
+      [createManagedEntry()],
+      null,
+      { mounts: [createMount()] },
+    );
+    const client = createClient(initial);
+    vi.mocked(client.createMountPlan).mockResolvedValue(createMountPlan());
+    vi.mocked(client.confirmMountPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishMount = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    expect(screen.getByRole("button", { name: "返回添加项目" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
+
+    expect(client.createMountPlan).toHaveBeenCalledWith(
+      "member-1",
+      "codex",
+      "global",
+      null,
+    );
+    expect(
+      screen.getByRole("heading", { name: "确认创建 Codex 挂载" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/确认开始后不能取消/)).toBeInTheDocument();
+    expect(client.confirmMountPlan).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "确认创建" }));
+
+    expect(client.confirmMountPlan).toHaveBeenCalledWith("mount-plan-1");
+    expect(screen.getByRole("button", { name: "正在安全创建…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+
+    await act(async () => {
+      finishMount?.(mounted);
+    });
+
+    const bundle = screen.getByRole("region", { name: "example-bundle" });
+    expect(bundle).toHaveTextContent("Codex · 全局");
+  });
+
+  it("project Mount Plan 只接受已登记 Project 的稳定 ID", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [createManagedEntry()],
+        null,
+        {
+          projects: [
+            {
+              id: "project-1",
+              displayName: "SkillYard",
+              rootPath: "/tmp/SkillYard",
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createMountPlan).mockResolvedValue(
+      createMountPlan({
+        scope: "project",
+        projectId: "project-1",
+        projectDisplayName: "SkillYard",
+        targetPath: "/tmp/SkillYard/.codex/skills/example",
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await user.click(
+      screen.getByRole("button", { name: "挂载到项目 SkillYard" }),
+    );
+
+    expect(client.createMountPlan).toHaveBeenCalledWith(
+      "member-1",
+      "codex",
+      "project",
+      "project-1",
+    );
+    expect(screen.getByLabelText("挂载影响预览")).toHaveTextContent(
+      "/tmp/SkillYard/.codex/skills/example",
+    );
+  });
+
+  it("正确软链接的创建 Plan 明确表示只登记关系", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.createMountPlan).mockResolvedValue(
+      createMountPlan({ targetHealth: "healthy" }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
+
+    expect(screen.getByLabelText("挂载影响预览")).toHaveTextContent(
+      "软链接已经正确存在，将只登记为 SkillYard Mount",
+    );
+    expect(screen.getByLabelText("挂载影响预览")).toHaveTextContent(
+      "现有软链接不会被改写",
+    );
+  });
+
+  it("Mount Plan 冲突不丢弃已加载清单", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.createMountPlan).mockRejectedValue({
+      code: "mountConflict",
+      message: "目标路径已被其他内容占用",
+    });
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "目标路径已被其他内容占用",
+    );
+    expect(client.getStartupState).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "返回添加项目" }));
+    expect(screen.getByText("example-bundle: example")).toBeInTheDocument();
+  });
+
+  it("移除 Mount 前显示确认页，确认后只提交 Plan ID", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome(
+      [createManagedEntry()],
+      null,
+      { mounts: [createMount()] },
+    );
+    const client = createClient(initial);
+    vi.mocked(client.createRemoveMountPlan).mockResolvedValue(
+      createMountPlan({ operation: "remove" }),
+    );
+    vi.mocked(client.confirmMountPlan).mockResolvedValue(
+      inventoryOutcome([createManagedEntry()]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await user.click(
+      screen.getByRole("button", { name: "移除 Codex 全局挂载" }),
+    );
+
+    expect(client.createRemoveMountPlan).toHaveBeenCalledWith("mount-1");
+    expect(
+      screen.getByRole("heading", { name: "确认移除 Codex 挂载" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/不会删除 Skill 或 Bundle/)).toBeInTheDocument();
+    expect(client.confirmMountPlan).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "确认移除" }));
+
+    expect(client.confirmMountPlan).toHaveBeenCalledWith("mount-plan-1");
+    expect(screen.queryByText("Codex · 全局")).not.toBeInTheDocument();
+  });
+
+  it("Mount 确认失败后丢弃 Plan 并重新读取最终清单", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const recovered = inventoryOutcome([createManagedEntry()]);
+    const client = createClient(initial);
+    vi.mocked(client.createMountPlan).mockResolvedValue(createMountPlan());
+    vi.mocked(client.confirmMountPlan).mockRejectedValue({
+      code: "mountConflict",
+      message: "目标路径已被其他内容占用",
+    });
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(recovered);
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
+    await user.click(screen.getByRole("button", { name: "确认创建" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "目标路径已被其他内容占用",
+    );
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "确认创建" })).not.toBeInTheDocument();
+    expect(screen.getByText("example-bundle: example")).toBeInTheDocument();
+  });
+
   it("空清单仍然是完成状态", async () => {
     const client = createClient(inventoryOutcome([]));
 
@@ -571,12 +808,17 @@ function createClient(startup: UiOutcome): SkillYardClient {
     refreshLocalInventory: vi.fn(),
     chooseFolderInstallPlan: vi.fn(),
     confirmInstallPlan: vi.fn(),
+    chooseAndRegisterProject: vi.fn(),
+    createMountPlan: vi.fn(),
+    createRemoveMountPlan: vi.fn(),
+    confirmMountPlan: vi.fn(),
   };
 }
 
 function inventoryOutcome(
   entries: InventoryObservation[],
   lastLocalRefresh: Extract<UiOutcome, { type: "inventory" }>["lastLocalRefresh"] = null,
+  overrides: Partial<Extract<UiOutcome, { type: "inventory" }>> = {},
 ): Extract<UiOutcome, { type: "inventory" }> {
   return {
     type: "inventory",
@@ -586,6 +828,62 @@ function inventoryOutcome(
     lastLocalRefresh,
     scanIssues: [],
     recoveryIssues: [],
+    projects: [],
+    mounts: [],
+    ...overrides,
+  };
+}
+
+function createManagedEntry(
+  overrides: Partial<InventoryObservation> = {},
+): InventoryObservation {
+  return createEntry({
+    id: "managed:member-1",
+    memberId: "member-1",
+    skillName: "example",
+    managementKind: "skillYardManaged",
+    bundleId: "bundle-1",
+    bundleDisplayName: "example-bundle",
+    locationKind: "managedStore",
+    rootKey: null,
+    observedBy: [],
+    ...overrides,
+  });
+}
+
+function createMount(overrides: Partial<MountSummary> = {}): MountSummary {
+  return {
+    id: "mount-1",
+    memberId: "member-1",
+    skillName: "example",
+    appId: "codex",
+    scope: "global",
+    projectId: null,
+    projectDisplayName: null,
+    targetPath: "/tmp/.codex/skills/example",
+    expectedTarget: "/tmp/central/bundles/bundle-1/current/members/example",
+    health: "healthy",
+    ...overrides,
+  };
+}
+
+function createMountPlan(overrides: Partial<MountPlan> = {}): MountPlan {
+  return {
+    id: "mount-plan-1",
+    operation: "create",
+    mountId: "mount-1",
+    memberId: "member-1",
+    skillName: "example",
+    appId: "codex",
+    scope: "global",
+    projectId: null,
+    projectDisplayName: null,
+    targetPath: "/tmp/.codex/skills/example",
+    expectedTarget: "/tmp/central/bundles/bundle-1/current/members/example",
+    targetHealth: "missing",
+    createdAt: 1,
+    expiresAt: 2,
+    ...overrides,
   };
 }
 

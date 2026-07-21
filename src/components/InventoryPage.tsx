@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
 
-import type { InventoryObservation, SupportedAppId, UiOutcome } from "../domain";
+import type {
+  InventoryObservation,
+  MountSummary,
+  SupportedAppId,
+  UiOutcome,
+} from "../domain";
 
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 type ManagementFilter = "all" | "managed" | "takeover" | "other";
@@ -9,10 +14,15 @@ interface InventoryPageProps {
   outcome: InventoryOutcome;
   isRefreshing: boolean;
   isChoosingFolder: boolean;
+  isAddingProject: boolean;
   refreshError: string | null;
   installError: string | null;
+  projectError: string | null;
+  mountError: string | null;
   onRefresh(): void;
   onInstall(): void;
+  onAddProject(): void;
+  onManageMount(memberId: string): void;
 }
 
 const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
@@ -26,10 +36,15 @@ export function InventoryPage({
   outcome,
   isRefreshing,
   isChoosingFolder,
+  isAddingProject,
   refreshError,
   installError,
+  projectError,
+  mountError,
   onRefresh,
   onInstall,
+  onAddProject,
+  onManageMount,
 }: InventoryPageProps) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ManagementFilter>("all");
@@ -80,6 +95,14 @@ export function InventoryPage({
             onClick={onInstall}
           >
             {isChoosingFolder ? "正在选择…" : "安装 Skill"}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isAddingProject}
+            onClick={onAddProject}
+          >
+            {isAddingProject ? "正在选择项目…" : "添加项目"}
           </button>
           <button
             className="secondary-action"
@@ -151,6 +174,20 @@ export function InventoryPage({
         </div>
       ) : null}
 
+      {projectError ? (
+        <div className="inline-error" role="alert">
+          <strong>无法添加项目</strong>
+          <span>{projectError}</span>
+        </div>
+      ) : null}
+
+      {mountError ? (
+        <div className="inline-error" role="alert">
+          <strong>挂载操作未完成</strong>
+          <span>{mountError}</span>
+        </div>
+      ) : null}
+
       {outcome.scanIssues.length > 0 ? (
         <section className="scan-warning" aria-label="刷新告警">
           <strong>部分目录暂时无法读取</strong>
@@ -183,6 +220,8 @@ export function InventoryPage({
             title={group.title}
             eyebrow="由 SkillYard 管理 · BUNDLE"
             entries={group.entries}
+            mounts={outcome.mounts}
+            onManageMount={onManageMount}
           />
         ))}
         <InventorySection
@@ -219,10 +258,14 @@ function InventorySection({
   title,
   eyebrow,
   entries,
+  mounts = [],
+  onManageMount,
 }: {
   title: string;
   eyebrow: string;
   entries: InventoryObservation[];
+  mounts?: MountSummary[];
+  onManageMount?(memberId: string): void;
 }) {
   if (entries.length === 0) return null;
   return (
@@ -236,14 +279,29 @@ function InventorySection({
       </header>
       <ul className="inventory-list">
         {entries.map((entry) => (
-          <SkillCard key={entry.id} entry={entry} />
+          <SkillCard
+            key={entry.id}
+            entry={entry}
+            mounts={mounts.filter(
+              (mount) => mount.memberId === entry.memberId && mount.appId === "codex",
+            )}
+            onManageMount={onManageMount}
+          />
         ))}
       </ul>
     </section>
   );
 }
 
-function SkillCard({ entry }: { entry: InventoryObservation }) {
+function SkillCard({
+  entry,
+  mounts,
+  onManageMount,
+}: {
+  entry: InventoryObservation;
+  mounts: MountSummary[];
+  onManageMount?(memberId: string): void;
+}) {
   return (
     <li className="skill-card">
       <div className="skill-card-heading">
@@ -267,8 +325,47 @@ function SkillCard({ entry }: { entry: InventoryObservation }) {
       {managementDirection(entry) ? (
         <p className="management-direction">{managementDirection(entry)}</p>
       ) : null}
+      {entry.managementKind === "skillYardManaged" && entry.memberId ? (
+        <div className="mount-card-controls">
+          <div className="mount-badges" aria-label="当前 Codex 挂载">
+            {mounts.length > 0 ? (
+              mounts.map((mount) => (
+                <span key={mount.id} className={`mount-badge ${mount.health}`}>
+                  {mountLabel(mount)}
+                  {mount.health === "healthy"
+                    ? ""
+                    : ` · ${mountHealthLabel(mount.health)}`}
+                </span>
+              ))
+            ) : (
+              <span className="mount-empty">Codex 未挂载</span>
+            )}
+          </div>
+          <button
+            className="compact-action"
+            type="button"
+            onClick={() => onManageMount?.(entry.memberId!)}
+          >
+            管理挂载
+          </button>
+        </div>
+      ) : null}
     </li>
   );
+}
+
+function mountLabel(mount: MountSummary): string {
+  return mount.scope === "global"
+    ? "Codex · 全局"
+    : `Codex · ${mount.projectDisplayName ?? "已登记项目"}`;
+}
+
+function mountHealthLabel(health: MountSummary["health"]): string {
+  return {
+    healthy: "正常",
+    missing: "已缺失",
+    conflict: "路径冲突",
+  }[health];
 }
 
 function groupManagedEntries(
