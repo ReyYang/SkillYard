@@ -2282,6 +2282,49 @@ pub(crate) fn rename_at_no_replace(
     }
 }
 
+/// macOS 通过内核级 `RENAME_SWAP` 交换两个已存在目录项，不暴露中间缺口。
+// 真实 Takeover 文件事务将在下一切片调用这个原子原语。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn rename_at_swap(
+    source_parent: &File,
+    source_name: &OsStr,
+    destination_parent: &File,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    let source_name = c_string(source_name)?;
+    let destination_name = c_string(destination_name)?;
+    #[cfg(target_os = "macos")]
+    {
+        let result = unsafe {
+            libc::renameatx_np(
+                source_parent.as_raw_fd(),
+                source_name.as_ptr(),
+                destination_parent.as_raw_fd(),
+                destination_name.as_ptr(),
+                libc::RENAME_SWAP,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+        );
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic rename swap is only supported on macOS",
+        ))
+    }
+}
+
 fn c_string(value: &OsStr) -> io::Result<CString> {
     CString::new(value.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
@@ -2449,5 +2492,77 @@ mod tests {
             matches!(&result, Err(LifecycleError::PlanPreconditionChanged)),
             "候选变化应在发布前被拒绝：{result:?}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rename_swap_atomically_exchanges_a_directory_and_symlink() {
+        let temp = tempdir().expect("应创建临时目录");
+        let parent = File::open(temp.path()).expect("应打开父目录");
+        fs::create_dir(temp.path().join("original")).expect("应创建原目录");
+        fs::write(temp.path().join("original/value.txt"), "original").expect("应写入原内容");
+        std::os::unix::fs::symlink("/tmp/managed-skill", temp.path().join("replacement"))
+            .expect("应创建替换链接");
+
+        rename_at_swap(
+            &parent,
+            OsStr::new("original"),
+            &parent,
+            OsStr::new("replacement"),
+        )
+        .expect("macOS 应原子交换两个现有目录项");
+
+        assert_eq!(
+            fs::read_link(temp.path().join("original")).expect("原路径应成为符号链接"),
+            PathBuf::from("/tmp/managed-skill")
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("replacement/value.txt"))
+                .expect("隐藏路径应保存原目录"),
+            "original"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rename_swap_missing_side_preserves_the_other_entry() {
+        let temp = tempdir().expect("应创建临时目录");
+        let parent = File::open(temp.path()).expect("应打开父目录");
+        fs::create_dir(temp.path().join("original")).expect("应创建原目录");
+        fs::write(temp.path().join("original/value.txt"), "unchanged").expect("应写入原内容");
+
+        assert!(
+            rename_at_swap(
+                &parent,
+                OsStr::new("original"),
+                &parent,
+                OsStr::new("missing"),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("original/value.txt"))
+                .expect("失败后原目录必须保留"),
+            "unchanged"
+        );
+        assert!(!temp.path().join("missing").exists());
+
+        std::os::unix::fs::symlink("/tmp/managed-skill", temp.path().join("replacement"))
+            .expect("应创建仍需保护的 destination");
+        assert!(
+            rename_at_swap(
+                &parent,
+                OsStr::new("missing-source"),
+                &parent,
+                OsStr::new("replacement"),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_link(temp.path().join("replacement"))
+                .expect("source 缺失时 destination 必须保留"),
+            PathBuf::from("/tmp/managed-skill")
+        );
+        assert!(!temp.path().join("missing-source").exists());
     }
 }

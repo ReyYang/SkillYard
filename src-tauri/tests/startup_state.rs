@@ -1686,7 +1686,7 @@ fn version_one_database_migrates_without_losing_inventory() {
             |row| row.get(0),
         )
         .expect("应读取 migration 版本");
-    assert_eq!(versions, "1,2,3,4,5,6,7,8,9,10");
+    assert_eq!(versions, "1,2,3,4,5,6,7,8,9,10,11");
 }
 
 fn started_application(sandbox: &tempfile::TempDir) -> (SkillYardApplication, ApplicationPaths) {
