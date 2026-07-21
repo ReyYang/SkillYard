@@ -41,7 +41,7 @@ pub enum MountLifecycleError {
     Content(#[from] ContentValidationError),
     #[error(transparent)]
     SharedLifecycle(#[from] LifecycleError),
-    #[error("SkillYard 1.0 当前阶段只支持 Codex Mount")]
+    #[error("SkillYard 不支持这个 Agent 应用")]
     UnsupportedApp,
     #[error("global Mount 不能选择 Project，project Mount 必须选择已登记 Project")]
     InvalidScope,
@@ -184,7 +184,7 @@ pub fn create_mount_plan(
     project_id: Option<&str>,
     now: i64,
 ) -> Result<MountPlan, MountLifecycleError> {
-    ensure_codex_scope(app_id, scope, project_id)?;
+    ensure_supported_scope(scope, project_id)?;
     let member = storage.read_managed_member(member_id)?;
     validate_member_content(&member)?;
     let project = read_scope_project(storage, scope, project_id)?;
@@ -192,6 +192,7 @@ pub fn create_mount_plan(
     let target_path = derive_target_path(paths, &member, app_id, scope, project.as_ref())?;
     let snapshot = observe_target(
         paths,
+        app_id,
         scope,
         project.as_ref(),
         &member.skill_name,
@@ -231,7 +232,7 @@ pub fn create_remove_mount_plan(
     now: i64,
 ) -> Result<MountPlan, MountLifecycleError> {
     let mount = storage.read_mount(mount_id)?;
-    ensure_codex_scope(mount.app_id, mount.scope, mount.project_id.as_deref())?;
+    ensure_supported_scope(mount.scope, mount.project_id.as_deref())?;
     let member = storage.read_managed_member(&mount.member_id)?;
     if member.bundle_id != mount.bundle_id
         || member.skill_name != mount.skill_name
@@ -249,6 +250,7 @@ pub fn create_remove_mount_plan(
     }
     let snapshot = observe_removal_target(
         paths,
+        mount.app_id,
         mount.scope,
         project.as_ref(),
         &member.skill_name,
@@ -437,6 +439,7 @@ fn apply_mount_effect(
     let project = stored_plan_project(plan)?;
     let parent = match open_mount_parent(
         paths,
+        plan.app_id,
         plan.scope,
         project.as_ref(),
         plan.operation == MountOperation::Create,
@@ -696,7 +699,7 @@ fn inspect_effect_state(
     journal: &MountJournal,
 ) -> Result<EffectState, MountLifecycleError> {
     let project = stored_plan_project(plan)?;
-    let parent = match open_mount_parent(paths, plan.scope, project.as_ref(), false) {
+    let parent = match open_mount_parent(paths, plan.app_id, plan.scope, project.as_ref(), false) {
         Ok(parent) => parent,
         Err(MountLifecycleError::UnsafeMountPath(path))
             if plan.operation == MountOperation::Remove
@@ -804,7 +807,7 @@ fn cleanup_temporary(
     applied: bool,
 ) -> Result<(), MountLifecycleError> {
     let project = stored_plan_project(plan)?;
-    let parent = match open_mount_parent(paths, plan.scope, project.as_ref(), false) {
+    let parent = match open_mount_parent(paths, plan.app_id, plan.scope, project.as_ref(), false) {
         Ok(parent) => parent,
         Err(MountLifecycleError::UnsafeMountPath(path))
             if plan.operation == MountOperation::Remove
@@ -853,7 +856,7 @@ fn validate_plan_contract(
     ensure_single_component(&plan.mount_id)?;
     ensure_single_component(&plan.member_id)?;
     ensure_single_component(&plan.skill_name)?;
-    ensure_codex_scope(plan.app_id, plan.scope, plan.project_id.as_deref())?;
+    ensure_supported_scope(plan.scope, plan.project_id.as_deref())?;
     validate_operation_observation(plan)?;
     let member = storage.read_managed_member(&plan.member_id)?;
     if member.bundle_id != plan.bundle_id
@@ -905,6 +908,7 @@ fn ensure_target_observation(
     let snapshot = match plan.operation {
         MountOperation::Create => observe_target(
             paths,
+            plan.app_id,
             plan.scope,
             project.as_ref(),
             &plan.skill_name,
@@ -912,6 +916,7 @@ fn ensure_target_observation(
         )?,
         MountOperation::Remove => observe_removal_target(
             paths,
+            plan.app_id,
             plan.scope,
             project.as_ref(),
             &plan.skill_name,
@@ -1007,7 +1012,7 @@ fn derive_target_path(
     scope: MountScope,
     project: Option<&StoredProject>,
 ) -> Result<PathBuf, MountLifecycleError> {
-    let config = codex_config(paths, app_id)?;
+    let config = app_config(paths, app_id)?;
     let root = match (scope, project) {
         (MountScope::Global, None) => config.global_root,
         (MountScope::Project, Some(project)) => {
@@ -1018,39 +1023,36 @@ fn derive_target_path(
     Ok(root.join(&member.skill_name))
 }
 
-fn ensure_codex_scope(
-    app_id: SupportedAppId,
+fn ensure_supported_scope(
     scope: MountScope,
     project_id: Option<&str>,
 ) -> Result<(), MountLifecycleError> {
-    if app_id != SupportedAppId::Codex {
-        return Err(MountLifecycleError::UnsupportedApp);
-    }
     match (scope, project_id) {
         (MountScope::Global, None) | (MountScope::Project, Some(_)) => Ok(()),
         _ => Err(MountLifecycleError::InvalidScope),
     }
 }
 
-fn codex_config(
+fn app_config(
     paths: &ApplicationPaths,
     app_id: SupportedAppId,
 ) -> Result<crate::paths::SupportedAppPathConfig, MountLifecycleError> {
     paths
         .supported_apps()
         .into_iter()
-        .find(|config| config.id == app_id && app_id == SupportedAppId::Codex)
+        .find(|config| config.id == app_id)
         .ok_or(MountLifecycleError::UnsupportedApp)
 }
 
 fn observe_target(
     paths: &ApplicationPaths,
+    app_id: SupportedAppId,
     scope: MountScope,
     project: Option<&StoredProject>,
     skill_name: &str,
     expected_target: &str,
 ) -> Result<TargetSnapshot, MountLifecycleError> {
-    match open_mount_parent(paths, scope, project, false)? {
+    match open_mount_parent(paths, app_id, scope, project, false)? {
         ParentLookup::Missing => Ok(TargetSnapshot {
             kind: TargetKind::Absent,
             observation: "absent".to_owned(),
@@ -1065,12 +1067,13 @@ fn observe_target(
 
 fn observe_removal_target(
     paths: &ApplicationPaths,
+    app_id: SupportedAppId,
     scope: MountScope,
     project: Option<&StoredProject>,
     skill_name: &str,
     expected_target: &str,
 ) -> Result<TargetSnapshot, MountLifecycleError> {
-    match observe_target(paths, scope, project, skill_name, expected_target) {
+    match observe_target(paths, app_id, scope, project, skill_name, expected_target) {
         Ok(snapshot) => Ok(snapshot),
         Err(MountLifecycleError::UnsafeMountPath(path)) => Ok(TargetSnapshot {
             kind: TargetKind::Other,
@@ -1082,15 +1085,22 @@ fn observe_removal_target(
 
 fn open_mount_parent(
     paths: &ApplicationPaths,
+    app_id: SupportedAppId,
     scope: MountScope,
     project: Option<&StoredProject>,
     create_missing: bool,
 ) -> Result<ParentLookup, MountLifecycleError> {
+    let config = app_config(paths, app_id)?;
     let (base_path, relative) = match (scope, project) {
-        (MountScope::Global, None) => (paths.home().to_path_buf(), PathBuf::from(".codex/skills")),
+        (MountScope::Global, None) => {
+            let relative = config.global_root.strip_prefix(paths.home()).map_err(|_| {
+                MountLifecycleError::UnsafeMountPath(config.global_root.display().to_string())
+            })?;
+            (paths.home().to_path_buf(), relative.to_path_buf())
+        }
         (MountScope::Project, Some(project)) => (
             PathBuf::from(&project.root_path),
-            PathBuf::from(".codex/skills"),
+            config.project_relative_root,
         ),
         _ => return Err(MountLifecycleError::InvalidScope),
     };

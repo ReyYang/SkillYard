@@ -19,6 +19,75 @@ const HARD_EXIT_PLAN_ID: &str = "SKILLYARD_MOUNT_HARD_EXIT_PLAN_ID";
 const HARD_EXIT_POINT: &str = "SKILLYARD_MOUNT_HARD_EXIT_POINT";
 
 #[test]
+fn every_supported_app_uses_its_fixed_global_and_project_mount_paths() {
+    let cases = [
+        (SupportedAppId::Codex, ".codex/skills"),
+        (SupportedAppId::ClaudeCode, ".claude/skills"),
+        (SupportedAppId::GitHubCopilot, ".copilot/skills"),
+    ];
+
+    for (app_id, global_relative_root) in cases {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let (_paths, application, member_id) =
+            installed_skill(sandbox.path(), "supported-app-skill");
+        let global = mount_plan_for_app(&application, &member_id, app_id, MountScope::Global, None);
+        let global_target = sandbox
+            .path()
+            .join("home")
+            .join(global_relative_root)
+            .join("supported-app-skill");
+        assert_eq!(global.target_path, global_target.to_string_lossy());
+        let mounted = application
+            .handle(UiIntent::ConfirmMountPlan { plan_id: global.id })
+            .expect("三个 Supported App 都应支持 global Mount");
+        assert_eq!(
+            fs::read_link(&global_target).expect("global Mount 必须是目录软链接"),
+            Path::new(&global.expected_target)
+        );
+
+        let remove = remove_mount_plan(&application, &mount_id(&mounted));
+        application
+            .handle(UiIntent::ConfirmMountPlan { plan_id: remove.id })
+            .expect("应先移除 global Mount，再验证 project scope");
+
+        let project = sandbox.path().join("supported-project");
+        fs::create_dir(&project).expect("应创建测试 Project");
+        let registered = application
+            .handle(UiIntent::RegisterProject {
+                root_path: project.to_string_lossy().into_owned(),
+            })
+            .expect("应登记测试 Project");
+        let project_id = inventory_projects(&registered)[0].id.clone();
+        let project_mount = mount_plan_for_app(
+            &application,
+            &member_id,
+            app_id,
+            MountScope::Project,
+            Some(project_id),
+        );
+        let project_relative_root = match app_id {
+            SupportedAppId::Codex => ".codex/skills",
+            SupportedAppId::ClaudeCode => ".claude/skills",
+            SupportedAppId::GitHubCopilot => ".github/skills",
+        };
+        let project_target = fs::canonicalize(&project)
+            .expect("应解析登记后的 Project 路径")
+            .join(project_relative_root)
+            .join("supported-app-skill");
+        assert_eq!(project_mount.target_path, project_target.to_string_lossy());
+        application
+            .handle(UiIntent::ConfirmMountPlan {
+                plan_id: project_mount.id,
+            })
+            .expect("三个 Supported App 都应支持 project Mount");
+        assert_eq!(
+            fs::read_link(&project_target).expect("project Mount 必须是目录软链接"),
+            Path::new(&project_mount.expected_target)
+        );
+    }
+}
+
+#[test]
 fn codex_global_mount_is_planned_created_and_removed_without_touching_bundle_content() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (_paths, application, member_id) = installed_skill(sandbox.path(), "global-skill");
@@ -852,10 +921,26 @@ fn mount_plan(
     scope: MountScope,
     project_id: Option<String>,
 ) -> skillyard_lib::MountPlan {
+    mount_plan_for_app(
+        application,
+        member_id,
+        SupportedAppId::Codex,
+        scope,
+        project_id,
+    )
+}
+
+fn mount_plan_for_app(
+    application: &SkillYardApplication,
+    member_id: &str,
+    app_id: SupportedAppId,
+    scope: MountScope,
+    project_id: Option<String>,
+) -> skillyard_lib::MountPlan {
     let UiOutcome::MountPlan { plan } = application
         .handle(UiIntent::CreateMountPlan {
             member_id: member_id.to_owned(),
-            app_id: SupportedAppId::Codex,
+            app_id,
             scope,
             project_id,
         })
