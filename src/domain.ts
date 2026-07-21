@@ -22,6 +22,13 @@ export type ScanRootKey =
   | "gitHubCopilotProject"
   | "sharedAgentsProject";
 
+export interface ManagementEvidence {
+  kind: "gitHeadTracked";
+  authorityRoot: string;
+  snapshotCommitOid: string;
+  subjectPath: string;
+}
+
 export interface InventoryObservation {
   id: string;
   skillName: string;
@@ -41,6 +48,8 @@ export interface InventoryObservation {
     | "takeoverCandidate"
     | "agentManaged"
     | "projectManaged";
+  // 当前仅由已登记 Project 的 Git HEAD 确定性证据产生。
+  managementEvidence?: ManagementEvidence | null;
   // 受管安装由 Rust 投影真实 Bundle；扫描观察保持这些关系为空。
   bundleId?: string | null;
   bundleDisplayName?: string | null;
@@ -64,6 +73,7 @@ export interface ScanIssue {
   path: string;
   code:
     | "inspectPath"
+    | "inspectManagementEvidence"
     | "rootNotDirectory"
     | "readRoot"
     | "readSkillContent";

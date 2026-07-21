@@ -15,6 +15,9 @@ use crate::{
         InventoryLocationKind, InventoryObservation, ManagementKind, ScanIssue, ScanIssueCode,
         ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SupportedAppId, SupportedAppSummary,
     },
+    git_management_evidence::{
+        ManagementEvidenceError, ManagementEvidenceInspection, inspect_git_head_management,
+    },
     paths::ApplicationPaths,
     storage::StoredProject,
 };
@@ -40,6 +43,12 @@ pub enum ScanError {
         path: String,
         #[source]
         source: std::io::Error,
+    },
+    #[error("无法检查 Project Skill 的管理证据 {path}：{source}")]
+    InspectManagementEvidence {
+        path: String,
+        #[source]
+        source: ManagementEvidenceError,
     },
     #[error("已登记 Project 目录已经变化：{0}")]
     ProjectChanged(String),
@@ -87,6 +96,7 @@ pub fn scan_excluding(
             InventoryLocationKind::AppGlobal,
             vec![app.id],
             None,
+            None,
             excluded_skill_roots,
         ) {
             Ok(root_entries) => {
@@ -102,6 +112,7 @@ pub fn scan_excluding(
         ScanRootKey::SharedAgents,
         InventoryLocationKind::SharedReadOnly,
         vec![SupportedAppId::Codex, SupportedAppId::GitHubCopilot],
+        None,
         None,
         excluded_skill_roots,
     ) {
@@ -171,6 +182,7 @@ pub fn scan_projects(
                 InventoryLocationKind::AppProject,
                 project_observers(app.id),
                 Some(&project.id),
+                Some(project_path),
                 excluded_skill_roots,
             ) {
                 Ok(entries) => {
@@ -192,6 +204,7 @@ pub fn scan_projects(
             InventoryLocationKind::SharedReadOnly,
             vec![SupportedAppId::Codex, SupportedAppId::GitHubCopilot],
             Some(&project.id),
+            Some(project_path),
             excluded_skill_roots,
         ) {
             Ok(entries) => {
@@ -229,6 +242,7 @@ fn scan_optional_root(
     location_kind: InventoryLocationKind,
     observed_by: Vec<SupportedAppId>,
     project_id: Option<&str>,
+    project_root: Option<&Path>,
     excluded_skill_roots: &BTreeSet<PathBuf>,
 ) -> Result<Vec<InventoryObservation>, ScanError> {
     if !path_exists(path)? {
@@ -292,6 +306,21 @@ fn scan_optional_root(
             fallback_name
         };
         let observed_fingerprint = fingerprint_skill_root(&skill_root)?;
+        let (management_kind, management_evidence) = match project_root {
+            Some(project_root) => match inspect_git_head_management(project_root, &skill_file) {
+                ManagementEvidenceInspection::Confirmed(evidence) => {
+                    (ManagementKind::ProjectManaged, Some(evidence))
+                }
+                ManagementEvidenceInspection::Absent => (ManagementKind::TakeoverCandidate, None),
+                ManagementEvidenceInspection::Indeterminate(source) => {
+                    return Err(ScanError::InspectManagementEvidence {
+                        path: skill_file.display().to_string(),
+                        source,
+                    });
+                }
+            },
+            None => (ManagementKind::TakeoverCandidate, None),
+        };
         let root_string = skill_root.to_string_lossy().into_owned();
         observations.push(InventoryObservation {
             id: format!("{}:{root_string}", location_kind.as_str()),
@@ -306,7 +335,8 @@ fn scan_optional_root(
             root_key,
             project_id: project_id.map(str::to_owned),
             stale: false,
-            management_kind: ManagementKind::TakeoverCandidate,
+            management_kind,
+            management_evidence,
         });
     }
 
@@ -321,6 +351,9 @@ impl ScanError {
             Self::RootIsNotDirectory(path) => (path.clone(), ScanIssueCode::RootNotDirectory),
             Self::ReadRoot { path, .. } => (path.clone(), ScanIssueCode::ReadRoot),
             Self::ReadSkillContent { path, .. } => (path.clone(), ScanIssueCode::ReadSkillContent),
+            Self::InspectManagementEvidence { path, .. } => {
+                (path.clone(), ScanIssueCode::InspectManagementEvidence)
+            }
             Self::ProjectChanged(path) => (path.clone(), ScanIssueCode::InspectPath),
         };
         let identity = match project_id {

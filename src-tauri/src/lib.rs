@@ -4,6 +4,7 @@ mod application;
 mod commands;
 mod content;
 mod domain;
+mod git_management_evidence;
 mod lifecycle;
 mod mount_lifecycle;
 mod paths;
@@ -14,9 +15,10 @@ pub use application::SkillYardApplication;
 pub use domain::{
     BatchMountDisposition, BatchMountPlan, BatchMountPlanItem, BatchMountRequest,
     FolderInstallPlan, InventoryItem, InventoryLocationKind, InventoryObservation,
-    LocalRefreshSummary, ManagementKind, MountHealth, MountOperation, MountPlan, MountPlanPurpose,
-    MountScope, MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, ScanIssue,
-    ScanIssueCode, ScanRootKey, SkillMetadataStatus, SupportedAppId, UiIntent, UiOutcome,
+    LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
+    MountOperation, MountPlan, MountPlanPurpose, MountScope, MountSummary, PlatformInfo,
+    ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
+    SupportedAppId, UiIntent, UiOutcome,
 };
 pub use lifecycle::LifecycleFailpoint;
 pub use paths::ApplicationPaths;

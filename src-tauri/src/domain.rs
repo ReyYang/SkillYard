@@ -284,6 +284,37 @@ pub struct BatchMountPlan {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ManagementEvidenceKind {
+    GitHeadTracked,
+}
+
+impl ManagementEvidenceKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::GitHeadTracked => "git_head_tracked",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "git_head_tracked" => Some(Self::GitHeadTracked),
+            _ => None,
+        }
+    }
+}
+
+/// 这份证据只说明 Project 当前 HEAD 维护该文件，不推断远端 Source 或可编辑性。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagementEvidence {
+    pub kind: ManagementEvidenceKind,
+    pub authority_root: String,
+    pub snapshot_commit_oid: String,
+    pub subject_path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InventoryObservation {
@@ -302,6 +333,7 @@ pub struct InventoryObservation {
     pub project_id: Option<String>,
     pub stale: bool,
     pub management_kind: ManagementKind,
+    pub management_evidence: Option<ManagementEvidence>,
 }
 
 /// 主界面读模型合并扫描事实和受管领域记录，但两者仍分别持久化。
@@ -321,6 +353,7 @@ pub struct InventoryItem {
     pub project_id: Option<String>,
     pub stale: bool,
     pub management_kind: ManagementKind,
+    pub management_evidence: Option<ManagementEvidence>,
     pub bundle_id: Option<String>,
     /// 受管条目公开稳定 Member ID；扫描观察保持为空，前端不能解析展示 ID。
     pub member_id: Option<String>,
@@ -475,6 +508,7 @@ impl ManagementKind {
 #[serde(rename_all = "camelCase")]
 pub enum ScanIssueCode {
     InspectPath,
+    InspectManagementEvidence,
     RootNotDirectory,
     ReadRoot,
     ReadSkillContent,
@@ -484,6 +518,7 @@ impl ScanIssueCode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::InspectPath => "inspect_path",
+            Self::InspectManagementEvidence => "inspect_management_evidence",
             Self::RootNotDirectory => "root_not_directory",
             Self::ReadRoot => "read_root",
             Self::ReadSkillContent => "read_skill_content",
@@ -493,6 +528,7 @@ impl ScanIssueCode {
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
             "inspect_path" => Some(Self::InspectPath),
+            "inspect_management_evidence" => Some(Self::InspectManagementEvidence),
             "root_not_directory" => Some(Self::RootNotDirectory),
             "read_root" => Some(Self::ReadRoot),
             "read_skill_content" => Some(Self::ReadSkillContent),

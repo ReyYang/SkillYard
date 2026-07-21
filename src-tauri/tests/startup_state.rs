@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use rusqlite::Connection;
 use skillyard_lib::{
@@ -1118,6 +1121,499 @@ fn scan_issues_for_the_same_root_are_preserved_for_each_project() {
 }
 
 #[test]
+fn committed_project_skill_is_project_managed_and_evidence_survives_restart() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, paths) = started_application(&sandbox);
+    let project = sandbox.path().join("tracked-project");
+    init_git_repository(&project);
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "tracked");
+    commit_all(&project, "track alpha");
+    let head = git_stdout(&project, &["rev-parse", "HEAD"]);
+
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    let alpha = inventory_entry(&registered, "alpha");
+    assert_eq!(alpha.management_kind, ManagementKind::ProjectManaged);
+    let evidence = alpha
+        .management_evidence
+        .as_ref()
+        .expect("HEAD 中的普通 blob 应产生管理证据");
+    assert_eq!(
+        evidence.authority_root,
+        fs::canonicalize(&project)
+            .expect("应解析 Git authority root")
+            .to_string_lossy()
+    );
+    assert_eq!(evidence.snapshot_commit_oid, head);
+    assert_eq!(evidence.subject_path, ".codex/skills/alpha/SKILL.md");
+
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let restored = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("重启应读取已保存证据");
+    assert_eq!(
+        inventory_entry(&restored, "alpha").management_evidence,
+        alpha.management_evidence
+    );
+}
+
+#[test]
+fn untracked_and_staged_only_project_skills_remain_takeover_candidates() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let project = sandbox.path().join("candidate-project");
+    init_git_repository(&project);
+    fs::write(project.join("README.md"), "fixture\n").expect("应写入初始 Git 文件");
+    commit_all(&project, "create initial head");
+    write_skill(
+        &project.join(".codex/skills/untracked"),
+        "untracked",
+        "untracked",
+    );
+    write_skill(&project.join(".codex/skills/staged"), "staged", "staged");
+    run_git(&project, &["add", ".codex/skills/staged/SKILL.md"]);
+
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    for name in ["untracked", "staged"] {
+        let entry = inventory_entry(&registered, name);
+        assert_eq!(entry.management_kind, ManagementKind::TakeoverCandidate);
+        assert!(entry.management_evidence.is_none());
+    }
+}
+
+#[test]
+fn dirty_tracked_skill_stays_project_managed_because_only_head_is_authoritative() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let project = sandbox.path().join("dirty-project");
+    init_git_repository(&project);
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "committed");
+    commit_all(&project, "track alpha");
+    fs::write(
+        project.join(".codex/skills/alpha/SKILL.md"),
+        "---\nname: alpha\ndescription: Dirty working tree\n---\n",
+    )
+    .expect("应修改工作区内容");
+
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    assert_eq!(
+        inventory_entry(&registered, "alpha").management_kind,
+        ManagementKind::ProjectManaged
+    );
+}
+
+#[test]
+fn project_management_follows_head_when_skill_is_committed_or_removed() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let project = sandbox.path().join("changing-project");
+    init_git_repository(&project);
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "initial");
+
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    assert_eq!(
+        inventory_entry(&registered, "alpha").management_kind,
+        ManagementKind::TakeoverCandidate
+    );
+
+    commit_all(&project, "track alpha");
+    let upgraded = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("提交后刷新应成功");
+    assert_eq!(
+        inventory_entry(&upgraded, "alpha").management_kind,
+        ManagementKind::ProjectManaged
+    );
+
+    run_git(
+        &project,
+        &["rm", "--cached", ".codex/skills/alpha/SKILL.md"],
+    );
+    run_git(&project, &["commit", "-m", "stop tracking alpha"]);
+    let downgraded = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("HEAD 删除后刷新应成功");
+    let alpha = inventory_entry(&downgraded, "alpha");
+    assert_eq!(alpha.management_kind, ManagementKind::TakeoverCandidate);
+    assert!(alpha.management_evidence.is_none());
+}
+
+#[test]
+fn replacement_refs_cannot_substitute_a_different_tree_for_head_evidence() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let project = sandbox.path().join("replace-ref-project");
+    init_git_repository(&project);
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "tracked");
+    commit_all(&project, "track alpha");
+    let commit_with_skill = git_stdout(&project, &["rev-parse", "HEAD"]);
+    run_git(
+        &project,
+        &["rm", "--cached", ".codex/skills/alpha/SKILL.md"],
+    );
+    run_git(&project, &["commit", "-m", "remove alpha from head"]);
+    let original_head = git_stdout(&project, &["rev-parse", "HEAD"]);
+    run_git(&project, &["replace", &original_head, &commit_with_skill]);
+    assert!(
+        !git_stdout(
+            &project,
+            &["ls-tree", "HEAD", ".codex/skills/alpha/SKILL.md"]
+        )
+        .is_empty(),
+        "测试 fixture 必须证明默认 Git 会应用 replacement ref"
+    );
+
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    let alpha = inventory_entry(&registered, "alpha");
+    assert_eq!(alpha.management_kind, ManagementKind::TakeoverCandidate);
+    assert!(alpha.management_evidence.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn tracked_symlink_skill_file_is_not_project_management_evidence() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let project = sandbox.path().join("symlink-project");
+    init_git_repository(&project);
+    let skill_root = project.join(".codex/skills/linked");
+    fs::create_dir_all(&skill_root).expect("应创建 Skill 目录");
+    fs::write(
+        skill_root.join("actual.md"),
+        "---\nname: linked\ndescription: Linked fixture\n---\n",
+    )
+    .expect("应写入链接目标");
+    symlink("actual.md", skill_root.join("SKILL.md")).expect("应创建 SKILL.md 软链接");
+    commit_all(&project, "track symlink");
+
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    let linked = inventory_entry(&registered, "linked");
+    assert_eq!(linked.management_kind, ManagementKind::TakeoverCandidate);
+    assert!(linked.management_evidence.is_none());
+}
+
+#[test]
+fn tracked_submodule_skill_is_not_project_management_evidence() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let project = sandbox.path().join("submodule-project");
+    init_git_repository(&project);
+    let skill_root = project.join(".codex/skills/nested");
+    init_git_repository(&skill_root);
+    write_skill(&skill_root, "nested", "nested");
+    commit_all(&skill_root, "track nested skill");
+    commit_all(&project, "track nested repository as gitlink");
+    assert!(
+        git_stdout(&project, &["ls-tree", "HEAD", ".codex/skills/nested"])
+            .starts_with("160000 commit "),
+        "测试 fixture 必须让外层 Project 只追踪 gitlink"
+    );
+
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    let nested = inventory_entry(&registered, "nested");
+    assert_eq!(nested.management_kind, ManagementKind::TakeoverCandidate);
+    assert!(nested.management_evidence.is_none());
+}
+
+#[test]
+fn project_inside_monorepo_and_git_file_worktree_use_their_actual_authority_root() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let monorepo = sandbox.path().join("monorepo");
+    init_git_repository(&monorepo);
+    let project = monorepo.join("packages/product");
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "alpha");
+    commit_all(&monorepo, "track monorepo skill");
+
+    let monorepo_outcome = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 monorepo 子目录");
+    let alpha = inventory_entry(&monorepo_outcome, "alpha");
+    assert_eq!(alpha.management_kind, ManagementKind::ProjectManaged);
+    assert_eq!(
+        alpha
+            .management_evidence
+            .as_ref()
+            .expect("应保存 monorepo 证据")
+            .authority_root,
+        fs::canonicalize(&monorepo)
+            .expect("应解析 monorepo authority root")
+            .to_string_lossy()
+    );
+
+    let linked_worktree = sandbox.path().join("linked-worktree");
+    run_git(
+        &monorepo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "worktree-test",
+            linked_worktree.to_str().expect("测试路径应为 UTF-8"),
+        ],
+    );
+    write_skill(
+        &linked_worktree.join(".codex/skills/bravo"),
+        "bravo",
+        "bravo",
+    );
+    commit_all(&linked_worktree, "track worktree skill");
+    assert!(linked_worktree.join(".git").is_file());
+
+    let worktree_outcome = application
+        .handle(UiIntent::RegisterProject {
+            root_path: linked_worktree.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 .git file worktree");
+    let bravo = inventory_entry(&worktree_outcome, "bravo");
+    assert_eq!(bravo.management_kind, ManagementKind::ProjectManaged);
+    assert_eq!(
+        bravo
+            .management_evidence
+            .as_ref()
+            .expect("应保存 worktree 证据")
+            .authority_root,
+        fs::canonicalize(&linked_worktree)
+            .expect("应解析 worktree authority root")
+            .to_string_lossy()
+    );
+}
+
+#[test]
+fn broken_git_evidence_keeps_the_last_project_snapshot_stale() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, paths) = started_application(&sandbox);
+    let project = sandbox.path().join("broken-git-project");
+    init_git_repository(&project);
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "alpha");
+    commit_all(&project, "track alpha");
+    let initial = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    let old_evidence = inventory_entry(&initial, "alpha")
+        .management_evidence
+        .clone();
+
+    fs::rename(project.join(".git"), project.join(".git-valid")).expect("应暂存有效 Git 元数据");
+    fs::write(project.join(".git"), "gitdir: missing-git-directory\n")
+        .expect("应写入损坏的 .git file");
+    let refreshed = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("证据不确定时应保留旧快照而不是让整次刷新失败");
+    let alpha = inventory_entry(&refreshed, "alpha");
+    assert!(alpha.stale);
+    assert_eq!(alpha.management_kind, ManagementKind::ProjectManaged);
+    assert_eq!(alpha.management_evidence, old_evidence);
+    let UiOutcome::Inventory { scan_issues, .. } = &refreshed else {
+        panic!("刷新后应返回 Inventory");
+    };
+    assert!(scan_issues.iter().any(|issue| {
+        issue.root_key == ScanRootKey::CodexProject
+            && issue.code == skillyard_lib::ScanIssueCode::InspectManagementEvidence
+    }));
+
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    assert_eq!(
+        inventory_entry(
+            &reopened
+                .handle(UiIntent::GetStartupState)
+                .expect("重启应读取保留的旧快照"),
+            "alpha"
+        )
+        .management_evidence,
+        old_evidence
+    );
+}
+
+#[test]
+fn broken_head_object_is_indeterminate_instead_of_an_unborn_repository() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let project = sandbox.path().join("broken-head-project");
+    init_git_repository(&project);
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "alpha");
+    commit_all(&project, "track alpha");
+    let initial = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 应成功");
+    let old_evidence = inventory_entry(&initial, "alpha")
+        .management_evidence
+        .clone();
+    let head_reference = git_stdout(&project, &["symbolic-ref", "HEAD"]);
+    fs::write(
+        project.join(".git").join(head_reference),
+        "0000000000000000000000000000000000000000\n",
+    )
+    .expect("应损坏 HEAD 指向的对象引用");
+
+    let refreshed = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("损坏对象应成为局部扫描问题");
+    let alpha = inventory_entry(&refreshed, "alpha");
+    assert!(alpha.stale);
+    assert_eq!(alpha.management_evidence, old_evidence);
+    let UiOutcome::Inventory { scan_issues, .. } = refreshed else {
+        panic!("刷新后应返回 Inventory");
+    };
+    assert!(scan_issues.iter().any(|issue| {
+        issue.root_key == ScanRootKey::CodexProject
+            && issue.code == skillyard_lib::ScanIssueCode::InspectManagementEvidence
+    }));
+}
+
+#[test]
+fn partial_clone_missing_tree_does_not_lazy_fetch_during_local_refresh() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let origin = sandbox.path().join("partial-origin");
+    init_git_repository(&origin);
+    run_git(&origin, &["config", "uploadpack.allowFilter", "true"]);
+    write_skill(&origin.join(".codex/skills/alpha"), "alpha", "alpha");
+    commit_all(&origin, "track alpha");
+
+    let project = sandbox.path().join("partial-project");
+    clone_tree_filtered(&origin, &project);
+    let initial_pack_files = git_pack_files(&project);
+    assert!(!initial_pack_files.is_empty(), "过滤 clone 应产生初始 pack");
+    run_git(&project, &["checkout", "--force", "HEAD"]);
+    let hydrated_pack_files = git_pack_files(&project);
+    assert!(
+        hydrated_pack_files.len() > initial_pack_files.len(),
+        "checkout 应通过 promisor remote 补齐工作区对象"
+    );
+
+    let initial = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("对象完整时应登记 Project");
+    assert_eq!(
+        inventory_entry(&initial, "alpha").management_kind,
+        ManagementKind::ProjectManaged
+    );
+
+    // 只移除 checkout 后懒加载的 pack，保留含 HEAD commit 的初始 promisor pack。
+    for path in hydrated_pack_files.difference(&initial_pack_files) {
+        fs::remove_file(path).expect("应移除测试用的已补齐对象 pack");
+    }
+    let missing_object_pack_files = git_pack_files(&project);
+    assert_eq!(missing_object_pack_files, initial_pack_files);
+    assert!(
+        !git_command_with_no_lazy_fetch(
+            &project,
+            &["ls-tree", "HEAD", ".codex/skills/alpha/SKILL.md"]
+        )
+        .status
+        .success(),
+        "fixture 必须在禁用 lazy fetch 时缺少 tree object"
+    );
+
+    let refreshed = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("缺失承诺对象应成为局部扫描问题");
+    let alpha = inventory_entry(&refreshed, "alpha");
+    assert!(alpha.stale);
+    assert_eq!(alpha.management_kind, ManagementKind::ProjectManaged);
+    let UiOutcome::Inventory { scan_issues, .. } = refreshed else {
+        panic!("刷新后应返回 Inventory");
+    };
+    assert!(scan_issues.iter().any(|issue| {
+        issue.root_key == ScanRootKey::CodexProject
+            && issue.code == skillyard_lib::ScanIssueCode::InspectManagementEvidence
+    }));
+    assert_eq!(
+        git_pack_files(&project),
+        missing_object_pack_files,
+        "Local Refresh 不能从 promisor remote 新增对象 pack"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_git_marker_is_indeterminate_and_does_not_create_management_evidence() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _) = started_application(&sandbox);
+    let project = sandbox.path().join("linked-git-marker-project");
+    init_git_repository(&project);
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "alpha");
+    commit_all(&project, "track alpha");
+    fs::rename(project.join(".git"), project.join(".git-real")).expect("应移动 Git 元数据目录");
+    symlink(".git-real", project.join(".git")).expect("应创建 .git 软链接");
+
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("证据问题不应阻止登记 Project");
+    let UiOutcome::Inventory {
+        entries,
+        scan_issues,
+        ..
+    } = registered
+    else {
+        panic!("登记后应返回 Inventory");
+    };
+    assert!(entries.iter().all(|entry| entry.skill_name != "alpha"));
+    assert!(scan_issues.iter().any(|issue| {
+        issue.root_key == ScanRootKey::CodexProject
+            && issue.code == skillyard_lib::ScanIssueCode::InspectManagementEvidence
+    }));
+}
+
+#[test]
+fn global_skill_in_a_git_clone_is_not_classified_as_project_managed() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("global-repository");
+    init_git_repository(&home);
+    write_skill(&home.join(".codex/skills/alpha"), "alpha", "alpha");
+    commit_all(&home, "track global skill");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(sandbox.path().join("data"), home),
+        PlatformInfo::supported_for_test(),
+    );
+
+    let scanned = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("全局扫描应成功");
+    let alpha = inventory_entry(&scanned, "alpha");
+    assert_eq!(alpha.management_kind, ManagementKind::TakeoverCandidate);
+    assert!(alpha.management_evidence.is_none());
+}
+
+#[test]
 fn version_one_database_migrates_without_losing_inventory() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let data_root = sandbox.path().join("application-support/SkillYard");
@@ -1190,7 +1686,117 @@ fn version_one_database_migrates_without_losing_inventory() {
             |row| row.get(0),
         )
         .expect("应读取 migration 版本");
-    assert_eq!(versions, "1,2,3,4,5,6,7,8");
+    assert_eq!(versions, "1,2,3,4,5,6,7,8,9");
+}
+
+fn started_application(sandbox: &tempfile::TempDir) -> (SkillYardApplication, ApplicationPaths) {
+    let home = sandbox.path().join("home");
+    fs::create_dir_all(&home).expect("应创建测试 home");
+    let paths = ApplicationPaths::for_home(sandbox.path().join("data"), home);
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应先完成首次扫描");
+    (application, paths)
+}
+
+fn inventory_entry<'a>(outcome: &'a UiOutcome, name: &str) -> &'a skillyard_lib::InventoryItem {
+    let UiOutcome::Inventory { entries, .. } = outcome else {
+        panic!("应返回 Inventory");
+    };
+    entries
+        .iter()
+        .find(|entry| entry.skill_name == name)
+        .expect("应找到目标 Skill")
+}
+
+fn init_git_repository(root: &Path) {
+    fs::create_dir_all(root).expect("应创建 Git fixture 目录");
+    run_git(root, &["init"]);
+    run_git(root, &["config", "user.name", "SkillYard Test"]);
+    run_git(root, &["config", "user.email", "skillyard@example.invalid"]);
+}
+
+fn commit_all(root: &Path, message: &str) {
+    run_git(root, &["add", "--all"]);
+    run_git(root, &["commit", "-m", message]);
+}
+
+fn run_git(root: &Path, arguments: &[&str]) {
+    let output = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("应执行测试 Git 命令");
+    assert!(
+        output.status.success(),
+        "Git fixture 命令失败：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_stdout(root: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("应执行测试 Git 命令");
+    assert!(output.status.success(), "Git fixture 查询应成功");
+    String::from_utf8(output.stdout)
+        .expect("Git fixture 输出应为 UTF-8")
+        .trim()
+        .to_owned()
+}
+
+fn clone_tree_filtered(origin: &Path, destination: &Path) {
+    let origin_url = format!(
+        "file://{}",
+        origin.to_str().expect("测试 origin 路径应为 UTF-8")
+    );
+    let output = Command::new("/usr/bin/git")
+        .args([
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "--filter=tree:0",
+            "--no-checkout",
+            &origin_url,
+        ])
+        .arg(destination)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("应执行过滤 clone");
+    assert!(
+        output.status.success(),
+        "过滤 clone 失败：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_pack_files(repository: &Path) -> BTreeSet<PathBuf> {
+    fs::read_dir(repository.join(".git/objects/pack"))
+        .expect("应读取 Git pack 目录")
+        .map(|entry| entry.expect("应读取 Git pack 条目").path())
+        .collect()
+}
+
+fn git_command_with_no_lazy_fetch(root: &Path, arguments: &[&str]) -> std::process::Output {
+    Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("应执行禁用 lazy fetch 的 Git 命令")
 }
 
 fn write_skill(root: &std::path::Path, name: &str, script_contents: &str) {

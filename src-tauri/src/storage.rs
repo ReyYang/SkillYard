@@ -13,9 +13,10 @@ use thiserror::Error;
 
 use crate::domain::{
     BatchMountDisposition, InventoryItem, InventoryLocationKind, InventoryObservation,
-    LocalRefreshSummary, ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope,
-    MountSummary, ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity,
-    ScanRootKey, SkillMetadataStatus, SupportedAppId, SupportedAppSummary, UiOutcome,
+    LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
+    MountOperation, MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue,
+    ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SupportedAppId,
+    SupportedAppSummary, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -30,6 +31,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, include_str!("../migrations/0006_mount_plan_purpose.sql")),
     (7, include_str!("../migrations/0007_project_inventory.sql")),
     (8, include_str!("../migrations/0008_mount_batches.sql")),
+    (
+        9,
+        include_str!("../migrations/0009_management_evidence.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -68,6 +73,8 @@ pub enum StorageError {
     InvalidScanRootIdentity(String),
     #[error("SQLite 中包含未知管理状态：{0}")]
     UnknownManagementKind(String),
+    #[error("SQLite 中包含未知管理证据类型：{0}")]
+    UnknownManagementEvidenceKind(String),
     #[error("SQLite 中包含未知扫描问题类型：{0}")]
     UnknownScanIssueCode(String),
     #[error("SQLite 中包含非法刷新统计值：{0}")]
@@ -3880,10 +3887,37 @@ fn read_inventory_entries_from(
             stale,
             management_kind: ManagementKind::from_str(&management_kind)
                 .ok_or_else(|| StorageError::UnknownManagementKind(management_kind.clone()))?,
+            management_evidence: None,
         });
     }
 
     for entry in &mut entries {
+        let stored_evidence = connection
+            .query_row(
+                "SELECT kind, authority_root, snapshot_commit_oid, subject_path
+                 FROM inventory_management_evidence
+                 WHERE observation_id = ?1",
+                [&entry.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::ReadInventory)?;
+        if let Some((kind, authority_root, snapshot_commit_oid, subject_path)) = stored_evidence {
+            entry.management_evidence = Some(ManagementEvidence {
+                kind: ManagementEvidenceKind::from_str(&kind)
+                    .ok_or_else(|| StorageError::UnknownManagementEvidenceKind(kind.clone()))?,
+                authority_root,
+                snapshot_commit_oid,
+                subject_path,
+            });
+        }
         let mut app_statement = connection
             .prepare(
                 "SELECT app_id FROM inventory_observation_apps WHERE observation_id = ?1 ORDER BY app_id",
@@ -4128,6 +4162,7 @@ fn inventory_item_from_observation(
         project_id: observation.project_id,
         stale: observation.stale,
         management_kind: observation.management_kind,
+        management_evidence: observation.management_evidence,
         bundle_id: None,
         member_id: None,
         bundle_display_name: None,
@@ -4202,6 +4237,7 @@ fn read_managed_entries_from(
             project_id: None,
             stale: false,
             management_kind: ManagementKind::SkillYardManaged,
+            management_evidence: None,
             bundle_id: Some(bundle_id),
             member_id: Some(member_id),
             bundle_display_name: Some(bundle_display_name),
@@ -4379,6 +4415,20 @@ fn replace_inventory_rows(
                 params![entry.id, app.as_str()],
             )?;
         }
+        if let Some(evidence) = &entry.management_evidence {
+            transaction.execute(
+                "INSERT INTO inventory_management_evidence
+                 (observation_id, kind, authority_root, snapshot_commit_oid, subject_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    entry.id,
+                    evidence.kind.as_str(),
+                    evidence.authority_root,
+                    evidence.snapshot_commit_oid,
+                    evidence.subject_path
+                ],
+            )?;
+        }
     }
 
     for issue in scan_issues {
@@ -4424,9 +4474,14 @@ fn reconcile_entries(
         })
         .collect::<Vec<_>>();
     combined.extend(scanned.iter().cloned().map(|mut entry| {
-        // 扫描只更新观察事实，不能覆盖由确定性证据或用户确认产生的管理归属。
-        if let Some(previous_entry) = previous_by_id.get(entry.id.as_str()) {
+        // AgentManaged 由独立识别器负责；Git HEAD 证据只重算项目候选与 ProjectManaged。
+        if let Some(previous_entry) = previous_by_id.get(entry.id.as_str())
+            && (previous_entry.management_kind == ManagementKind::AgentManaged
+                || previous_entry.management_kind == ManagementKind::SkillYardManaged
+                || entry.project_id.is_none())
+        {
             entry.management_kind = previous_entry.management_kind;
+            entry.management_evidence = previous_entry.management_evidence.clone();
         }
         entry
     }));
@@ -4804,7 +4859,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         for table in [
             "projects",
             "mount_plans",
@@ -4814,6 +4869,7 @@ mod tests {
             "batch_mount_plan_items",
             "batch_mount_transactions",
             "batch_mount_transaction_items",
+            "inventory_management_evidence",
         ] {
             let exists = storage
                 .connection
