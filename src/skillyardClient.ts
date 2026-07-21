@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  BatchMountPlan,
+  BatchMountRequest,
   FolderInstallPlan,
   MountPlan,
   MountScope,
@@ -27,6 +29,14 @@ export interface SkillYardClient {
   createRemoveMountPlan(mountId: string): Promise<MountPlan>;
   createRepairMountPlan(mountId: string): Promise<MountPlan>;
   confirmMountPlan(planId: string): Promise<UiOutcome>;
+  createBatchMountPlan(
+    bundleId: string,
+    requests: BatchMountRequest[],
+  ): Promise<BatchMountPlan>;
+  confirmBatchMountPlan(
+    planId: string,
+    selectedItemIds: string[],
+  ): Promise<UiOutcome>;
 }
 
 // 前端只知道任务级命令；文件夹路径由 Rust 原生选择器产生，不开放通用文件能力。
@@ -56,4 +66,14 @@ export const tauriSkillYardClient: SkillYardClient = {
     invoke<MountPlan>("create_repair_mount_plan", { mountId }),
   confirmMountPlan: (planId) =>
     invoke<UiOutcome>("confirm_mount_plan", { planId }),
+  createBatchMountPlan: (bundleId, requests) =>
+    invoke<BatchMountPlan>("create_batch_mount_plan", {
+      bundleId,
+      requests,
+    }),
+  confirmBatchMountPlan: (planId, selectedItemIds) =>
+    invoke<UiOutcome>("confirm_batch_mount_plan", {
+      planId,
+      selectedItemIds,
+    }),
 };

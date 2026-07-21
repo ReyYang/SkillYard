@@ -146,4 +146,53 @@ describe("Tauri IPC contract", () => {
       planId: "mount-plan-1",
     });
   });
+
+  it("创建 Batch Mount Plan 时只提交 Bundle 与明确目标请求", async () => {
+    mocks.invoke.mockResolvedValue({ id: "batch-plan-1" });
+    const requests = [
+      {
+        memberId: "member-1",
+        appId: "codex" as const,
+        scope: "global" as const,
+        projectId: null,
+      },
+      {
+        memberId: "member-2",
+        appId: "claudeCode" as const,
+        scope: "project" as const,
+        projectId: "project-1",
+      },
+    ];
+
+    await tauriSkillYardClient.createBatchMountPlan("bundle-1", requests);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_batch_mount_plan", {
+      bundleId: "bundle-1",
+      requests,
+    });
+  });
+
+  it("确认 Batch Mount 时只提交 opaque Plan 与最终选中项", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+    });
+
+    await tauriSkillYardClient.confirmBatchMountPlan("batch-plan-1", [
+      "batch-item-1",
+      "batch-item-3",
+    ]);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("confirm_batch_mount_plan", {
+      planId: "batch-plan-1",
+      selectedItemIds: ["batch-item-1", "batch-item-3"],
+    });
+  });
 });

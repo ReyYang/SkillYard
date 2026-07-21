@@ -23,6 +23,7 @@ interface InventoryPageProps {
   onInstall(): void;
   onAddProject(): void;
   onManageMount(memberId: string): void;
+  onBatchMount(bundleId: string): void;
 }
 
 const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
@@ -45,6 +46,7 @@ export function InventoryPage({
   onInstall,
   onAddProject,
   onManageMount,
+  onBatchMount,
 }: InventoryPageProps) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ManagementFilter>("all");
@@ -222,6 +224,8 @@ export function InventoryPage({
             entries={group.entries}
             mounts={outcome.mounts}
             onManageMount={onManageMount}
+            batchMountBundleId={group.bundleId}
+            onBatchMount={onBatchMount}
           />
         ))}
         <InventorySection
@@ -260,12 +264,16 @@ function InventorySection({
   entries,
   mounts = [],
   onManageMount,
+  batchMountBundleId,
+  onBatchMount,
 }: {
   title: string;
   eyebrow: string;
   entries: InventoryObservation[];
   mounts?: MountSummary[];
   onManageMount?(memberId: string): void;
+  batchMountBundleId?: string | null;
+  onBatchMount?(bundleId: string): void;
 }) {
   if (entries.length === 0) return null;
   return (
@@ -275,7 +283,18 @@ function InventorySection({
           <p className="section-eyebrow">{eyebrow}</p>
           <h2>{title}</h2>
         </div>
-        <span>{entries.length}</span>
+        <div className="inventory-section-actions">
+          {batchMountBundleId ? (
+            <button
+              className="compact-action"
+              type="button"
+              onClick={() => onBatchMount?.(batchMountBundleId)}
+            >
+              批量挂载
+            </button>
+          ) : null}
+          <span>{entries.length}</span>
+        </div>
       </header>
       <ul className="inventory-list">
         {entries.map((entry) => (
@@ -371,10 +390,20 @@ function mountHealthLabel(health: MountSummary["health"]): string {
 
 function groupManagedEntries(
   entries: InventoryObservation[],
-): Array<{ id: string; title: string; entries: InventoryObservation[] }> {
+): Array<{
+  id: string;
+  bundleId: string | null;
+  title: string;
+  entries: InventoryObservation[];
+}> {
   const groups = new Map<
     string,
-    { id: string; title: string; entries: InventoryObservation[] }
+    {
+      id: string;
+      bundleId: string | null;
+      title: string;
+      entries: InventoryObservation[];
+    }
   >();
   for (const entry of entries) {
     if (entry.managementKind !== "skillYardManaged") continue;
@@ -383,6 +412,8 @@ function groupManagedEntries(
     const existing = groups.get(id);
     groups.set(id, {
       id,
+      // fallback 分组仅用于显示，绝不能把合成 ID 交给生命周期命令。
+      bundleId: entry.bundleId ?? null,
       title: entry.bundleDisplayName ?? "本地 Bundle",
       entries: [...(existing?.entries ?? []), entry],
     });

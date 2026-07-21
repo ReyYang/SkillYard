@@ -116,6 +116,45 @@ export interface MountPlan {
   expiresAt: number;
 }
 
+export interface BatchMountRequest {
+  memberId: string;
+  appId: SupportedAppId;
+  scope: MountScope;
+  projectId: string | null;
+}
+
+export type BatchMountDisposition =
+  | "ready"
+  | "pathConflict"
+  | "scopeConflict"
+  | "alreadyMounted";
+
+export interface BatchMountPlanItem {
+  id: string;
+  memberId: string;
+  skillName: string;
+  appId: SupportedAppId;
+  scope: MountScope;
+  projectId: string | null;
+  projectDisplayName: string | null;
+  targetPath: string;
+  expectedTarget: string;
+  disposition: BatchMountDisposition;
+  selectable: boolean;
+  defaultSelected: boolean;
+  conflictReason: string | null;
+  targetHealth: MountHealth;
+}
+
+export interface BatchMountPlan {
+  id: string;
+  bundleId: string;
+  bundleDisplayName: string;
+  items: BatchMountPlanItem[];
+  createdAt: number;
+  expiresAt: number;
+}
+
 export interface FolderInstallPlan {
   id: string;
   inputPath: string;
@@ -170,4 +209,8 @@ export type UiOutcome =
   | {
       type: "mountPlan";
       plan: MountPlan;
+    }
+  | {
+      type: "batchMountPlan";
+      plan: BatchMountPlan;
     };

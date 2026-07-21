@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
 
+import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
+import { BundleMountPage } from "./components/BundleMountPage";
 import { InventoryPage } from "./components/InventoryPage";
 import { InstallFolderPage } from "./components/InstallFolderPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
 import type {
+  BatchMountPlan,
+  BatchMountRequest,
   FolderInstallPlan,
   MountPlan,
   MountScope,
@@ -43,6 +47,13 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [isPlanningMount, setIsPlanningMount] = useState(false);
   const [isConfirmingMount, setIsConfirmingMount] = useState(false);
   const [mountError, setMountError] = useState<string | null>(null);
+  const [batchMountBundleId, setBatchMountBundleId] = useState<string | null>(
+    null,
+  );
+  const [pendingBatchMountPlan, setPendingBatchMountPlan] =
+    useState<BatchMountPlan | null>(null);
+  const [isPlanningBatchMount, setIsPlanningBatchMount] = useState(false);
+  const [isConfirmingBatchMount, setIsConfirmingBatchMount] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -242,6 +253,61 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
+  const openBatchMount = (bundleId: string) => {
+    setMountError(null);
+    setBatchMountBundleId(bundleId);
+  };
+
+  const createBatchMountPlan = async (requests: BatchMountRequest[]) => {
+    if (!batchMountBundleId || isPlanningBatchMount) return;
+    setIsPlanningBatchMount(true);
+    setMountError(null);
+    try {
+      const plan = await client.createBatchMountPlan(
+        batchMountBundleId,
+        requests,
+      );
+      setPendingBatchMountPlan(plan);
+    } catch (error) {
+      // 预览失败尚未开始生命周期事务，保留目标选择页供用户调整或返回。
+      setMountError(formatError(error));
+    } finally {
+      setIsPlanningBatchMount(false);
+    }
+  };
+
+  const confirmBatchMount = async (selectedItemIds: string[]) => {
+    if (!pendingBatchMountPlan || isConfirmingBatchMount) return;
+    setIsConfirmingBatchMount(true);
+    setMountError(null);
+    try {
+      const outcome = await client.confirmBatchMountPlan(
+        pendingBatchMountPlan.id,
+        selectedItemIds,
+      );
+      setPendingBatchMountPlan(null);
+      setBatchMountBundleId(null);
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      const message = formatError(error);
+      // 确认后 Plan 可能已消费；丢弃两步页面并重新读取 Rust 的最终状态。
+      setPendingBatchMountPlan(null);
+      setBatchMountBundleId(null);
+      try {
+        const outcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome });
+        setMountError(message);
+      } catch (recoveryError) {
+        setViewState({
+          status: "error",
+          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+        });
+      }
+    } finally {
+      setIsConfirmingBatchMount(false);
+    }
+  };
+
   if (viewState.status === "loading") {
     return (
       <main className="state-page" aria-label="SkillYard 正在启动">
@@ -283,6 +349,16 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       />
     );
   }
+  if (pendingBatchMountPlan) {
+    return (
+      <BatchMountPlanPage
+        plan={pendingBatchMountPlan}
+        isConfirming={isConfirmingBatchMount}
+        onBack={() => setPendingBatchMountPlan(null)}
+        onConfirm={confirmBatchMount}
+      />
+    );
+  }
   if (viewState.outcome.type === "onboardingRequired") {
     return (
       <OnboardingPage
@@ -311,6 +387,45 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         <h1>暂时无法继续</h1>
         <p>SkillYard 收到了无法显示的应用状态。</p>
       </main>
+    );
+  }
+
+  const batchMountEntries = batchMountBundleId
+    ? viewState.outcome.entries.flatMap((entry) =>
+        entry.managementKind === "skillYardManaged" &&
+        entry.bundleId === batchMountBundleId &&
+        entry.memberId
+          ? [{ memberId: entry.memberId, skillName: entry.skillName }]
+          : [],
+      )
+    : [];
+  const batchMountBundleName = batchMountBundleId
+    ? viewState.outcome.entries.find(
+        (entry) =>
+          entry.managementKind === "skillYardManaged" &&
+          entry.bundleId === batchMountBundleId,
+      )?.bundleDisplayName
+    : null;
+
+  if (
+    batchMountBundleId &&
+    batchMountBundleName &&
+    batchMountEntries.length > 0
+  ) {
+    return (
+      <BundleMountPage
+        bundleDisplayName={batchMountBundleName}
+        members={batchMountEntries}
+        supportedApps={viewState.outcome.supportedApps}
+        projects={viewState.outcome.projects}
+        isPlanning={isPlanningBatchMount}
+        error={mountError}
+        onBack={() => {
+          setMountError(null);
+          setBatchMountBundleId(null);
+        }}
+        onCreatePlan={createBatchMountPlan}
+      />
     );
   }
 
@@ -356,6 +471,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onInstall={chooseFolderInstallPlan}
       onAddProject={chooseAndRegisterProject}
       onManageMount={openMountManager}
+      onBatchMount={openBatchMount}
     />
   );
 }

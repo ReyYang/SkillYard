@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type {
+  BatchMountPlan,
   FolderInstallPlan,
   InventoryObservation,
   MountPlan,
@@ -722,6 +723,335 @@ describe("本机清单", () => {
     expect(screen.getByText("example-bundle: example")).toBeInTheDocument();
   });
 
+  it("只给真实受管 Bundle 提供批量挂载入口", async () => {
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          id: "managed:unassigned",
+          memberId: "member-unassigned",
+          bundleId: null,
+          bundleDisplayName: null,
+          skillName: "unassigned",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    const fallbackGroup = await screen.findByRole("region", {
+      name: "本地 Bundle",
+    });
+    expect(
+      within(fallbackGroup).queryByRole("button", { name: "批量挂载" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("从完整 Inventory 取出 Bundle 全成员并生成全成员乘目标请求", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            id: "managed:alpha",
+            memberId: "member-alpha",
+            skillName: "alpha",
+          }),
+          createManagedEntry({
+            id: "managed:beta",
+            memberId: "member-beta",
+            skillName: "beta",
+          }),
+        ],
+        null,
+        {
+          supportedApps: [
+            { id: "codex", displayName: "Codex", detected: true },
+            {
+              id: "claudeCode",
+              displayName: "Claude Code",
+              detected: false,
+            },
+            {
+              id: "gitHubCopilot",
+              displayName: "GitHub Copilot",
+              detected: null,
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createBatchMountPlan).mockResolvedValue(
+      createBatchPlan({
+        items: [
+          createBatchPlanItem({
+            id: "batch-alpha-codex",
+            memberId: "member-alpha",
+            skillName: "alpha",
+          }),
+          createBatchPlanItem({
+            id: "batch-beta-codex",
+            memberId: "member-beta",
+            skillName: "beta",
+          }),
+        ],
+      }),
+    );
+    render(<App client={client} />);
+
+    await screen.findByRole("heading", { name: "Skill 清单" });
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 Skill" }),
+      "alpha",
+    );
+    const visibleBundle = screen.getByRole("region", { name: "example-bundle" });
+    expect(
+      within(visibleBundle).queryByText("example-bundle: beta"),
+    ).not.toBeInTheDocument();
+    await user.click(
+      within(visibleBundle).getByRole("button", { name: "批量挂载" }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "批量挂载 example-bundle" }),
+    ).toBeInTheDocument();
+    const members = screen.getByRole("region", { name: "Bundle 全部成员" });
+    expect(members).toHaveTextContent("alpha");
+    expect(members).toHaveTextContent("beta");
+    expect(
+      screen.getByText("本 Bundle 的 2 个 Skill 将全部参与"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: "Codex 全局" }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole("region", { name: "Codex 批量挂载目标" }),
+    ).toHaveTextContent("已检测到");
+    expect(
+      screen.getByRole("region", { name: "Claude Code 批量挂载目标" }),
+    ).toHaveTextContent("未检测到");
+    expect(
+      screen.getByRole("region", { name: "GitHub Copilot 批量挂载目标" }),
+    ).toHaveTextContent("尚未检测");
+
+    await user.click(screen.getByRole("checkbox", { name: "Codex 全局" }));
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createBatchMountPlan).toHaveBeenCalledWith("bundle-1", [
+      {
+        memberId: "member-alpha",
+        appId: "codex",
+        scope: "global",
+        projectId: null,
+      },
+      {
+        memberId: "member-beta",
+        appId: "codex",
+        scope: "global",
+        projectId: null,
+      },
+    ]);
+  });
+
+  it("同一应用的 global 与 project 目标互斥，同时允许多个 Project", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry()], null, {
+        projects: [
+          { id: "project-1", displayName: "Alpha", rootPath: "/tmp/alpha" },
+          { id: "project-2", displayName: "Beta", rootPath: "/tmp/beta" },
+        ],
+      }),
+    );
+    vi.mocked(client.createBatchMountPlan).mockResolvedValue(createBatchPlan());
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", { name: "example-bundle" });
+    await user.click(within(bundle).getByRole("button", { name: "批量挂载" }));
+    const global = screen.getByRole("checkbox", { name: "Claude Code 全局" });
+    const alpha = screen.getByRole("checkbox", {
+      name: "Claude Code 项目 Alpha",
+    });
+    const beta = screen.getByRole("checkbox", {
+      name: "Claude Code 项目 Beta",
+    });
+
+    await user.click(global);
+    expect(global).toBeChecked();
+    await user.click(alpha);
+    await user.click(beta);
+    expect(global).not.toBeChecked();
+    expect(alpha).toBeChecked();
+    expect(beta).toBeChecked();
+    expect(screen.getByText(/GitHub Copilot 也可能读取/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+    expect(client.createBatchMountPlan).toHaveBeenCalledWith("bundle-1", [
+      {
+        memberId: "member-1",
+        appId: "claudeCode",
+        scope: "project",
+        projectId: "project-1",
+      },
+      {
+        memberId: "member-1",
+        appId: "claudeCode",
+        scope: "project",
+        projectId: "project-2",
+      },
+    ]);
+  });
+
+  it("Batch Plan 遵循后端默认选择，并禁用冲突和已挂载项", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.createBatchMountPlan).mockResolvedValue(
+      createBatchPlan({
+        items: [
+          createBatchPlanItem(),
+          createBatchPlanItem({
+            id: "batch-ready-not-default",
+            skillName: "optional",
+            selectable: true,
+            defaultSelected: false,
+          }),
+          createBatchPlanItem({
+            id: "batch-path-conflict",
+            appId: "claudeCode",
+            disposition: "pathConflict",
+            selectable: false,
+            defaultSelected: false,
+            conflictReason: "目标路径已被其他内容占用",
+          }),
+          createBatchPlanItem({
+            id: "batch-scope-conflict",
+            appId: "gitHubCopilot",
+            disposition: "scopeConflict",
+            selectable: false,
+            defaultSelected: false,
+            conflictReason: "该应用已经存在 global Mount",
+          }),
+          createBatchPlanItem({
+            id: "batch-already-mounted",
+            scope: "project",
+            projectId: "project-1",
+            projectDisplayName: "Alpha",
+            disposition: "alreadyMounted",
+            selectable: false,
+            defaultSelected: false,
+            conflictReason: null,
+          }),
+        ],
+      }),
+    );
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", { name: "example-bundle" });
+    await user.click(within(bundle).getByRole("button", { name: "批量挂载" }));
+    await user.click(screen.getByRole("checkbox", { name: "Codex 全局" }));
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(
+      screen.getByRole("heading", { name: "确认 example-bundle 批量挂载" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/全部完成或全部撤销/)).toBeInTheDocument();
+    const ready = screen.getByRole("checkbox", {
+      name: "example · Codex · 全局",
+    });
+    expect(ready).toBeChecked();
+    const readyNotDefault = screen.getByRole("checkbox", {
+      name: "optional · Codex · 全局",
+    });
+    expect(readyNotDefault).toBeEnabled();
+    expect(readyNotDefault).not.toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "example · Claude Code · 全局" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("checkbox", { name: "example · GitHub Copilot · 全局" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("checkbox", { name: "example · Codex · 项目 Alpha" }),
+    ).toBeDisabled();
+    expect(screen.getByText("目标路径已被其他内容占用")).toBeInTheDocument();
+    expect(screen.getByText("该应用已经存在 global Mount")).toBeInTheDocument();
+    expect(screen.getByText("已经挂载，无需重复创建")).toBeInTheDocument();
+
+    await user.click(ready);
+    expect(screen.getByText("至少保留一个可挂载项")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认批量挂载" })).toBeDisabled();
+  });
+
+  it("确认 Batch Mount 期间不能返回或重复，成功后回到清单", async () => {
+    const user = userEvent.setup();
+    let finishBatchMount: ((outcome: UiOutcome) => void) | undefined;
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const mounted = inventoryOutcome([createManagedEntry()], null, {
+      mounts: [createMount()],
+    });
+    const client = createClient(initial);
+    vi.mocked(client.createBatchMountPlan).mockResolvedValue(createBatchPlan());
+    vi.mocked(client.confirmBatchMountPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishBatchMount = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", { name: "example-bundle" });
+    await user.click(within(bundle).getByRole("button", { name: "批量挂载" }));
+    await user.click(screen.getByRole("checkbox", { name: "Codex 全局" }));
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+    await user.click(screen.getByRole("button", { name: "确认批量挂载" }));
+
+    expect(client.confirmBatchMountPlan).toHaveBeenCalledWith("batch-plan-1", [
+      "batch-item-1",
+    ]);
+    expect(screen.getByRole("button", { name: "正在安全挂载…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "正在安全挂载…" }));
+    expect(client.confirmBatchMountPlan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishBatchMount?.(mounted);
+    });
+    expect(
+      screen.getByRole("region", { name: "example-bundle" }),
+    ).toHaveTextContent("Codex · 全局");
+  });
+
+  it("Batch Mount 确认失败后丢弃 Plan 并读取真实状态", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const recovered = inventoryOutcome([createManagedEntry()]);
+    const client = createClient(initial);
+    vi.mocked(client.createBatchMountPlan).mockResolvedValue(createBatchPlan());
+    vi.mocked(client.confirmBatchMountPlan).mockRejectedValue({
+      code: "batchMountConflict",
+      message: "批量挂载中断，已撤销全部改动",
+    });
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(recovered);
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", { name: "example-bundle" });
+    await user.click(within(bundle).getByRole("button", { name: "批量挂载" }));
+    await user.click(screen.getByRole("checkbox", { name: "Codex 全局" }));
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+    await user.click(screen.getByRole("button", { name: "确认批量挂载" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "批量挂载中断，已撤销全部改动",
+    );
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(
+      screen.queryByRole("button", { name: "确认批量挂载" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "example-bundle" }),
+    ).toBeInTheDocument();
+  });
+
   it("空清单仍然是完成状态", async () => {
     const client = createClient(inventoryOutcome([]));
 
@@ -1048,6 +1378,8 @@ function createClient(startup: UiOutcome): SkillYardClient {
     createRemoveMountPlan: vi.fn(),
     createRepairMountPlan: vi.fn(),
     confirmMountPlan: vi.fn(),
+    createBatchMountPlan: vi.fn(),
+    confirmBatchMountPlan: vi.fn(),
   };
 }
 
@@ -1120,6 +1452,42 @@ function createMountPlan(overrides: Partial<MountPlan> = {}): MountPlan {
     targetHealth: "missing",
     createdAt: 1,
     expiresAt: 2,
+    ...overrides,
+  };
+}
+
+function createBatchPlan(
+  overrides: Partial<BatchMountPlan> = {},
+): BatchMountPlan {
+  return {
+    id: "batch-plan-1",
+    bundleId: "bundle-1",
+    bundleDisplayName: "example-bundle",
+    items: [createBatchPlanItem()],
+    createdAt: 1,
+    expiresAt: 2,
+    ...overrides,
+  };
+}
+
+function createBatchPlanItem(
+  overrides: Partial<BatchMountPlan["items"][number]> = {},
+): BatchMountPlan["items"][number] {
+  return {
+    id: "batch-item-1",
+    memberId: "member-1",
+    skillName: "example",
+    appId: "codex",
+    scope: "global",
+    projectId: null,
+    projectDisplayName: null,
+    targetPath: "/tmp/.codex/skills/example",
+    expectedTarget: "/tmp/central/bundles/bundle-1/current/members/example",
+    disposition: "ready",
+    selectable: true,
+    defaultSelected: true,
+    conflictReason: null,
+    targetHealth: "missing",
     ...overrides,
   };
 }

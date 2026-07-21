@@ -553,7 +553,13 @@ code {
   letter-spacing: -0.03em;
 }
 
-.inventory-section > header > span {
+.inventory-section-actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.inventory-section-actions > span {
   display: grid;
   min-width: 30px;
   height: 30px;
@@ -816,6 +822,159 @@ code {
 
 .mount-confirm-warning {
   color: #715926;
+}
+
+.batch-intro {
+  max-width: 720px;
+  margin: 0.7rem 0 0;
+  color: #687269;
+  line-height: 1.55;
+}
+
+.batch-member-summary {
+  margin-top: 2rem;
+  padding: 1rem 1.2rem;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 15px;
+  background: rgb(255 255 251 / 74%);
+}
+
+.batch-member-summary ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.batch-member-summary li {
+  padding: 0.4rem 0.62rem;
+  border-radius: 8px;
+  color: #455b49;
+  background: #e7eee1;
+  font-size: 0.78rem;
+  font-weight: 680;
+}
+
+.batch-target-list {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.batch-target-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.9rem;
+  border: 1px solid rgb(43 68 47 / 12%);
+  border-radius: 12px;
+  background: #f3f6ef;
+  cursor: pointer;
+}
+
+.batch-target-option input {
+  margin-top: 0.18rem;
+}
+
+.batch-target-option > span {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.batch-target-option small,
+.batch-target-option code {
+  color: #707a72;
+  font-size: 0.76rem;
+  font-weight: 500;
+}
+
+.batch-plan {
+  margin-top: 2.2rem;
+  overflow: hidden;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 18px;
+  background: rgb(255 255 251 / 78%);
+  box-shadow: 0 18px 48px rgb(34 57 41 / 8%);
+}
+
+.batch-plan-list {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 1rem;
+  list-style: none;
+}
+
+.batch-plan-list li {
+  border: 1px solid rgb(50 70 56 / 9%);
+  border-radius: 12px;
+  background: #f5f7f1;
+}
+
+.batch-plan-list li.is-blocked {
+  color: #745044;
+  background: #f4ebe5;
+}
+
+.batch-plan-list label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: start;
+  padding: 0.9rem;
+}
+
+.batch-plan-list input {
+  margin-top: 0.2rem;
+}
+
+.batch-plan-copy {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+  color: #69736b;
+  font-size: 0.78rem;
+}
+
+.batch-plan-copy em {
+  color: #8b4939;
+  font-style: normal;
+}
+
+.batch-plan-heading {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.batch-plan-heading strong {
+  color: #263d2c;
+  font-size: 0.92rem;
+}
+
+.batch-disposition {
+  padding: 0.26rem 0.46rem;
+  border-radius: 999px;
+  color: #3c6243;
+  background: #dceccf;
+  font-size: 0.66rem;
+  font-weight: 720;
+}
+
+.batch-disposition.pathConflict,
+.batch-disposition.scopeConflict {
+  color: #854638;
+  background: #f0d8cf;
+}
+
+.batch-disposition.alreadyMounted {
+  color: #5e6570;
+  background: #e2e5e7;
 }
 
 .management-direction {
