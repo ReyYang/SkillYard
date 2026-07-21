@@ -793,6 +793,331 @@ fn local_refresh_database_failure_keeps_the_previous_snapshot() {
 }
 
 #[test]
+fn registering_a_project_immediately_scans_every_existing_supported_project_root() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    fs::create_dir(&home).expect("应创建测试 home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应先完成首次扫描");
+
+    let project = sandbox.path().join("sample-project");
+    fs::create_dir(&project).expect("应创建 Project");
+    write_skill(
+        &project.join(".codex/skills/codex-project"),
+        "codex-project",
+        "codex",
+    );
+    write_skill(
+        &project.join(".claude/skills/claude-project"),
+        "claude-project",
+        "claude",
+    );
+    write_skill(
+        &project.join(".github/skills/copilot-project"),
+        "copilot-project",
+        "copilot",
+    );
+    write_skill(
+        &project.join(".agents/skills/shared-project"),
+        "shared-project",
+        "shared",
+    );
+
+    let UiOutcome::Inventory {
+        entries, projects, ..
+    } = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("登记 Project 后应立即只读扫描")
+    else {
+        panic!("应返回 Inventory");
+    };
+    let project_id = &projects[0].id;
+    let project_entries = entries
+        .iter()
+        .filter(|entry| entry.project_id.as_ref() == Some(project_id))
+        .collect::<Vec<_>>();
+    assert_eq!(project_entries.len(), 4);
+    for entry in &project_entries {
+        assert_eq!(
+            entry.project_display_name.as_deref(),
+            Some("sample-project")
+        );
+        assert_eq!(entry.management_kind, ManagementKind::TakeoverCandidate);
+    }
+
+    let codex = project_entries
+        .iter()
+        .find(|entry| entry.skill_name == "codex-project")
+        .unwrap();
+    assert_eq!(codex.location_kind, InventoryLocationKind::AppProject);
+    assert_eq!(codex.root_key, Some(ScanRootKey::CodexProject));
+    assert_eq!(codex.observed_by, vec![SupportedAppId::Codex]);
+    let claude = project_entries
+        .iter()
+        .find(|entry| entry.skill_name == "claude-project")
+        .unwrap();
+    assert_eq!(claude.root_key, Some(ScanRootKey::ClaudeCodeProject));
+    assert_eq!(
+        claude.observed_by,
+        vec![SupportedAppId::ClaudeCode, SupportedAppId::GitHubCopilot]
+    );
+    let copilot = project_entries
+        .iter()
+        .find(|entry| entry.skill_name == "copilot-project")
+        .unwrap();
+    assert_eq!(copilot.root_key, Some(ScanRootKey::GitHubCopilotProject));
+    assert_eq!(copilot.observed_by, vec![SupportedAppId::GitHubCopilot]);
+    let shared = project_entries
+        .iter()
+        .find(|entry| entry.skill_name == "shared-project")
+        .unwrap();
+    assert_eq!(shared.location_kind, InventoryLocationKind::SharedReadOnly);
+    assert_eq!(shared.root_key, Some(ScanRootKey::SharedAgentsProject));
+    assert_eq!(
+        shared.observed_by,
+        vec![SupportedAppId::Codex, SupportedAppId::GitHubCopilot]
+    );
+}
+
+#[test]
+fn project_registration_rolls_back_when_its_initial_inventory_cannot_be_saved() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    fs::create_dir(&home).expect("应创建测试 home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应先完成首次扫描");
+    let project = sandbox.path().join("atomic-project");
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "alpha");
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开测试 SQLite");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_project_inventory
+             BEFORE INSERT ON inventory_observations
+             WHEN NEW.project_id IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'test project scan failure'); END;",
+        )
+        .expect("应创建 Project 扫描失败点");
+
+    assert!(
+        application
+            .handle(UiIntent::RegisterProject {
+                root_path: project.to_string_lossy().into_owned(),
+            })
+            .is_err()
+    );
+    let project_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
+        .expect("应读取 Project 数量");
+    assert_eq!(project_count, 0, "扫描保存失败时 Project 记录也必须回退");
+}
+
+#[cfg(unix)]
+#[test]
+fn local_refresh_isolates_a_failed_root_to_the_correct_registered_project() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    fs::create_dir(&home).expect("应创建测试 home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应先完成首次扫描");
+
+    let project_a = sandbox.path().join("project-a");
+    let project_b = sandbox.path().join("project-b");
+    write_skill(&project_a.join(".codex/skills/alpha"), "alpha", "alpha");
+    write_skill(&project_b.join(".codex/skills/bravo"), "bravo", "bravo");
+    let registered_a = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project_a.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 Project A");
+    let project_a_id = match registered_a {
+        UiOutcome::Inventory { projects, .. } => projects[0].id.clone(),
+        _ => panic!("应返回 Inventory"),
+    };
+    let registered_b = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project_b.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 Project B");
+    let project_b_id = match registered_b {
+        UiOutcome::Inventory { projects, .. } => projects
+            .iter()
+            .find(|project| project.display_name == "project-b")
+            .unwrap()
+            .id
+            .clone(),
+        _ => panic!("应返回 Inventory"),
+    };
+
+    fs::remove_dir_all(project_a.join(".codex/skills")).expect("应移除 Project A 扫描根");
+    symlink(
+        project_a.join("missing-skills"),
+        project_a.join(".codex/skills"),
+    )
+    .expect("应创建 Project A 失败根");
+    fs::remove_dir_all(project_b.join(".codex/skills/bravo")).expect("应移除旧 Skill");
+    write_skill(
+        &project_b.join(".codex/skills/charlie"),
+        "charlie",
+        "charlie",
+    );
+
+    let UiOutcome::Inventory {
+        entries,
+        scan_issues,
+        ..
+    } = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("一个 Project 根失败不能阻止其他 Project 刷新")
+    else {
+        panic!("应返回 Inventory");
+    };
+    let alpha = entries
+        .iter()
+        .find(|entry| entry.skill_name == "alpha")
+        .expect("失败根应保留上次结果");
+    assert_eq!(alpha.project_id.as_deref(), Some(project_a_id.as_str()));
+    assert!(alpha.stale);
+    assert!(entries.iter().all(|entry| entry.skill_name != "bravo"));
+    let charlie = entries
+        .iter()
+        .find(|entry| entry.skill_name == "charlie")
+        .expect("其他 Project 应保存新结果");
+    assert_eq!(charlie.project_id.as_deref(), Some(project_b_id.as_str()));
+    assert_eq!(scan_issues.len(), 1);
+    assert_eq!(scan_issues[0].root_key, ScanRootKey::CodexProject);
+    assert_eq!(
+        scan_issues[0].project_id.as_deref(),
+        Some(project_a_id.as_str())
+    );
+}
+
+#[test]
+fn returning_user_reads_saved_project_inventory_until_refresh_is_requested() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    fs::create_dir(&home).expect("应创建测试 home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let paths = ApplicationPaths::for_home(data_root, home);
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应先完成首次扫描");
+    let project = sandbox.path().join("persisted-project");
+    write_skill(&project.join(".codex/skills/alpha"), "alpha", "alpha");
+    application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("应登记并扫描 Project");
+    write_skill(&project.join(".codex/skills/beta"), "beta", "beta");
+
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let startup = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("重启应读取已保存清单");
+    let UiOutcome::Inventory {
+        entries: startup_entries,
+        ..
+    } = startup
+    else {
+        panic!("启动应返回 Inventory");
+    };
+    assert!(
+        startup_entries
+            .iter()
+            .any(|entry| entry.skill_name == "alpha")
+    );
+    assert!(
+        startup_entries
+            .iter()
+            .all(|entry| entry.skill_name != "beta"),
+        "启动不能擅自扫描 Project"
+    );
+
+    let refreshed = reopened
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("主动刷新后应读取 Project 变化");
+    let UiOutcome::Inventory {
+        entries: refreshed_entries,
+        ..
+    } = refreshed
+    else {
+        panic!("刷新应返回 Inventory");
+    };
+    assert!(
+        refreshed_entries
+            .iter()
+            .any(|entry| entry.skill_name == "beta")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_issues_for_the_same_root_are_preserved_for_each_project() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    fs::create_dir(&home).expect("应创建测试 home");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(sandbox.path().join("data"), home),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应先完成首次扫描");
+
+    let mut latest = None;
+    for name in ["broken-project-a", "broken-project-b"] {
+        let project = sandbox.path().join(name);
+        fs::create_dir_all(project.join(".codex")).expect("应创建 Project 父目录");
+        symlink(
+            project.join("missing-skills"),
+            project.join(".codex/skills"),
+        )
+        .expect("应创建断链扫描根");
+        latest = Some(
+            application
+                .handle(UiIntent::RegisterProject {
+                    root_path: project.to_string_lossy().into_owned(),
+                })
+                .expect("扫描问题不能阻止 Project 登记"),
+        );
+    }
+
+    let UiOutcome::Inventory { scan_issues, .. } = latest.expect("应有最终清单") else {
+        panic!("应返回 Inventory");
+    };
+    let project_issues = scan_issues
+        .iter()
+        .filter(|issue| issue.root_key == ScanRootKey::CodexProject)
+        .collect::<Vec<_>>();
+    assert_eq!(project_issues.len(), 2);
+    assert_ne!(project_issues[0].root_id, project_issues[1].root_id);
+    assert_ne!(project_issues[0].project_id, project_issues[1].project_id);
+}
+
+#[test]
 fn version_one_database_migrates_without_losing_inventory() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let data_root = sandbox.path().join("application-support/SkillYard");
@@ -865,7 +1190,7 @@ fn version_one_database_migrates_without_losing_inventory() {
             |row| row.get(0),
         )
         .expect("应读取 migration 版本");
-    assert_eq!(versions, "1,2,3,4,5,6");
+    assert_eq!(versions, "1,2,3,4,5,6,7");
 }
 
 fn write_skill(root: &std::path::Path, name: &str, script_contents: &str) {

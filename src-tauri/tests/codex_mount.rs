@@ -162,6 +162,42 @@ fn local_refresh_does_not_duplicate_a_managed_mount_as_takeover_candidate() {
 }
 
 #[test]
+fn local_refresh_does_not_duplicate_a_managed_project_mount_as_inventory() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (_paths, application, member_id) = installed_skill(sandbox.path(), "project-mounted");
+    let project = sandbox.path().join("mounted-project");
+    fs::create_dir(&project).expect("应创建 Project");
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 Project");
+    let project_id = inventory_projects(&registered)[0].id.clone();
+    let plan = mount_plan(
+        &application,
+        &member_id,
+        MountScope::Project,
+        Some(project_id),
+    );
+    application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: plan.id })
+        .expect("应创建 project Mount");
+
+    let refreshed = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("应主动刷新包含 Project 的本机清单");
+    let matching = inventory_entries(&refreshed)
+        .iter()
+        .filter(|entry| entry.skill_name == "project-mounted")
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(
+        matching[0].management_kind,
+        skillyard_lib::ManagementKind::SkillYardManaged
+    );
+}
+
+#[test]
 fn registered_project_is_read_only_until_project_mount_is_confirmed() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (_paths, application, member_id) = installed_skill(sandbox.path(), "project-skill");
@@ -175,10 +211,12 @@ fn registered_project_is_read_only_until_project_mount_is_confirmed() {
         })
         .expect("应登记 Project");
     let project_id = inventory_projects(&registered)[0].id.clone();
-    assert!(
-        !project.join(".codex").exists(),
-        "登记 Project 不能写入项目目录"
-    );
+    for relative in [".codex", ".claude", ".github", ".agents"] {
+        assert!(
+            !project.join(relative).exists(),
+            "登记 Project 不能创建不存在的应用目录：{relative}"
+        );
+    }
 
     let plan = mount_plan(
         &application,

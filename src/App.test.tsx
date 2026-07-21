@@ -768,6 +768,9 @@ describe("本机清单", () => {
         createEntry({
           id: "project",
           skillName: "repo-skill",
+          locationKind: "appProject",
+          rootKey: "codexProject",
+          projectId: "project-1",
           managementKind: "projectManaged",
           projectDisplayName: "SkillYard",
         }),
@@ -892,7 +895,9 @@ describe("本机清单", () => {
       ]),
       scanIssues: [
         {
+          rootId: "global:codex_global",
           rootKey: "codexGlobal",
+          projectId: null,
           path: "/tmp/.codex/skills",
           code: "rootNotDirectory",
           message: "扫描根目录不是文件夹",
@@ -905,6 +910,52 @@ describe("本机清单", () => {
       "没有把它们当作已删除",
     );
     expect(screen.getByText("上次结果")).toBeInTheDocument();
+  });
+
+  it("同一种项目扫描根的问题按 rootId 同时显示", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const client = createClient({
+      ...inventoryOutcome([]),
+      scanIssues: [
+        {
+          rootId: "project:project-1:codex_project",
+          rootKey: "codexProject",
+          projectId: "project-1",
+          path: "/tmp/first/.codex/skills",
+          code: "readRoot",
+          message: "无法读取第一个项目扫描根",
+        },
+        {
+          rootId: "project:project-2:codex_project",
+          rootKey: "codexProject",
+          projectId: "project-2",
+          path: "/tmp/second/.codex/skills",
+          code: "readRoot",
+          message: "无法读取第二个项目扫描根",
+        },
+      ],
+    });
+
+    try {
+      render(<App client={client} />);
+
+      const warning = await screen.findByLabelText("刷新告警");
+      expect(warning).toHaveTextContent("/tmp/first/.codex/skills");
+      expect(warning).toHaveTextContent("/tmp/second/.codex/skills");
+      // 两个 Project 共用 rootKey 时，也不能触发 React 重复 key 告警。
+      expect(
+        consoleError.mock.calls.some((call) =>
+          call.some(
+            (value) =>
+              typeof value === "string" && value.includes("same key"),
+          ),
+        ),
+      ).toBe(false);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it("人工恢复只提示相关 Bundle，同时保留其他清单浏览", async () => {
@@ -1087,6 +1138,7 @@ function createEntry(
     observedBy: ["codex"],
     observedFingerprint: "fingerprint",
     rootKey: "codexGlobal",
+    projectId: null,
     stale: false,
     managementKind: "takeoverCandidate",
     ...overrides,

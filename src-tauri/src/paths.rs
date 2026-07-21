@@ -10,6 +10,7 @@ pub(crate) struct SupportedAppPathConfig {
     pub project_relative_root: PathBuf,
     pub detection_root: PathBuf,
     pub root_key: ScanRootKey,
+    pub project_root_key: ScanRootKey,
 }
 
 /// 生产路径固定，测试只能通过构造隔离实例替换根目录。
@@ -66,6 +67,7 @@ impl ApplicationPaths {
                 project_relative_root: PathBuf::from(".codex/skills"),
                 detection_root: self.home.join(".codex"),
                 root_key: ScanRootKey::CodexGlobal,
+                project_root_key: ScanRootKey::CodexProject,
             },
             SupportedAppPathConfig {
                 id: SupportedAppId::ClaudeCode,
@@ -74,6 +76,7 @@ impl ApplicationPaths {
                 project_relative_root: PathBuf::from(".claude/skills"),
                 detection_root: self.home.join(".claude"),
                 root_key: ScanRootKey::ClaudeCodeGlobal,
+                project_root_key: ScanRootKey::ClaudeCodeProject,
             },
             SupportedAppPathConfig {
                 id: SupportedAppId::GitHubCopilot,
@@ -82,6 +85,7 @@ impl ApplicationPaths {
                 project_relative_root: PathBuf::from(".github/skills"),
                 detection_root: self.home.join(".copilot"),
                 root_key: ScanRootKey::GitHubCopilotGlobal,
+                project_root_key: ScanRootKey::GitHubCopilotProject,
             },
         ]
     }

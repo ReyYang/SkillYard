@@ -14,8 +14,8 @@ use thiserror::Error;
 use crate::domain::{
     InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
     ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope, MountSummary,
-    ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
-    SupportedAppId, SupportedAppSummary, UiOutcome,
+    ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey,
+    SkillMetadataStatus, SupportedAppId, SupportedAppSummary, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -28,6 +28,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (5, include_str!("../migrations/0005_codex_mounts.sql")),
     (6, include_str!("../migrations/0006_mount_plan_purpose.sql")),
+    (7, include_str!("../migrations/0007_project_inventory.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -52,6 +53,8 @@ pub enum StorageError {
     SaveInitialScan(#[source] rusqlite::Error),
     #[error("无法保存本机刷新结果：{0}")]
     SaveLocalRefresh(#[source] rusqlite::Error),
+    #[error("无法保存 Project 扫描结果：{0}")]
+    SaveProjectScan(#[source] rusqlite::Error),
     #[error("SQLite 中包含未知 Supported App：{0}")]
     UnknownSupportedApp(String),
     #[error("SQLite 中包含未知 Inventory location：{0}")]
@@ -60,6 +63,8 @@ pub enum StorageError {
     UnknownMetadataStatus(String),
     #[error("SQLite 中包含未知扫描根：{0}")]
     UnknownScanRoot(String),
+    #[error("SQLite 中的扫描根与 Project 关系不一致：{0}")]
+    InvalidScanRootIdentity(String),
     #[error("SQLite 中包含未知管理状态：{0}")]
     UnknownManagementKind(String),
     #[error("SQLite 中包含未知扫描问题类型：{0}")]
@@ -559,7 +564,7 @@ impl Storage {
         completed_at: i64,
         scanned_entries: &[InventoryObservation],
         scanned_apps: &[SupportedAppSummary],
-        successful_roots: &[ScanRootKey],
+        successful_roots: &[ScanRootIdentity],
         scan_issues: &[ScanIssue],
     ) -> Result<SavedLocalRefresh, StorageError> {
         // 读取旧快照和写入新快照必须处于同一个写事务，不能让并发命令覆盖较新结果。
@@ -569,6 +574,7 @@ impl Storage {
             .map_err(StorageError::SaveLocalRefresh)?;
         let previous_entries = read_inventory_entries_from(&transaction)?;
         let previous_apps = read_supported_apps_from(&transaction)?;
+        let previous_issues = read_scan_issues_from(&transaction)?;
         let mount_targets = read_mount_target_paths_from(&transaction)?;
         let scanned_entries = scanned_entries
             .iter()
@@ -581,9 +587,10 @@ impl Storage {
             successful_roots,
             scan_issues,
         );
+        let scan_issues = reconcile_scan_issues(&previous_issues, successful_roots, scan_issues);
         let supported_apps = reconcile_supported_apps(&previous_apps, scanned_apps);
         let summary = summarize_changes(completed_at, &previous_entries, &entries);
-        replace_inventory_rows(&transaction, &entries, &supported_apps, scan_issues)
+        replace_inventory_rows(&transaction, &entries, &supported_apps, &scan_issues)
             .map_err(StorageError::SaveLocalRefresh)?;
         transaction
             .execute(
@@ -615,24 +622,49 @@ impl Storage {
         })
     }
 
-    pub(crate) fn register_project(
+    /// Project 记录与首次项目扫描在同一事务提交，失败时不能留下“已登记但未扫描”。
+    pub(crate) fn register_project_with_scan(
         &mut self,
-        project: NewProject<'_>,
-    ) -> Result<StoredProject, StorageError> {
-        if !is_single_path_component(project.id)
-            || project.display_name.trim().is_empty()
-            || !is_normalized_absolute_path(project.root_path)
-        {
-            return Err(StorageError::ProjectIdentityConflict);
-        }
-        let root_device = filesystem_identity_to_sql(project.root_device)?;
-        let root_inode = filesystem_identity_to_sql(project.root_inode)?;
+        project: &StoredProject,
+        scanned_entries: &[InventoryObservation],
+        successful_roots: &[ScanRootIdentity],
+        scan_issues: &[ScanIssue],
+    ) -> Result<(), StorageError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StorageError::SaveProject)?;
+            .map_err(StorageError::SaveProjectScan)?;
+        persist_project_from(&transaction, project)?;
+        let previous_entries = read_inventory_entries_from(&transaction)?;
+        let supported_apps = read_supported_apps_from(&transaction)?;
+        let previous_issues = read_scan_issues_from(&transaction)?;
+        let mount_targets = read_mount_target_paths_from(&transaction)?;
+        let scanned_entries = scanned_entries
+            .iter()
+            .filter(|entry| !mount_targets.contains(&entry.skill_root))
+            .cloned()
+            .collect::<Vec<_>>();
+        let entries = reconcile_entries(
+            &previous_entries,
+            &scanned_entries,
+            successful_roots,
+            scan_issues,
+        );
+        let scan_issues = reconcile_scan_issues(&previous_issues, successful_roots, scan_issues);
+        replace_inventory_rows(&transaction, &entries, &supported_apps, &scan_issues)
+            .map_err(StorageError::SaveProjectScan)?;
+        transaction.commit().map_err(StorageError::SaveProjectScan)
+    }
+
+    pub(crate) fn prepare_project(
+        &self,
+        project: NewProject<'_>,
+    ) -> Result<StoredProject, StorageError> {
+        validate_new_project(&project)?;
+        let root_device = filesystem_identity_to_sql(project.root_device)?;
+        let root_inode = filesystem_identity_to_sql(project.root_inode)?;
         let existing = read_project_by_identity_from(
-            &transaction,
+            &self.connection,
             project.id,
             project.root_path,
             root_device,
@@ -645,25 +677,31 @@ impl Storage {
             {
                 return Err(StorageError::ProjectIdentityConflict);
             }
-            transaction.commit().map_err(StorageError::SaveProject)?;
             return Ok(existing);
         }
-        transaction
-            .execute(
-                "INSERT INTO projects (id, display_name, root_path, root_device, root_inode, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    project.id,
-                    project.display_name,
-                    project.root_path,
-                    root_device,
-                    root_inode,
-                    project.created_at
-                ],
-            )
+        Ok(StoredProject {
+            id: project.id.to_owned(),
+            display_name: project.display_name.to_owned(),
+            root_path: project.root_path.to_owned(),
+            root_device: project.root_device,
+            root_inode: project.root_inode,
+            created_at: project.created_at,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_project(
+        &mut self,
+        project: NewProject<'_>,
+    ) -> Result<StoredProject, StorageError> {
+        let project = self.prepare_project(project)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveProject)?;
+        persist_project_from(&transaction, &project)?;
         transaction.commit().map_err(StorageError::SaveProject)?;
-        self.read_project(project.id)
+        Ok(project)
     }
 
     pub(crate) fn read_project(&self, project_id: &str) -> Result<StoredProject, StorageError> {
@@ -672,6 +710,18 @@ impl Storage {
     }
 
     pub(crate) fn read_projects(&self) -> Result<Vec<ProjectSummary>, StorageError> {
+        Ok(self
+            .read_stored_projects()?
+            .into_iter()
+            .map(|project| ProjectSummary {
+                id: project.id,
+                display_name: project.display_name,
+                root_path: project.root_path,
+            })
+            .collect())
+    }
+
+    pub(crate) fn read_stored_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
         let mut statement = self
             .connection
             .prepare("SELECT id, display_name, root_path, root_device, root_inode, created_at FROM projects ORDER BY display_name, id")
@@ -682,19 +732,12 @@ impl Storage {
         let projects = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::ReadProject)?;
-        projects
-            .into_iter()
-            .map(|project| {
-                if !is_normalized_absolute_path(&project.root_path) {
-                    return Err(StorageError::ProjectIdentityConflict);
-                }
-                Ok(ProjectSummary {
-                    id: project.id,
-                    display_name: project.display_name,
-                    root_path: project.root_path,
-                })
-            })
-            .collect()
+        for project in &projects {
+            if !is_normalized_absolute_path(&project.root_path) {
+                return Err(StorageError::ProjectIdentityConflict);
+            }
+        }
+        Ok(projects)
     }
 
     pub(crate) fn read_managed_member(
@@ -1591,9 +1634,21 @@ impl Storage {
         &self,
         entries: Vec<InventoryObservation>,
     ) -> Result<Vec<InventoryItem>, StorageError> {
+        let project_names = self
+            .read_projects()?
+            .into_iter()
+            .map(|project| (project.id, project.display_name))
+            .collect::<BTreeMap<_, _>>();
         let mut entries = entries
             .into_iter()
-            .map(inventory_item_from_observation)
+            .map(|observation| {
+                let project_display_name = observation
+                    .project_id
+                    .as_ref()
+                    .and_then(|project_id| project_names.get(project_id))
+                    .cloned();
+                inventory_item_from_observation(observation, project_display_name)
+            })
             .collect::<Vec<_>>();
         entries.extend(read_managed_entries_from(
             &self.connection,
@@ -1612,35 +1667,7 @@ impl Storage {
     }
 
     fn read_scan_issues(&self) -> Result<Vec<ScanIssue>, StorageError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT root_key, path, code, message FROM inventory_scan_issues ORDER BY root_key",
-            )
-            .map_err(StorageError::ReadInventory)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .map_err(StorageError::ReadInventory)?;
-        let mut issues = Vec::new();
-        for row in rows {
-            let (root_key, path, code, message) = row.map_err(StorageError::ReadInventory)?;
-            issues.push(ScanIssue {
-                root_key: ScanRootKey::from_str(&root_key)
-                    .ok_or_else(|| StorageError::UnknownScanRoot(root_key.clone()))?,
-                path,
-                code: ScanIssueCode::from_str(&code)
-                    .ok_or_else(|| StorageError::UnknownScanIssueCode(code.clone()))?,
-                message,
-            });
-        }
-        Ok(issues)
+        read_scan_issues_from(&self.connection)
     }
 
     fn read_mount_summaries(&self) -> Result<Vec<MountSummary>, StorageError> {
@@ -1813,6 +1840,57 @@ fn stored_project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPr
             .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, root_inode))?,
         created_at: row.get(5)?,
     })
+}
+
+fn validate_new_project(project: &NewProject<'_>) -> Result<(), StorageError> {
+    if !is_single_path_component(project.id)
+        || project.display_name.trim().is_empty()
+        || !is_normalized_absolute_path(project.root_path)
+    {
+        return Err(StorageError::ProjectIdentityConflict);
+    }
+    Ok(())
+}
+
+fn persist_project_from(
+    connection: &Connection,
+    project: &StoredProject,
+) -> Result<(), StorageError> {
+    if !is_single_path_component(&project.id)
+        || project.display_name.trim().is_empty()
+        || !is_normalized_absolute_path(&project.root_path)
+    {
+        return Err(StorageError::ProjectIdentityConflict);
+    }
+    let root_device = filesystem_identity_to_sql(project.root_device)?;
+    let root_inode = filesystem_identity_to_sql(project.root_inode)?;
+    if let Some(existing) = read_project_by_identity_from(
+        connection,
+        &project.id,
+        &project.root_path,
+        root_device,
+        root_inode,
+    )? {
+        if existing != *project {
+            return Err(StorageError::ProjectIdentityConflict);
+        }
+        return Ok(());
+    }
+    connection
+        .execute(
+            "INSERT INTO projects (id, display_name, root_path, root_device, root_inode, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                project.id,
+                project.display_name,
+                project.root_path,
+                root_device,
+                root_inode,
+                project.created_at
+            ],
+        )
+        .map_err(StorageError::SaveProject)?;
+    Ok(())
 }
 
 fn read_project_from(
@@ -2567,7 +2645,7 @@ fn read_inventory_entries_from(
 ) -> Result<Vec<InventoryObservation>, StorageError> {
     let mut statement = connection
         .prepare(
-            "SELECT id, skill_name, declared_name, skill_root, skill_file, location_kind, metadata_status, observed_fingerprint, root_key, stale, management_kind FROM inventory_observations ORDER BY skill_root",
+            "SELECT id, skill_name, declared_name, skill_root, skill_file, location_kind, metadata_status, observed_fingerprint, root_key, project_id, stale, management_kind FROM inventory_observations ORDER BY skill_root",
         )
         .map_err(StorageError::ReadInventory)?;
     let rows = statement
@@ -2582,8 +2660,9 @@ fn read_inventory_entries_from(
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
-                row.get::<_, bool>(9)?,
-                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, bool>(10)?,
+                row.get::<_, String>(11)?,
             ))
         })
         .map_err(StorageError::ReadInventory)?;
@@ -2599,9 +2678,13 @@ fn read_inventory_entries_from(
             metadata_status,
             observed_fingerprint,
             root_key,
+            project_id,
             stale,
             management_kind,
         ) = row.map_err(StorageError::ReadInventory)?;
+        let root_key = ScanRootKey::from_str(&root_key)
+            .ok_or_else(|| StorageError::UnknownScanRoot(root_key.clone()))?;
+        validate_scan_root_identity(root_key, project_id.as_deref())?;
         entries.push(InventoryObservation {
             id,
             skill_name,
@@ -2614,8 +2697,8 @@ fn read_inventory_entries_from(
                 .ok_or_else(|| StorageError::UnknownMetadataStatus(metadata_status.clone()))?,
             observed_by: Vec::new(),
             observed_fingerprint,
-            root_key: ScanRootKey::from_str(&root_key)
-                .ok_or_else(|| StorageError::UnknownScanRoot(root_key.clone()))?,
+            root_key,
+            project_id,
             stale,
             management_kind: ManagementKind::from_str(&management_kind)
                 .ok_or_else(|| StorageError::UnknownManagementKind(management_kind.clone()))?,
@@ -2640,6 +2723,63 @@ fn read_inventory_entries_from(
         }
     }
     Ok(entries)
+}
+
+fn read_scan_issues_from(connection: &Connection) -> Result<Vec<ScanIssue>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT root_id, root_key, project_id, path, code, message
+             FROM inventory_scan_issues ORDER BY root_id",
+        )
+        .map_err(StorageError::ReadInventory)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(StorageError::ReadInventory)?;
+    let mut issues = Vec::new();
+    for row in rows {
+        let (root_id, root_key, project_id, path, code, message) =
+            row.map_err(StorageError::ReadInventory)?;
+        let root_key = ScanRootKey::from_str(&root_key)
+            .ok_or_else(|| StorageError::UnknownScanRoot(root_key.clone()))?;
+        let identity = validate_scan_root_identity(root_key, project_id.as_deref())?;
+        if root_id != identity.stable_id() {
+            return Err(StorageError::InvalidScanRootIdentity(root_id));
+        }
+        issues.push(ScanIssue {
+            root_id,
+            root_key,
+            project_id,
+            path,
+            code: ScanIssueCode::from_str(&code)
+                .ok_or_else(|| StorageError::UnknownScanIssueCode(code.clone()))?,
+            message,
+        });
+    }
+    Ok(issues)
+}
+
+fn validate_scan_root_identity(
+    root_key: ScanRootKey,
+    project_id: Option<&str>,
+) -> Result<ScanRootIdentity, StorageError> {
+    match (root_key.is_project(), project_id) {
+        (false, None) => Ok(ScanRootIdentity::global(root_key)),
+        (true, Some(project_id)) if is_single_path_component(project_id) => {
+            Ok(ScanRootIdentity::project(root_key, project_id))
+        }
+        _ => Err(StorageError::InvalidScanRootIdentity(
+            root_key.as_str().to_owned(),
+        )),
+    }
 }
 
 fn read_mount_target_paths_from(connection: &Connection) -> Result<BTreeSet<String>, StorageError> {
@@ -2792,7 +2932,10 @@ fn sqlite_bool(value: i64) -> Result<bool, StorageError> {
     }
 }
 
-fn inventory_item_from_observation(observation: InventoryObservation) -> InventoryItem {
+fn inventory_item_from_observation(
+    observation: InventoryObservation,
+    project_display_name: Option<String>,
+) -> InventoryItem {
     InventoryItem {
         id: observation.id,
         skill_name: observation.skill_name,
@@ -2804,13 +2947,14 @@ fn inventory_item_from_observation(observation: InventoryObservation) -> Invento
         observed_by: observation.observed_by,
         observed_fingerprint: observation.observed_fingerprint,
         root_key: Some(observation.root_key),
+        project_id: observation.project_id,
         stale: observation.stale,
         management_kind: observation.management_kind,
         bundle_id: None,
         member_id: None,
         bundle_display_name: None,
         source_display_name: None,
-        project_display_name: None,
+        project_display_name,
     }
 }
 
@@ -2877,6 +3021,7 @@ fn read_managed_entries_from(
             observed_by: Vec::new(),
             observed_fingerprint: content_fingerprint,
             root_key: None,
+            project_id: None,
             stale: false,
             management_kind: ManagementKind::SkillYardManaged,
             bundle_id: Some(bundle_id),
@@ -3023,7 +3168,7 @@ fn replace_inventory_rows(
 
     for entry in entries {
         transaction.execute(
-            "INSERT INTO inventory_observations (id, skill_name, declared_name, skill_root, skill_file, location_kind, metadata_status, observed_fingerprint, root_key, stale, management_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO inventory_observations (id, skill_name, declared_name, skill_root, skill_file, location_kind, metadata_status, observed_fingerprint, root_key, project_id, stale, management_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 entry.id,
                 entry.skill_name,
@@ -3034,6 +3179,7 @@ fn replace_inventory_rows(
                 entry.metadata_status.as_str(),
                 entry.observed_fingerprint,
                 entry.root_key.as_str(),
+                entry.project_id,
                 entry.stale,
                 entry.management_kind.as_str()
             ],
@@ -3048,9 +3194,11 @@ fn replace_inventory_rows(
 
     for issue in scan_issues {
         transaction.execute(
-            "INSERT INTO inventory_scan_issues (root_key, path, code, message) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO inventory_scan_issues (root_id, root_key, project_id, path, code, message) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
+                issue.root_id,
                 issue.root_key.as_str(),
+                issue.project_id,
                 issue.path,
                 issue.code.as_str(),
                 issue.message
@@ -3063,13 +3211,13 @@ fn replace_inventory_rows(
 fn reconcile_entries(
     previous: &[InventoryObservation],
     scanned: &[InventoryObservation],
-    successful_roots: &[ScanRootKey],
+    successful_roots: &[ScanRootIdentity],
     scan_issues: &[ScanIssue],
 ) -> Vec<InventoryObservation> {
-    let successful = successful_roots.iter().copied().collect::<BTreeSet<_>>();
+    let successful = successful_roots.iter().cloned().collect::<BTreeSet<_>>();
     let failed = scan_issues
         .iter()
-        .map(|issue| issue.root_key)
+        .map(scan_issue_identity)
         .collect::<BTreeSet<_>>();
     let previous_by_id = previous
         .iter()
@@ -3077,10 +3225,10 @@ fn reconcile_entries(
         .collect::<BTreeMap<_, _>>();
     let mut combined = previous
         .iter()
-        .filter(|entry| !successful.contains(&entry.root_key))
+        .filter(|entry| !successful.contains(&observation_root_identity(entry)))
         .cloned()
         .map(|mut entry| {
-            if failed.contains(&entry.root_key) {
+            if failed.contains(&observation_root_identity(&entry)) {
                 entry.stale = true;
             }
             entry
@@ -3095,6 +3243,39 @@ fn reconcile_entries(
     }));
     combined.sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
     combined
+}
+
+fn reconcile_scan_issues(
+    previous: &[ScanIssue],
+    successful_roots: &[ScanRootIdentity],
+    current: &[ScanIssue],
+) -> Vec<ScanIssue> {
+    let mut touched = successful_roots.iter().cloned().collect::<BTreeSet<_>>();
+    touched.extend(current.iter().map(scan_issue_identity));
+    let mut combined = previous
+        .iter()
+        .filter(|issue| !touched.contains(&scan_issue_identity(issue)))
+        .cloned()
+        .map(|issue| (issue.root_id.clone(), issue))
+        .collect::<BTreeMap<_, _>>();
+    for issue in current {
+        combined.insert(issue.root_id.clone(), issue.clone());
+    }
+    combined.into_values().collect()
+}
+
+fn observation_root_identity(entry: &InventoryObservation) -> ScanRootIdentity {
+    ScanRootIdentity {
+        root_key: entry.root_key,
+        project_id: entry.project_id.clone(),
+    }
+}
+
+fn scan_issue_identity(issue: &ScanIssue) -> ScanRootIdentity {
+    ScanRootIdentity {
+        root_key: issue.root_key,
+        project_id: issue.project_id.clone(),
+    }
 }
 
 fn reconcile_supported_apps(
@@ -3163,6 +3344,8 @@ fn observation_changed(previous: &InventoryObservation, current: &InventoryObser
         || previous.metadata_status != current.metadata_status
         || previous.observed_by != current.observed_by
         || previous.observed_fingerprint != current.observed_fingerprint
+        || previous.root_key != current.root_key
+        || previous.project_id != current.project_id
         || previous.management_kind != current.management_kind
 }
 
@@ -3348,7 +3531,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
         for table in ["projects", "mount_plans", "mounts", "mount_transactions"] {
             let exists = storage
                 .connection

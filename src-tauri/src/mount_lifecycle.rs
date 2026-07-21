@@ -16,8 +16,7 @@ use uuid::Uuid;
 use crate::{
     content::{ContentValidationError, validate_single_skill_folder},
     domain::{
-        MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope, ProjectSummary,
-        SupportedAppId,
+        MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope, SupportedAppId,
     },
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
@@ -131,12 +130,12 @@ enum ParentLookup {
     Open(OpenMountParent),
 }
 
-pub fn register_project(
+pub fn prepare_project_registration(
     _paths: &ApplicationPaths,
-    storage: &mut Storage,
+    storage: &Storage,
     root: &Path,
     now: i64,
-) -> Result<ProjectSummary, MountLifecycleError> {
+) -> Result<StoredProject, MountLifecycleError> {
     let supplied =
         fs::symlink_metadata(root).map_err(|source| mount_io("检查 Project 目录", root, source))?;
     if supplied.file_type().is_symlink() || !supplied.is_dir() {
@@ -163,7 +162,7 @@ pub fn register_project(
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| MountLifecycleError::UnsafeMountPath(canonical.display().to_string()))?;
     let root_path = path_to_string(&canonical)?;
-    let stored = storage.register_project(NewProject {
+    let stored = storage.prepare_project(NewProject {
         id: &Uuid::new_v4().to_string(),
         display_name,
         root_path: &root_path,
@@ -171,11 +170,7 @@ pub fn register_project(
         root_inode: canonical_metadata.ino(),
         created_at: now,
     })?;
-    Ok(ProjectSummary {
-        id: stored.id,
-        display_name: stored.display_name,
-        root_path: stored.root_path,
-    })
+    Ok(stored)
 }
 
 pub fn create_mount_plan(

@@ -194,7 +194,7 @@ export function InventoryPage({
           <p>这些目录继续显示上次成功结果，SkillYard 没有把它们当作已删除。</p>
           <ul>
             {outcome.scanIssues.map((issue) => (
-              <li key={issue.rootKey}>
+              <li key={issue.rootId}>
                 <code>{issue.path}</code>
                 <span>{issue.message}</span>
               </li>

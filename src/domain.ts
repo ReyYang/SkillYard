@@ -6,22 +6,35 @@ export interface SupportedAppSummary {
   detected: boolean | null;
 }
 
+export type InventoryLocationKind =
+  | "appGlobal"
+  | "appProject"
+  | "sharedReadOnly"
+  | "managedStore";
+
+export type ScanRootKey =
+  | "codexGlobal"
+  | "claudeCodeGlobal"
+  | "gitHubCopilotGlobal"
+  | "sharedAgents"
+  | "codexProject"
+  | "claudeCodeProject"
+  | "gitHubCopilotProject"
+  | "sharedAgentsProject";
+
 export interface InventoryObservation {
   id: string;
   skillName: string;
   declaredName: string | null;
   skillRoot: string;
   skillFile: string;
-  locationKind: "appGlobal" | "sharedReadOnly" | "managedStore";
+  locationKind: InventoryLocationKind;
   metadataStatus: "valid" | "invalid" | "unreadable";
   observedBy: SupportedAppId[];
   observedFingerprint: string;
-  rootKey:
-    | "codexGlobal"
-    | "claudeCodeGlobal"
-    | "gitHubCopilotGlobal"
-    | "sharedAgents"
-    | null;
+  rootKey: ScanRootKey | null;
+  // Project 扫描观察携带稳定 ID；global、共享根和受管条目保持为空。
+  projectId: string | null;
   stale: boolean;
   managementKind:
     | "skillYardManaged"
@@ -44,7 +57,10 @@ export interface LocalRefreshSummary {
 }
 
 export interface ScanIssue {
-  rootKey: InventoryObservation["rootKey"];
+  // 同一种 project rootKey 可属于多个 Project，界面身份必须使用 rootId。
+  rootId: string;
+  rootKey: ScanRootKey;
+  projectId: string | null;
   path: string;
   code:
     | "inspectPath"

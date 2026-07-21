@@ -3,6 +3,7 @@ use std::{
     fs,
     fs::File,
     io::Read,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -12,9 +13,10 @@ use thiserror::Error;
 use crate::{
     domain::{
         InventoryLocationKind, InventoryObservation, ManagementKind, ScanIssue, ScanIssueCode,
-        ScanRootKey, SkillMetadataStatus, SupportedAppId, SupportedAppSummary,
+        ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SupportedAppId, SupportedAppSummary,
     },
     paths::ApplicationPaths,
+    storage::StoredProject,
 };
 
 #[derive(Debug, Error)]
@@ -39,12 +41,14 @@ pub enum ScanError {
         #[source]
         source: std::io::Error,
     },
+    #[error("已登记 Project 目录已经变化：{0}")]
+    ProjectChanged(String),
 }
 
 pub struct ScanResult {
     pub entries: Vec<InventoryObservation>,
     pub supported_apps: Vec<SupportedAppSummary>,
-    pub successful_roots: Vec<ScanRootKey>,
+    pub successful_roots: Vec<ScanRootIdentity>,
     pub issues: Vec<ScanIssue>,
 }
 
@@ -67,7 +71,7 @@ pub fn scan_excluding(
         let detected = match path_exists(&app.detection_root) {
             Ok(value) => value,
             Err(error) => {
-                issues.push(error.into_issue(app.root_key));
+                issues.push(error.as_issue(app.root_key, None));
                 continue;
             }
         };
@@ -82,13 +86,14 @@ pub fn scan_excluding(
             app.root_key,
             InventoryLocationKind::AppGlobal,
             vec![app.id],
+            None,
             excluded_skill_roots,
         ) {
             Ok(root_entries) => {
                 entries.extend(root_entries);
-                successful_roots.push(app.root_key);
+                successful_roots.push(ScanRootIdentity::global(app.root_key));
             }
-            Err(error) => issues.push(error.into_issue(app.root_key)),
+            Err(error) => issues.push(error.as_issue(app.root_key, None)),
         }
     }
 
@@ -97,13 +102,14 @@ pub fn scan_excluding(
         ScanRootKey::SharedAgents,
         InventoryLocationKind::SharedReadOnly,
         vec![SupportedAppId::Codex, SupportedAppId::GitHubCopilot],
+        None,
         excluded_skill_roots,
     ) {
         Ok(root_entries) => {
             entries.extend(root_entries);
-            successful_roots.push(ScanRootKey::SharedAgents);
+            successful_roots.push(ScanRootIdentity::global(ScanRootKey::SharedAgents));
         }
-        Err(error) => issues.push(error.into_issue(ScanRootKey::SharedAgents)),
+        Err(error) => issues.push(error.as_issue(ScanRootKey::SharedAgents, None)),
     }
     entries.sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
 
@@ -115,11 +121,114 @@ pub fn scan_excluding(
     }
 }
 
+/// Local Refresh 在固定用户级根之外，只扫描用户明确登记且身份未变化的 Project。
+pub fn scan_with_projects(
+    paths: &ApplicationPaths,
+    projects: &[StoredProject],
+    excluded_skill_roots: &BTreeSet<PathBuf>,
+) -> ScanResult {
+    let mut result = scan_excluding(paths, excluded_skill_roots);
+    let project_result = scan_projects(paths, projects, excluded_skill_roots);
+    result.entries.extend(project_result.entries);
+    result
+        .successful_roots
+        .extend(project_result.successful_roots);
+    result.issues.extend(project_result.issues);
+    result
+        .entries
+        .sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
+    result
+}
+
+/// Project 登记只扫描该 Project 的已存在目录，不触发用户级完整刷新。
+pub fn scan_projects(
+    paths: &ApplicationPaths,
+    projects: &[StoredProject],
+    excluded_skill_roots: &BTreeSet<PathBuf>,
+) -> ScanResult {
+    let mut result = ScanResult {
+        entries: Vec::new(),
+        supported_apps: Vec::new(),
+        successful_roots: Vec::new(),
+        issues: Vec::new(),
+    };
+    for project in projects {
+        let project_path = Path::new(&project.root_path);
+        if let Err(error) = validate_project_root(project) {
+            push_project_identity_issues(&mut result.issues, &error, &project.id);
+            continue;
+        }
+        let entry_start = result.entries.len();
+        let successful_start = result.successful_roots.len();
+        let issue_start = result.issues.len();
+
+        for app in paths.supported_apps() {
+            let root = project_path.join(&app.project_relative_root);
+            let identity = ScanRootIdentity::project(app.project_root_key, &project.id);
+            match scan_optional_root(
+                &root,
+                app.project_root_key,
+                InventoryLocationKind::AppProject,
+                project_observers(app.id),
+                Some(&project.id),
+                excluded_skill_roots,
+            ) {
+                Ok(entries) => {
+                    result.entries.extend(entries);
+                    result.successful_roots.push(identity);
+                }
+                Err(error) => result
+                    .issues
+                    .push(error.as_issue(app.project_root_key, Some(&project.id))),
+            }
+        }
+
+        let shared_root = project_path.join(".agents/skills");
+        let shared_identity =
+            ScanRootIdentity::project(ScanRootKey::SharedAgentsProject, &project.id);
+        match scan_optional_root(
+            &shared_root,
+            ScanRootKey::SharedAgentsProject,
+            InventoryLocationKind::SharedReadOnly,
+            vec![SupportedAppId::Codex, SupportedAppId::GitHubCopilot],
+            Some(&project.id),
+            excluded_skill_roots,
+        ) {
+            Ok(entries) => {
+                result.entries.extend(entries);
+                result.successful_roots.push(shared_identity);
+            }
+            Err(error) => result
+                .issues
+                .push(error.as_issue(ScanRootKey::SharedAgentsProject, Some(&project.id))),
+        }
+
+        // 扫描期间若 Project 根被替换，丢弃本轮结果，不能把替代目录归到原 Project。
+        if let Err(error) = validate_project_root(project) {
+            result.entries.truncate(entry_start);
+            result.successful_roots.truncate(successful_start);
+            result.issues.truncate(issue_start);
+            push_project_identity_issues(&mut result.issues, &error, &project.id);
+        }
+    }
+    result
+        .entries
+        .sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
+    result
+}
+
+fn push_project_identity_issues(issues: &mut Vec<ScanIssue>, error: &ScanError, project_id: &str) {
+    for root_key in project_scan_root_keys() {
+        issues.push(error.as_issue(root_key, Some(project_id)));
+    }
+}
+
 fn scan_optional_root(
     path: &Path,
     root_key: ScanRootKey,
     location_kind: InventoryLocationKind,
     observed_by: Vec<SupportedAppId>,
+    project_id: Option<&str>,
     excluded_skill_roots: &BTreeSet<PathBuf>,
 ) -> Result<Vec<InventoryObservation>, ScanError> {
     if !path_exists(path)? {
@@ -195,6 +304,7 @@ fn scan_optional_root(
             observed_by: observed_by.clone(),
             observed_fingerprint,
             root_key,
+            project_id: project_id.map(str::to_owned),
             stale: false,
             management_kind: ManagementKind::TakeoverCandidate,
         });
@@ -204,20 +314,61 @@ fn scan_optional_root(
 }
 
 impl ScanError {
-    fn into_issue(self, root_key: ScanRootKey) -> ScanIssue {
+    fn as_issue(&self, root_key: ScanRootKey, project_id: Option<&str>) -> ScanIssue {
         let message = self.to_string();
-        let (path, code) = match &self {
+        let (path, code) = match self {
             Self::InspectPath { path, .. } => (path.clone(), ScanIssueCode::InspectPath),
             Self::RootIsNotDirectory(path) => (path.clone(), ScanIssueCode::RootNotDirectory),
             Self::ReadRoot { path, .. } => (path.clone(), ScanIssueCode::ReadRoot),
             Self::ReadSkillContent { path, .. } => (path.clone(), ScanIssueCode::ReadSkillContent),
+            Self::ProjectChanged(path) => (path.clone(), ScanIssueCode::InspectPath),
+        };
+        let identity = match project_id {
+            Some(project_id) => ScanRootIdentity::project(root_key, project_id),
+            None => ScanRootIdentity::global(root_key),
         };
         ScanIssue {
+            root_id: identity.stable_id(),
             root_key,
+            project_id: project_id.map(str::to_owned),
             path,
             code,
             message,
         }
+    }
+}
+
+fn validate_project_root(project: &StoredProject) -> Result<(), ScanError> {
+    let path = Path::new(&project.root_path);
+    let metadata = fs::symlink_metadata(path).map_err(|source| ScanError::InspectPath {
+        path: project.root_path.clone(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.dev() != project.root_device
+        || metadata.ino() != project.root_inode
+    {
+        return Err(ScanError::ProjectChanged(project.root_path.clone()));
+    }
+    Ok(())
+}
+
+fn project_scan_root_keys() -> [ScanRootKey; 4] {
+    [
+        ScanRootKey::CodexProject,
+        ScanRootKey::ClaudeCodeProject,
+        ScanRootKey::GitHubCopilotProject,
+        ScanRootKey::SharedAgentsProject,
+    ]
+}
+
+fn project_observers(app_id: SupportedAppId) -> Vec<SupportedAppId> {
+    match app_id {
+        SupportedAppId::ClaudeCode => {
+            vec![SupportedAppId::ClaudeCode, SupportedAppId::GitHubCopilot]
+        }
+        other => vec![other],
     }
 }
 

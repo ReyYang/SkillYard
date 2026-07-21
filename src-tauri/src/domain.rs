@@ -219,6 +219,8 @@ pub struct InventoryObservation {
     /// 仅用于比较本机观察变化，不作为 Skill Identity 或受管内容摘要。
     pub observed_fingerprint: String,
     pub root_key: ScanRootKey,
+    /// 只有 project 扫描根携带 Project；global 与用户级共享根保持为空。
+    pub project_id: Option<String>,
     pub stale: bool,
     pub management_kind: ManagementKind,
 }
@@ -237,6 +239,7 @@ pub struct InventoryItem {
     pub observed_by: Vec<SupportedAppId>,
     pub observed_fingerprint: String,
     pub root_key: Option<ScanRootKey>,
+    pub project_id: Option<String>,
     pub stale: bool,
     pub management_kind: ManagementKind,
     pub bundle_id: Option<String>,
@@ -282,6 +285,10 @@ pub enum ScanRootKey {
     ClaudeCodeGlobal,
     GitHubCopilotGlobal,
     SharedAgents,
+    CodexProject,
+    ClaudeCodeProject,
+    GitHubCopilotProject,
+    SharedAgentsProject,
 }
 
 impl ScanRootKey {
@@ -291,6 +298,10 @@ impl ScanRootKey {
             Self::ClaudeCodeGlobal => "claude_code_global",
             Self::GitHubCopilotGlobal => "github_copilot_global",
             Self::SharedAgents => "shared_agents",
+            Self::CodexProject => "codex_project",
+            Self::ClaudeCodeProject => "claude_code_project",
+            Self::GitHubCopilotProject => "github_copilot_project",
+            Self::SharedAgentsProject => "shared_agents_project",
         }
     }
 
@@ -300,7 +311,53 @@ impl ScanRootKey {
             "claude_code_global" => Some(Self::ClaudeCodeGlobal),
             "github_copilot_global" => Some(Self::GitHubCopilotGlobal),
             "shared_agents" => Some(Self::SharedAgents),
+            "codex_project" => Some(Self::CodexProject),
+            "claude_code_project" => Some(Self::ClaudeCodeProject),
+            "github_copilot_project" => Some(Self::GitHubCopilotProject),
+            "shared_agents_project" => Some(Self::SharedAgentsProject),
             _ => None,
+        }
+    }
+
+    pub(crate) fn is_project(self) -> bool {
+        matches!(
+            self,
+            Self::CodexProject
+                | Self::ClaudeCodeProject
+                | Self::GitHubCopilotProject
+                | Self::SharedAgentsProject
+        )
+    }
+}
+
+/// 同一种 project root key 会出现在多个 Project 中，刷新必须按二者共同隔离结果。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub(crate) struct ScanRootIdentity {
+    pub root_key: ScanRootKey,
+    pub project_id: Option<String>,
+}
+
+impl ScanRootIdentity {
+    pub(crate) fn global(root_key: ScanRootKey) -> Self {
+        Self {
+            root_key,
+            project_id: None,
+        }
+    }
+
+    pub(crate) fn project(root_key: ScanRootKey, project_id: &str) -> Self {
+        Self {
+            root_key,
+            project_id: Some(project_id.to_owned()),
+        }
+    }
+
+    pub(crate) fn stable_id(&self) -> String {
+        match &self.project_id {
+            Some(project_id) => {
+                format!("project:{project_id}:{}", self.root_key.as_str())
+            }
+            None => format!("global:{}", self.root_key.as_str()),
         }
     }
 }
@@ -368,7 +425,9 @@ impl ScanIssueCode {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanIssue {
+    pub root_id: String,
     pub root_key: ScanRootKey,
+    pub project_id: Option<String>,
     pub path: String,
     pub code: ScanIssueCode,
     pub message: String,
@@ -395,6 +454,7 @@ pub struct RecoveryIssue {
 #[serde(rename_all = "camelCase")]
 pub enum InventoryLocationKind {
     AppGlobal,
+    AppProject,
     SharedReadOnly,
     ManagedStore,
 }
@@ -403,6 +463,7 @@ impl InventoryLocationKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::AppGlobal => "app_global",
+            Self::AppProject => "app_project",
             Self::SharedReadOnly => "shared_read_only",
             Self::ManagedStore => "managed_store",
         }
@@ -411,6 +472,7 @@ impl InventoryLocationKind {
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
             "app_global" => Some(Self::AppGlobal),
+            "app_project" => Some(Self::AppProject),
             "shared_read_only" => Some(Self::SharedReadOnly),
             "managed_store" => Some(Self::ManagedStore),
             _ => None,
@@ -601,5 +663,9 @@ mod tests {
         assert_eq!(value["recoveryIssues"][0]["bundleDisplayName"], "example");
         assert!(value.get("scan_completed_at").is_none());
         assert!(value.get("recovery_issues").is_none());
+
+        let project_root =
+            serde_json::to_value(ScanRootKey::GitHubCopilotProject).expect("应序列化扫描根");
+        assert_eq!(project_root, "gitHubCopilotProject");
     }
 }

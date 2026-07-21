@@ -10,11 +10,11 @@ use crate::{
     },
     mount_lifecycle::{
         MountLifecycleError, confirm_mount_plan, create_mount_plan, create_remove_mount_plan,
-        create_repair_mount_plan, recover_pending_mount_transactions, refresh_mount_health,
-        register_project,
+        create_repair_mount_plan, prepare_project_registration, recover_pending_mount_transactions,
+        refresh_mount_health,
     },
     paths::ApplicationPaths,
-    scanner::{scan, scan_excluding},
+    scanner::{scan, scan_projects, scan_with_projects},
     storage::{Storage, StorageError},
 };
 
@@ -180,9 +180,10 @@ impl SkillYardApplication {
         };
 
         let completed_at = unix_timestamp_millis();
-        let mount_targets = storage.mount_target_paths()?;
         refresh_mount_health(&self.paths, &mut storage, completed_at)?;
-        let result = scan_excluding(&self.paths, &mount_targets);
+        let mount_targets = storage.mount_target_paths()?;
+        let projects = storage.read_stored_projects()?;
+        let result = scan_with_projects(&self.paths, &projects, &mount_targets);
         let saved = storage.save_local_refresh(
             completed_at,
             &result.entries,
@@ -248,11 +249,19 @@ impl SkillYardApplication {
         ensure_onboarding_completed(&storage)?;
         let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
         lifecycle_lock.recheck(&self.paths)?;
-        register_project(
+        let project = prepare_project_registration(
             &self.paths,
-            &mut storage,
+            &storage,
             std::path::Path::new(&root_path),
             unix_timestamp_millis(),
+        )?;
+        let mount_targets = storage.mount_target_paths()?;
+        let result = scan_projects(&self.paths, std::slice::from_ref(&project), &mount_targets);
+        storage.register_project_with_scan(
+            &project,
+            &result.entries,
+            &result.successful_roots,
+            &result.issues,
         )?;
         lifecycle_lock.recheck(&self.paths)?;
         storage
