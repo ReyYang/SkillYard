@@ -21,6 +21,7 @@ interface MountManagementPageProps {
     projectId: string | null,
   ): void;
   onRemove(mountId: string): void;
+  onRepair(mountId: string): void;
 }
 
 const SUPPORTED_APPS: Array<{
@@ -42,6 +43,7 @@ export function MountManagementPage({
   onBack,
   onCreate,
   onRemove,
+  onRepair,
 }: MountManagementPageProps) {
   return (
     <main className="mount-shell">
@@ -102,6 +104,15 @@ export function MountManagementPage({
                       <span>{mountHealthCopy(mount)}</span>
                       <code title={mount.targetPath}>{mount.targetPath}</code>
                     </div>
+                    <button
+                      className="compact-action"
+                      type="button"
+                      hidden={mount.health !== "missing"}
+                      disabled={isPlanning}
+                      onClick={() => onRepair(mount.id)}
+                    >
+                      {`修复 ${mountDestinationLabel(mount)}挂载`}
+                    </button>
                     <button
                       className="danger-outline-action"
                       type="button"
@@ -211,6 +222,6 @@ function mountHealthCopy(mount: MountSummary): string {
   return {
     healthy: "软链接正常",
     missing: "软链接已缺失；移除时只清理 SkillYard 记录",
-    conflict: "目标路径已被其他内容占用；移除不会删除该内容",
+    conflict: "目标路径无法安全确认；移除只清理 SkillYard 记录",
   }[mount.health];
 }

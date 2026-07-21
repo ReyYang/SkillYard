@@ -85,6 +85,7 @@ export interface MountSummary {
 export interface MountPlan {
   id: string;
   operation: "create" | "remove";
+  purpose: "create" | "repair" | "remove";
   mountId: string;
   memberId: string;
   skillName: string;

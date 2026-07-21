@@ -26,6 +26,9 @@ pub enum UiIntent {
     CreateRemoveMountPlan {
         mount_id: String,
     },
+    CreateRepairMountPlan {
+        mount_id: String,
+    },
     ConfirmMountPlan {
         plan_id: String,
     },
@@ -78,6 +81,41 @@ impl MountScope {
 pub enum MountOperation {
     Create,
     Remove,
+}
+
+/// Plan 的用户意图与底层文件效果分开；修复和首次创建都使用同一套安全创建事务。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MountPlanPurpose {
+    Create,
+    Repair,
+    Remove,
+}
+
+impl MountPlanPurpose {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Repair => "repair",
+            Self::Remove => "remove",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "create" => Some(Self::Create),
+            "repair" => Some(Self::Repair),
+            "remove" => Some(Self::Remove),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn operation(self) -> MountOperation {
+        match self {
+            Self::Create | Self::Repair => MountOperation::Create,
+            Self::Remove => MountOperation::Remove,
+        }
+    }
 }
 
 impl MountOperation {
@@ -152,6 +190,7 @@ pub struct MountSummary {
 pub struct MountPlan {
     pub id: String,
     pub operation: MountOperation,
+    pub purpose: MountPlanPurpose,
     pub mount_id: String,
     pub member_id: String,
     pub skill_name: String,

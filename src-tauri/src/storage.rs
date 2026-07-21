@@ -13,9 +13,9 @@ use thiserror::Error;
 
 use crate::domain::{
     InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
-    ManagementKind, MountHealth, MountOperation, MountScope, MountSummary, ProjectSummary,
-    RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus, SupportedAppId,
-    SupportedAppSummary, UiOutcome,
+    ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope, MountSummary,
+    ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
+    SupportedAppId, SupportedAppSummary, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -27,6 +27,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0004_bundle_install_candidates.sql"),
     ),
     (5, include_str!("../migrations/0005_codex_mounts.sql")),
+    (6, include_str!("../migrations/0006_mount_plan_purpose.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -286,6 +287,7 @@ pub(crate) struct StoredMount {
 pub(crate) struct NewMountPlan<'a> {
     pub id: &'a str,
     pub operation: MountOperation,
+    pub purpose: MountPlanPurpose,
     pub mount_id: &'a str,
     pub member_id: &'a str,
     pub app_id: SupportedAppId,
@@ -304,6 +306,7 @@ pub(crate) struct NewMountPlan<'a> {
 pub(crate) struct StoredMountPlan {
     pub id: String,
     pub operation: MountOperation,
+    pub purpose: MountPlanPurpose,
     pub mount_id: String,
     pub member_id: String,
     pub bundle_id: String,
@@ -721,6 +724,15 @@ impl Storage {
         ids.into_iter().map(|id| self.read_mount(&id)).collect()
     }
 
+    pub(crate) fn mount_target_paths(&self) -> Result<BTreeSet<PathBuf>, StorageError> {
+        read_mount_target_paths_from(&self.connection).map(|paths| {
+            paths
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<BTreeSet<_>>()
+        })
+    }
+
     pub(crate) fn save_mount_plan(&mut self, plan: NewMountPlan<'_>) -> Result<(), StorageError> {
         validate_new_mount_plan_shape(&plan)?;
         let transaction = self
@@ -731,6 +743,7 @@ impl Storage {
             &transaction,
             &self.data_root,
             plan.operation,
+            plan.purpose,
             plan.mount_id,
             plan.member_id,
             plan.app_id,
@@ -750,14 +763,15 @@ impl Storage {
         transaction
             .execute(
                 "INSERT INTO mount_plans (
-                    id, operation, mount_id, member_id, app_id, scope, project_id,
+                    id, operation, purpose, mount_id, member_id, app_id, scope, project_id,
                     project_root_path, project_root_device, project_root_inode, target_path,
                     expected_target, member_fingerprint, target_observation, created_at,
                     expires_at, status
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'pending')",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, 'pending')",
                 params![
                     plan.id,
                     plan.operation.as_str(),
+                    plan.purpose.as_str(),
                     plan.mount_id,
                     plan.member_id,
                     plan.app_id.as_str(),
@@ -863,7 +877,12 @@ impl Storage {
         plan: &StoredMountPlan,
         now: i64,
     ) -> Result<(), StorageError> {
-        if plan.operation != MountOperation::Create {
+        if plan.operation != MountOperation::Create
+            || !matches!(
+                plan.purpose,
+                MountPlanPurpose::Create | MountPlanPurpose::Repair
+            )
+        {
             return Err(StorageError::InvalidMountPlan);
         }
         let transaction = self
@@ -880,26 +899,39 @@ impl Storage {
                 .commit()
                 .map_err(StorageError::SaveMountTransaction);
         }
-        transaction
-            .execute(
-                "INSERT INTO mounts (
-                    id, member_id, app_id, scope, project_id, target_path,
-                    expected_target, health, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
-                 ON CONFLICT(id) DO NOTHING",
-                params![
-                    plan.mount_id,
-                    plan.member_id,
-                    plan.app_id.as_str(),
-                    plan.scope.as_str(),
-                    plan.project_id,
-                    plan.target_path,
-                    plan.expected_target,
-                    MountHealth::Healthy.as_str(),
-                    now,
-                ],
-            )
-            .map_err(StorageError::SaveMountTransaction)?;
+        if plan.purpose == MountPlanPurpose::Repair {
+            // 修复只能更新生成 Plan 时已存在的关系，不能把已正式移除的 Mount 复活。
+            let changed = transaction
+                .execute(
+                    "UPDATE mounts SET health = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![plan.mount_id, MountHealth::Healthy.as_str(), now],
+                )
+                .map_err(StorageError::SaveMountTransaction)?;
+            ensure_one_mount_row(changed, &plan.mount_id)?;
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO mounts (
+                        id, member_id, app_id, scope, project_id, target_path,
+                        expected_target, health, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                     ON CONFLICT(id) DO UPDATE SET
+                        health = excluded.health,
+                        updated_at = excluded.updated_at",
+                    params![
+                        plan.mount_id,
+                        plan.member_id,
+                        plan.app_id.as_str(),
+                        plan.scope.as_str(),
+                        plan.project_id,
+                        plan.target_path,
+                        plan.expected_target,
+                        MountHealth::Healthy.as_str(),
+                        now,
+                    ],
+                )
+                .map_err(StorageError::SaveMountTransaction)?;
+        }
         let stored = read_mount_from(&transaction, &self.data_root, &plan.mount_id)?
             .ok_or_else(|| StorageError::MountStateConflict(transaction_id.to_owned()))?;
         ensure_mount_matches_plan(&stored, plan)?;
@@ -922,7 +954,7 @@ impl Storage {
         plan: &StoredMountPlan,
         now: i64,
     ) -> Result<(), StorageError> {
-        if plan.operation != MountOperation::Remove {
+        if plan.operation != MountOperation::Remove || plan.purpose != MountPlanPurpose::Remove {
             return Err(StorageError::InvalidMountPlan);
         }
         let transaction = self
@@ -1070,21 +1102,27 @@ impl Storage {
         Ok(transactions)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn update_mount_health(
+    pub(crate) fn update_mount_health_batch(
         &mut self,
-        mount_id: &str,
-        health: MountHealth,
+        updates: &[(String, MountHealth)],
         now: i64,
     ) -> Result<(), StorageError> {
-        let changed = self
+        let transaction = self
             .connection
-            .execute(
-                "UPDATE mounts SET health = ?2, updated_at = ?3 WHERE id = ?1",
-                params![mount_id, health.as_str(), now],
-            )
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveMountTransaction)?;
-        ensure_one_mount_row(changed, mount_id)
+        for (mount_id, health) in updates {
+            let changed = transaction
+                .execute(
+                    "UPDATE mounts SET health = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![mount_id, health.as_str(), now],
+                )
+                .map_err(StorageError::SaveMountTransaction)?;
+            ensure_one_mount_row(changed, mount_id)?;
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveMountTransaction)
     }
 
     pub fn save_install_plan(&mut self, plan: NewInstallPlan<'_>) -> Result<(), StorageError> {
@@ -1897,6 +1935,7 @@ fn validate_new_mount_plan_shape(plan: &NewMountPlan<'_>) -> Result<(), StorageE
         MountScope::Project => plan.project_id.is_some_and(is_single_path_component),
     };
     if !is_single_path_component(plan.id)
+        || plan.purpose.operation() != plan.operation
         || !is_single_path_component(plan.mount_id)
         || !is_single_path_component(plan.member_id)
         || !project_shape_is_valid
@@ -1916,6 +1955,7 @@ fn validate_mount_plan_state(
     connection: &Connection,
     data_root: &Path,
     operation: MountOperation,
+    purpose: MountPlanPurpose,
     mount_id: &str,
     member_id: &str,
     app_id: SupportedAppId,
@@ -1925,6 +1965,9 @@ fn validate_mount_plan_state(
     expected_target: &str,
     member_fingerprint: &str,
 ) -> Result<(), StorageError> {
+    if purpose.operation() != operation {
+        return Err(StorageError::InvalidMountPlan);
+    }
     let member = read_managed_member_from(connection, data_root, member_id)?
         .ok_or_else(|| StorageError::ManagedMemberNotFound(member_id.to_owned()))?;
     if member.content_fingerprint != member_fingerprint || member.expected_target != expected_target
@@ -1970,8 +2013,8 @@ fn validate_mount_plan_state(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    match operation {
-        MountOperation::Create => {
+    match purpose {
+        MountPlanPurpose::Create => {
             for existing in mounts {
                 let same_slot = existing.member_id == member_id
                     && existing.app_id == app_id
@@ -1992,7 +2035,7 @@ fn validate_mount_plan_state(
                 }
             }
         }
-        MountOperation::Remove => {
+        MountPlanPurpose::Repair | MountPlanPurpose::Remove => {
             let existing = mounts
                 .iter()
                 .find(|mount| mount.id == mount_id)
@@ -2021,6 +2064,7 @@ fn validate_stored_mount_plan_state(
         connection,
         data_root,
         plan.operation,
+        plan.purpose,
         &plan.mount_id,
         &plan.member_id,
         plan.app_id,
@@ -2039,7 +2083,7 @@ fn read_mount_plan_from(
 ) -> Result<Option<StoredMountPlan>, StorageError> {
     let stored = connection
         .query_row(
-            "SELECT plan.id, plan.operation, plan.mount_id, plan.member_id,
+            "SELECT plan.id, plan.operation, plan.purpose, plan.mount_id, plan.member_id,
                     member.bundle_id, member.skill_name, plan.app_id, plan.scope,
                     plan.project_id, project.display_name, plan.project_root_path,
                     plan.project_root_device, plan.project_root_inode, plan.target_path,
@@ -2060,18 +2104,19 @@ fn read_mount_plan_from(
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<String>>(11)?,
                     row.get::<_, Option<i64>>(12)?,
-                    row.get::<_, String>(13)?,
+                    row.get::<_, Option<i64>>(13)?,
                     row.get::<_, String>(14)?,
                     row.get::<_, String>(15)?,
                     row.get::<_, String>(16)?,
-                    row.get::<_, i64>(17)?,
+                    row.get::<_, String>(17)?,
                     row.get::<_, i64>(18)?,
-                    row.get::<_, String>(19)?,
+                    row.get::<_, i64>(19)?,
+                    row.get::<_, String>(20)?,
                 ))
             },
         )
@@ -2080,6 +2125,7 @@ fn read_mount_plan_from(
     let Some((
         id,
         operation,
+        purpose,
         mount_id,
         member_id,
         bundle_id,
@@ -2104,6 +2150,7 @@ fn read_mount_plan_from(
     };
     let operation = MountOperation::from_str(&operation)
         .ok_or_else(|| StorageError::UnknownMountOperation(operation.clone()))?;
+    let purpose = MountPlanPurpose::from_str(&purpose).ok_or(StorageError::InvalidMountPlan)?;
     let app_id = SupportedAppId::from_str(&app_id)
         .ok_or_else(|| StorageError::UnknownSupportedApp(app_id.clone()))?;
     let scope = MountScope::from_str(&scope)
@@ -2123,6 +2170,7 @@ fn read_mount_plan_from(
         project_root_inode,
     )?;
     if !is_single_path_component(&id)
+        || purpose.operation() != operation
         || !is_single_path_component(&mount_id)
         || !is_single_path_component(&member_id)
         || !is_normalized_absolute_path(&target_path)
@@ -2136,6 +2184,7 @@ fn read_mount_plan_from(
     let plan = StoredMountPlan {
         id,
         operation,
+        purpose,
         mount_id,
         member_id,
         bundle_id,
@@ -3243,6 +3292,10 @@ mod tests {
             .save_mount_plan(NewMountPlan {
                 id: plan_id,
                 operation,
+                purpose: match operation {
+                    MountOperation::Create => MountPlanPurpose::Create,
+                    MountOperation::Remove => MountPlanPurpose::Remove,
+                },
                 mount_id,
                 member_id: &member.id,
                 app_id: SupportedAppId::Codex,
@@ -3295,7 +3348,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
         for table in ["projects", "mount_plans", "mounts", "mount_transactions"] {
             let exists = storage
                 .connection
@@ -3536,6 +3589,7 @@ mod tests {
             .save_mount_plan(NewMountPlan {
                 id: "mount-plan-project",
                 operation: MountOperation::Create,
+                purpose: MountPlanPurpose::Create,
                 mount_id: "mount-project",
                 member_id: &member.id,
                 app_id: SupportedAppId::Codex,

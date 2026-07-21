@@ -117,6 +117,16 @@ describe("Tauri IPC contract", () => {
     });
   });
 
+  it("修复 Mount 也必须先创建 opaque Plan", async () => {
+    mocks.invoke.mockResolvedValue({ id: "repair-plan-1" });
+
+    await tauriSkillYardClient.createRepairMountPlan("mount-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_repair_mount_plan", {
+      mountId: "mount-1",
+    });
+  });
+
   it("确认 Mount 事务时只提交 opaque Plan ID", async () => {
     mocks.invoke.mockResolvedValue({
       type: "inventory",

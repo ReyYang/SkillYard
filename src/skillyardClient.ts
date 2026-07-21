@@ -25,6 +25,7 @@ export interface SkillYardClient {
     projectId: string | null,
   ): Promise<MountPlan>;
   createRemoveMountPlan(mountId: string): Promise<MountPlan>;
+  createRepairMountPlan(mountId: string): Promise<MountPlan>;
   confirmMountPlan(planId: string): Promise<UiOutcome>;
 }
 
@@ -51,6 +52,8 @@ export const tauriSkillYardClient: SkillYardClient = {
     }),
   createRemoveMountPlan: (mountId) =>
     invoke<MountPlan>("create_remove_mount_plan", { mountId }),
+  createRepairMountPlan: (mountId) =>
+    invoke<MountPlan>("create_repair_mount_plan", { mountId }),
   confirmMountPlan: (planId) =>
     invoke<UiOutcome>("confirm_mount_plan", { planId }),
 };

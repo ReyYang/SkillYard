@@ -1,4 +1,10 @@
-use std::{fs, fs::File, io::Read, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -44,6 +50,14 @@ pub struct ScanResult {
 
 /// 扫描每个固定根目录并分别记录结果，单个根失败不会伪装成空目录。
 pub fn scan(paths: &ApplicationPaths) -> ScanResult {
+    scan_excluding(paths, &BTreeSet::new())
+}
+
+/// 已登记 Mount 由独立 health 检查读取，Inventory 扫描不能跟随它们指向的内容。
+pub fn scan_excluding(
+    paths: &ApplicationPaths,
+    excluded_skill_roots: &BTreeSet<PathBuf>,
+) -> ScanResult {
     let mut entries = Vec::new();
     let mut supported_apps = Vec::new();
     let mut successful_roots = Vec::new();
@@ -68,6 +82,7 @@ pub fn scan(paths: &ApplicationPaths) -> ScanResult {
             app.root_key,
             InventoryLocationKind::AppGlobal,
             vec![app.id],
+            excluded_skill_roots,
         ) {
             Ok(root_entries) => {
                 entries.extend(root_entries);
@@ -82,6 +97,7 @@ pub fn scan(paths: &ApplicationPaths) -> ScanResult {
         ScanRootKey::SharedAgents,
         InventoryLocationKind::SharedReadOnly,
         vec![SupportedAppId::Codex, SupportedAppId::GitHubCopilot],
+        excluded_skill_roots,
     ) {
         Ok(root_entries) => {
             entries.extend(root_entries);
@@ -104,6 +120,7 @@ fn scan_optional_root(
     root_key: ScanRootKey,
     location_kind: InventoryLocationKind,
     observed_by: Vec<SupportedAppId>,
+    excluded_skill_roots: &BTreeSet<PathBuf>,
 ) -> Result<Vec<InventoryObservation>, ScanError> {
     if !path_exists(path)? {
         return Ok(Vec::new());
@@ -132,6 +149,9 @@ fn scan_optional_root(
     let mut observations = Vec::new();
     for child in children {
         let skill_root = child.path();
+        if excluded_skill_roots.contains(&skill_root) {
+            continue;
+        }
         let file_type = child.file_type().map_err(|source| ScanError::ReadRoot {
             path: path.display().to_string(),
             source,

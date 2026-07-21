@@ -189,6 +189,30 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
+  const createRepairMountPlan = async (mountId: string) => {
+    if (isPlanningMount) return;
+    setIsPlanningMount(true);
+    setMountError(null);
+    try {
+      const plan = await client.createRepairMountPlan(mountId);
+      setPendingMountPlan(plan);
+    } catch (error) {
+      const message = formatError(error);
+      // 生成修复 Plan 时可能刚发现外部占用；立即重读，避免继续展示过时的“缺失”状态。
+      try {
+        const outcome = await client.refreshLocalInventory();
+        setViewState({ status: "ready", outcome });
+        setMountError(message);
+      } catch (refreshFailure) {
+        setMountError(
+          `${message}；重新检查挂载状态失败：${formatError(refreshFailure)}`,
+        );
+      }
+    } finally {
+      setIsPlanningMount(false);
+    }
+  };
+
   const confirmMount = async () => {
     if (!pendingMountPlan || isConfirmingMount) return;
     setIsConfirmingMount(true);
@@ -313,6 +337,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         }}
         onCreate={createMountPlan}
         onRemove={createRemoveMountPlan}
+        onRepair={createRepairMountPlan}
       />
     );
   }

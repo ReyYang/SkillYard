@@ -10,10 +10,11 @@ use crate::{
     },
     mount_lifecycle::{
         MountLifecycleError, confirm_mount_plan, create_mount_plan, create_remove_mount_plan,
-        recover_pending_mount_transactions, register_project,
+        create_repair_mount_plan, recover_pending_mount_transactions, refresh_mount_health,
+        register_project,
     },
     paths::ApplicationPaths,
-    scanner::scan,
+    scanner::{scan, scan_excluding},
     storage::{Storage, StorageError},
 };
 
@@ -105,6 +106,9 @@ impl SkillYardApplication {
             UiIntent::CreateRemoveMountPlan { mount_id } => {
                 self.with_write_operation(|| self.create_remove_mount_plan(mount_id))
             }
+            UiIntent::CreateRepairMountPlan { mount_id } => {
+                self.with_write_operation(|| self.create_repair_mount_plan(mount_id))
+            }
             UiIntent::ConfirmMountPlan { plan_id } => {
                 self.with_write_operation(|| self.confirm_mount_plan(plan_id))
             }
@@ -127,9 +131,15 @@ impl SkillYardApplication {
     }
 
     fn get_startup_state(&self) -> Result<UiOutcome, ApplicationError> {
-        let storage = self.open_recovered_storage()?;
-        if let Some(outcome) = storage.read_initial_scan()? {
-            return Ok(outcome);
+        let mut storage = self.open_recovered_storage()?;
+        if storage.read_initial_scan()?.is_some() {
+            let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+            lifecycle_lock.recheck(&self.paths)?;
+            refresh_mount_health(&self.paths, &mut storage, unix_timestamp_millis())?;
+            lifecycle_lock.recheck(&self.paths)?;
+            return storage
+                .read_initial_scan()?
+                .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"));
         }
 
         Ok(UiOutcome::onboarding_required())
@@ -169,8 +179,10 @@ impl SkillYardApplication {
             return Err(ApplicationError::InvalidState("完成首次扫描后才能刷新本机"));
         };
 
-        let result = scan(&self.paths);
         let completed_at = unix_timestamp_millis();
+        let mount_targets = storage.mount_target_paths()?;
+        refresh_mount_health(&self.paths, &mut storage, completed_at)?;
+        let result = scan_excluding(&self.paths, &mount_targets);
         let saved = storage.save_local_refresh(
             completed_at,
             &result.entries,
@@ -278,6 +290,21 @@ impl SkillYardApplication {
         let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
         lifecycle_lock.recheck(&self.paths)?;
         let plan = create_remove_mount_plan(
+            &self.paths,
+            &mut storage,
+            &mount_id,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::MountPlan { plan })
+    }
+
+    fn create_repair_mount_plan(&self, mount_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_repair_mount_plan(
             &self.paths,
             &mut storage,
             &mount_id,

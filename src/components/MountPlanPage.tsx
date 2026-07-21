@@ -14,7 +14,8 @@ export function MountPlanPage({
   onConfirm,
 }: MountPlanPageProps) {
   const isCreate = plan.operation === "create";
-  const action = isCreate ? "创建" : "移除";
+  const action =
+    plan.purpose === "repair" ? "修复" : isCreate ? "创建" : "移除";
   const appName = supportedAppLabel(plan.appId);
 
   return (
@@ -35,7 +36,9 @@ export function MountPlanPage({
           </strong>
           <span>
             {isCreate
-              ? plan.targetHealth === "healthy"
+              ? plan.purpose === "repair"
+                ? "修复只重建正确软链接，不会修改 Skill 或 Bundle。"
+                : plan.targetHealth === "healthy"
                 ? "现有软链接不会被改写；SkillYard 只补充这条使用关系。"
                 : "Skill 内容仍只有一份，Bundle 更新后这里会继续使用最新 Current Content。"
               : "移除挂载不会删除 Skill 或 Bundle，也不会影响其他使用位置。"}
@@ -107,6 +110,11 @@ function supportedAppLabel(appId: SupportedAppId): string {
 }
 
 function createImpactCopy(plan: MountPlan): string {
+  if (plan.purpose === "repair") {
+    return plan.targetHealth === "healthy"
+      ? "软链接已经恢复，将只校正 Mount 状态"
+      : "将重新创建指向中央主副本的软链接";
+  }
   return plan.targetHealth === "healthy"
     ? "软链接已经正确存在，将只登记为 SkillYard Mount"
     : "将创建一个指向中央主副本的软链接";

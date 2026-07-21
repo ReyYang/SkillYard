@@ -176,6 +176,20 @@ pub fn create_remove_mount_plan(
 }
 
 #[tauri::command(async)]
+pub fn create_repair_mount_plan(
+    application: State<'_, SkillYardApplication>,
+    mount_id: String,
+) -> Result<MountPlan, UiError> {
+    match dispatch(&application, UiIntent::CreateRepairMountPlan { mount_id })? {
+        UiOutcome::MountPlan { plan } => Ok(plan),
+        _ => Err(UiError {
+            code: "invalidOutcome",
+            message: "SkillYard 没有生成修复 Mount 的确认信息".to_owned(),
+        }),
+    }
+}
+
+#[tauri::command(async)]
 pub fn confirm_mount_plan(
     application: State<'_, SkillYardApplication>,
     plan_id: String,

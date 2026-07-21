@@ -616,6 +616,85 @@ describe("本机清单", () => {
     expect(screen.queryByText("Codex · 全局")).not.toBeInTheDocument();
   });
 
+  it("缺失 Mount 可以生成独立修复 Plan，冲突 Mount 不提供修复", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [createManagedEntry()],
+        null,
+        {
+          mounts: [
+            createMount({ id: "mount-missing", health: "missing" }),
+            createMount({
+              id: "mount-conflict",
+              appId: "claudeCode",
+              targetPath: "/tmp/.claude/skills/example",
+              health: "conflict",
+            }),
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createRepairMountPlan).mockResolvedValue(
+      createMountPlan({
+        purpose: "repair",
+        mountId: "mount-missing",
+        targetHealth: "missing",
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    expect(
+      screen.queryByRole("button", {
+        name: "修复 Claude Code 全局挂载",
+      }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "修复 Codex 全局挂载" }),
+    );
+
+    expect(client.createRepairMountPlan).toHaveBeenCalledWith("mount-missing");
+    expect(
+      screen.getByRole("heading", { name: "确认修复 Codex 挂载" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("挂载影响预览")).toHaveTextContent(
+      "将重新创建指向中央主副本的软链接",
+    );
+  });
+
+  it("修复 Plan 发现外部占用后刷新缓存状态并隐藏修复入口", async () => {
+    const user = userEvent.setup();
+    const missing = createMount({ id: "mount-missing", health: "missing" });
+    const client = createClient(
+      inventoryOutcome([createManagedEntry()], null, { mounts: [missing] }),
+    );
+    vi.mocked(client.createRepairMountPlan).mockRejectedValue({
+      code: "mountConflict",
+      message: "Mount 目标已经被其他内容占用",
+    });
+    vi.mocked(client.refreshLocalInventory).mockResolvedValue(
+      inventoryOutcome([createManagedEntry()], null, {
+        mounts: [{ ...missing, health: "conflict" }],
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await user.click(
+      screen.getByRole("button", { name: "修复 Codex 全局挂载" }),
+    );
+
+    expect(client.refreshLocalInventory).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Mount 目标已经被其他内容占用",
+    );
+    expect(screen.getByText(/目标路径无法安全确认/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "修复 Codex 全局挂载" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("Mount 确认失败后丢弃 Plan 并重新读取最终清单", async () => {
     const user = userEvent.setup();
     const initial = inventoryOutcome([createManagedEntry()]);
@@ -916,6 +995,7 @@ function createClient(startup: UiOutcome): SkillYardClient {
     chooseAndRegisterProject: vi.fn(),
     createMountPlan: vi.fn(),
     createRemoveMountPlan: vi.fn(),
+    createRepairMountPlan: vi.fn(),
     confirmMountPlan: vi.fn(),
   };
 }
@@ -976,6 +1056,7 @@ function createMountPlan(overrides: Partial<MountPlan> = {}): MountPlan {
   return {
     id: "mount-plan-1",
     operation: "create",
+    purpose: "create",
     mountId: "mount-1",
     memberId: "member-1",
     skillName: "example",

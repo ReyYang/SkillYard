@@ -15,7 +15,10 @@ use uuid::Uuid;
 
 use crate::{
     content::{ContentValidationError, validate_single_skill_folder},
-    domain::{MountHealth, MountOperation, MountPlan, MountScope, ProjectSummary, SupportedAppId},
+    domain::{
+        MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope, ProjectSummary,
+        SupportedAppId,
+    },
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
         entry_metadata_at, mkdir_at, open_directory_at, open_managed_directory_from_root,
@@ -24,8 +27,8 @@ use crate::{
     },
     paths::ApplicationPaths,
     storage::{
-        NewMountPlan, NewProject, Storage, StorageError, StoredManagedMember, StoredMountPlan,
-        StoredMountTransaction, StoredProject,
+        NewMountPlan, NewProject, Storage, StorageError, StoredManagedMember, StoredMount,
+        StoredMountPlan, StoredMountTransaction, StoredProject,
     },
 };
 
@@ -209,6 +212,7 @@ pub fn create_mount_plan(
     storage.save_mount_plan(NewMountPlan {
         id: &plan_id,
         operation: MountOperation::Create,
+        purpose: MountPlanPurpose::Create,
         mount_id: &mount_id,
         member_id,
         app_id,
@@ -243,7 +247,6 @@ pub fn create_remove_mount_plan(
     }
     validate_member_content(&member)?;
     let project = read_scope_project(storage, mount.scope, mount.project_id.as_deref())?;
-    validate_project_identity(project.as_ref())?;
     let target = derive_target_path(paths, &member, mount.app_id, mount.scope, project.as_ref())?;
     if path_to_string(&target)? != mount.target_path {
         return Err(MountLifecycleError::PlanPreconditionChanged);
@@ -260,6 +263,7 @@ pub fn create_remove_mount_plan(
     storage.save_mount_plan(NewMountPlan {
         id: &plan_id,
         operation: MountOperation::Remove,
+        purpose: MountPlanPurpose::Remove,
         mount_id,
         member_id: &member.id,
         app_id: mount.app_id,
@@ -274,6 +278,88 @@ pub fn create_remove_mount_plan(
     })?;
     let stored = storage.read_mount_plan(&plan_id)?;
     stored_plan_to_ui(&stored, target_health(&snapshot))
+}
+
+pub fn create_repair_mount_plan(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    mount_id: &str,
+    now: i64,
+) -> Result<MountPlan, MountLifecycleError> {
+    let mount = storage.read_mount(mount_id)?;
+    ensure_supported_scope(mount.scope, mount.project_id.as_deref())?;
+    let member = storage.read_managed_member(&mount.member_id)?;
+    if member.bundle_id != mount.bundle_id
+        || member.skill_name != mount.skill_name
+        || member.content_fingerprint != mount.member_fingerprint
+        || member.expected_target != mount.expected_target
+    {
+        return Err(MountLifecycleError::PlanPreconditionChanged);
+    }
+    validate_member_content(&member)?;
+    let project = read_scope_project(storage, mount.scope, mount.project_id.as_deref())?;
+    validate_project_identity(project.as_ref())?;
+    let target = derive_target_path(paths, &member, mount.app_id, mount.scope, project.as_ref())?;
+    if path_to_string(&target)? != mount.target_path {
+        return Err(MountLifecycleError::PlanPreconditionChanged);
+    }
+    let snapshot = observe_target(
+        paths,
+        mount.app_id,
+        mount.scope,
+        project.as_ref(),
+        &member.skill_name,
+        &member.expected_target,
+    )?;
+    if snapshot.kind == TargetKind::Other {
+        return Err(MountLifecycleError::MountConflict(
+            mount.target_path.clone(),
+        ));
+    }
+
+    let plan_id = Uuid::new_v4().to_string();
+    storage.save_mount_plan(NewMountPlan {
+        id: &plan_id,
+        operation: MountOperation::Create,
+        purpose: MountPlanPurpose::Repair,
+        mount_id,
+        member_id: &member.id,
+        app_id: mount.app_id,
+        scope: mount.scope,
+        project_id: mount.project_id.as_deref(),
+        target_path: &mount.target_path,
+        expected_target: &mount.expected_target,
+        member_fingerprint: &mount.member_fingerprint,
+        target_observation: &snapshot.observation,
+        created_at: now,
+        expires_at: now.saturating_add(MOUNT_PLAN_TTL_MILLIS),
+    })?;
+    let stored = storage.read_mount_plan(&plan_id)?;
+    stored_plan_to_ui(&stored, target_health(&snapshot))
+}
+
+/// 启动和主动刷新只更新 Mount 的观察状态，不创建、删除或改写 Host 内容。
+pub fn refresh_mount_health(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    now: i64,
+) -> Result<(), MountLifecycleError> {
+    let mut updates = Vec::new();
+    for mount in storage.read_mounts()? {
+        let project = stored_mount_project(&mount)?;
+        let snapshot = observe_removal_target(
+            paths,
+            mount.app_id,
+            mount.scope,
+            project.as_ref(),
+            &mount.skill_name,
+            &mount.expected_target,
+        )?;
+        let health = target_health(&snapshot);
+        updates.push((mount.id, health));
+    }
+    storage.update_mount_health_batch(&updates, now)?;
+    Ok(())
 }
 
 pub fn confirm_mount_plan(
@@ -445,11 +531,11 @@ fn apply_mount_effect(
         plan.operation == MountOperation::Create,
     ) {
         Ok(parent) => parent,
-        Err(MountLifecycleError::UnsafeMountPath(path))
+        Err(error)
             if plan.operation == MountOperation::Remove
-                && plan.target_observation == unsafe_parent_observation(&path) =>
+                && matches_unavailable_removal_observation(plan, &error) =>
         {
-            // 父级已被未知内容占用时，移除只清理关系，不接触该路径。
+            // 父级无法安全检查时，移除只清理关系，不接触任何未知路径。
             return Ok(());
         }
         Err(error) => return Err(error),
@@ -701,9 +787,9 @@ fn inspect_effect_state(
     let project = stored_plan_project(plan)?;
     let parent = match open_mount_parent(paths, plan.app_id, plan.scope, project.as_ref(), false) {
         Ok(parent) => parent,
-        Err(MountLifecycleError::UnsafeMountPath(path))
+        Err(error)
             if plan.operation == MountOperation::Remove
-                && plan.target_observation == unsafe_parent_observation(&path) =>
+                && matches_unavailable_removal_observation(plan, &error) =>
         {
             return Ok(EffectState::Applied);
         }
@@ -809,9 +895,9 @@ fn cleanup_temporary(
     let project = stored_plan_project(plan)?;
     let parent = match open_mount_parent(paths, plan.app_id, plan.scope, project.as_ref(), false) {
         Ok(parent) => parent,
-        Err(MountLifecycleError::UnsafeMountPath(path))
+        Err(error)
             if plan.operation == MountOperation::Remove
-                && plan.target_observation == unsafe_parent_observation(&path) =>
+                && matches_unavailable_removal_observation(plan, &error) =>
         {
             return Ok(());
         }
@@ -871,7 +957,9 @@ fn validate_plan_contract(
     if !same_project_identity(project.as_ref(), stored_plan_project(plan)?.as_ref()) {
         return Err(MountLifecycleError::PlanPreconditionChanged);
     }
-    validate_project_identity(project.as_ref())?;
+    if !is_unavailable_removal_plan(plan) {
+        validate_project_identity(project.as_ref())?;
+    }
     let expected_target_path =
         derive_target_path(paths, &member, plan.app_id, plan.scope, project.as_ref())?;
     if path_to_string(&expected_target_path)? != plan.target_path {
@@ -986,6 +1074,42 @@ fn stored_plan_project(
     }
 }
 
+fn stored_mount_project(mount: &StoredMount) -> Result<Option<StoredProject>, MountLifecycleError> {
+    match mount.scope {
+        MountScope::Global
+            if mount.project_id.is_none()
+                && mount.project_root_path.is_none()
+                && mount.project_display_name.is_none()
+                && mount.project_root_device.is_none()
+                && mount.project_root_inode.is_none() =>
+        {
+            Ok(None)
+        }
+        MountScope::Project => Ok(Some(StoredProject {
+            id: mount
+                .project_id
+                .clone()
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            display_name: mount
+                .project_display_name
+                .clone()
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            root_path: mount
+                .project_root_path
+                .clone()
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            root_device: mount
+                .project_root_device
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            root_inode: mount
+                .project_root_inode
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            created_at: 0,
+        })),
+        _ => Err(MountLifecycleError::InvalidScope),
+    }
+}
+
 fn validate_project_identity(project: Option<&StoredProject>) -> Result<(), MountLifecycleError> {
     let Some(project) = project else {
         return Ok(());
@@ -1079,6 +1203,12 @@ fn observe_removal_target(
             kind: TargetKind::Other,
             observation: unsafe_parent_observation(&path),
         }),
+        Err(error @ (MountLifecycleError::ProjectChanged(_) | MountLifecycleError::Io { .. })) => {
+            Ok(TargetSnapshot {
+                kind: TargetKind::Other,
+                observation: unavailable_parent_observation(&error),
+            })
+        }
         Err(error) => Err(error),
     }
 }
@@ -1323,7 +1453,9 @@ fn parse_observation_kind(observation: &str) -> Option<TargetKind> {
         {
             Some(TargetKind::Other)
         }
-        ["unsafe_parent", path] if is_nonempty_hex(path) => Some(TargetKind::Other),
+        ["unsafe_parent" | "unavailable_parent", evidence] if is_nonempty_hex(evidence) => {
+            Some(TargetKind::Other)
+        }
         _ => None,
     }
 }
@@ -1336,6 +1468,39 @@ fn is_nonempty_hex(value: &str) -> bool {
 
 fn unsafe_parent_observation(path: &str) -> String {
     format!("unsafe_parent:{}", hex_bytes(path.as_bytes()))
+}
+
+fn unavailable_parent_observation(error: &MountLifecycleError) -> String {
+    format!(
+        "unavailable_parent:{}",
+        hex_bytes(error.to_string().as_bytes())
+    )
+}
+
+fn matches_unavailable_removal_observation(
+    plan: &StoredMountPlan,
+    error: &MountLifecycleError,
+) -> bool {
+    match error {
+        // 兼容 0005 中已经保存的 unsafe_parent Plan。
+        MountLifecycleError::UnsafeMountPath(path)
+            if plan.target_observation == unsafe_parent_observation(path) =>
+        {
+            true
+        }
+        MountLifecycleError::UnsafeMountPath(_)
+        | MountLifecycleError::ProjectChanged(_)
+        | MountLifecycleError::Io { .. } => {
+            plan.target_observation == unavailable_parent_observation(error)
+        }
+        _ => false,
+    }
+}
+
+fn is_unavailable_removal_plan(plan: &StoredMountPlan) -> bool {
+    plan.purpose == MountPlanPurpose::Remove
+        && (plan.target_observation.starts_with("unsafe_parent:")
+            || plan.target_observation.starts_with("unavailable_parent:"))
 }
 
 fn same_project_identity(left: Option<&StoredProject>, right: Option<&StoredProject>) -> bool {
@@ -1490,6 +1655,7 @@ fn stored_plan_to_ui(
     Ok(MountPlan {
         id: plan.id.clone(),
         operation: plan.operation,
+        purpose: plan.purpose,
         mount_id: plan.mount_id.clone(),
         member_id: plan.member_id.clone(),
         skill_name: plan.skill_name.clone(),
@@ -1599,6 +1765,7 @@ mod tests {
         let plan = StoredMountPlan {
             id: "plan".to_owned(),
             operation: MountOperation::Remove,
+            purpose: MountPlanPurpose::Remove,
             mount_id: "mount".to_owned(),
             member_id: "member".to_owned(),
             bundle_id: "bundle".to_owned(),

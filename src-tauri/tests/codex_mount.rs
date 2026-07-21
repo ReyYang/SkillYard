@@ -280,6 +280,200 @@ fn removing_a_missing_mount_does_not_recreate_its_parent_directories() {
 }
 
 #[test]
+fn startup_and_refresh_report_mount_drift_without_repairing_or_overwriting_it() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (_paths, application, member_id) = installed_skill(sandbox.path(), "health-check");
+    let create = mount_plan(&application, &member_id, MountScope::Global, None);
+    let mounted = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: create.id })
+        .expect("应先创建 Mount");
+    let target = sandbox.path().join("home/.codex/skills/health-check");
+
+    fs::remove_file(&target).expect("应模拟外部删除 Mount");
+    let startup = application
+        .handle(UiIntent::GetStartupState)
+        .expect("启动读取应检查 Mount health");
+    assert_eq!(inventory_mounts(&startup)[0].health, MountHealth::Missing);
+    assert!(!target.exists(), "启动检查不能自动修复缺失 Mount");
+
+    fs::write(&target, "external replacement").expect("应模拟外部内容占位");
+    let refreshed = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("本机刷新应再次检查 Mount health");
+    assert_eq!(
+        inventory_mounts(&refreshed)[0].health,
+        MountHealth::Conflict
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "external replacement");
+    assert_eq!(inventory_mount_count(&mounted), 1);
+
+    fs::remove_file(&target).expect("应清理外部占用文件");
+    let unknown_target = sandbox.path().join("unknown-skill-content");
+    symlink(&unknown_target, &target).expect("应模拟指向未知内容的错误软链接");
+    let refreshed = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("刷新不能跟随已登记但发生漂移的 Mount");
+    let UiOutcome::Inventory { scan_issues, .. } = &refreshed else {
+        panic!("刷新后应返回 Inventory");
+    };
+    assert!(
+        scan_issues.is_empty(),
+        "已登记 Mount 应由 health 检查处理，不能进入 Inventory 扫描"
+    );
+    assert_eq!(
+        inventory_mounts(&refreshed)[0].health,
+        MountHealth::Conflict
+    );
+    assert_eq!(
+        fs::read_link(&target).expect("错误软链接必须保持原样"),
+        unknown_target
+    );
+}
+
+#[test]
+fn a_missing_mount_can_be_repaired_after_a_separate_confirmation() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (_paths, application, member_id) = installed_skill(sandbox.path(), "repair-missing");
+    let create = mount_plan(&application, &member_id, MountScope::Global, None);
+    let mounted = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: create.id })
+        .expect("应先创建 Mount");
+    let mount_id = mount_id(&mounted);
+    let target = sandbox.path().join("home/.codex/skills/repair-missing");
+    fs::remove_file(&target).expect("应模拟缺失 Mount");
+    let drifted = application
+        .handle(UiIntent::GetStartupState)
+        .expect("应保存缺失状态");
+    assert_eq!(inventory_mounts(&drifted)[0].health, MountHealth::Missing);
+
+    let UiOutcome::MountPlan { plan } = application
+        .handle(UiIntent::CreateRepairMountPlan { mount_id })
+        .expect("缺失 Mount 应生成修复 Plan")
+    else {
+        panic!("应返回修复 Plan");
+    };
+    assert_eq!(plan.operation, MountOperation::Create);
+    assert_eq!(plan.purpose, skillyard_lib::MountPlanPurpose::Repair);
+    assert_eq!(plan.target_health, MountHealth::Missing);
+    assert!(!target.exists(), "修复 Plan 不能提前创建软链接");
+
+    let repaired = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: plan.id })
+        .expect("确认后应修复 Mount");
+    assert_eq!(inventory_mounts(&repaired)[0].health, MountHealth::Healthy);
+    assert_eq!(
+        fs::read_link(&target).expect("修复结果必须是软链接"),
+        Path::new(&plan.expected_target)
+    );
+}
+
+#[test]
+fn repair_plan_never_overwrites_content_that_appears_after_preview() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (_paths, application, member_id) = installed_skill(sandbox.path(), "repair-race");
+    let create = mount_plan(&application, &member_id, MountScope::Global, None);
+    let mounted = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: create.id })
+        .expect("应先创建 Mount");
+    let target = sandbox.path().join("home/.codex/skills/repair-race");
+    fs::remove_file(&target).expect("应模拟缺失 Mount");
+    let UiOutcome::MountPlan { plan } = application
+        .handle(UiIntent::CreateRepairMountPlan {
+            mount_id: mount_id(&mounted),
+        })
+        .expect("应生成修复 Plan")
+    else {
+        panic!("应返回修复 Plan");
+    };
+
+    fs::write(&target, "appeared after preview").expect("应模拟确认前占位");
+    let error = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: plan.id })
+        .expect_err("修复确认必须拒绝变化后的目标");
+    assert!(error.to_string().contains("前置状态"));
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "appeared after preview"
+    );
+}
+
+#[test]
+fn an_old_repair_plan_cannot_recreate_a_mount_that_was_formally_removed() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (_paths, application, member_id) = installed_skill(sandbox.path(), "repair-removed");
+    let create = mount_plan(&application, &member_id, MountScope::Global, None);
+    let mounted = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: create.id })
+        .expect("应先创建 Mount");
+    let mount_id = mount_id(&mounted);
+    let target = sandbox.path().join("home/.codex/skills/repair-removed");
+    fs::remove_file(&target).expect("应模拟缺失 Mount");
+
+    let UiOutcome::MountPlan { plan: repair } = application
+        .handle(UiIntent::CreateRepairMountPlan {
+            mount_id: mount_id.clone(),
+        })
+        .expect("应先生成修复 Plan")
+    else {
+        panic!("应返回修复 Plan");
+    };
+    let remove = remove_mount_plan(&application, &mount_id);
+    let removed = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: remove.id })
+        .expect("另一项已确认操作应正式移除 Mount");
+    assert_eq!(inventory_mount_count(&removed), 0);
+
+    application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: repair.id })
+        .expect_err("旧修复 Plan 不能复活已经正式移除的 Mount");
+    assert!(!target.exists(), "失败的旧修复 Plan 不能重建软链接");
+    let reopened = application
+        .handle(UiIntent::GetStartupState)
+        .expect("应读取正式移除后的状态");
+    assert_eq!(inventory_mount_count(&reopened), 0);
+}
+
+#[test]
+fn interrupted_repair_recovers_the_existing_mount_relation_to_healthy() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (paths, application, member_id) = installed_skill(sandbox.path(), "repair-recovery");
+    let create = mount_plan(&application, &member_id, MountScope::Global, None);
+    let mounted = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: create.id })
+        .expect("应先创建 Mount");
+    let target = sandbox.path().join("home/.codex/skills/repair-recovery");
+    fs::remove_file(&target).expect("应模拟缺失 Mount");
+    let UiOutcome::MountPlan { plan } = application
+        .handle(UiIntent::CreateRepairMountPlan {
+            mount_id: mount_id(&mounted),
+        })
+        .expect("应生成修复 Plan")
+    else {
+        panic!("应返回修复 Plan");
+    };
+
+    let interrupted = SkillYardApplication::new_with_lifecycle_failpoint(
+        paths.clone(),
+        PlatformInfo::supported_for_test(),
+        LifecycleFailpoint::AfterMountTargetApplied,
+    );
+    interrupted
+        .handle(UiIntent::ConfirmMountPlan { plan_id: plan.id })
+        .expect_err("应在修复软链接生效后模拟中断");
+
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let recovered = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("重启后应完成修复事务");
+    assert_eq!(inventory_mounts(&recovered).len(), 1);
+    assert_eq!(inventory_mounts(&recovered)[0].health, MountHealth::Healthy);
+    assert_eq!(
+        fs::read_link(target).expect("恢复后应保留正确软链接"),
+        Path::new(&plan.expected_target)
+    );
+}
+
+#[test]
 fn removing_a_mount_with_an_unsafe_parent_preserves_the_external_parent() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (_paths, application, member_id) = installed_skill(sandbox.path(), "unsafe-remove");
@@ -448,6 +642,57 @@ fn project_identity_change_after_plan_is_rejected_without_writing_to_replacement
     assert!(error.to_string().contains("Project 目录已经变化"));
     assert!(!project.join(".codex").exists());
     assert!(!moved_project.join(".codex").exists());
+}
+
+#[test]
+fn a_mount_with_a_replaced_project_root_can_forget_its_relation_without_touching_either_tree() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (_paths, application, member_id) = installed_skill(sandbox.path(), "project-forget");
+    let project = sandbox.path().join("replaceable-project");
+    let moved_project = sandbox.path().join("original-project");
+    fs::create_dir(&project).expect("应创建 Project");
+    let registered = application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 Project");
+    let project_id = inventory_projects(&registered)[0].id.clone();
+    let create = mount_plan(
+        &application,
+        &member_id,
+        MountScope::Project,
+        Some(project_id),
+    );
+    let mounted = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: create.id })
+        .expect("应先创建 project Mount");
+
+    fs::rename(&project, &moved_project).expect("应移走包含原 Mount 的 Project");
+    fs::create_dir(&project).expect("应在原路径创建不同 Project");
+    fs::write(project.join("replacement.txt"), "keep replacement")
+        .expect("应创建替代 Project 内容");
+    let drifted = application
+        .handle(UiIntent::GetStartupState)
+        .expect("启动应把 Project 身份变化记录为冲突");
+    assert_eq!(inventory_mounts(&drifted)[0].health, MountHealth::Conflict);
+
+    let remove = remove_mount_plan(&application, &mount_id(&mounted));
+    assert_eq!(remove.target_health, MountHealth::Conflict);
+    let removed = application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: remove.id })
+        .expect("Project 无法安全检查时应只清理 Mount 关系");
+
+    assert_eq!(inventory_mount_count(&removed), 0);
+    assert_eq!(
+        fs::read_to_string(project.join("replacement.txt")).unwrap(),
+        "keep replacement"
+    );
+    assert!(
+        moved_project
+            .join(".codex/skills/project-forget")
+            .is_symlink(),
+        "无法安全定位旧 Project 时不能删除原路径中的内容"
+    );
 }
 
 #[test]
@@ -985,6 +1230,13 @@ fn inventory_mount_count(outcome: &UiOutcome) -> usize {
         panic!("应返回 Inventory");
     };
     mounts.len()
+}
+
+fn inventory_mounts(outcome: &UiOutcome) -> &[skillyard_lib::MountSummary] {
+    let UiOutcome::Inventory { mounts, .. } = outcome else {
+        panic!("应返回 Inventory");
+    };
+    mounts
 }
 
 fn mount_id(outcome: &UiOutcome) -> String {
