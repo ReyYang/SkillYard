@@ -2197,6 +2197,131 @@ pub(crate) fn write_atomic_at(
     result
 }
 
+/// 首次事务 Journal 只能占用空路径；并发插入的任何条目都必须原样保留。
+pub(crate) fn write_new_atomic_at(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), LifecycleError> {
+    write_new_atomic_at_with_hook(parent, name, path, bytes, |_| {})
+}
+
+fn write_new_atomic_at_with_hook(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    bytes: &[u8],
+    before_rename: impl FnOnce(&OsStr),
+) -> Result<(), LifecycleError> {
+    let temporary_name = OsString::from(format!(
+        ".{}.tmp-{}",
+        name.to_string_lossy(),
+        Uuid::new_v4()
+    ));
+    let temporary_path = path.with_file_name(&temporary_name);
+    let mut owned_temporary = None;
+    let result = (|| {
+        let mut file = create_new_file_at(parent, &temporary_name, &temporary_path)?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| io_error("检查首次事务临时文件", &temporary_path, source))?;
+        owned_temporary = Some((
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mode(),
+            metadata.nlink(),
+        ));
+        file.write_all(bytes)
+            .map_err(|source| io_error("写入首次事务临时文件", &temporary_path, source))?;
+        file.sync_all()
+            .map_err(|source| io_error("同步首次事务临时文件", &temporary_path, source))?;
+        before_rename(&temporary_name);
+        let visible = entry_metadata_at(parent, &temporary_name)
+            .map_err(|source| io_error("重新检查首次事务临时文件", &temporary_path, source))?
+            .ok_or_else(|| {
+                LifecycleError::RecoveryBlocked(
+                    "首次事务临时文件已被外部移除，已保留现场".to_owned(),
+                )
+            })?;
+        if visible.st_mode & libc::S_IFMT != libc::S_IFREG
+            || visible.st_nlink != 1
+            || (
+                visible.st_dev as u64,
+                visible.st_ino,
+                u32::from(visible.st_mode),
+                visible.st_nlink as u64,
+            ) != owned_temporary.expect("临时文件身份已保存")
+        {
+            return Err(LifecycleError::RecoveryBlocked(
+                "首次事务临时文件已被外部替换，已保留现场".to_owned(),
+            ));
+        }
+        rename_at_no_replace(parent, &temporary_name, parent, name)
+            .map_err(|source| io_error("占用首次事务文件", path, source))?;
+        let published = entry_metadata_at(parent, name)
+            .map_err(|source| io_error("检查首次事务文件", path, source))?
+            .ok_or_else(|| {
+                LifecycleError::RecoveryBlocked("首次事务文件在发布后消失".to_owned())
+            })?;
+        if (
+            published.st_dev as u64,
+            published.st_ino,
+            u32::from(published.st_mode),
+            published.st_nlink as u64,
+        ) != owned_temporary.expect("临时文件身份已保存")
+        {
+            return Err(LifecycleError::RecoveryBlocked(
+                "首次事务文件在发布时被外部替换，已保留现场".to_owned(),
+            ));
+        }
+        parent
+            .sync_all()
+            .map_err(|source| io_error("同步首次事务文件父目录", path, source))
+    })();
+    if let Err(error) = result {
+        let visible = entry_metadata_at(parent, &temporary_name)
+            .map_err(|source| io_error("检查首次事务临时文件", &temporary_path, source))?;
+        match (visible, owned_temporary) {
+            (Some(visible), Some(expected))
+                if visible.st_mode & libc::S_IFMT == libc::S_IFREG
+                    && visible.st_nlink == 1
+                    && (
+                        visible.st_dev as u64,
+                        visible.st_ino,
+                        u32::from(visible.st_mode),
+                        visible.st_nlink as u64,
+                    ) == expected =>
+            {
+                unlink_at(parent, &temporary_name, false)
+                    .map_err(|source| io_error("清理首次事务临时文件", &temporary_path, source))?;
+                parent
+                    .sync_all()
+                    .map_err(|source| io_error("同步首次事务临时文件父目录", path, source))?;
+            }
+            (None, _) => {}
+            _ => {
+                return Err(LifecycleError::RecoveryBlocked(
+                    "首次事务临时文件已被外部替换，已保留现场".to_owned(),
+                ));
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn write_new_atomic_at_test_hook(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    bytes: &[u8],
+    before_rename: impl FnOnce(&OsStr),
+) -> Result<(), LifecycleError> {
+    write_new_atomic_at_with_hook(parent, name, path, bytes, before_rename)
+}
+
 fn ensure_entry_absent_at(parent: &File, name: &OsStr) -> io::Result<()> {
     if entry_metadata_at(parent, name)?.is_some() {
         Err(io::Error::new(

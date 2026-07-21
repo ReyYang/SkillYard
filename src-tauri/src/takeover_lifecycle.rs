@@ -159,7 +159,7 @@ enum TakeoverOriginalEntryKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct TakeoverOriginalEntry {
+pub(crate) struct TakeoverOriginalEntry {
     /// 使用原始 Unix 路径字节的 hex，避免 Journal 因非 UTF-8 文件名失真。
     relative_path_hex: String,
     kind: TakeoverOriginalEntryKind,
@@ -2198,7 +2198,29 @@ fn collect_original_manifest(
         if kind == TakeoverOriginalEntryKind::Directory {
             let child = open_directory_at(directory, &name)
                 .map_err(|source| takeover_io("打开原 Skill 子目录", &child_path, source))?;
+            let opened = child
+                .metadata()
+                .map_err(|source| takeover_io("检查原 Skill 子目录", &child_path, source))?;
+            if opened.dev() != metadata.st_dev as u64
+                || opened.ino() != metadata.st_ino
+                || opened.mode() != u32::from(metadata.st_mode)
+            {
+                return Err(TakeoverLifecycleError::PlanPreconditionChanged);
+            }
             collect_original_manifest(&child, relative, &child_path, entries)?;
+            let after_entry = entry_metadata_at(directory, &name)
+                .map_err(|source| takeover_io("重新检查原 Skill 子目录", &child_path, source))?
+                .ok_or(TakeoverLifecycleError::PlanPreconditionChanged)?;
+            let after_handle = child
+                .metadata()
+                .map_err(|source| takeover_io("重新检查原 Skill 子目录", &child_path, source))?;
+            if !same_manifest_stat(&metadata, &after_entry)
+                || after_handle.dev() != metadata.st_dev as u64
+                || after_handle.ino() != metadata.st_ino
+                || after_handle.mode() != u32::from(metadata.st_mode)
+            {
+                return Err(TakeoverLifecycleError::PlanPreconditionChanged);
+            }
         }
     }
     Ok(())
@@ -2313,6 +2335,66 @@ fn validate_original_manifest(
     } else {
         Err(TakeoverLifecycleError::RecoveryBlocked(
             "隔离原目录包含外部新增、移除或替换的条目".to_owned(),
+        ))
+    }
+}
+
+/// v2 从已核验 parent dirfd 打开 leaf，避免把绝对路径重新解析当作授权边界。
+pub(crate) fn collect_original_manifest_at(
+    parent: &File,
+    name: &OsStr,
+    visible_path: &Path,
+    expected_root: (u64, u64, u32),
+) -> Result<Vec<TakeoverOriginalEntry>, TakeoverLifecycleError> {
+    let before = entry_metadata_at(parent, name)
+        .map_err(|source| takeover_io("检查原 Skill 根目录", visible_path, source))?
+        .ok_or(TakeoverLifecycleError::PlanPreconditionChanged)?;
+    if before.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || (
+            before.st_dev as u64,
+            before.st_ino,
+            u32::from(before.st_mode),
+        ) != expected_root
+    {
+        return Err(TakeoverLifecycleError::PlanPreconditionChanged);
+    }
+    let directory = open_directory_at(parent, name)
+        .map_err(|source| takeover_io("打开原 Skill 根目录", visible_path, source))?;
+    let opened = directory
+        .metadata()
+        .map_err(|source| takeover_io("检查原 Skill 根目录", visible_path, source))?;
+    if (opened.dev(), opened.ino(), opened.mode()) != expected_root {
+        return Err(TakeoverLifecycleError::PlanPreconditionChanged);
+    }
+    let mut entries = Vec::new();
+    collect_original_manifest(&directory, Vec::new(), visible_path, &mut entries)?;
+    entries.sort_by(|left, right| left.relative_path_hex.cmp(&right.relative_path_hex));
+    let after_entry = entry_metadata_at(parent, name)
+        .map_err(|source| takeover_io("重新检查原 Skill 根目录", visible_path, source))?
+        .ok_or(TakeoverLifecycleError::PlanPreconditionChanged)?;
+    let after_handle = directory
+        .metadata()
+        .map_err(|source| takeover_io("重新检查原 Skill 根目录", visible_path, source))?;
+    if !same_manifest_stat(&before, &after_entry)
+        || (after_handle.dev(), after_handle.ino(), after_handle.mode()) != expected_root
+    {
+        return Err(TakeoverLifecycleError::PlanPreconditionChanged);
+    }
+    Ok(entries)
+}
+
+pub(crate) fn validate_original_manifest_at(
+    parent: &File,
+    name: &OsStr,
+    visible_path: &Path,
+    expected_root: (u64, u64, u32),
+    expected: &[TakeoverOriginalEntry],
+) -> Result<(), TakeoverLifecycleError> {
+    if collect_original_manifest_at(parent, name, visible_path, expected_root)? == expected {
+        Ok(())
+    } else {
+        Err(TakeoverLifecycleError::RecoveryBlocked(
+            "Origin 包含外部新增、移除或替换的条目".to_owned(),
         ))
     }
 }
