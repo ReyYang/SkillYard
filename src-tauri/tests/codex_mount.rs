@@ -369,6 +369,37 @@ fn startup_and_refresh_report_mount_drift_without_repairing_or_overwriting_it() 
 }
 
 #[test]
+fn failed_local_refresh_rolls_back_mount_health_with_the_inventory_snapshot() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (_paths, application, member_id) = installed_skill(sandbox.path(), "atomic-health");
+    let create = mount_plan(&application, &member_id, MountScope::Global, None);
+    application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: create.id })
+        .expect("应创建测试 Mount");
+    fs::remove_file(sandbox.path().join("home/.codex/skills/atomic-health"))
+        .expect("应模拟 Mount 漂移");
+
+    let connection =
+        Connection::open(sandbox.path().join("data/skillyard.sqlite3")).expect("应打开测试 SQLite");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_atomic_refresh
+             BEFORE UPDATE OF last_local_refresh_at ON app_state
+             BEGIN SELECT RAISE(ABORT, 'test refresh failure'); END;",
+        )
+        .expect("应创建刷新失败点");
+
+    assert!(application.handle(UiIntent::RefreshLocalInventory).is_err());
+    let health: String = connection
+        .query_row("SELECT health FROM mounts", [], |row| row.get(0))
+        .expect("应读取失败后的 Mount health");
+    assert_eq!(
+        health, "healthy",
+        "Inventory 保存失败时，同一轮 Mount health 也必须回退"
+    );
+}
+
+#[test]
 fn a_missing_mount_can_be_repaired_after_a_separate_confirmation() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (_paths, application, member_id) = installed_skill(sandbox.path(), "repair-missing");

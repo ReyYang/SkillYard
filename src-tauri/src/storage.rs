@@ -566,12 +566,14 @@ impl Storage {
         scanned_apps: &[SupportedAppSummary],
         successful_roots: &[ScanRootIdentity],
         scan_issues: &[ScanIssue],
+        mount_health: &[(String, MountHealth)],
     ) -> Result<SavedLocalRefresh, StorageError> {
         // 读取旧快照和写入新快照必须处于同一个写事务，不能让并发命令覆盖较新结果。
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveLocalRefresh)?;
+        update_mount_health_rows(&transaction, mount_health, completed_at)?;
         let previous_entries = read_inventory_entries_from(&transaction)?;
         let previous_apps = read_supported_apps_from(&transaction)?;
         let previous_issues = read_scan_issues_from(&transaction)?;
@@ -1154,15 +1156,7 @@ impl Storage {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveMountTransaction)?;
-        for (mount_id, health) in updates {
-            let changed = transaction
-                .execute(
-                    "UPDATE mounts SET health = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![mount_id, health.as_str(), now],
-                )
-                .map_err(StorageError::SaveMountTransaction)?;
-            ensure_one_mount_row(changed, mount_id)?;
-        }
+        update_mount_health_rows(&transaction, updates, now)?;
         transaction
             .commit()
             .map_err(StorageError::SaveMountTransaction)
@@ -1792,6 +1786,23 @@ fn ensure_one_mount_row(changed: usize, transaction_id: &str) -> Result<(), Stor
     } else {
         Err(StorageError::MountStateConflict(transaction_id.to_owned()))
     }
+}
+
+fn update_mount_health_rows(
+    connection: &Connection,
+    updates: &[(String, MountHealth)],
+    now: i64,
+) -> Result<(), StorageError> {
+    for (mount_id, health) in updates {
+        let changed = connection
+            .execute(
+                "UPDATE mounts SET health = ?2, updated_at = ?3 WHERE id = ?1",
+                params![mount_id, health.as_str(), now],
+            )
+            .map_err(StorageError::SaveMountTransaction)?;
+        ensure_one_mount_row(changed, mount_id)?;
+    }
+    Ok(())
 }
 
 fn filesystem_identity_to_sql(value: u64) -> Result<i64, StorageError> {
@@ -4283,7 +4294,7 @@ mod tests {
         assert_eq!(recovery_issues[0].message, "current 状态无法判断");
 
         let refreshed = storage
-            .save_local_refresh(203, &[], &[], &[], &[])
+            .save_local_refresh(203, &[], &[], &[], &[], &[])
             .expect("刷新不应隐藏人工恢复状态");
         assert_eq!(refreshed.recovery_issues, recovery_issues);
     }

@@ -333,12 +333,11 @@ pub fn create_repair_mount_plan(
     stored_plan_to_ui(&stored, target_health(&snapshot))
 }
 
-/// 启动和主动刷新只更新 Mount 的观察状态，不创建、删除或改写 Host 内容。
-pub fn refresh_mount_health(
+/// 只读取 Mount 目标并生成健康快照，调用方决定与哪一份状态原子提交。
+pub fn observe_mount_health(
     paths: &ApplicationPaths,
-    storage: &mut Storage,
-    now: i64,
-) -> Result<(), MountLifecycleError> {
+    storage: &Storage,
+) -> Result<Vec<(String, MountHealth)>, MountLifecycleError> {
     let mut updates = Vec::new();
     for mount in storage.read_mounts()? {
         let project = stored_mount_project(&mount)?;
@@ -353,6 +352,16 @@ pub fn refresh_mount_health(
         let health = target_health(&snapshot);
         updates.push((mount.id, health));
     }
+    Ok(updates)
+}
+
+/// 启动检查可以单独保存；Local Refresh 会把同一快照交给清单事务一起提交。
+pub fn refresh_mount_health(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    now: i64,
+) -> Result<(), MountLifecycleError> {
+    let updates = observe_mount_health(paths, storage)?;
     storage.update_mount_health_batch(&updates, now)?;
     Ok(())
 }

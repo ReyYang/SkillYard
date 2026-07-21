@@ -10,8 +10,8 @@ use crate::{
     },
     mount_lifecycle::{
         MountLifecycleError, confirm_mount_plan, create_mount_plan, create_remove_mount_plan,
-        create_repair_mount_plan, prepare_project_registration, recover_pending_mount_transactions,
-        refresh_mount_health,
+        create_repair_mount_plan, observe_mount_health, prepare_project_registration,
+        recover_pending_mount_transactions, refresh_mount_health,
     },
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
@@ -180,7 +180,7 @@ impl SkillYardApplication {
         };
 
         let completed_at = unix_timestamp_millis();
-        refresh_mount_health(&self.paths, &mut storage, completed_at)?;
+        let mount_health = observe_mount_health(&self.paths, &storage)?;
         let mount_targets = storage.mount_target_paths()?;
         let projects = storage.read_stored_projects()?;
         let result = scan_with_projects(&self.paths, &projects, &mount_targets);
@@ -190,6 +190,7 @@ impl SkillYardApplication {
             &result.supported_apps,
             &result.successful_roots,
             &result.issues,
+            &mount_health,
         )?;
         lifecycle_lock.recheck(&self.paths)?;
 
