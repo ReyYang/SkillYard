@@ -131,6 +131,13 @@ describe("本机清单", () => {
           bundleId: "bundle-1",
           bundleDisplayName: "mattpocock/skills",
         }),
+        createEntry({
+          id: "managed-same-name",
+          skillName: "research",
+          managementKind: "skillYardManaged",
+          bundleId: "bundle-2",
+          bundleDisplayName: "mattpocock/skills",
+        }),
         createEntry({ id: "takeover", skillName: "local-copy" }),
         createEntry({
           id: "agent",
@@ -149,11 +156,19 @@ describe("本机清单", () => {
 
     render(<App client={client} />);
 
-    const bundle = await screen.findByRole("region", {
+    const bundles = await screen.findAllByRole("region", {
       name: "mattpocock/skills",
     });
-    expect(within(bundle).getByText("mattpocock/skills: qa")).toBeInTheDocument();
-    expect(within(bundle).getByText("mattpocock/skills: tdd")).toBeInTheDocument();
+    expect(bundles).toHaveLength(2);
+    expect(bundles.some((bundle) => within(bundle).queryByText("mattpocock/skills: qa")))
+      .toBe(true);
+    expect(bundles.some((bundle) => within(bundle).queryByText("mattpocock/skills: tdd")))
+      .toBe(true);
+    expect(
+      bundles.some((bundle) =>
+        within(bundle).queryByText("mattpocock/skills: research"),
+      ),
+    ).toBe(true);
     expect(screen.getByRole("region", { name: "待接管" })).toHaveTextContent(
       "local-copy",
     );

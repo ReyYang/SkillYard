@@ -1,3 +1,5 @@
+use std::sync::{Mutex, TryLockError};
+
 use thiserror::Error;
 
 use crate::{
@@ -15,18 +17,27 @@ pub enum ApplicationError {
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
     InvalidState(&'static str),
+    #[error("已有一项写操作正在执行，请等待完成")]
+    OperationInProgress,
+    #[error("写操作保护状态不可用，请重新启动 SkillYard")]
+    OperationGateUnavailable,
 }
 
 /// 所有业务行为都从这个 seam 进入；Tauri command 只负责薄适配。
 pub struct SkillYardApplication {
     paths: ApplicationPaths,
     platform: PlatformInfo,
+    operation_gate: Mutex<()>,
 }
 
 impl SkillYardApplication {
     pub fn new(paths: ApplicationPaths, platform: PlatformInfo) -> Self {
         // SQLite 延迟到 intent 中打开，确保初始化失败能通过 UiError 呈现，而不是在窗口创建前 panic。
-        Self { paths, platform }
+        Self {
+            paths,
+            platform,
+            operation_gate: Mutex::new(()),
+        }
     }
 
     pub fn handle(&self, intent: UiIntent) -> Result<UiOutcome, ApplicationError> {
@@ -42,9 +53,26 @@ impl SkillYardApplication {
 
         match intent {
             UiIntent::GetStartupState => self.get_startup_state(),
-            UiIntent::StartInitialScan => self.start_initial_scan(),
-            UiIntent::RefreshLocalInventory => self.refresh_local_inventory(),
+            UiIntent::StartInitialScan => self.with_write_operation(|| self.start_initial_scan()),
+            UiIntent::RefreshLocalInventory => {
+                self.with_write_operation(|| self.refresh_local_inventory())
+            }
         }
+    }
+
+    /// 扫描结果会写入同一份 SQLite；拒绝并发写可避免旧快照覆盖新状态。
+    fn with_write_operation(
+        &self,
+        operation: impl FnOnce() -> Result<UiOutcome, ApplicationError>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let _guard = match self.operation_gate.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => return Err(ApplicationError::OperationInProgress),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(ApplicationError::OperationGateUnavailable);
+            }
+        };
+        operation()
     }
 
     fn get_startup_state(&self) -> Result<UiOutcome, ApplicationError> {
@@ -114,4 +142,30 @@ fn unix_timestamp_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("系统时间必须晚于 Unix epoch")
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn a_second_write_intent_is_rejected_while_the_operation_gate_is_held() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let application = SkillYardApplication::new(
+            ApplicationPaths::for_home(sandbox.path().join("data"), sandbox.path().join("home")),
+            PlatformInfo::supported_for_test(),
+        );
+
+        let _active_operation = application
+            .operation_gate
+            .lock()
+            .expect("测试应取得写操作门");
+        let error = application
+            .handle(UiIntent::StartInitialScan)
+            .expect_err("并发写操作必须被拒绝");
+
+        assert!(matches!(error, ApplicationError::OperationInProgress));
+    }
 }

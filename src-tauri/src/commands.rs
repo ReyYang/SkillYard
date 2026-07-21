@@ -16,6 +16,8 @@ impl From<ApplicationError> for UiError {
             ApplicationError::Storage(_) => "storageError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
+            ApplicationError::OperationInProgress => "operationInProgress",
+            ApplicationError::OperationGateUnavailable => "operationGateUnavailable",
         };
         Self {
             code,

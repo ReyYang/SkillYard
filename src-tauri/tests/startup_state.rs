@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 use rusqlite::Connection;
 use skillyard_lib::{
@@ -451,6 +453,46 @@ fn local_refresh_reconciles_added_removed_and_changed_skills() {
 }
 
 #[test]
+fn local_refresh_preserves_the_existing_management_authority() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    write_skill(
+        &home.join(".codex/skills/agent-owned"),
+        "agent-owned",
+        "initial",
+    );
+    let paths = ApplicationPaths::for_home(data_root.clone(), home);
+    let application = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开测试 SQLite");
+    connection
+        .execute(
+            "UPDATE inventory_observations SET management_kind = 'agent_managed' WHERE skill_name = 'agent-owned'",
+            [],
+        )
+        .expect("应设置已有管理归属");
+    drop(connection);
+
+    let UiOutcome::Inventory { entries, .. } = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("本机刷新应成功")
+    else {
+        panic!("刷新后应返回 Inventory");
+    };
+    let entry = entries
+        .iter()
+        .find(|entry| entry.skill_name == "agent-owned")
+        .expect("刷新后应保留 Skill");
+
+    assert_eq!(entry.management_kind, ManagementKind::AgentManaged);
+}
+
+#[test]
 fn local_refresh_is_rejected_before_initial_scan_without_reading_roots() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
@@ -531,6 +573,181 @@ fn local_refresh_preserves_the_last_snapshot_for_a_failed_root() {
             .expect("重开后应读取带告警的刷新结果"),
         refreshed
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn local_refresh_treats_a_dangling_root_symlink_as_a_scan_failure() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    write_skill(
+        &home.join(".codex/skills/codex-existing"),
+        "codex-existing",
+        "initial",
+    );
+    let paths = ApplicationPaths::for_home(data_root, home.clone());
+    let application = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+
+    fs::remove_dir_all(home.join(".codex/skills")).expect("应移除原扫描根");
+    // 断链不是空目录，必须保留上次观察，避免把暂时不可读误判成用户删除。
+    symlink(
+        home.join("missing-codex-skills"),
+        home.join(".codex/skills"),
+    )
+    .expect("应创建断链扫描根");
+
+    let UiOutcome::Inventory {
+        entries,
+        last_local_refresh: Some(summary),
+        scan_issues,
+        ..
+    } = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("断链应作为局部扫描告警返回")
+    else {
+        panic!("刷新后应返回 Inventory");
+    };
+
+    let preserved = entries
+        .iter()
+        .find(|entry| entry.skill_name == "codex-existing")
+        .expect("断链根应保留上次成功观察");
+    assert!(preserved.stale);
+    assert_eq!(summary.removed, 0);
+    assert_eq!(scan_issues.len(), 1);
+    assert_eq!(scan_issues[0].root_key, ScanRootKey::CodexGlobal);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_refresh_preserves_a_skill_when_its_metadata_becomes_unreadable() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let skill_root = home.join(".codex/skills/codex-existing");
+    write_skill(&skill_root, "codex-existing", "initial");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+
+    fs::remove_file(skill_root.join("SKILL.md")).expect("应移除原 metadata");
+    symlink("SKILL.md", skill_root.join("SKILL.md")).expect("应创建不可解析的 metadata 链接");
+
+    let UiOutcome::Inventory {
+        entries,
+        last_local_refresh: Some(summary),
+        scan_issues,
+        ..
+    } = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("不可读 metadata 应成为局部扫描告警")
+    else {
+        panic!("刷新后应返回 Inventory");
+    };
+
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.skill_name == "codex-existing" && entry.stale })
+    );
+    assert_eq!(summary.removed, 0);
+    assert_eq!(scan_issues.len(), 1);
+    assert_eq!(scan_issues[0].root_key, ScanRootKey::CodexGlobal);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_refresh_preserves_a_root_when_its_detection_directory_is_dangling() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    write_skill(
+        &home.join(".codex/skills/codex-existing"),
+        "codex-existing",
+        "initial",
+    );
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+
+    fs::remove_dir_all(home.join(".codex")).expect("应移除原应用目录");
+    symlink(home.join("missing-codex"), home.join(".codex")).expect("应创建断链应用目录");
+
+    let UiOutcome::Inventory {
+        entries,
+        last_local_refresh: Some(summary),
+        scan_issues,
+        ..
+    } = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("断链应用目录应成为局部扫描告警")
+    else {
+        panic!("刷新后应返回 Inventory");
+    };
+
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.skill_name == "codex-existing" && entry.stale })
+    );
+    assert_eq!(summary.removed, 0);
+    assert_eq!(scan_issues.len(), 1);
+    assert_eq!(scan_issues[0].root_key, ScanRootKey::CodexGlobal);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_refresh_preserves_a_mounted_skill_when_its_target_disappears() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let source = sandbox.path().join("source/codex-existing");
+    let mounted = home.join(".codex/skills/codex-existing");
+    write_skill(&source, "codex-existing", "initial");
+    fs::create_dir_all(mounted.parent().expect("Mount 应有父目录")).expect("应创建扫描根");
+    symlink(&source, &mounted).expect("应创建已有 Skill Mount");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+
+    fs::remove_dir_all(&source).expect("应模拟 Mount 目标暂时消失");
+
+    let UiOutcome::Inventory {
+        entries,
+        last_local_refresh: Some(summary),
+        scan_issues,
+        ..
+    } = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("断链 Skill Mount 应成为局部扫描告警")
+    else {
+        panic!("刷新后应返回 Inventory");
+    };
+
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.skill_name == "codex-existing" && entry.stale })
+    );
+    assert_eq!(summary.removed, 0);
+    assert_eq!(scan_issues.len(), 1);
+    assert_eq!(scan_issues[0].root_key, ScanRootKey::CodexGlobal);
 }
 
 #[test]

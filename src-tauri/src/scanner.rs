@@ -136,12 +136,19 @@ fn scan_optional_root(
             path: path.display().to_string(),
             source,
         })?;
-        if !file_type.is_dir() && !file_type.is_symlink() {
+        let is_reachable_directory = if file_type.is_symlink() {
+            fs::metadata(&skill_root)
+                .map_err(|source| read_skill_content_error(&skill_root, source))?
+                .is_dir()
+        } else {
+            file_type.is_dir()
+        };
+        if !is_reachable_directory {
             continue;
         }
 
         let skill_file = skill_root.join("SKILL.md");
-        if !skill_file.is_file() {
+        if !is_regular_skill_file(&skill_file)? {
             continue;
         }
 
@@ -249,6 +256,8 @@ fn fingerprint_directory(
 fn fingerprint_file(path: &Path, fingerprint: &mut StableFingerprint) -> Result<(), ScanError> {
     let mut file = File::open(path).map_err(|source| read_skill_content_error(path, source))?;
     let mut buffer = [0_u8; 16 * 1024];
+    let mut content_fingerprint = StableFingerprint::new();
+    let mut content_length = 0_u64;
     loop {
         let bytes_read = file
             .read(&mut buffer)
@@ -256,8 +265,12 @@ fn fingerprint_file(path: &Path, fingerprint: &mut StableFingerprint) -> Result<
         if bytes_read == 0 {
             break;
         }
-        fingerprint.write(&buffer[..bytes_read]);
+        content_fingerprint.write(&buffer[..bytes_read]);
+        content_length = content_length.wrapping_add(bytes_read as u64);
     }
+    // 文件长度与独立内容摘要形成固定边界，不能被后续路径编码伪装。
+    fingerprint.write_segment(&content_length.to_le_bytes());
+    fingerprint.write_segment(&content_fingerprint.finish().to_le_bytes());
     Ok(())
 }
 
@@ -341,14 +354,77 @@ fn is_valid_skill_name(name: &str, directory_name: &str) -> bool {
 }
 
 fn path_exists(path: &Path) -> Result<bool, ScanError> {
-    path.try_exists().map_err(|source| ScanError::InspectPath {
-        path: path.display().to_string(),
-        source,
-    })
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(path) {
+                // 路径条目存在但目标不可达时不能伪装成“尚未安装”。
+                Ok(_) => Err(ScanError::InspectPath {
+                    path: path.display().to_string(),
+                    source,
+                }),
+                Err(link_error) if link_error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(link_error) => Err(ScanError::InspectPath {
+                    path: path.display().to_string(),
+                    source: link_error,
+                }),
+            }
+        }
+        Err(source) => Err(ScanError::InspectPath {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
+}
+
+fn is_regular_skill_file(path: &Path) -> Result<bool, ScanError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(path) {
+                // 断链 SKILL.md 是不可读内容，不等同于目录里没有 SKILL.md。
+                Ok(_) => Err(read_skill_content_error(path, source)),
+                Err(link_error) if link_error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(link_error) => Err(read_skill_content_error(path, link_error)),
+            }
+        }
+        Err(source) => Err(read_skill_content_error(path, source)),
+    }
 }
 
 fn extract_frontmatter(contents: &str) -> Option<&str> {
     let body = contents.strip_prefix("---\n")?;
     let end = body.find("\n---")?;
     Some(&body[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn file_content_is_framed_separately_from_following_tree_entries() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let split_tree = sandbox.path().join("split");
+        let joined_tree = sandbox.path().join("joined");
+        fs::create_dir_all(&split_tree).expect("应创建分离文件树");
+        fs::create_dir_all(&joined_tree).expect("应创建拼接文件树");
+        fs::write(split_tree.join("a"), b"left").expect("应写入第一个文件");
+        fs::write(split_tree.join("b"), b"right").expect("应写入第二个文件");
+
+        // 这段内容在旧编码中会伪装成后续 b 文件的路径、类型和内容。
+        let mut crafted = b"left".to_vec();
+        crafted.extend_from_slice(&(1_u64).to_le_bytes());
+        crafted.extend_from_slice(b"b");
+        crafted.extend_from_slice(&(4_u64).to_le_bytes());
+        crafted.extend_from_slice(b"file");
+        crafted.extend_from_slice(b"right");
+        fs::write(joined_tree.join("a"), crafted).expect("应写入边界碰撞样本");
+
+        assert_ne!(
+            fingerprint_skill_root(&split_tree).expect("应计算分离文件树指纹"),
+            fingerprint_skill_root(&joined_tree).expect("应计算拼接文件树指纹")
+        );
+    }
 }

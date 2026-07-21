@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
 use crate::domain::{
@@ -80,31 +80,29 @@ impl Storage {
             .map_err(StorageError::Migration)?;
 
         for (version, migration) in MIGRATIONS {
-            let applied = self
+            // IMMEDIATE 锁让多个同时启动的进程在检查版本前排队，避免重复执行 ALTER TABLE。
+            let transaction = self
                 .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(StorageError::Migration)?;
+            let applied = transaction
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
                     [version],
                     |row| row.get::<_, bool>(0),
                 )
                 .map_err(StorageError::Migration)?;
-            if applied {
-                continue;
+            if !applied {
+                transaction
+                    .execute_batch(migration)
+                    .map_err(StorageError::Migration)?;
+                transaction
+                    .execute(
+                        "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, unixepoch())",
+                        [version],
+                    )
+                    .map_err(StorageError::Migration)?;
             }
-
-            let transaction = self
-                .connection
-                .transaction()
-                .map_err(StorageError::Migration)?;
-            transaction
-                .execute_batch(migration)
-                .map_err(StorageError::Migration)?;
-            transaction
-                .execute(
-                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, unixepoch())",
-                    [version],
-                )
-                .map_err(StorageError::Migration)?;
             transaction.commit().map_err(StorageError::Migration)?;
         }
         Ok(())
@@ -160,7 +158,7 @@ impl Storage {
     ) -> Result<(), StorageError> {
         let transaction = self
             .connection
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveInitialScan)?;
         replace_inventory_rows(&transaction, entries, supported_apps, &[])
             .map_err(StorageError::SaveInitialScan)?;
@@ -187,8 +185,13 @@ impl Storage {
         successful_roots: &[ScanRootKey],
         scan_issues: &[ScanIssue],
     ) -> Result<SavedLocalRefresh, StorageError> {
-        let previous_entries = self.read_inventory_entries()?;
-        let previous_apps = self.read_supported_apps()?;
+        // 读取旧快照和写入新快照必须处于同一个写事务，不能让并发命令覆盖较新结果。
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveLocalRefresh)?;
+        let previous_entries = read_inventory_entries_from(&transaction)?;
+        let previous_apps = read_supported_apps_from(&transaction)?;
         let entries = reconcile_entries(
             &previous_entries,
             scanned_entries,
@@ -197,11 +200,6 @@ impl Storage {
         );
         let supported_apps = reconcile_supported_apps(&previous_apps, scanned_apps);
         let summary = summarize_changes(completed_at, &previous_entries, &entries);
-
-        let transaction = self
-            .connection
-            .transaction()
-            .map_err(StorageError::SaveLocalRefresh)?;
         replace_inventory_rows(&transaction, &entries, &supported_apps, scan_issues)
             .map_err(StorageError::SaveLocalRefresh)?;
         transaction
@@ -232,112 +230,11 @@ impl Storage {
     }
 
     fn read_supported_apps(&self) -> Result<Vec<SupportedAppSummary>, StorageError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT app_id, display_name, detected FROM supported_app_status ORDER BY sort_order",
-            )
-            .map_err(StorageError::ReadInventory)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, bool>(2)?,
-                ))
-            })
-            .map_err(StorageError::ReadInventory)?;
-        let mut supported_apps = Vec::new();
-        for row in rows {
-            let (id, display_name, detected) = row.map_err(StorageError::ReadInventory)?;
-            supported_apps.push(SupportedAppSummary {
-                id: SupportedAppId::from_str(&id)
-                    .ok_or_else(|| StorageError::UnknownSupportedApp(id.clone()))?,
-                display_name,
-                detected: Some(detected),
-            });
-        }
-        Ok(supported_apps)
+        read_supported_apps_from(&self.connection)
     }
 
     fn read_inventory_entries(&self) -> Result<Vec<InventoryObservation>, StorageError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT id, skill_name, declared_name, skill_root, skill_file, location_kind, metadata_status, observed_fingerprint, root_key, stale, management_kind FROM inventory_observations ORDER BY skill_root",
-            )
-            .map_err(StorageError::ReadInventory)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, bool>(9)?,
-                    row.get::<_, String>(10)?,
-                ))
-            })
-            .map_err(StorageError::ReadInventory)?;
-        let mut entries = Vec::new();
-        for row in rows {
-            let (
-                id,
-                skill_name,
-                declared_name,
-                skill_root,
-                skill_file,
-                location_kind,
-                metadata_status,
-                observed_fingerprint,
-                root_key,
-                stale,
-                management_kind,
-            ) = row.map_err(StorageError::ReadInventory)?;
-            entries.push(InventoryObservation {
-                id,
-                skill_name,
-                declared_name,
-                skill_root,
-                skill_file,
-                location_kind: InventoryLocationKind::from_str(&location_kind)
-                    .ok_or_else(|| StorageError::UnknownInventoryLocation(location_kind.clone()))?,
-                metadata_status: SkillMetadataStatus::from_str(&metadata_status)
-                    .ok_or_else(|| StorageError::UnknownMetadataStatus(metadata_status.clone()))?,
-                observed_by: Vec::new(),
-                observed_fingerprint,
-                root_key: ScanRootKey::from_str(&root_key)
-                    .ok_or_else(|| StorageError::UnknownScanRoot(root_key.clone()))?,
-                stale,
-                management_kind: ManagementKind::from_str(&management_kind)
-                    .ok_or_else(|| StorageError::UnknownManagementKind(management_kind.clone()))?,
-            });
-        }
-
-        for entry in &mut entries {
-            let mut app_statement = self
-                .connection
-                .prepare(
-                    "SELECT app_id FROM inventory_observation_apps WHERE observation_id = ?1 ORDER BY app_id",
-                )
-                .map_err(StorageError::ReadInventory)?;
-            let app_rows = app_statement
-                .query_map([&entry.id], |row| row.get::<_, String>(0))
-                .map_err(StorageError::ReadInventory)?;
-            for row in app_rows {
-                let id = row.map_err(StorageError::ReadInventory)?;
-                entry.observed_by.push(
-                    SupportedAppId::from_str(&id)
-                        .ok_or_else(|| StorageError::UnknownSupportedApp(id.clone()))?,
-                );
-            }
-        }
-        Ok(entries)
+        read_inventory_entries_from(&self.connection)
     }
 
     fn read_scan_issues(&self) -> Result<Vec<ScanIssue>, StorageError> {
@@ -371,6 +268,116 @@ impl Storage {
         }
         Ok(issues)
     }
+}
+
+fn read_supported_apps_from(
+    connection: &Connection,
+) -> Result<Vec<SupportedAppSummary>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT app_id, display_name, detected FROM supported_app_status ORDER BY sort_order",
+        )
+        .map_err(StorageError::ReadInventory)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .map_err(StorageError::ReadInventory)?;
+    let mut supported_apps = Vec::new();
+    for row in rows {
+        let (id, display_name, detected) = row.map_err(StorageError::ReadInventory)?;
+        supported_apps.push(SupportedAppSummary {
+            id: SupportedAppId::from_str(&id)
+                .ok_or_else(|| StorageError::UnknownSupportedApp(id.clone()))?,
+            display_name,
+            detected: Some(detected),
+        });
+    }
+    Ok(supported_apps)
+}
+
+fn read_inventory_entries_from(
+    connection: &Connection,
+) -> Result<Vec<InventoryObservation>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, skill_name, declared_name, skill_root, skill_file, location_kind, metadata_status, observed_fingerprint, root_key, stale, management_kind FROM inventory_observations ORDER BY skill_root",
+        )
+        .map_err(StorageError::ReadInventory)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, bool>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })
+        .map_err(StorageError::ReadInventory)?;
+    let mut entries = Vec::new();
+    for row in rows {
+        let (
+            id,
+            skill_name,
+            declared_name,
+            skill_root,
+            skill_file,
+            location_kind,
+            metadata_status,
+            observed_fingerprint,
+            root_key,
+            stale,
+            management_kind,
+        ) = row.map_err(StorageError::ReadInventory)?;
+        entries.push(InventoryObservation {
+            id,
+            skill_name,
+            declared_name,
+            skill_root,
+            skill_file,
+            location_kind: InventoryLocationKind::from_str(&location_kind)
+                .ok_or_else(|| StorageError::UnknownInventoryLocation(location_kind.clone()))?,
+            metadata_status: SkillMetadataStatus::from_str(&metadata_status)
+                .ok_or_else(|| StorageError::UnknownMetadataStatus(metadata_status.clone()))?,
+            observed_by: Vec::new(),
+            observed_fingerprint,
+            root_key: ScanRootKey::from_str(&root_key)
+                .ok_or_else(|| StorageError::UnknownScanRoot(root_key.clone()))?,
+            stale,
+            management_kind: ManagementKind::from_str(&management_kind)
+                .ok_or_else(|| StorageError::UnknownManagementKind(management_kind.clone()))?,
+        });
+    }
+
+    for entry in &mut entries {
+        let mut app_statement = connection
+            .prepare(
+                "SELECT app_id FROM inventory_observation_apps WHERE observation_id = ?1 ORDER BY app_id",
+            )
+            .map_err(StorageError::ReadInventory)?;
+        let app_rows = app_statement
+            .query_map([&entry.id], |row| row.get::<_, String>(0))
+            .map_err(StorageError::ReadInventory)?;
+        for row in app_rows {
+            let id = row.map_err(StorageError::ReadInventory)?;
+            entry.observed_by.push(
+                SupportedAppId::from_str(&id)
+                    .ok_or_else(|| StorageError::UnknownSupportedApp(id.clone()))?,
+            );
+        }
+    }
+    Ok(entries)
 }
 
 fn replace_inventory_rows(
@@ -441,6 +448,10 @@ fn reconcile_entries(
         .iter()
         .map(|issue| issue.root_key)
         .collect::<BTreeSet<_>>();
+    let previous_by_id = previous
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
     let mut combined = previous
         .iter()
         .filter(|entry| !successful.contains(&entry.root_key))
@@ -452,7 +463,13 @@ fn reconcile_entries(
             entry
         })
         .collect::<Vec<_>>();
-    combined.extend(scanned.iter().cloned());
+    combined.extend(scanned.iter().cloned().map(|mut entry| {
+        // 扫描只更新观察事实，不能覆盖由确定性证据或用户确认产生的管理归属。
+        if let Some(previous_entry) = previous_by_id.get(entry.id.as_str()) {
+            entry.management_kind = previous_entry.management_kind;
+        }
+        entry
+    }));
     combined.sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
     combined
 }
@@ -528,4 +545,39 @@ fn observation_changed(previous: &InventoryObservation, current: &InventoryObser
 
 fn refresh_count(value: i64) -> Result<usize, StorageError> {
     usize::try_from(value).map_err(|_| StorageError::InvalidRefreshCount(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn concurrent_open_applies_each_migration_only_once() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        let database = data_root.join("skillyard.sqlite3");
+        let barrier = Arc::new(Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let data_root = data_root.clone();
+                let database = database.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Storage::open(&data_root, &database).map(|_| ())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("并发 migration 线程不应 panic")
+                .expect("并发打开应成功");
+        }
+    }
 }

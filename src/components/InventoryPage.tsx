@@ -134,12 +134,12 @@ export function InventoryPage({
       )}
 
       <div className="inventory-content">
-        {managedGroups.map(([bundleName, entries]) => (
+        {managedGroups.map((group) => (
           <InventorySection
-            key={bundleName}
-            title={bundleName}
+            key={group.id}
+            title={group.title}
             eyebrow="由 SkillYard 管理 · BUNDLE"
-            entries={entries}
+            entries={group.entries}
           />
         ))}
         <InventorySection
@@ -230,15 +230,24 @@ function SkillCard({ entry }: { entry: InventoryObservation }) {
 
 function groupManagedEntries(
   entries: InventoryObservation[],
-): Array<[string, InventoryObservation[]]> {
-  const groups = new Map<string, InventoryObservation[]>();
+): Array<{ id: string; title: string; entries: InventoryObservation[] }> {
+  const groups = new Map<
+    string,
+    { id: string; title: string; entries: InventoryObservation[] }
+  >();
   for (const entry of entries) {
     if (entry.managementKind !== "skillYardManaged") continue;
-    const name = entry.bundleDisplayName ?? "本地 Bundle";
-    groups.set(name, [...(groups.get(name) ?? []), entry]);
+    // Bundle 名只是展示文字；生命周期分组必须使用稳定 ID，缺失时也不能误合并。
+    const id = entry.bundleId ?? `unassigned:${entry.id}`;
+    const existing = groups.get(id);
+    groups.set(id, {
+      id,
+      title: entry.bundleDisplayName ?? "本地 Bundle",
+      entries: [...(existing?.entries ?? []), entry],
+    });
   }
-  return [...groups.entries()].sort(([left], [right]) =>
-    left.localeCompare(right, "zh-CN"),
+  return [...groups.values()].sort((left, right) =>
+    left.title.localeCompare(right.title, "zh-CN") || left.id.localeCompare(right.id),
   );
 }
 
