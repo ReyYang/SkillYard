@@ -9,9 +9,11 @@ use crate::{
         create_folder_install_plan, ensure_central_store_layout, recover_pending_transactions,
     },
     mount_lifecycle::{
-        MountLifecycleError, confirm_mount_plan, create_mount_plan, create_remove_mount_plan,
-        create_repair_mount_plan, observe_mount_health, prepare_project_registration,
-        recover_pending_mount_transactions, refresh_mount_health,
+        MountLifecycleError, confirm_batch_mount_plan, confirm_mount_plan, create_batch_mount_plan,
+        create_mount_plan, create_remove_mount_plan, create_repair_mount_plan,
+        observe_mount_health, prepare_project_registration,
+        recover_pending_batch_mount_transactions, recover_pending_mount_transactions,
+        refresh_mount_health,
     },
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
@@ -112,6 +114,15 @@ impl SkillYardApplication {
             UiIntent::ConfirmMountPlan { plan_id } => {
                 self.with_write_operation(|| self.confirm_mount_plan(plan_id))
             }
+            UiIntent::CreateBatchMountPlan {
+                bundle_id,
+                requests,
+            } => self.with_write_operation(|| self.create_batch_mount_plan(bundle_id, requests)),
+            UiIntent::ConfirmBatchMountPlan {
+                plan_id,
+                selected_item_ids,
+            } => self
+                .with_write_operation(|| self.confirm_batch_mount_plan(plan_id, selected_item_ids)),
         }
     }
 
@@ -339,11 +350,56 @@ impl SkillYardApplication {
             .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
     }
 
+    fn create_batch_mount_plan(
+        &self,
+        bundle_id: String,
+        requests: Vec<crate::domain::BatchMountRequest>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_batch_mount_plan(
+            &self.paths,
+            &mut storage,
+            &bundle_id,
+            &requests,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::BatchMountPlan { plan })
+    }
+
+    fn confirm_batch_mount_plan(
+        &self,
+        plan_id: String,
+        selected_item_ids: Vec<String>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        confirm_batch_mount_plan(
+            &self.paths,
+            &mut storage,
+            &plan_id,
+            &selected_item_ids,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
     fn open_recovered_storage(&self) -> Result<Storage, ApplicationError> {
         let mut storage = Storage::open(self.paths.data_root(), &self.paths.database())?;
         ensure_central_store_layout(&self.paths)?;
         recover_pending_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
         recover_pending_mount_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
+        recover_pending_batch_mount_transactions(
+            &self.paths,
+            &mut storage,
+            unix_timestamp_millis(),
+        )?;
         Ok(storage)
     }
 }

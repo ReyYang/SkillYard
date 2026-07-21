@@ -59,6 +59,14 @@ pub enum LifecycleFailpoint {
     HardExitAfterMountTargetApplied,
     HardExitAfterMountStateCommittedBeforeJournal,
     HardExitAfterMountJournalRemovedBeforeForget,
+    HardExitAfterFirstBatchMountStageJournalBeforePublish,
+    HardExitAfterFirstBatchMountTargetAppliedBeforePhase,
+    HardExitAfterFirstBatchMountQuarantineBeforeUnlink,
+    ReplaceFirstBatchMountQuarantineWithUnknownBeforeDiscard,
+    HardExitAfterFirstBatchMountDiscardBeforeUnlink,
+    HardExitAfterFirstBatchMountRollbackBeforeProgress,
+    HardExitAfterAllBatchMountTargetsAppliedBeforeState,
+    HardExitAfterBatchMountStateCommittedBeforeJournal,
 }
 
 #[derive(Debug, Error)]

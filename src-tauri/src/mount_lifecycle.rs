@@ -1,22 +1,28 @@
 use std::{
-    ffi::{OsStr, OsString},
+    collections::{BTreeMap, BTreeSet},
+    ffi::{CStr, OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Read},
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::{
+            ffi::{OsStrExt, OsStringExt},
+            fs::{MetadataExt, OpenOptionsExt},
+        },
     },
     path::{Component, Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     content::{ContentValidationError, validate_single_skill_folder},
     domain::{
-        MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope, SupportedAppId,
+        BatchMountDisposition, BatchMountPlan, BatchMountPlanItem, BatchMountRequest, MountHealth,
+        MountOperation, MountPlan, MountPlanPurpose, MountScope, SupportedAppId,
     },
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
@@ -26,14 +32,17 @@ use crate::{
     },
     paths::ApplicationPaths,
     storage::{
-        NewMountPlan, NewProject, Storage, StorageError, StoredManagedMember, StoredMount,
-        StoredMountPlan, StoredMountTransaction, StoredProject,
+        NewBatchMountPlan, NewBatchMountPlanItem, NewMountPlan, NewProject, Storage, StorageError,
+        StoredBatchMountPlan, StoredBatchMountPlanItem, StoredBatchMountTransaction,
+        StoredManagedMember, StoredMount, StoredMountPlan, StoredMountTransaction, StoredProject,
     },
 };
 
 const MOUNT_PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
 const MOUNT_JOURNAL_VERSION: u32 = 1;
 const MAX_MOUNT_JOURNAL_BYTES: usize = 64 * 1024;
+const BATCH_MOUNT_JOURNAL_VERSION: u32 = 1;
+const MAX_BATCH_MOUNT_JOURNAL_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum MountLifecycleError {
@@ -70,6 +79,8 @@ pub enum MountLifecycleError {
     RecoveryBlocked(String),
     #[error("测试模拟 Mount 中断：{0}")]
     SimulatedInterruption(&'static str),
+    #[error("Bundle 批量 Mount Plan 无效：{0}")]
+    InvalidBatchMountPlan(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -105,6 +116,51 @@ struct MountJournal {
     phase: MountJournalPhase,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BatchMountJournalPhase {
+    JournalReady,
+    Applying,
+    TargetsApplied,
+    RollingBack,
+    StateCommitted,
+}
+
+impl BatchMountJournalPhase {
+    fn as_storage_str(self) -> &'static str {
+        match self {
+            Self::JournalReady => "journal_ready",
+            Self::Applying => "applying",
+            Self::TargetsApplied => "targets_applied",
+            Self::RollingBack => "rolling_back",
+            Self::StateCommitted => "state_committed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BatchMountJournalItem {
+    item_id: String,
+    target_observation: String,
+    /// 只有本事务确实创建且已经保存精确快照的链接，失败回滚时才允许删除。
+    created_by_transaction: bool,
+    applied_observation: Option<String>,
+    /// 回滚方向下，只有文件系统已经恢复并同步后才持久化这个进度位。
+    rolled_back: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BatchMountJournal {
+    version: u32,
+    transaction_id: String,
+    plan_id: String,
+    bundle_id: String,
+    phase: BatchMountJournalPhase,
+    items: Vec<BatchMountJournalItem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TargetKind {
     Absent,
@@ -116,6 +172,53 @@ enum TargetKind {
 struct TargetSnapshot {
     kind: TargetKind,
     observation: String,
+}
+
+struct PreparedBatchMountItem {
+    id: String,
+    mount_id: String,
+    member: StoredManagedMember,
+    app_id: SupportedAppId,
+    scope: MountScope,
+    project: Option<StoredProject>,
+    target_path: String,
+    snapshot: TargetSnapshot,
+    disposition: BatchMountDisposition,
+    conflict_reason: Option<String>,
+}
+
+/// Plan ID 携带预览内容摘要，确认时不只依赖可被协调改写的 SQLite 字段自洽。
+#[derive(Serialize)]
+struct BatchMountPlanSeal<'a> {
+    bundle_id: &'a str,
+    created_at: i64,
+    expires_at: i64,
+    items: Vec<BatchMountPlanSealItem<'a>>,
+}
+
+#[derive(Serialize)]
+struct BatchMountPlanSealItem<'a> {
+    id: &'a str,
+    mount_id: &'a str,
+    member_id: &'a str,
+    bundle_id: &'a str,
+    skill_name: &'a str,
+    app_id: SupportedAppId,
+    scope: MountScope,
+    project_id: Option<&'a str>,
+    project_display_name: Option<&'a str>,
+    project_root_path: Option<&'a str>,
+    project_root_device: Option<u64>,
+    project_root_inode: Option<u64>,
+    target_path: &'a str,
+    expected_target: &'a str,
+    member_fingerprint: &'a str,
+    target_observation: &'a str,
+    disposition: BatchMountDisposition,
+    selectable: bool,
+    default_selected: bool,
+    conflict_reason: Option<&'a str>,
+    target_health: MountHealth,
 }
 
 struct OpenMountParent {
@@ -366,6 +469,182 @@ pub fn refresh_mount_health(
     Ok(())
 }
 
+pub fn create_batch_mount_plan(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    bundle_id: &str,
+    requests: &[BatchMountRequest],
+    now: i64,
+) -> Result<BatchMountPlan, MountLifecycleError> {
+    ensure_single_component(bundle_id)?;
+    if requests.is_empty() {
+        return Err(MountLifecycleError::InvalidBatchMountPlan(
+            "至少选择一个 Mount 目标".to_owned(),
+        ));
+    }
+
+    let existing_mounts = storage.read_mounts()?;
+    let mut request_keys = BTreeSet::new();
+    let mut requested_scopes = BTreeMap::<(String, &'static str), (bool, bool)>::new();
+    for request in requests {
+        ensure_supported_scope(request.scope, request.project_id.as_deref())?;
+        let key = format!(
+            "{}\0{}\0{}\0{}",
+            request.member_id,
+            request.app_id.as_str(),
+            request.scope.as_str(),
+            request.project_id.as_deref().unwrap_or("")
+        );
+        if !request_keys.insert(key) {
+            return Err(MountLifecycleError::InvalidBatchMountPlan(
+                "同一个 Mount 目标被重复选择".to_owned(),
+            ));
+        }
+        let scopes = requested_scopes
+            .entry((request.member_id.clone(), request.app_id.as_str()))
+            .or_default();
+        match request.scope {
+            MountScope::Global => scopes.0 = true,
+            MountScope::Project => scopes.1 = true,
+        }
+    }
+
+    let mut prepared = Vec::with_capacity(requests.len());
+    for request in requests {
+        let member = storage.read_managed_member(&request.member_id)?;
+        if member.bundle_id != bundle_id {
+            return Err(MountLifecycleError::InvalidBatchMountPlan(
+                "一次批量 Mount 只能包含同一个 Bundle 的成员".to_owned(),
+            ));
+        }
+        validate_member_content(&member)?;
+        let project = read_scope_project(storage, request.scope, request.project_id.as_deref())?;
+        validate_project_identity(project.as_ref())?;
+        let target_path = derive_target_path(
+            paths,
+            &member,
+            request.app_id,
+            request.scope,
+            project.as_ref(),
+        )?;
+        let snapshot = observe_target(
+            paths,
+            request.app_id,
+            request.scope,
+            project.as_ref(),
+            &member.skill_name,
+            &member.expected_target,
+        )?;
+        let target_path = path_to_string(&target_path)?;
+        let blocked_object = storage.is_batch_mount_object_blocked(&member.id, &target_path)?;
+
+        let exact_mount = existing_mounts.iter().any(|mount| {
+            mount.member_id == member.id
+                && mount.app_id == request.app_id
+                && mount.scope == request.scope
+                && mount.project_id == request.project_id
+                && mount.target_path == target_path
+                && mount.expected_target == member.expected_target
+        });
+        let existing_scope_conflict = existing_mounts.iter().any(|mount| {
+            mount.member_id == member.id
+                && mount.app_id == request.app_id
+                && mount.scope != request.scope
+        });
+        let requested_scope_conflict = requested_scopes
+            .get(&(member.id.clone(), request.app_id.as_str()))
+            .is_some_and(|(global, project)| *global && *project);
+        let existing_path_conflict = existing_mounts.iter().any(|mount| {
+            mount.target_path == target_path
+                && !(mount.member_id == member.id
+                    && mount.app_id == request.app_id
+                    && mount.scope == request.scope
+                    && mount.project_id == request.project_id)
+        });
+
+        let (disposition, conflict_reason) = if blocked_object {
+            (
+                BatchMountDisposition::PathConflict,
+                Some("相关 Skill 或 Mount 路径正在等待人工恢复".to_owned()),
+            )
+        } else if exact_mount {
+            (BatchMountDisposition::AlreadyMounted, None)
+        } else if existing_scope_conflict || requested_scope_conflict {
+            (
+                BatchMountDisposition::ScopeConflict,
+                Some("同一 Skill 在同一应用中不能同时使用 global 与 project".to_owned()),
+            )
+        } else if existing_path_conflict || snapshot.kind == TargetKind::Other {
+            (
+                BatchMountDisposition::PathConflict,
+                Some("Mount 目标路径已被其他内容占用".to_owned()),
+            )
+        } else {
+            (BatchMountDisposition::Ready, None)
+        };
+        prepared.push(PreparedBatchMountItem {
+            id: Uuid::new_v4().to_string(),
+            mount_id: Uuid::new_v4().to_string(),
+            member,
+            app_id: request.app_id,
+            scope: request.scope,
+            project,
+            target_path,
+            snapshot,
+            disposition,
+            conflict_reason,
+        });
+    }
+
+    // 相同叶子即使来自异常数据库内容也不能让两个批量项争用同一路径。
+    let mut target_counts = BTreeMap::<String, usize>::new();
+    for item in &prepared {
+        *target_counts.entry(item.target_path.clone()).or_default() += 1;
+    }
+    for item in &mut prepared {
+        if target_counts.get(&item.target_path).copied().unwrap_or(0) > 1
+            && item.disposition != BatchMountDisposition::AlreadyMounted
+        {
+            item.disposition = BatchMountDisposition::PathConflict;
+            item.conflict_reason = Some("批量计划中的多个成员使用同一个 Mount 路径".to_owned());
+        }
+    }
+
+    let created_at = now;
+    let expires_at = now.saturating_add(MOUNT_PLAN_TTL_MILLIS);
+    let seal = batch_plan_seal_for_prepared(bundle_id, created_at, expires_at, &prepared)?;
+    let plan_id = format!("batch-{}-{seal}", Uuid::new_v4());
+    let new_items = prepared
+        .iter()
+        .map(|item| NewBatchMountPlanItem {
+            id: &item.id,
+            mount_id: &item.mount_id,
+            member_id: &item.member.id,
+            app_id: item.app_id,
+            scope: item.scope,
+            project_id: item.project.as_ref().map(|project| project.id.as_str()),
+            target_path: &item.target_path,
+            expected_target: &item.member.expected_target,
+            member_fingerprint: &item.member.content_fingerprint,
+            target_observation: &item.snapshot.observation,
+            disposition: item.disposition,
+            selectable: item.disposition == BatchMountDisposition::Ready,
+            default_selected: item.disposition == BatchMountDisposition::Ready,
+            conflict_reason: item.conflict_reason.as_deref(),
+            target_health: target_health(&item.snapshot),
+        })
+        .collect::<Vec<_>>();
+    storage.save_batch_mount_plan(NewBatchMountPlan {
+        id: &plan_id,
+        bundle_id,
+        items: &new_items,
+        created_at,
+        expires_at,
+    })?;
+    let stored = storage.read_batch_mount_plan(&plan_id)?;
+    stored_batch_plan_to_ui(&stored)
+}
+
 pub fn confirm_mount_plan(
     paths: &ApplicationPaths,
     storage: &mut Storage,
@@ -453,6 +732,1528 @@ pub fn recover_pending_mount_transactions(
         }
         lifecycle_lock.recheck(paths)?;
     }
+    Ok(())
+}
+
+pub fn confirm_batch_mount_plan(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    plan_id: &str,
+    selected_item_ids: &[String],
+    now: i64,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), MountLifecycleError> {
+    let lifecycle_lock = acquire_lifecycle_lock(paths)?;
+    lifecycle_lock.recheck(paths)?;
+    let preview = storage.read_batch_mount_plan(plan_id)?;
+    validate_batch_selection(&preview, selected_item_ids, now)?;
+    validate_batch_plan_contract(paths, storage, &preview)?;
+    ensure_batch_target_observations(paths, &preview, selected_item_ids)?;
+    // Batch 可能跨多个 Host；在首个 Skill 路径写入前先证明回滚隔离可以使用原子 rename。
+    preflight_batch_mount_devices(paths, &lifecycle_lock, storage, &preview, selected_item_ids)?;
+
+    let transaction_id = Uuid::new_v4().to_string();
+    let journal_relative = format!("journals/mount-batch-{transaction_id}.json");
+    let plan = storage.begin_batch_mount_transaction(
+        plan_id,
+        selected_item_ids,
+        &transaction_id,
+        &journal_relative,
+        now,
+    )?;
+    if let Err(error) = validate_consumed_batch_plan(&preview, &plan, selected_item_ids) {
+        storage.abort_batch_mount_transaction(&transaction_id, Some(&error.to_string()), now)?;
+        storage.forget_terminal_batch_mount_transaction(&transaction_id)?;
+        return Err(error);
+    }
+    let mut journal = match build_batch_journal(&transaction_id, &plan) {
+        Ok(journal) => journal,
+        Err(error) => {
+            storage.abort_batch_mount_transaction(
+                &transaction_id,
+                Some(&error.to_string()),
+                now,
+            )?;
+            storage.forget_terminal_batch_mount_transaction(&transaction_id)?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = ensure_batch_journal_fits(&journal, &plan) {
+        storage.abort_batch_mount_transaction(&transaction_id, Some(&error.to_string()), now)?;
+        storage.forget_terminal_batch_mount_transaction(&transaction_id)?;
+        return Err(error);
+    }
+    lifecycle_lock.recheck(paths)?;
+
+    let result = execute_batch_mount(
+        paths,
+        &lifecycle_lock,
+        storage,
+        &plan,
+        &mut journal,
+        now,
+        failpoint,
+    );
+    if let Err(error) = result {
+        handle_batch_mount_error(
+            paths,
+            &lifecycle_lock,
+            storage,
+            &plan,
+            &mut journal,
+            now,
+            &error,
+            failpoint,
+        )?;
+        return Err(error);
+    }
+    cleanup_completed_batch_mount(paths, &lifecycle_lock, storage, &journal)?;
+    Ok(())
+}
+
+pub fn recover_pending_batch_mount_transactions(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    now: i64,
+) -> Result<(), MountLifecycleError> {
+    let lifecycle_lock = acquire_lifecycle_lock(paths)?;
+    lifecycle_lock.recheck(paths)?;
+    for transaction in storage.recoverable_batch_mount_transactions()? {
+        if transaction.status == "blocked" {
+            continue;
+        }
+        if let Err(error) =
+            recover_batch_mount_transaction(paths, &lifecycle_lock, storage, &transaction, now)
+        {
+            storage.block_batch_mount_transaction(&transaction.id, &error.to_string(), now)?;
+        }
+        lifecycle_lock.recheck(paths)?;
+    }
+    Ok(())
+}
+
+fn validate_batch_selection(
+    plan: &StoredBatchMountPlan,
+    selected_item_ids: &[String],
+    now: i64,
+) -> Result<(), MountLifecycleError> {
+    if plan.status != "pending" {
+        return Err(StorageError::BatchMountPlanConsumed.into());
+    }
+    if plan.expires_at <= now {
+        return Err(StorageError::BatchMountPlanExpired.into());
+    }
+    let selected = selected_item_ids.iter().collect::<BTreeSet<_>>();
+    if selected.is_empty() || selected.len() != selected_item_ids.len() {
+        return Err(MountLifecycleError::InvalidBatchMountPlan(
+            "确认集合不能为空或包含重复项".to_owned(),
+        ));
+    }
+    for item_id in selected {
+        let Some(item) = plan.items.iter().find(|item| &item.id == item_id) else {
+            return Err(MountLifecycleError::InvalidBatchMountPlan(
+                "确认集合包含不属于当前 Plan 的项目".to_owned(),
+            ));
+        };
+        if item.disposition != BatchMountDisposition::Ready || !item.selectable {
+            return Err(MountLifecycleError::InvalidBatchMountPlan(
+                "只有 Ready 项可以进入确认集合".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_batch_plan_contract(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    plan: &StoredBatchMountPlan,
+) -> Result<(), MountLifecycleError> {
+    ensure_single_component(&plan.id)?;
+    ensure_single_component(&plan.bundle_id)?;
+    validate_batch_plan_seal(plan)?;
+    if plan.items.is_empty() {
+        return Err(MountLifecycleError::InvalidBatchMountPlan(
+            "批量 Plan 不包含任何项目".to_owned(),
+        ));
+    }
+    let mut item_ids = BTreeSet::new();
+    let mut mount_ids = BTreeSet::new();
+    for item in &plan.items {
+        if !item_ids.insert(item.id.as_str()) || !mount_ids.insert(item.mount_id.as_str()) {
+            return Err(MountLifecycleError::InvalidBatchMountPlan(
+                "批量 Plan 包含重复身份".to_owned(),
+            ));
+        }
+        let member = storage.read_managed_member(&item.member_id)?;
+        if member.bundle_id != plan.bundle_id
+            || item.bundle_id != plan.bundle_id
+            || member.skill_name != item.skill_name
+            || member.content_fingerprint != item.member_fingerprint
+            || member.expected_target != item.expected_target
+        {
+            return Err(MountLifecycleError::PlanPreconditionChanged);
+        }
+        validate_member_content(&member)?;
+        let project = batch_item_project(storage, item)?;
+        validate_project_identity(project.as_ref())?;
+        let expected_path =
+            derive_target_path(paths, &member, item.app_id, item.scope, project.as_ref())?;
+        if path_to_string(&expected_path)? != item.target_path
+            || parse_observation_kind(&item.target_observation).is_none()
+        {
+            return Err(MountLifecycleError::PlanPreconditionChanged);
+        }
+    }
+    Ok(())
+}
+
+fn batch_plan_seal_for_prepared(
+    bundle_id: &str,
+    created_at: i64,
+    expires_at: i64,
+    items: &[PreparedBatchMountItem],
+) -> Result<String, MountLifecycleError> {
+    let seal = BatchMountPlanSeal {
+        bundle_id,
+        created_at,
+        expires_at,
+        items: items
+            .iter()
+            .map(|item| BatchMountPlanSealItem {
+                id: &item.id,
+                mount_id: &item.mount_id,
+                member_id: &item.member.id,
+                bundle_id: &item.member.bundle_id,
+                skill_name: &item.member.skill_name,
+                app_id: item.app_id,
+                scope: item.scope,
+                project_id: item.project.as_ref().map(|project| project.id.as_str()),
+                project_display_name: item
+                    .project
+                    .as_ref()
+                    .map(|project| project.display_name.as_str()),
+                project_root_path: item
+                    .project
+                    .as_ref()
+                    .map(|project| project.root_path.as_str()),
+                project_root_device: item.project.as_ref().map(|project| project.root_device),
+                project_root_inode: item.project.as_ref().map(|project| project.root_inode),
+                target_path: &item.target_path,
+                expected_target: &item.member.expected_target,
+                member_fingerprint: &item.member.content_fingerprint,
+                target_observation: &item.snapshot.observation,
+                disposition: item.disposition,
+                selectable: item.disposition == BatchMountDisposition::Ready,
+                default_selected: item.disposition == BatchMountDisposition::Ready,
+                conflict_reason: item.conflict_reason.as_deref(),
+                target_health: target_health(&item.snapshot),
+            })
+            .collect(),
+    };
+    hash_batch_plan_seal(&seal)
+}
+
+fn batch_plan_seal_for_stored(plan: &StoredBatchMountPlan) -> Result<String, MountLifecycleError> {
+    let seal = BatchMountPlanSeal {
+        bundle_id: &plan.bundle_id,
+        created_at: plan.created_at,
+        expires_at: plan.expires_at,
+        items: plan
+            .items
+            .iter()
+            .map(|item| BatchMountPlanSealItem {
+                id: &item.id,
+                mount_id: &item.mount_id,
+                member_id: &item.member_id,
+                bundle_id: &item.bundle_id,
+                skill_name: &item.skill_name,
+                app_id: item.app_id,
+                scope: item.scope,
+                project_id: item.project_id.as_deref(),
+                project_display_name: item.project_display_name.as_deref(),
+                project_root_path: item.project_root_path.as_deref(),
+                project_root_device: item.project_root_device,
+                project_root_inode: item.project_root_inode,
+                target_path: &item.target_path,
+                expected_target: &item.expected_target,
+                member_fingerprint: &item.member_fingerprint,
+                target_observation: &item.target_observation,
+                disposition: item.disposition,
+                selectable: item.selectable,
+                default_selected: item.default_selected,
+                conflict_reason: item.conflict_reason.as_deref(),
+                target_health: item.target_health,
+            })
+            .collect(),
+    };
+    hash_batch_plan_seal(&seal)
+}
+
+fn hash_batch_plan_seal(seal: &BatchMountPlanSeal<'_>) -> Result<String, MountLifecycleError> {
+    let encoded = serde_json::to_vec(seal)?;
+    let digest = Sha256::digest(encoded);
+    Ok(hex_bytes(&digest))
+}
+
+fn validate_batch_plan_seal(plan: &StoredBatchMountPlan) -> Result<(), MountLifecycleError> {
+    let Some(encoded_id) = plan.id.strip_prefix("batch-") else {
+        return Err(MountLifecycleError::InvalidBatchMountPlan(
+            "批量 Plan 缺少预览摘要".to_owned(),
+        ));
+    };
+    let Some((nonce, expected_seal)) = encoded_id.rsplit_once('-') else {
+        return Err(MountLifecycleError::InvalidBatchMountPlan(
+            "批量 Plan 缺少预览摘要".to_owned(),
+        ));
+    };
+    if Uuid::parse_str(nonce).is_err()
+        || expected_seal.len() != 64
+        || !expected_seal
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(MountLifecycleError::InvalidBatchMountPlan(
+            "批量 Plan 的预览摘要无效".to_owned(),
+        ));
+    }
+    if batch_plan_seal_for_stored(plan)? != expected_seal {
+        return Err(MountLifecycleError::PlanPreconditionChanged);
+    }
+    Ok(())
+}
+
+fn ensure_batch_target_observations(
+    paths: &ApplicationPaths,
+    plan: &StoredBatchMountPlan,
+    selected_item_ids: &[String],
+) -> Result<(), MountLifecycleError> {
+    let selected = selected_item_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    for item in plan
+        .items
+        .iter()
+        .filter(|item| selected.contains(item.id.as_str()))
+    {
+        let project = stored_batch_item_project(item)?;
+        let snapshot = observe_target(
+            paths,
+            item.app_id,
+            item.scope,
+            project.as_ref(),
+            &item.skill_name,
+            &item.expected_target,
+        )?;
+        if snapshot.observation != item.target_observation {
+            return Err(MountLifecycleError::PlanPreconditionChanged);
+        }
+    }
+    Ok(())
+}
+
+fn preflight_batch_mount_devices(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &Storage,
+    plan: &StoredBatchMountPlan,
+    selected_item_ids: &[String],
+) -> Result<(), MountLifecycleError> {
+    let selected = selected_item_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let staging =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging_device = staging
+        .metadata()
+        .map_err(|source| mount_io("检查受管回滚临时区", &paths.staging_root(), source))?
+        .dev();
+    let mut checked = 0usize;
+    for item in plan
+        .items
+        .iter()
+        .filter(|item| selected.contains(item.id.as_str()))
+    {
+        let project = batch_item_project(storage, item)?;
+        let target_device =
+            preflight_mount_parent_device(paths, item.app_id, item.scope, project.as_ref())?;
+        if target_device != staging_device {
+            return Err(MountLifecycleError::InvalidBatchMountPlan(format!(
+                "Mount 目标与 Central Store 不在同一文件系统，无法保证安全回滚：{}",
+                item.target_path
+            )));
+        }
+        lifecycle_lock.recheck(paths)?;
+        checked += 1;
+    }
+    if checked != selected.len() {
+        return Err(MountLifecycleError::InvalidBatchMountPlan(
+            "批量事务包含未知确认项".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_mount_parent_device(
+    paths: &ApplicationPaths,
+    app_id: SupportedAppId,
+    scope: MountScope,
+    project: Option<&StoredProject>,
+) -> Result<u64, MountLifecycleError> {
+    let config = app_config(paths, app_id)?;
+    let (base_path, relative) = match (scope, project) {
+        (MountScope::Global, None) => {
+            let relative = config.global_root.strip_prefix(paths.home()).map_err(|_| {
+                MountLifecycleError::UnsafeMountPath(config.global_root.display().to_string())
+            })?;
+            (paths.home().to_path_buf(), relative.to_path_buf())
+        }
+        (MountScope::Project, Some(project)) => (
+            PathBuf::from(&project.root_path),
+            config.project_relative_root,
+        ),
+        _ => return Err(MountLifecycleError::InvalidScope),
+    };
+    let base = open_real_directory(&base_path)?;
+    if let Some(project) = project {
+        let metadata = base
+            .metadata()
+            .map_err(|source| mount_io("检查 Project 句柄", &base_path, source))?;
+        if metadata.dev() != project.root_device || metadata.ino() != project.root_inode {
+            return Err(MountLifecycleError::ProjectChanged(
+                project.root_path.clone(),
+            ));
+        }
+    }
+    let mut parent = base
+        .try_clone()
+        .map_err(|source| mount_io("保留 Mount 根目录", &base_path, source))?;
+    let mut parent_path = base_path.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(MountLifecycleError::UnsafeMountPath(
+                relative.display().to_string(),
+            ));
+        };
+        let child_path = parent_path.join(name);
+        match entry_metadata_at(&parent, name)
+            .map_err(|source| mount_io("检查 Mount 父目录", &child_path, source))?
+        {
+            None => break,
+            Some(metadata) if metadata.st_mode & libc::S_IFMT == libc::S_IFDIR => {
+                parent = open_directory_at(&parent, name)
+                    .map_err(|source| mount_io("安全打开 Mount 父目录", &child_path, source))?;
+                parent_path = child_path;
+            }
+            Some(_) => {
+                return Err(MountLifecycleError::UnsafeMountPath(
+                    child_path.display().to_string(),
+                ));
+            }
+        }
+    }
+    let opened = OpenMountParent {
+        base,
+        base_path,
+        parent,
+        parent_path,
+    };
+    let device = opened
+        .parent
+        .metadata()
+        .map_err(|source| mount_io("检查批量 Mount 文件系统", &opened.parent_path, source))?
+        .dev();
+    recheck_open_parent(&opened)?;
+    Ok(device)
+}
+
+fn validate_consumed_batch_plan(
+    preview: &StoredBatchMountPlan,
+    consumed: &StoredBatchMountPlan,
+    selected_item_ids: &[String],
+) -> Result<(), MountLifecycleError> {
+    let selected = selected_item_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut expected = preview.clone();
+    expected.status = "consumed".to_owned();
+    for item in &mut expected.items {
+        item.selected = selected.contains(item.id.as_str());
+    }
+    if &expected == consumed {
+        Ok(())
+    } else {
+        Err(MountLifecycleError::PlanPreconditionChanged)
+    }
+}
+
+fn execute_batch_mount(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    plan: &StoredBatchMountPlan,
+    journal: &mut BatchMountJournal,
+    now: i64,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), MountLifecycleError> {
+    write_batch_journal(paths, lifecycle_lock, journal)?;
+    storage.update_batch_mount_transaction_phase(
+        &journal.transaction_id,
+        BatchMountJournalPhase::JournalReady.as_storage_str(),
+        now,
+    )?;
+    lifecycle_lock.recheck(paths)?;
+
+    let mut selected = plan
+        .items
+        .iter()
+        .filter(|item| item.selected)
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        left.target_path
+            .cmp(&right.target_path)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    for (index, item) in selected.into_iter().enumerate() {
+        let item_failpoint = if index == 0 {
+            failpoint
+        } else {
+            LifecycleFailpoint::None
+        };
+        apply_batch_mount_item(
+            paths,
+            lifecycle_lock,
+            storage,
+            item,
+            journal,
+            false,
+            item_failpoint,
+        )?;
+        write_batch_journal(paths, lifecycle_lock, journal)?;
+        lifecycle_lock.recheck(paths)?;
+        if index == 0 {
+            inject_hard_exit(
+                failpoint,
+                LifecycleFailpoint::HardExitAfterFirstBatchMountTargetAppliedBeforePhase,
+            );
+            journal.phase = BatchMountJournalPhase::Applying;
+            write_batch_journal(paths, lifecycle_lock, journal)?;
+            storage.update_batch_mount_transaction_phase(
+                &journal.transaction_id,
+                journal.phase.as_storage_str(),
+                now,
+            )?;
+        }
+    }
+
+    journal.phase = BatchMountJournalPhase::TargetsApplied;
+    write_batch_journal(paths, lifecycle_lock, journal)?;
+    storage.update_batch_mount_transaction_phase(
+        &journal.transaction_id,
+        journal.phase.as_storage_str(),
+        now,
+    )?;
+    inject_hard_exit(
+        failpoint,
+        LifecycleFailpoint::HardExitAfterAllBatchMountTargetsAppliedBeforeState,
+    );
+    // 阶段信号持久化后再紧贴 SQLite 提交复验，外部不能利用可观察间隔写入虚假的 healthy 状态。
+    verify_batch_mount_effects(paths, storage, plan, journal)?;
+    storage.finalize_batch_mount_create(&journal.transaction_id, plan, now)?;
+    verify_batch_mount_effects(paths, storage, plan, journal)?;
+    write_notice_from_storage(paths, lifecycle_lock.root(), storage)?;
+    inject_hard_exit(
+        failpoint,
+        LifecycleFailpoint::HardExitAfterBatchMountStateCommittedBeforeJournal,
+    );
+    journal.phase = BatchMountJournalPhase::StateCommitted;
+    write_batch_journal(paths, lifecycle_lock, journal)?;
+    Ok(())
+}
+
+fn apply_batch_mount_item(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &Storage,
+    item: &StoredBatchMountPlanItem,
+    journal: &mut BatchMountJournal,
+    recovering: bool,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), MountLifecycleError> {
+    let journal_index = journal
+        .items
+        .iter()
+        .position(|candidate| candidate.item_id == item.id)
+        .ok_or_else(|| {
+            MountLifecycleError::RecoveryBlocked("Batch Journal 缺少已确认项目".to_owned())
+        })?;
+    let member = storage.read_managed_member(&item.member_id)?;
+    if member.bundle_id != item.bundle_id
+        || member.skill_name != item.skill_name
+        || member.content_fingerprint != item.member_fingerprint
+        || member.expected_target != item.expected_target
+    {
+        return Err(MountLifecycleError::PlanPreconditionChanged);
+    }
+    validate_member_content(&member)?;
+    let project = batch_item_project(storage, item)?;
+    validate_project_identity(project.as_ref())?;
+    let parent = match open_mount_parent(paths, item.app_id, item.scope, project.as_ref(), true)? {
+        ParentLookup::Open(parent) => parent,
+        ParentLookup::Missing => {
+            return Err(MountLifecycleError::UnsafeMountPath(
+                item.target_path.clone(),
+            ));
+        }
+    };
+    ensure_batch_parent_matches_target(&parent, item)?;
+    let leaf = OsStr::new(&item.skill_name);
+    let temporary_name = batch_mount_temporary_name(journal, item);
+    let temporary_path = parent.parent_path.join(&temporary_name);
+    let current = snapshot_at(&parent.parent, leaf, &item.expected_target)?;
+
+    if let Some(applied) = journal.items[journal_index].applied_observation.clone() {
+        if current.observation != applied {
+            if recovering && current.observation == item.target_observation {
+                let staged = snapshot_at(&parent.parent, &temporary_name, &item.expected_target)?;
+                if staged.observation != applied {
+                    return Err(MountLifecycleError::RecoveryBlocked(format!(
+                        "批量 Mount 的暂存链接无法确认归属：{}",
+                        temporary_path.display()
+                    )));
+                }
+                recheck_open_parent(&parent)?;
+                rename_at_no_replace(&parent.parent, &temporary_name, &parent.parent, leaf)
+                    .map_err(|source| mount_io("发布批量 Mount", &parent.parent_path, source))?;
+                let published = snapshot_at(&parent.parent, leaf, &item.expected_target)?;
+                if published.observation != applied {
+                    return Err(MountLifecycleError::RecoveryBlocked(format!(
+                        "批量 Mount 发布后无法确认归属：{}",
+                        item.target_path
+                    )));
+                }
+                parent
+                    .parent
+                    .sync_all()
+                    .map_err(|source| mount_io("同步批量 Mount", &parent.parent_path, source))?;
+                recheck_open_parent(&parent)?;
+                return Ok(());
+            }
+            return Err(MountLifecycleError::RecoveryBlocked(format!(
+                "批量 Mount 目标在恢复时被外部修改：{}",
+                item.target_path
+            )));
+        }
+        let staged = snapshot_at(&parent.parent, &temporary_name, &item.expected_target)?;
+        if staged.kind != TargetKind::Absent {
+            return Err(MountLifecycleError::RecoveryBlocked(format!(
+                "批量 Mount 已发布但暂存路径仍被占用：{}",
+                temporary_path.display()
+            )));
+        }
+        recheck_open_parent(&parent)?;
+        return Ok(());
+    }
+
+    let staged = snapshot_at(&parent.parent, &temporary_name, &item.expected_target)?;
+    if staged.kind != TargetKind::Absent {
+        return Err(if recovering {
+            MountLifecycleError::RecoveryBlocked(format!(
+                "批量 Mount 暂存路径存在但缺少归属证据：{}",
+                temporary_path.display()
+            ))
+        } else {
+            MountLifecycleError::UnsafeMountPath(temporary_path.display().to_string())
+        });
+    }
+
+    if current.observation != item.target_observation {
+        return Err(if recovering {
+            MountLifecycleError::RecoveryBlocked(format!(
+                "批量 Mount 目标与已确认前置状态不一致：{}",
+                item.target_path
+            ))
+        } else {
+            MountLifecycleError::PlanPreconditionChanged
+        });
+    }
+
+    match current.kind {
+        TargetKind::Absent => {
+            symlink_at(
+                Path::new(&item.expected_target),
+                &parent.parent,
+                &temporary_name,
+            )
+            .map_err(|source| mount_io("创建批量 Mount 暂存链接", &parent.parent_path, source))?;
+            journal.items[journal_index].created_by_transaction = true;
+            let applied = snapshot_at(&parent.parent, &temporary_name, &item.expected_target)?;
+            if applied.kind != TargetKind::ExpectedLink {
+                return Err(MountLifecycleError::RecoveryBlocked(format!(
+                    "批量 Mount 暂存链接创建后无法验证：{}",
+                    temporary_path.display()
+                )));
+            }
+            journal.items[journal_index].applied_observation = Some(applied.observation.clone());
+            parent.parent.sync_all().map_err(|source| {
+                mount_io("同步批量 Mount 暂存链接", &parent.parent_path, source)
+            })?;
+            // 先持久化暂存链接的 inode 证据，再向 Host 的最终名称发布，失败回滚不会误删后来出现的内容。
+            write_batch_journal(paths, lifecycle_lock, journal)?;
+            inject_hard_exit(
+                failpoint,
+                LifecycleFailpoint::HardExitAfterFirstBatchMountStageJournalBeforePublish,
+            );
+            lifecycle_lock.recheck(paths)?;
+            recheck_open_parent(&parent)?;
+            let staged = snapshot_at(&parent.parent, &temporary_name, &item.expected_target)?;
+            if staged.observation != applied.observation {
+                return Err(MountLifecycleError::RecoveryBlocked(format!(
+                    "批量 Mount 暂存链接在发布前被外部修改：{}",
+                    temporary_path.display()
+                )));
+            }
+            rename_at_no_replace(&parent.parent, &temporary_name, &parent.parent, leaf)
+                .map_err(|source| mount_io("发布批量 Mount", &parent.parent_path, source))?;
+            let published = snapshot_at(&parent.parent, leaf, &item.expected_target)?;
+            if published.observation != applied.observation {
+                return Err(MountLifecycleError::RecoveryBlocked(format!(
+                    "批量 Mount 发布后无法确认归属：{}",
+                    item.target_path
+                )));
+            }
+            parent
+                .parent
+                .sync_all()
+                .map_err(|source| mount_io("同步批量 Mount", &parent.parent_path, source))?;
+        }
+        TargetKind::ExpectedLink => {
+            // 已有正确链接只补齐数据库关系，任何失败回滚都不能删除它。
+            journal.items[journal_index].created_by_transaction = false;
+            journal.items[journal_index].applied_observation = Some(current.observation);
+        }
+        TargetKind::Other => return Err(MountLifecycleError::PlanPreconditionChanged),
+    }
+    recheck_open_parent(&parent)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_batch_mount_error(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    plan: &StoredBatchMountPlan,
+    journal: &mut BatchMountJournal,
+    now: i64,
+    error: &MountLifecycleError,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), MountLifecycleError> {
+    let transaction = storage
+        .recoverable_batch_mount_transactions()?
+        .into_iter()
+        .find(|transaction| transaction.id == journal.transaction_id)
+        .ok_or_else(|| {
+            MountLifecycleError::RecoveryBlocked(
+                "Batch Mount 错误处理时事务记录已经不存在".to_owned(),
+            )
+        })?;
+    if transaction.status == "completed" {
+        // SQLite 已经提交后绝不反向删除；同时冻结相关对象，避免人工恢复前出现第二个所有者。
+        storage.block_batch_mount_transaction(&journal.transaction_id, &error.to_string(), now)?;
+        return Ok(());
+    }
+    if transaction.phase == "journal_pending" {
+        storage.abort_batch_mount_transaction(
+            &journal.transaction_id,
+            Some(&error.to_string()),
+            now,
+        )?;
+        remove_batch_journal(paths, lifecycle_lock, journal)?;
+        storage.forget_terminal_batch_mount_transaction(&journal.transaction_id)?;
+        return Ok(());
+    }
+
+    journal.phase = BatchMountJournalPhase::RollingBack;
+    if let Err(rollback_start_error) = write_batch_journal(paths, lifecycle_lock, journal) {
+        storage.block_batch_mount_transaction(
+            &journal.transaction_id,
+            &rollback_start_error.to_string(),
+            now,
+        )?;
+        return Err(rollback_start_error);
+    }
+    storage.begin_batch_mount_rollback(&journal.transaction_id, now)?;
+    if let Err(rollback_error) =
+        rollback_batch_mount(paths, lifecycle_lock, storage, plan, journal, failpoint)
+    {
+        storage.block_batch_mount_transaction(
+            &journal.transaction_id,
+            &rollback_error.to_string(),
+            now,
+        )?;
+        return Err(rollback_error);
+    }
+    storage.abort_batch_mount_transaction(
+        &journal.transaction_id,
+        Some(&error.to_string()),
+        now,
+    )?;
+    remove_batch_journal(paths, lifecycle_lock, journal)?;
+    storage.forget_terminal_batch_mount_transaction(&journal.transaction_id)?;
+    Ok(())
+}
+
+struct BatchRollbackDiscard {
+    staging_root: File,
+    transaction: File,
+    discard: File,
+    transaction_name: OsString,
+    transaction_path: PathBuf,
+    discard_path: PathBuf,
+}
+
+fn open_batch_rollback_discard(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    journal: &BatchMountJournal,
+) -> Result<BatchRollbackDiscard, MountLifecycleError> {
+    ensure_single_component(&journal.transaction_id)?;
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let transaction_name = OsString::from(&journal.transaction_id);
+    let transaction_path = paths.staging_root().join(&transaction_name);
+    let transaction =
+        open_or_create_rollback_directory(&staging_root, &transaction_name, &transaction_path)?;
+    ensure_only_expected_entries(
+        &transaction,
+        &BTreeSet::from([OsString::from("discard")]),
+        &transaction_path,
+    )?;
+    let discard_path = transaction_path.join("discard");
+    let discard =
+        open_or_create_rollback_directory(&transaction, OsStr::new("discard"), &discard_path)?;
+    let expected_entries = journal
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.created_by_transaction)
+        .map(|(index, _)| batch_rollback_discard_name(index))
+        .collect::<BTreeSet<_>>();
+    ensure_only_expected_entries(&discard, &expected_entries, &discard_path)?;
+    Ok(BatchRollbackDiscard {
+        staging_root,
+        transaction,
+        discard,
+        transaction_name,
+        transaction_path,
+        discard_path,
+    })
+}
+
+fn batch_rollback_discard_name(index: usize) -> OsString {
+    OsString::from(format!("item-{index}"))
+}
+
+fn open_or_create_rollback_directory(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<File, MountLifecycleError> {
+    match mkdir_at(parent, name, 0o700) {
+        Ok(()) => parent
+            .sync_all()
+            .map_err(|source| mount_io("同步受管回滚目录", path, source))?,
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(source) => return Err(mount_io("创建受管回滚目录", path, source)),
+    }
+    let child = open_directory_at(parent, name)
+        .map_err(|source| mount_io("安全打开受管回滚目录", path, source))?;
+    recheck_child_directory(parent, name, &child, path)?;
+    Ok(child)
+}
+
+fn recheck_child_directory(
+    parent: &File,
+    name: &OsStr,
+    child: &File,
+    path: &Path,
+) -> Result<(), MountLifecycleError> {
+    let visible = entry_metadata_at(parent, name)
+        .map_err(|source| mount_io("重新检查受管回滚目录", path, source))?
+        .ok_or_else(|| {
+            MountLifecycleError::RecoveryBlocked(format!(
+                "受管回滚目录在操作期间消失：{}",
+                path.display()
+            ))
+        })?;
+    let opened = child
+        .metadata()
+        .map_err(|source| mount_io("检查受管回滚目录句柄", path, source))?;
+    if visible.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || visible.st_dev as u64 != opened.dev()
+        || visible.st_ino as u64 != opened.ino()
+    {
+        return Err(MountLifecycleError::RecoveryBlocked(format!(
+            "受管回滚目录在操作期间被替换：{}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn recheck_batch_rollback_discard(
+    discard: &BatchRollbackDiscard,
+) -> Result<(), MountLifecycleError> {
+    let visible_staging =
+        fs::symlink_metadata(discard.transaction_path.parent().ok_or_else(|| {
+            MountLifecycleError::RecoveryBlocked("受管回滚目录缺少父路径".to_owned())
+        })?)
+        .map_err(|source| {
+            mount_io(
+                "重新检查受管 staging",
+                discard
+                    .transaction_path
+                    .parent()
+                    .unwrap_or(Path::new("<staging>")),
+                source,
+            )
+        })?;
+    let opened_staging = discard
+        .staging_root
+        .metadata()
+        .map_err(|source| mount_io("检查受管 staging 句柄", &discard.transaction_path, source))?;
+    if visible_staging.file_type().is_symlink()
+        || !visible_staging.is_dir()
+        || visible_staging.dev() != opened_staging.dev()
+        || visible_staging.ino() != opened_staging.ino()
+    {
+        return Err(MountLifecycleError::RecoveryBlocked(
+            "受管 staging 在回滚期间被替换".to_owned(),
+        ));
+    }
+    recheck_child_directory(
+        &discard.staging_root,
+        &discard.transaction_name,
+        &discard.transaction,
+        &discard.transaction_path,
+    )?;
+    recheck_child_directory(
+        &discard.transaction,
+        OsStr::new("discard"),
+        &discard.discard,
+        &discard.discard_path,
+    )
+}
+
+fn ensure_only_expected_entries(
+    directory: &File,
+    expected: &BTreeSet<OsString>,
+    path: &Path,
+) -> Result<(), MountLifecycleError> {
+    let entries = read_mount_directory_entries(directory)?;
+    if let Some(unknown) = entries.iter().find(|entry| !expected.contains(*entry)) {
+        return Err(MountLifecycleError::RecoveryBlocked(format!(
+            "受管回滚目录包含未知内容：{}",
+            path.join(unknown).display()
+        )));
+    }
+    Ok(())
+}
+
+struct MountDirectoryStream(*mut libc::DIR);
+
+impl Drop for MountDirectoryStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::closedir(self.0);
+        }
+    }
+}
+
+fn read_mount_directory_entries(directory: &File) -> Result<Vec<OsString>, MountLifecycleError> {
+    let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
+    if duplicate < 0 {
+        return Err(mount_io(
+            "保留受管回滚目录句柄",
+            Path::new("<dirfd>"),
+            io::Error::last_os_error(),
+        ));
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(duplicate);
+        }
+        return Err(mount_io("读取受管回滚目录", Path::new("<dirfd>"), error));
+    }
+    let stream = MountDirectoryStream(stream);
+    let mut names = Vec::new();
+    loop {
+        clear_mount_errno();
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error().unwrap_or(0) == 0 {
+                break;
+            }
+            return Err(mount_io("读取受管回滚目录", Path::new("<dirfd>"), error));
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(OsString::from_vec(name.to_vec()));
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(target_os = "macos")]
+fn clear_mount_errno() {
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clear_mount_errno() {
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+}
+
+fn inject_unknown_quarantine_replacement(
+    failpoint: LifecycleFailpoint,
+    parent: &OpenMountParent,
+    quarantine_name: &OsStr,
+) -> Result<(), MountLifecycleError> {
+    if failpoint != LifecycleFailpoint::ReplaceFirstBatchMountQuarantineWithUnknownBeforeDiscard {
+        return Ok(());
+    }
+    // 仅测试构造器可启用：模拟外部进程恰好在 Host 快照校验后替换同名条目。
+    unlink_at(&parent.parent, quarantine_name, false)
+        .map_err(|source| mount_io("模拟替换 Host 回滚隔离内容", &parent.parent_path, source))?;
+    let unknown_path = parent.parent_path.join(quarantine_name);
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&unknown_path)
+        .map_err(|source| mount_io("模拟写入未知 Host 内容", &unknown_path, source))?;
+    parent
+        .parent
+        .sync_all()
+        .map_err(|source| mount_io("同步模拟 Host 竞态", &parent.parent_path, source))
+}
+
+fn cleanup_batch_rollback_discard(
+    discard: BatchRollbackDiscard,
+) -> Result<(), MountLifecycleError> {
+    recheck_batch_rollback_discard(&discard)?;
+    if !read_mount_directory_entries(&discard.discard)?.is_empty() {
+        return Err(MountLifecycleError::RecoveryBlocked(format!(
+            "受管回滚清理区仍包含内容：{}",
+            discard.discard_path.display()
+        )));
+    }
+    let BatchRollbackDiscard {
+        staging_root,
+        transaction,
+        discard: discard_handle,
+        transaction_name,
+        transaction_path,
+        discard_path,
+    } = discard;
+    drop(discard_handle);
+    unlink_at(&transaction, OsStr::new("discard"), true)
+        .map_err(|source| mount_io("清理空受管回滚目录", &discard_path, source))?;
+    transaction
+        .sync_all()
+        .map_err(|source| mount_io("同步受管回滚事务目录", &transaction_path, source))?;
+    if !read_mount_directory_entries(&transaction)?.is_empty() {
+        return Err(MountLifecycleError::RecoveryBlocked(format!(
+            "受管回滚事务目录包含未知内容：{}",
+            transaction_path.display()
+        )));
+    }
+    recheck_child_directory(
+        &staging_root,
+        &transaction_name,
+        &transaction,
+        &transaction_path,
+    )?;
+    drop(transaction);
+    unlink_at(&staging_root, &transaction_name, true)
+        .map_err(|source| mount_io("清理空受管回滚事务目录", &transaction_path, source))?;
+    staging_root
+        .sync_all()
+        .map_err(|source| mount_io("同步 staging 清理", &transaction_path, source))
+}
+
+fn rollback_batch_mount(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &Storage,
+    plan: &StoredBatchMountPlan,
+    journal: &mut BatchMountJournal,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), MountLifecycleError> {
+    let discard = open_batch_rollback_discard(paths, lifecycle_lock, journal)?;
+    for index in (0..journal.items.len()).rev() {
+        let item_id = journal.items[index].item_id.clone();
+        let created_by_transaction = journal.items[index].created_by_transaction;
+        let item = plan
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| {
+                MountLifecycleError::RecoveryBlocked("Batch Plan 与 Journal 不一致".to_owned())
+            })?;
+        if !created_by_transaction {
+            journal.items[index].rolled_back = true;
+            write_batch_journal(paths, lifecycle_lock, journal)?;
+            lifecycle_lock.recheck(paths)?;
+            continue;
+        }
+        let applied = journal.items[index]
+            .applied_observation
+            .clone()
+            .ok_or_else(|| {
+                MountLifecycleError::RecoveryBlocked(
+                    "Batch Journal 缺少事务创建链接的精确快照".to_owned(),
+                )
+            })?;
+        let project = batch_item_project(storage, item)?;
+        let parent =
+            match open_mount_parent(paths, item.app_id, item.scope, project.as_ref(), false)? {
+                ParentLookup::Open(parent) => parent,
+                ParentLookup::Missing => {
+                    return Err(MountLifecycleError::RecoveryBlocked(format!(
+                        "批量 Mount 回滚时父目录消失：{}",
+                        item.target_path
+                    )));
+                }
+            };
+        ensure_batch_parent_matches_target(&parent, item)?;
+        let leaf = OsStr::new(&item.skill_name);
+        let staged_name = batch_mount_temporary_name(journal, item);
+        let quarantine_name = OsString::from(format!(
+            ".skillyard-batch-rollback-{}-{index}",
+            journal.transaction_id
+        ));
+        let discard_name = batch_rollback_discard_name(index);
+        let current = snapshot_at(&parent.parent, leaf, &item.expected_target)?;
+        let staged = snapshot_at(&parent.parent, &staged_name, &item.expected_target)?;
+        let quarantine = snapshot_at(&parent.parent, &quarantine_name, &item.expected_target)?;
+        let discarded = snapshot_at(&discard.discard, &discard_name, &item.expected_target)?;
+        let (owned_name, mut quarantine_owned, mut discard_owned) = if quarantine.observation
+            == applied
+            && current.observation == item.target_observation
+            && staged.kind == TargetKind::Absent
+            && discarded.kind == TargetKind::Absent
+        {
+            (None, true, false)
+        } else if quarantine.kind != TargetKind::Absent {
+            return Err(MountLifecycleError::RecoveryBlocked(format!(
+                "批量 Mount 回滚隔离路径被未知内容占用：{}",
+                parent.parent_path.join(&quarantine_name).display()
+            )));
+        } else if discarded.observation == applied
+            && current.observation == item.target_observation
+            && staged.kind == TargetKind::Absent
+        {
+            (None, false, true)
+        } else if discarded.kind != TargetKind::Absent {
+            return Err(MountLifecycleError::RecoveryBlocked(format!(
+                "批量 Mount 受管清理路径被未知内容占用：{}",
+                discard.discard_path.join(&discard_name).display()
+            )));
+        } else if current.observation == applied && staged.kind == TargetKind::Absent {
+            (Some(leaf), false, false)
+        } else if current.observation == item.target_observation && staged.observation == applied {
+            (Some(staged_name.as_os_str()), false, false)
+        } else if item.target_observation == "absent"
+            && current.kind == TargetKind::Absent
+            && staged.kind == TargetKind::Absent
+        {
+            // 四个固定位置都缺失，才能把上次中断视为已经完成删除。
+            (None, false, false)
+        } else {
+            return Err(MountLifecycleError::RecoveryBlocked(format!(
+                "批量 Mount 回滚前无法确认事务链接的唯一归属：{}",
+                item.target_path
+            )));
+        };
+        if let Some(owned_name) = owned_name {
+            rename_at_no_replace(&parent.parent, owned_name, &parent.parent, &quarantine_name)
+                .map_err(|source| {
+                    mount_io("隔离批量 Mount 回滚链接", &parent.parent_path, source)
+                })?;
+            let moved = snapshot_at(&parent.parent, &quarantine_name, &item.expected_target)?;
+            if moved.observation != applied {
+                // 隔离前选中了最终名还是暂存名，竞态恢复就必须回到同一个名字，不能把未知内容发布到 Host。
+                let restored = rename_at_no_replace(
+                    &parent.parent,
+                    &quarantine_name,
+                    &parent.parent,
+                    owned_name,
+                );
+                parent.parent.sync_all().map_err(|source| {
+                    mount_io("同步批量 Mount 竞态恢复", &parent.parent_path, source)
+                })?;
+                return Err(if restored.is_ok() {
+                    MountLifecycleError::PlanPreconditionChanged
+                } else {
+                    MountLifecycleError::RecoveryBlocked(
+                        "批量 Mount 回滚时未知内容已保留在隔离路径".to_owned(),
+                    )
+                });
+            }
+            parent.parent.sync_all().map_err(|source| {
+                mount_io("同步批量 Mount 回滚隔离", &parent.parent_path, source)
+            })?;
+            inject_hard_exit(
+                failpoint,
+                LifecycleFailpoint::HardExitAfterFirstBatchMountQuarantineBeforeUnlink,
+            );
+            quarantine_owned = true;
+        }
+
+        if quarantine_owned {
+            inject_unknown_quarantine_replacement(failpoint, &parent, &quarantine_name)?;
+            recheck_open_parent(&parent)?;
+            recheck_batch_rollback_discard(&discard)?;
+            match rename_at_no_replace(
+                &parent.parent,
+                &quarantine_name,
+                &discard.discard,
+                &discard_name,
+            ) {
+                Ok(()) => {}
+                Err(source) if source.raw_os_error() == Some(libc::EXDEV) => {
+                    return Err(MountLifecycleError::RecoveryBlocked(format!(
+                        "批量 Mount 回滚跨文件系统，事务内容保留在 Host 隔离路径：{}",
+                        parent.parent_path.join(&quarantine_name).display()
+                    )));
+                }
+                Err(source) => {
+                    return Err(mount_io(
+                        "转移批量 Mount 到受管清理区",
+                        &discard.discard_path,
+                        source,
+                    ));
+                }
+            }
+            let moved = snapshot_at(&discard.discard, &discard_name, &item.expected_target)?;
+            if moved.observation != applied {
+                // Host 校验后的竞态内容必须原路恢复；恢复失败也只能保留，绝不能删除。
+                let restored = rename_at_no_replace(
+                    &discard.discard,
+                    &discard_name,
+                    &parent.parent,
+                    &quarantine_name,
+                );
+                let discard_synced = discard.discard.sync_all();
+                let host_synced = parent.parent.sync_all();
+                if restored.is_ok() && discard_synced.is_ok() && host_synced.is_ok() {
+                    let restored_snapshot =
+                        snapshot_at(&parent.parent, &quarantine_name, &item.expected_target)?;
+                    if restored_snapshot.observation == moved.observation {
+                        return Err(MountLifecycleError::PlanPreconditionChanged);
+                    }
+                }
+                return Err(MountLifecycleError::RecoveryBlocked(format!(
+                    "批量 Mount 回滚时未知内容已保留，需人工检查 {} 与 {}",
+                    parent.parent_path.join(&quarantine_name).display(),
+                    discard.discard_path.join(&discard_name).display()
+                )));
+            }
+            parent
+                .parent
+                .sync_all()
+                .map_err(|source| mount_io("同步 Host 回滚隔离", &parent.parent_path, source))?;
+            discard
+                .discard
+                .sync_all()
+                .map_err(|source| mount_io("同步受管回滚清理区", &discard.discard_path, source))?;
+            inject_hard_exit(
+                failpoint,
+                LifecycleFailpoint::HardExitAfterFirstBatchMountDiscardBeforeUnlink,
+            );
+            discard_owned = true;
+        }
+
+        if discard_owned {
+            // 恢复可能正好落在 rename 与 fsync 之间；再次同步两侧后才能删除受管条目。
+            parent
+                .parent
+                .sync_all()
+                .map_err(|source| mount_io("同步 Host 回滚隔离", &parent.parent_path, source))?;
+            discard
+                .discard
+                .sync_all()
+                .map_err(|source| mount_io("同步受管回滚清理区", &discard.discard_path, source))?;
+            recheck_batch_rollback_discard(&discard)?;
+            let before_unlink =
+                snapshot_at(&discard.discard, &discard_name, &item.expected_target)?;
+            if before_unlink.observation != applied {
+                return Err(MountLifecycleError::RecoveryBlocked(format!(
+                    "批量 Mount 受管清理内容在删除前被修改：{}",
+                    discard.discard_path.join(&discard_name).display()
+                )));
+            }
+            unlink_at(&discard.discard, &discard_name, false).map_err(|source| {
+                mount_io("删除受管批量 Mount 回滚链接", &discard.discard_path, source)
+            })?;
+            discard.discard.sync_all().map_err(|source| {
+                mount_io("同步受管批量 Mount 回滚", &discard.discard_path, source)
+            })?;
+            inject_hard_exit(
+                failpoint,
+                LifecycleFailpoint::HardExitAfterFirstBatchMountRollbackBeforeProgress,
+            );
+        }
+        recheck_open_parent(&parent)?;
+        journal.items[index].rolled_back = true;
+        write_batch_journal(paths, lifecycle_lock, journal)?;
+        lifecycle_lock.recheck(paths)?;
+    }
+    cleanup_batch_rollback_discard(discard)?;
+    Ok(())
+}
+
+fn recover_batch_mount_transaction(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    transaction: &StoredBatchMountTransaction,
+    now: i64,
+) -> Result<(), MountLifecycleError> {
+    ensure_single_component(&transaction.id)?;
+    ensure_single_component(&transaction.plan_id)?;
+    ensure_single_component(&transaction.bundle_id)?;
+    let expected_journal = format!("journals/mount-batch-{}.json", transaction.id);
+    if transaction.journal_path != expected_journal {
+        return Err(MountLifecycleError::RecoveryBlocked(
+            "SQLite 中的 Batch Mount Journal 路径不符合固定布局".to_owned(),
+        ));
+    }
+    let journal_name = OsString::from(format!("mount-batch-{}.json", transaction.id));
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    let journal_path = paths.journals_root().join(&journal_name);
+    let journal_exists = entry_metadata_at(&journals, &journal_name)
+        .map_err(|source| mount_io("检查 Batch Mount Journal", &journal_path, source))?
+        .is_some();
+    if !journal_exists {
+        if matches!(transaction.status.as_str(), "completed" | "aborted") {
+            storage.forget_terminal_batch_mount_transaction(&transaction.id)?;
+            return Ok(());
+        }
+        if transaction.phase == "journal_pending" && transaction.status == "in_progress" {
+            storage.abort_batch_mount_transaction(&transaction.id, None, now)?;
+            storage.forget_terminal_batch_mount_transaction(&transaction.id)?;
+            return Ok(());
+        }
+        return Err(MountLifecycleError::RecoveryBlocked(
+            "Batch Mount Journal 缺失但事务已经进入文件系统阶段".to_owned(),
+        ));
+    }
+
+    let plan = storage.read_batch_mount_plan(&transaction.plan_id)?;
+    validate_batch_plan_contract(paths, storage, &plan)?;
+    let mut journal = read_batch_journal(&journals, &journal_name, &journal_path)?;
+    validate_batch_journal(&journal, transaction, &plan)?;
+
+    let rolling_back = transaction.status == "in_progress"
+        && (journal.phase == BatchMountJournalPhase::RollingBack
+            || transaction.phase == "rolling_back");
+    if transaction.status == "aborted" {
+        remove_batch_journal(paths, lifecycle_lock, &journal)?;
+        storage.forget_terminal_batch_mount_transaction(&transaction.id)?;
+        return Ok(());
+    }
+    if rolling_back {
+        if journal.phase != BatchMountJournalPhase::RollingBack {
+            return Err(MountLifecycleError::RecoveryBlocked(
+                "SQLite 已进入回滚，但 Journal 没有保存回滚方向".to_owned(),
+            ));
+        }
+        preflight_batch_mount_devices(
+            paths,
+            lifecycle_lock,
+            storage,
+            &plan,
+            &transaction.selected_item_ids,
+        )?;
+        storage.begin_batch_mount_rollback(&transaction.id, now)?;
+        rollback_batch_mount(
+            paths,
+            lifecycle_lock,
+            storage,
+            &plan,
+            &mut journal,
+            LifecycleFailpoint::None,
+        )?;
+        storage.abort_batch_mount_transaction(&transaction.id, None, now)?;
+        remove_batch_journal(paths, lifecycle_lock, &journal)?;
+        storage.forget_terminal_batch_mount_transaction(&transaction.id)?;
+        return Ok(());
+    }
+    if transaction.status == "in_progress" && transaction.phase == "journal_pending" {
+        if journal
+            .items
+            .iter()
+            .any(|item| item.applied_observation.is_some())
+        {
+            return Err(MountLifecycleError::RecoveryBlocked(
+                "Batch Mount 事务阶段落后于已记录文件系统效果".to_owned(),
+            ));
+        }
+        storage.abort_batch_mount_transaction(&transaction.id, None, now)?;
+        remove_batch_journal(paths, lifecycle_lock, &journal)?;
+        storage.forget_terminal_batch_mount_transaction(&transaction.id)?;
+        return Ok(());
+    }
+
+    if transaction.status == "in_progress" {
+        preflight_batch_mount_devices(
+            paths,
+            lifecycle_lock,
+            storage,
+            &plan,
+            &transaction.selected_item_ids,
+        )?;
+    }
+
+    let forward_result = (|| -> Result<(), MountLifecycleError> {
+        if transaction.status == "in_progress" {
+            let mut selected = plan
+                .items
+                .iter()
+                .filter(|item| item.selected)
+                .collect::<Vec<_>>();
+            selected.sort_by(|left, right| {
+                left.target_path
+                    .cmp(&right.target_path)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            for item in selected {
+                apply_batch_mount_item(
+                    paths,
+                    lifecycle_lock,
+                    storage,
+                    item,
+                    &mut journal,
+                    true,
+                    LifecycleFailpoint::None,
+                )?;
+                write_batch_journal(paths, lifecycle_lock, &journal)?;
+                lifecycle_lock.recheck(paths)?;
+            }
+            if matches!(transaction.phase.as_str(), "journal_ready" | "applying") {
+                journal.phase = BatchMountJournalPhase::Applying;
+                write_batch_journal(paths, lifecycle_lock, &journal)?;
+                storage.update_batch_mount_transaction_phase(
+                    &transaction.id,
+                    BatchMountJournalPhase::Applying.as_storage_str(),
+                    now,
+                )?;
+            }
+            journal.phase = BatchMountJournalPhase::TargetsApplied;
+            write_batch_journal(paths, lifecycle_lock, &journal)?;
+            storage.update_batch_mount_transaction_phase(
+                &transaction.id,
+                BatchMountJournalPhase::TargetsApplied.as_storage_str(),
+                now,
+            )?;
+            verify_batch_mount_effects(paths, storage, &plan, &journal)?;
+            storage.finalize_batch_mount_create(&transaction.id, &plan, now)?;
+        }
+
+        verify_batch_mount_effects(paths, storage, &plan, &journal)?;
+        write_notice_from_storage(paths, lifecycle_lock.root(), storage)?;
+        journal.phase = BatchMountJournalPhase::StateCommitted;
+        write_batch_journal(paths, lifecycle_lock, &journal)?;
+        Ok(())
+    })();
+    if let Err(error) = forward_result {
+        handle_batch_mount_error(
+            paths,
+            lifecycle_lock,
+            storage,
+            &plan,
+            &mut journal,
+            now,
+            &error,
+            LifecycleFailpoint::None,
+        )?;
+        return Ok(());
+    }
+    remove_batch_journal(paths, lifecycle_lock, &journal)?;
+    storage.forget_terminal_batch_mount_transaction(&transaction.id)?;
+    Ok(())
+}
+
+fn verify_batch_mount_effects(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    plan: &StoredBatchMountPlan,
+    journal: &BatchMountJournal,
+) -> Result<(), MountLifecycleError> {
+    for item in plan.items.iter().filter(|item| item.selected) {
+        let journal_item = journal
+            .items
+            .iter()
+            .find(|candidate| candidate.item_id == item.id)
+            .ok_or_else(|| {
+                MountLifecycleError::RecoveryBlocked("Batch Journal 缺少确认项".to_owned())
+            })?;
+        let expected = journal_item.applied_observation.as_deref().ok_or_else(|| {
+            MountLifecycleError::RecoveryBlocked("Batch Journal 缺少生效快照".to_owned())
+        })?;
+        let project = batch_item_project(storage, item)?;
+        let parent =
+            match open_mount_parent(paths, item.app_id, item.scope, project.as_ref(), false)? {
+                ParentLookup::Open(parent) => parent,
+                ParentLookup::Missing => {
+                    return Err(MountLifecycleError::RecoveryBlocked(format!(
+                        "已提交的批量 Mount 父目录缺失：{}",
+                        item.target_path
+                    )));
+                }
+            };
+        ensure_batch_parent_matches_target(&parent, item)?;
+        let current = snapshot_at(
+            &parent.parent,
+            OsStr::new(&item.skill_name),
+            &item.expected_target,
+        )?;
+        if current.observation != expected {
+            return Err(MountLifecycleError::RecoveryBlocked(format!(
+                "已提交的批量 Mount 被外部修改：{}",
+                item.target_path
+            )));
+        }
+        recheck_open_parent(&parent)?;
+    }
+    Ok(())
+}
+
+fn cleanup_completed_batch_mount(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    journal: &BatchMountJournal,
+) -> Result<(), MountLifecycleError> {
+    remove_batch_journal(paths, lifecycle_lock, journal)?;
+    storage.forget_terminal_batch_mount_transaction(&journal.transaction_id)?;
+    lifecycle_lock.recheck(paths)?;
     Ok(())
 }
 
@@ -1078,6 +2879,57 @@ fn stored_plan_project(
     }
 }
 
+fn stored_batch_item_project(
+    item: &StoredBatchMountPlanItem,
+) -> Result<Option<StoredProject>, MountLifecycleError> {
+    match item.scope {
+        MountScope::Global
+            if item.project_id.is_none()
+                && item.project_root_path.is_none()
+                && item.project_display_name.is_none()
+                && item.project_root_device.is_none()
+                && item.project_root_inode.is_none() =>
+        {
+            Ok(None)
+        }
+        MountScope::Project => Ok(Some(StoredProject {
+            id: item
+                .project_id
+                .clone()
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            display_name: item
+                .project_display_name
+                .clone()
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            root_path: item
+                .project_root_path
+                .clone()
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            root_device: item
+                .project_root_device
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            root_inode: item
+                .project_root_inode
+                .ok_or(MountLifecycleError::InvalidScope)?,
+            created_at: 0,
+        })),
+        _ => Err(MountLifecycleError::InvalidScope),
+    }
+}
+
+fn batch_item_project(
+    storage: &Storage,
+    item: &StoredBatchMountPlanItem,
+) -> Result<Option<StoredProject>, MountLifecycleError> {
+    let snapshot = stored_batch_item_project(item)?;
+    let current = read_scope_project(storage, item.scope, item.project_id.as_deref())?;
+    if same_project_identity(snapshot.as_ref(), current.as_ref()) {
+        Ok(current)
+    } else {
+        Err(MountLifecycleError::PlanPreconditionChanged)
+    }
+}
+
 fn stored_mount_project(mount: &StoredMount) -> Result<Option<StoredProject>, MountLifecycleError> {
     match mount.scope {
         MountScope::Global
@@ -1361,6 +3213,17 @@ fn ensure_parent_matches_target(
     }
 }
 
+fn ensure_batch_parent_matches_target(
+    parent: &OpenMountParent,
+    item: &StoredBatchMountPlanItem,
+) -> Result<(), MountLifecycleError> {
+    if parent.parent_path.join(&item.skill_name) == Path::new(&item.target_path) {
+        Ok(())
+    } else {
+        Err(MountLifecycleError::PlanPreconditionChanged)
+    }
+}
+
 fn snapshot_at(
     parent: &File,
     name: &OsStr,
@@ -1557,6 +3420,223 @@ fn build_journal(transaction_id: &str, plan: &StoredMountPlan) -> MountJournal {
     }
 }
 
+fn build_batch_journal(
+    transaction_id: &str,
+    plan: &StoredBatchMountPlan,
+) -> Result<BatchMountJournal, MountLifecycleError> {
+    let mut selected = plan
+        .items
+        .iter()
+        .filter(|item| item.selected)
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        left.target_path
+            .cmp(&right.target_path)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if selected.is_empty() {
+        return Err(MountLifecycleError::InvalidBatchMountPlan(
+            "Batch Mount 事务没有确认项".to_owned(),
+        ));
+    }
+    Ok(BatchMountJournal {
+        version: BATCH_MOUNT_JOURNAL_VERSION,
+        transaction_id: transaction_id.to_owned(),
+        plan_id: plan.id.clone(),
+        bundle_id: plan.bundle_id.clone(),
+        phase: BatchMountJournalPhase::JournalReady,
+        items: selected
+            .into_iter()
+            .map(|item| BatchMountJournalItem {
+                item_id: item.id.clone(),
+                target_observation: item.target_observation.clone(),
+                created_by_transaction: false,
+                applied_observation: None,
+                rolled_back: false,
+            })
+            .collect(),
+    })
+}
+
+fn batch_mount_temporary_name(
+    journal: &BatchMountJournal,
+    item: &StoredBatchMountPlanItem,
+) -> OsString {
+    // 随机事务与 Plan item 身份让暂存名不会和 Host 的正常 Skill 名发生碰撞。
+    OsString::from(format!(
+        ".skillyard-batch-stage-{}-{}",
+        journal.transaction_id, item.id
+    ))
+}
+
+fn validate_batch_journal(
+    actual: &BatchMountJournal,
+    transaction: &StoredBatchMountTransaction,
+    plan: &StoredBatchMountPlan,
+) -> Result<(), MountLifecycleError> {
+    let expected = build_batch_journal(&transaction.id, plan)?;
+    let selected = transaction
+        .selected_item_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let actual_ids = actual
+        .items
+        .iter()
+        .map(|item| item.item_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let static_fields_match = actual.version == BATCH_MOUNT_JOURNAL_VERSION
+        && actual.transaction_id == expected.transaction_id
+        && actual.plan_id == expected.plan_id
+        && actual.bundle_id == expected.bundle_id
+        && transaction.plan_id == plan.id
+        && transaction.bundle_id == plan.bundle_id
+        && selected == actual_ids
+        && actual.items.len() == expected.items.len();
+    if !static_fields_match {
+        return Err(MountLifecycleError::RecoveryBlocked(
+            "SQLite、Batch Mount Plan 与 Journal 不一致".to_owned(),
+        ));
+    }
+    for actual_item in &actual.items {
+        let Some(expected_item) = expected
+            .items
+            .iter()
+            .find(|item| item.item_id == actual_item.item_id)
+        else {
+            return Err(MountLifecycleError::RecoveryBlocked(
+                "Batch Mount Journal 包含未知项目".to_owned(),
+            ));
+        };
+        if actual_item.target_observation != expected_item.target_observation {
+            return Err(MountLifecycleError::RecoveryBlocked(
+                "Batch Mount Journal 前置快照损坏".to_owned(),
+            ));
+        }
+        if let Some(observation) = actual_item.applied_observation.as_deref()
+            && parse_observation_kind(observation) != Some(TargetKind::ExpectedLink)
+        {
+            return Err(MountLifecycleError::RecoveryBlocked(
+                "Batch Mount Journal 生效快照损坏".to_owned(),
+            ));
+        }
+        if actual_item.created_by_transaction && actual_item.applied_observation.is_none() {
+            return Err(MountLifecycleError::RecoveryBlocked(
+                "Batch Mount Journal 缺少事务创建证据".to_owned(),
+            ));
+        }
+        if actual_item.rolled_back && actual.phase != BatchMountJournalPhase::RollingBack {
+            return Err(MountLifecycleError::RecoveryBlocked(
+                "Batch Mount Journal 的回滚进度与方向不一致".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_batch_journal_fits(
+    journal: &BatchMountJournal,
+    plan: &StoredBatchMountPlan,
+) -> Result<(), MountLifecycleError> {
+    for phase in [
+        BatchMountJournalPhase::JournalReady,
+        BatchMountJournalPhase::Applying,
+        BatchMountJournalPhase::TargetsApplied,
+        BatchMountJournalPhase::RollingBack,
+        BatchMountJournalPhase::StateCommitted,
+    ] {
+        let mut candidate = journal.clone();
+        candidate.phase = phase;
+        // 生效快照会在逐项创建后增长；必须在首次文件写入前按最大数字宽度预留空间。
+        for journal_item in &mut candidate.items {
+            let plan_item = plan
+                .items
+                .iter()
+                .find(|item| item.id == journal_item.item_id)
+                .ok_or_else(|| {
+                    MountLifecycleError::InvalidBatchMountPlan(
+                        "Batch Journal 包含未知确认项".to_owned(),
+                    )
+                })?;
+            journal_item.applied_observation = Some(format!(
+                "expected_symlink:{}:{}:{}:{}",
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                hex_bytes(plan_item.expected_target.as_bytes())
+            ));
+        }
+        if serde_json::to_vec_pretty(&candidate)?.len() > MAX_BATCH_MOUNT_JOURNAL_BYTES {
+            return Err(MountLifecycleError::JournalTooLarge);
+        }
+    }
+    Ok(())
+}
+
+fn write_batch_journal(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    journal: &BatchMountJournal,
+) -> Result<(), MountLifecycleError> {
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    let name = OsString::from(format!("mount-batch-{}.json", journal.transaction_id));
+    let bytes = serde_json::to_vec_pretty(journal)?;
+    if bytes.len() > MAX_BATCH_MOUNT_JOURNAL_BYTES {
+        return Err(MountLifecycleError::JournalTooLarge);
+    }
+    write_atomic_at(&journals, &name, &paths.journals_root().join(&name), &bytes)?;
+    Ok(())
+}
+
+fn read_batch_journal(
+    journals: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<BatchMountJournal, MountLifecycleError> {
+    let mut file = open_regular_file_at(journals, name, path, false)?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| mount_io("检查 Batch Mount Journal", path, source))?;
+    if metadata.len() > MAX_BATCH_MOUNT_JOURNAL_BYTES as u64 {
+        return Err(MountLifecycleError::JournalTooLarge);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
+    Read::by_ref(&mut file)
+        .take(MAX_BATCH_MOUNT_JOURNAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| mount_io("读取 Batch Mount Journal", path, source))?;
+    if bytes.len() > MAX_BATCH_MOUNT_JOURNAL_BYTES {
+        return Err(MountLifecycleError::JournalTooLarge);
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn remove_batch_journal(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    journal: &BatchMountJournal,
+) -> Result<(), MountLifecycleError> {
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    let name = OsString::from(format!("mount-batch-{}.json", journal.transaction_id));
+    match unlink_at(&journals, &name, false) {
+        Ok(()) => journals.sync_all().map_err(|source| {
+            mount_io(
+                "同步 Batch Mount Journal 清理",
+                &paths.journals_root(),
+                source,
+            )
+        }),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(mount_io(
+            "清理 Batch Mount Journal",
+            &paths.journals_root().join(name),
+            source,
+        )),
+    }
+}
+
 fn validate_journal(
     actual: &MountJournal,
     transaction: &StoredMountTransaction,
@@ -1670,6 +3750,38 @@ fn stored_plan_to_ui(
         target_path: plan.target_path.clone(),
         expected_target: plan.expected_target.clone(),
         target_health: health,
+        created_at: plan.created_at,
+        expires_at: plan.expires_at,
+    })
+}
+
+fn stored_batch_plan_to_ui(
+    plan: &StoredBatchMountPlan,
+) -> Result<BatchMountPlan, MountLifecycleError> {
+    Ok(BatchMountPlan {
+        id: plan.id.clone(),
+        bundle_id: plan.bundle_id.clone(),
+        bundle_display_name: plan.bundle_display_name.clone(),
+        items: plan
+            .items
+            .iter()
+            .map(|item| BatchMountPlanItem {
+                id: item.id.clone(),
+                member_id: item.member_id.clone(),
+                skill_name: item.skill_name.clone(),
+                app_id: item.app_id,
+                scope: item.scope,
+                project_id: item.project_id.clone(),
+                project_display_name: item.project_display_name.clone(),
+                target_path: item.target_path.clone(),
+                expected_target: item.expected_target.clone(),
+                disposition: item.disposition,
+                selectable: item.selectable,
+                default_selected: item.default_selected,
+                conflict_reason: item.conflict_reason.clone(),
+                target_health: item.target_health,
+            })
+            .collect(),
         created_at: plan.created_at,
         expires_at: plan.expires_at,
     })

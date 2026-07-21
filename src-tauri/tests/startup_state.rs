@@ -1190,7 +1190,7 @@ fn version_one_database_migrates_without_losing_inventory() {
             |row| row.get(0),
         )
         .expect("应读取 migration 版本");
-    assert_eq!(versions, "1,2,3,4,5,6,7");
+    assert_eq!(versions, "1,2,3,4,5,6,7,8");
 }
 
 fn write_skill(root: &std::path::Path, name: &str, script_contents: &str) {

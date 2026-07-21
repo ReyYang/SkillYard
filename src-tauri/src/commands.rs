@@ -3,8 +3,8 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
-    FolderInstallPlan, MountPlan, MountScope, SkillYardApplication, SupportedAppId, UiIntent,
-    UiOutcome, application::ApplicationError,
+    BatchMountPlan, BatchMountRequest, FolderInstallPlan, MountPlan, MountScope,
+    SkillYardApplication, SupportedAppId, UiIntent, UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -195,6 +195,42 @@ pub fn confirm_mount_plan(
     plan_id: String,
 ) -> Result<UiOutcome, UiError> {
     dispatch(&application, UiIntent::ConfirmMountPlan { plan_id })
+}
+
+#[tauri::command(async)]
+pub fn create_batch_mount_plan(
+    application: State<'_, SkillYardApplication>,
+    bundle_id: String,
+    requests: Vec<BatchMountRequest>,
+) -> Result<BatchMountPlan, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::CreateBatchMountPlan {
+            bundle_id,
+            requests,
+        },
+    )? {
+        UiOutcome::BatchMountPlan { plan } => Ok(plan),
+        _ => Err(UiError {
+            code: "invalidOutcome",
+            message: "SkillYard 没有生成批量 Mount 确认信息".to_owned(),
+        }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn confirm_batch_mount_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+    selected_item_ids: Vec<String>,
+) -> Result<UiOutcome, UiError> {
+    dispatch(
+        &application,
+        UiIntent::ConfirmBatchMountPlan {
+            plan_id,
+            selected_item_ids,
+        },
+    )
 }
 
 fn dispatch(application: &SkillYardApplication, intent: UiIntent) -> Result<UiOutcome, UiError> {

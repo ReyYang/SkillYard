@@ -23,6 +23,10 @@ pub enum UiIntent {
         scope: MountScope,
         project_id: Option<String>,
     },
+    CreateBatchMountPlan {
+        bundle_id: String,
+        requests: Vec<BatchMountRequest>,
+    },
     CreateRemoveMountPlan {
         mount_id: String,
     },
@@ -31,6 +35,10 @@ pub enum UiIntent {
     },
     ConfirmMountPlan {
         plan_id: String,
+    },
+    ConfirmBatchMountPlan {
+        plan_id: String,
+        selected_item_ids: Vec<String>,
     },
 }
 
@@ -201,6 +209,77 @@ pub struct MountPlan {
     pub target_path: String,
     pub expected_target: String,
     pub target_health: MountHealth,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+/// Batch Mount 的每一项仍然是一条独立 Mount 请求，不引入 Bundle 级 Mount。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchMountRequest {
+    pub member_id: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+}
+
+/// 路径冲突与 scope 冲突必须分别展示，用户不能把冲突项带入最终事务。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BatchMountDisposition {
+    Ready,
+    PathConflict,
+    ScopeConflict,
+    AlreadyMounted,
+}
+
+impl BatchMountDisposition {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::PathConflict => "path_conflict",
+            Self::ScopeConflict => "scope_conflict",
+            Self::AlreadyMounted => "already_mounted",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "ready" => Some(Self::Ready),
+            "path_conflict" => Some(Self::PathConflict),
+            "scope_conflict" => Some(Self::ScopeConflict),
+            "already_mounted" => Some(Self::AlreadyMounted),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchMountPlanItem {
+    pub id: String,
+    pub member_id: String,
+    pub skill_name: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub disposition: BatchMountDisposition,
+    pub selectable: bool,
+    pub default_selected: bool,
+    pub conflict_reason: Option<String>,
+    pub target_health: MountHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchMountPlan {
+    pub id: String,
+    pub bundle_id: String,
+    pub bundle_display_name: String,
+    pub items: Vec<BatchMountPlanItem>,
     pub created_at: i64,
     pub expires_at: i64,
 }
@@ -540,6 +619,9 @@ pub enum UiOutcome {
     },
     MountPlan {
         plan: MountPlan,
+    },
+    BatchMountPlan {
+        plan: BatchMountPlan,
     },
 }
 

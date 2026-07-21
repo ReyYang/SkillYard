@@ -12,6 +12,7 @@ mod storage;
 
 pub use application::SkillYardApplication;
 pub use domain::{
+    BatchMountDisposition, BatchMountPlan, BatchMountPlanItem, BatchMountRequest,
     FolderInstallPlan, InventoryItem, InventoryLocationKind, InventoryObservation,
     LocalRefreshSummary, ManagementKind, MountHealth, MountOperation, MountPlan, MountPlanPurpose,
     MountScope, MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, ScanIssue,
@@ -43,7 +44,9 @@ pub fn run() {
             commands::create_mount_plan,
             commands::create_remove_mount_plan,
             commands::create_repair_mount_plan,
-            commands::confirm_mount_plan
+            commands::confirm_mount_plan,
+            commands::create_batch_mount_plan,
+            commands::confirm_batch_mount_plan
         ])
         .run(tauri::generate_context!())
         .expect("SkillYard.app 运行失败");

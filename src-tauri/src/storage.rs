@@ -12,10 +12,10 @@ use rusqlite::{
 use thiserror::Error;
 
 use crate::domain::{
-    InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
-    ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope, MountSummary,
-    ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey,
-    SkillMetadataStatus, SupportedAppId, SupportedAppSummary, UiOutcome,
+    BatchMountDisposition, InventoryItem, InventoryLocationKind, InventoryObservation,
+    LocalRefreshSummary, ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope,
+    MountSummary, ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity,
+    ScanRootKey, SkillMetadataStatus, SupportedAppId, SupportedAppSummary, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -29,6 +29,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (5, include_str!("../migrations/0005_codex_mounts.sql")),
     (6, include_str!("../migrations/0006_mount_plan_purpose.sql")),
     (7, include_str!("../migrations/0007_project_inventory.sql")),
+    (8, include_str!("../migrations/0008_mount_batches.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -149,6 +150,32 @@ pub enum StorageError {
     UnknownMountScope(String),
     #[error("SQLite 中包含未知 Mount health：{0}")]
     UnknownMountHealth(String),
+    #[error("Batch Mount Plan 未签发或已经不存在")]
+    BatchMountPlanNotFound,
+    #[error("Batch Mount Plan 已经使用，不能重复确认")]
+    BatchMountPlanConsumed,
+    #[error("Batch Mount Plan 已过期，请重新生成")]
+    BatchMountPlanExpired,
+    #[error("Batch Mount Plan 的确认集合无效")]
+    InvalidBatchMountSelection,
+    #[error("Batch Mount Plan 的 Bundle、成员、Project 或目标状态不一致")]
+    InvalidBatchMountPlan,
+    #[error("相关 Skill 或 Mount 路径正在等待人工恢复，暂时不能修改")]
+    BatchMountObjectBlocked,
+    #[error("SQLite 中包含未知 Batch Mount disposition：{0}")]
+    UnknownBatchMountDisposition(String),
+    #[error("无法保存 Batch Mount Plan：{0}")]
+    SaveBatchMountPlan(#[source] rusqlite::Error),
+    #[error("无法读取 Batch Mount Plan：{0}")]
+    ReadBatchMountPlan(#[source] rusqlite::Error),
+    #[error("无法保存 Batch Mount 事务：{0}")]
+    SaveBatchMountTransaction(#[source] rusqlite::Error),
+    #[error("无法读取 Batch Mount 事务：{0}")]
+    ReadBatchMountTransaction(#[source] rusqlite::Error),
+    #[error("Batch Mount 事务不存在或当前状态不允许该操作：{0}")]
+    BatchMountStateConflict(String),
+    #[error("SQLite 中包含未知 Batch Mount 事务阶段：{0}")]
+    InvalidBatchMountPhase(String),
     #[error("SQLite 中包含非法文件系统身份值：{0}")]
     InvalidFilesystemIdentity(i64),
 }
@@ -343,6 +370,81 @@ pub(crate) struct StoredMountTransaction {
     pub status: String,
 }
 
+pub(crate) struct NewBatchMountPlan<'a> {
+    pub id: &'a str,
+    pub bundle_id: &'a str,
+    pub items: &'a [NewBatchMountPlanItem<'a>],
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+pub(crate) struct NewBatchMountPlanItem<'a> {
+    pub id: &'a str,
+    pub mount_id: &'a str,
+    pub member_id: &'a str,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<&'a str>,
+    pub target_path: &'a str,
+    pub expected_target: &'a str,
+    pub member_fingerprint: &'a str,
+    /// 生命周期层生成的不透明目标快照；确认时会再次与文件系统事实核对。
+    pub target_observation: &'a str,
+    pub disposition: BatchMountDisposition,
+    pub selectable: bool,
+    pub default_selected: bool,
+    pub conflict_reason: Option<&'a str>,
+    pub target_health: MountHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredBatchMountPlan {
+    pub id: String,
+    pub bundle_id: String,
+    pub bundle_display_name: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub status: String,
+    pub items: Vec<StoredBatchMountPlanItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredBatchMountPlanItem {
+    pub id: String,
+    pub mount_id: String,
+    pub member_id: String,
+    pub bundle_id: String,
+    pub skill_name: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub project_root_path: Option<String>,
+    pub project_root_device: Option<u64>,
+    pub project_root_inode: Option<u64>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub member_fingerprint: String,
+    pub target_observation: String,
+    pub disposition: BatchMountDisposition,
+    pub selectable: bool,
+    pub default_selected: bool,
+    pub selected: bool,
+    pub conflict_reason: Option<String>,
+    pub target_health: MountHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredBatchMountTransaction {
+    pub id: String,
+    pub plan_id: String,
+    pub bundle_id: String,
+    pub journal_path: String,
+    pub phase: String,
+    pub status: String,
+    pub selected_item_ids: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LifecyclePhase {
     JournalPending,
@@ -358,6 +460,51 @@ enum MountTransactionPhase {
     JournalReady,
     TargetApplied,
     StateCommitted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BatchMountTransactionPhase {
+    JournalPending,
+    JournalReady,
+    Applying,
+    TargetsApplied,
+    RollingBack,
+    StateCommitted,
+}
+
+impl BatchMountTransactionPhase {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "journal_pending" => Some(Self::JournalPending),
+            "journal_ready" => Some(Self::JournalReady),
+            "applying" => Some(Self::Applying),
+            "targets_applied" => Some(Self::TargetsApplied),
+            "rolling_back" => Some(Self::RollingBack),
+            "state_committed" => Some(Self::StateCommitted),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::JournalPending => "journal_pending",
+            Self::JournalReady => "journal_ready",
+            Self::Applying => "applying",
+            Self::TargetsApplied => "targets_applied",
+            Self::RollingBack => "rolling_back",
+            Self::StateCommitted => "state_committed",
+        }
+    }
+
+    fn previous(self) -> Option<Self> {
+        match self {
+            Self::JournalPending => Some(Self::JournalPending),
+            Self::JournalReady => Some(Self::JournalPending),
+            Self::Applying => Some(Self::JournalReady),
+            Self::TargetsApplied => Some(Self::Applying),
+            Self::RollingBack | Self::StateCommitted => None,
+        }
+    }
 }
 
 impl MountTransactionPhase {
@@ -778,6 +925,14 @@ impl Storage {
         })
     }
 
+    pub(crate) fn is_batch_mount_object_blocked(
+        &self,
+        member_id: &str,
+        target_path: &str,
+    ) -> Result<bool, StorageError> {
+        batch_mount_object_is_blocked(&self.connection, member_id, target_path)
+    }
+
     pub(crate) fn save_mount_plan(&mut self, plan: NewMountPlan<'_>) -> Result<(), StorageError> {
         validate_new_mount_plan_shape(&plan)?;
         let transaction = self
@@ -1142,6 +1297,450 @@ impl Storage {
                 journal_path,
                 phase,
                 status,
+            });
+        }
+        Ok(transactions)
+    }
+
+    pub(crate) fn save_batch_mount_plan(
+        &mut self,
+        plan: NewBatchMountPlan<'_>,
+    ) -> Result<(), StorageError> {
+        validate_new_batch_mount_plan_shape(&plan)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveBatchMountPlan)?;
+        let bundle_exists = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM bundles WHERE id = ?1)",
+                [plan.bundle_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::SaveBatchMountPlan)?;
+        if !bundle_exists {
+            return Err(StorageError::InvalidBatchMountPlan);
+        }
+        transaction
+            .execute(
+                "INSERT INTO batch_mount_plans (
+                    id, bundle_id, created_at, expires_at, status
+                 ) VALUES (?1, ?2, ?3, ?4, 'pending')",
+                params![plan.id, plan.bundle_id, plan.created_at, plan.expires_at],
+            )
+            .map_err(StorageError::SaveBatchMountPlan)?;
+        for (sort_order, item) in plan.items.iter().enumerate() {
+            validate_new_batch_mount_item_shape(item)?;
+            let member = read_managed_member_from(&transaction, &self.data_root, item.member_id)?
+                .ok_or_else(|| {
+                StorageError::ManagedMemberNotFound(item.member_id.to_owned())
+            })?;
+            if member.bundle_id != plan.bundle_id
+                || member.content_fingerprint != item.member_fingerprint
+                || member.expected_target != item.expected_target
+                || Path::new(item.target_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    != Some(member.skill_name.as_str())
+            {
+                return Err(StorageError::InvalidBatchMountPlan);
+            }
+            if item.disposition == BatchMountDisposition::Ready
+                && batch_mount_object_is_blocked(&transaction, item.member_id, item.target_path)?
+            {
+                return Err(StorageError::BatchMountObjectBlocked);
+            }
+            let project_snapshot = item
+                .project_id
+                .map(|project_id| {
+                    read_project_from(&transaction, project_id)?
+                        .ok_or_else(|| StorageError::ProjectNotFound(project_id.to_owned()))
+                })
+                .transpose()?;
+            transaction
+                .execute(
+                    "INSERT INTO batch_mount_plan_items (
+                        id, plan_id, bundle_id, mount_id, member_id, app_id, scope, project_id,
+                        project_root_path, project_root_device, project_root_inode, target_path,
+                        expected_target, member_fingerprint, target_observation, disposition,
+                        selectable, default_selected, conflict_reason, target_health, sort_order
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                        ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                     )",
+                    params![
+                        item.id,
+                        plan.id,
+                        plan.bundle_id,
+                        item.mount_id,
+                        item.member_id,
+                        item.app_id.as_str(),
+                        item.scope.as_str(),
+                        item.project_id,
+                        project_snapshot
+                            .as_ref()
+                            .map(|project| project.root_path.as_str()),
+                        project_snapshot
+                            .as_ref()
+                            .map(|project| filesystem_identity_to_sql(project.root_device))
+                            .transpose()?,
+                        project_snapshot
+                            .as_ref()
+                            .map(|project| filesystem_identity_to_sql(project.root_inode))
+                            .transpose()?,
+                        item.target_path,
+                        item.expected_target,
+                        item.member_fingerprint,
+                        item.target_observation,
+                        item.disposition.as_str(),
+                        i64::from(item.selectable),
+                        i64::from(item.default_selected),
+                        item.conflict_reason,
+                        item.target_health.as_str(),
+                        sort_order as i64,
+                    ],
+                )
+                .map_err(StorageError::SaveBatchMountPlan)?;
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveBatchMountPlan)
+    }
+
+    pub(crate) fn read_batch_mount_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<StoredBatchMountPlan, StorageError> {
+        read_batch_mount_plan_from(&self.connection, &self.data_root, plan_id)?
+            .ok_or(StorageError::BatchMountPlanNotFound)
+    }
+
+    pub(crate) fn begin_batch_mount_transaction(
+        &mut self,
+        plan_id: &str,
+        selected_item_ids: &[String],
+        transaction_id: &str,
+        journal_path: &str,
+        now: i64,
+    ) -> Result<StoredBatchMountPlan, StorageError> {
+        if !is_single_path_component(transaction_id) || !is_normalized_relative_path(journal_path) {
+            return Err(StorageError::InvalidBatchMountPlan);
+        }
+        let selected = selected_item_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if selected.is_empty() || selected.len() != selected_item_ids.len() {
+            return Err(StorageError::InvalidBatchMountSelection);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        let mut plan = read_batch_mount_plan_from(&transaction, &self.data_root, plan_id)?
+            .ok_or(StorageError::BatchMountPlanNotFound)?;
+        if plan.status != "pending" {
+            return Err(StorageError::BatchMountPlanConsumed);
+        }
+        if plan.expires_at <= now {
+            return Err(StorageError::BatchMountPlanExpired);
+        }
+        for item in &mut plan.items {
+            item.selected = selected.contains(item.id.as_str());
+        }
+        let selected_items = selected_batch_mount_items(&plan)?;
+        if selected_items.len() != selected.len() {
+            return Err(StorageError::InvalidBatchMountSelection);
+        }
+        for item in selected_items {
+            validate_batch_ready_item_state(&transaction, &self.data_root, item)?;
+        }
+        let inserted = transaction
+            .execute(
+                "INSERT INTO batch_mount_transactions (
+                    id, plan_id, bundle_id, journal_path, phase, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'journal_pending', 'in_progress', ?5, ?5)",
+                params![transaction_id, plan.id, plan.bundle_id, journal_path, now],
+            )
+            .map_err(map_batch_mount_transaction_insert_error)?;
+        ensure_one_batch_mount_row(inserted, transaction_id)?;
+        let mut selected_order = 0_i64;
+        for item in &plan.items {
+            if selected.contains(item.id.as_str()) {
+                transaction
+                    .execute(
+                        "INSERT INTO batch_mount_transaction_items (
+                            transaction_id, plan_id, item_id, sort_order
+                         ) VALUES (?1, ?2, ?3, ?4)",
+                        params![transaction_id, plan.id, item.id, selected_order],
+                    )
+                    .map_err(StorageError::SaveBatchMountTransaction)?;
+                selected_order += 1;
+            }
+        }
+        let consumed = transaction
+            .execute(
+                "UPDATE batch_mount_plans
+                 SET status = 'consumed'
+                 WHERE id = ?1 AND status = 'pending'",
+                [&plan.id],
+            )
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        ensure_one_batch_mount_row(consumed, transaction_id)?;
+        plan.status = "consumed".to_owned();
+        transaction
+            .commit()
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        Ok(plan)
+    }
+
+    pub(crate) fn update_batch_mount_transaction_phase(
+        &mut self,
+        transaction_id: &str,
+        phase: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let next = BatchMountTransactionPhase::from_str(phase)
+            .ok_or_else(|| StorageError::InvalidBatchMountPhase(phase.to_owned()))?;
+        let Some(previous) = next.previous() else {
+            return Err(StorageError::BatchMountStateConflict(
+                transaction_id.to_owned(),
+            ));
+        };
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE batch_mount_transactions
+                 SET phase = ?2, updated_at = ?4
+                 WHERE id = ?1 AND status = 'in_progress' AND phase IN (?2, ?3)",
+                params![transaction_id, next.as_str(), previous.as_str(), now],
+            )
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        ensure_one_batch_mount_row(changed, transaction_id)
+    }
+
+    pub(crate) fn begin_batch_mount_rollback(
+        &mut self,
+        transaction_id: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE batch_mount_transactions
+                 SET phase = 'rolling_back', updated_at = ?2
+                 WHERE id = ?1 AND status = 'in_progress'
+                   AND phase IN ('journal_ready', 'applying', 'targets_applied', 'rolling_back')",
+                params![transaction_id, now],
+            )
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        ensure_one_batch_mount_row(changed, transaction_id)
+    }
+
+    pub(crate) fn finalize_batch_mount_create(
+        &mut self,
+        transaction_id: &str,
+        plan: &StoredBatchMountPlan,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let selected = selected_batch_mount_items(plan)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        let already_completed =
+            validate_batch_mount_finalization(&transaction, &self.data_root, transaction_id, plan)?;
+        if already_completed {
+            for item in selected {
+                let mount = read_mount_from(&transaction, &self.data_root, &item.mount_id)?
+                    .ok_or_else(|| {
+                        StorageError::BatchMountStateConflict(transaction_id.to_owned())
+                    })?;
+                ensure_batch_mount_matches_item(&mount, item)?;
+            }
+            return transaction
+                .commit()
+                .map_err(StorageError::SaveBatchMountTransaction);
+        }
+        for item in selected {
+            transaction
+                .execute(
+                    "INSERT INTO mounts (
+                        id, member_id, app_id, scope, project_id, target_path,
+                        expected_target, health, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                    params![
+                        item.mount_id,
+                        item.member_id,
+                        item.app_id.as_str(),
+                        item.scope.as_str(),
+                        item.project_id,
+                        item.target_path,
+                        item.expected_target,
+                        MountHealth::Healthy.as_str(),
+                        now,
+                    ],
+                )
+                .map_err(StorageError::SaveBatchMountTransaction)?;
+            let mount = read_mount_from(&transaction, &self.data_root, &item.mount_id)?
+                .ok_or_else(|| StorageError::BatchMountStateConflict(transaction_id.to_owned()))?;
+            ensure_batch_mount_matches_item(&mount, item)?;
+            // Mount 关系一旦提交，对应路径就不再作为待接管观察重复展示。
+            transaction
+                .execute(
+                    "DELETE FROM inventory_observations WHERE skill_root = ?1",
+                    [&item.target_path],
+                )
+                .map_err(StorageError::SaveBatchMountTransaction)?;
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE batch_mount_transactions
+                 SET phase = 'state_committed', status = 'completed', updated_at = ?4
+                 WHERE id = ?1 AND plan_id = ?2 AND bundle_id = ?3
+                   AND phase = 'targets_applied' AND status = 'in_progress'",
+                params![transaction_id, plan.id, plan.bundle_id, now],
+            )
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        ensure_one_batch_mount_row(changed, transaction_id)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveBatchMountTransaction)
+    }
+
+    pub(crate) fn abort_batch_mount_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: Option<&str>,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        // 生命周期层只有在文件系统已恢复到事务开始前状态后，才会把 applying 之后的事务标为 aborted。
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE batch_mount_transactions
+                 SET status = 'aborted', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status = 'in_progress'
+                   AND phase IN (
+                       'journal_pending', 'journal_ready', 'applying',
+                       'targets_applied', 'rolling_back'
+                   )",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        ensure_one_batch_mount_row(changed, transaction_id)
+    }
+
+    pub(crate) fn block_batch_mount_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE batch_mount_transactions
+                 SET status = 'blocked', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status IN ('in_progress', 'completed', 'aborted', 'blocked')",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        ensure_one_batch_mount_row(changed, transaction_id)
+    }
+
+    pub(crate) fn forget_terminal_batch_mount_transaction(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        let stored = transaction
+            .query_row(
+                "SELECT plan_id, status FROM batch_mount_transactions WHERE id = ?1",
+                [transaction_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveBatchMountTransaction)?;
+        if let Some((plan_id, status)) = stored {
+            if !matches!(status.as_str(), "completed" | "aborted") {
+                return Err(StorageError::BatchMountStateConflict(
+                    transaction_id.to_owned(),
+                ));
+            }
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM batch_mount_transactions WHERE id = ?1",
+                    [transaction_id],
+                )
+                .map_err(StorageError::SaveBatchMountTransaction)?;
+            ensure_one_batch_mount_row(deleted, transaction_id)?;
+            let deleted = transaction
+                .execute("DELETE FROM batch_mount_plans WHERE id = ?1", [plan_id])
+                .map_err(StorageError::SaveBatchMountTransaction)?;
+            ensure_one_batch_mount_row(deleted, transaction_id)?;
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveBatchMountTransaction)
+    }
+
+    pub(crate) fn recoverable_batch_mount_transactions(
+        &self,
+    ) -> Result<Vec<StoredBatchMountTransaction>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, plan_id, bundle_id, journal_path, phase, status
+                 FROM batch_mount_transactions
+                 WHERE status IN ('in_progress', 'completed', 'aborted', 'blocked')
+                 ORDER BY created_at, id",
+            )
+            .map_err(StorageError::ReadBatchMountTransaction)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(StorageError::ReadBatchMountTransaction)?;
+        let stored = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadBatchMountTransaction)?;
+        let mut transactions = Vec::with_capacity(stored.len());
+        for (id, plan_id, bundle_id, journal_path, phase, status) in stored {
+            if !is_single_path_component(&id)
+                || !is_single_path_component(&plan_id)
+                || !is_single_path_component(&bundle_id)
+                || !is_normalized_relative_path(&journal_path)
+                || BatchMountTransactionPhase::from_str(&phase).is_none()
+                || !matches!(
+                    status.as_str(),
+                    "in_progress" | "completed" | "aborted" | "blocked"
+                )
+            {
+                return Err(StorageError::BatchMountStateConflict(id));
+            }
+            let selected_item_ids = read_batch_mount_transaction_item_ids(&self.connection, &id)?;
+            if selected_item_ids.is_empty() {
+                return Err(StorageError::BatchMountStateConflict(id));
+            }
+            transactions.push(StoredBatchMountTransaction {
+                id,
+                plan_id,
+                bundle_id,
+                journal_path,
+                phase,
+                status,
+                selected_item_ids,
             });
         }
         Ok(transactions)
@@ -1705,6 +2304,14 @@ impl Storage {
                     LEFT JOIN mount_plans AS plan ON plan.id = mount_tx.plan_id
                     LEFT JOIN skill_members AS member ON member.id = plan.member_id
                     WHERE mount_tx.status = 'blocked'
+                    UNION ALL
+                    SELECT batch_tx.id AS id,
+                           COALESCE(bundle.display_name, batch_tx.bundle_id) AS display_name,
+                           COALESCE(batch_tx.error_message, 'Batch Mount 事务状态无法自动判断') AS message,
+                           batch_tx.created_at AS created_at
+                    FROM batch_mount_transactions AS batch_tx
+                    LEFT JOIN bundles AS bundle ON bundle.id = batch_tx.bundle_id
+                    WHERE batch_tx.status = 'blocked'
                  ) ORDER BY created_at, id",
             )
             .map_err(StorageError::ReadRecoveryIssues)?;
@@ -1785,6 +2392,16 @@ fn ensure_one_mount_row(changed: usize, transaction_id: &str) -> Result<(), Stor
         Ok(())
     } else {
         Err(StorageError::MountStateConflict(transaction_id.to_owned()))
+    }
+}
+
+fn ensure_one_batch_mount_row(changed: usize, transaction_id: &str) -> Result<(), StorageError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::BatchMountStateConflict(
+            transaction_id.to_owned(),
+        ))
     }
 }
 
@@ -2070,6 +2687,9 @@ fn validate_mount_plan_state(
     {
         return Err(StorageError::InvalidMountPlan);
     }
+    if batch_mount_object_is_blocked(connection, member_id, target_path)? {
+        return Err(StorageError::BatchMountObjectBlocked);
+    }
     match (scope, project_id) {
         (MountScope::Global, None) => {}
         (MountScope::Project, Some(project_id)) => {
@@ -2163,6 +2783,553 @@ fn validate_stored_mount_plan_state(
         &plan.expected_target,
         &plan.member_fingerprint,
     )
+}
+
+fn batch_mount_object_is_blocked(
+    connection: &Connection,
+    member_id: &str,
+    target_path: &str,
+) -> Result<bool, StorageError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM batch_mount_transactions AS batch
+                JOIN batch_mount_transaction_items AS selected
+                  ON selected.transaction_id = batch.id
+                JOIN batch_mount_plan_items AS item
+                  ON item.plan_id = selected.plan_id AND item.id = selected.item_id
+                WHERE batch.status = 'blocked'
+                  AND (item.member_id = ?1 OR item.target_path = ?2)
+             )",
+            params![member_id, target_path],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadBatchMountTransaction)
+}
+
+fn validate_new_batch_mount_plan_shape(plan: &NewBatchMountPlan<'_>) -> Result<(), StorageError> {
+    if !is_single_path_component(plan.id)
+        || !is_single_path_component(plan.bundle_id)
+        || plan.items.is_empty()
+        || plan.expires_at <= plan.created_at
+    {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    let mut item_ids = BTreeSet::new();
+    let mut mount_ids = BTreeSet::new();
+    let mut ready_targets = BTreeSet::new();
+    for item in plan.items {
+        validate_new_batch_mount_item_shape(item)?;
+        if !item_ids.insert(item.id) || !mount_ids.insert(item.mount_id) {
+            return Err(StorageError::InvalidBatchMountPlan);
+        }
+        if item.disposition == BatchMountDisposition::Ready
+            && !ready_targets.insert(item.target_path)
+        {
+            return Err(StorageError::InvalidBatchMountPlan);
+        }
+    }
+    Ok(())
+}
+
+fn validate_new_batch_mount_item_shape(
+    item: &NewBatchMountPlanItem<'_>,
+) -> Result<(), StorageError> {
+    let valid_project = match item.scope {
+        MountScope::Global => item.project_id.is_none(),
+        MountScope::Project => item.project_id.is_some_and(is_single_path_component),
+    };
+    let valid_disposition = match item.disposition {
+        BatchMountDisposition::Ready => {
+            item.selectable
+                && item.conflict_reason.is_none()
+                && item.target_health != MountHealth::Conflict
+        }
+        BatchMountDisposition::AlreadyMounted => {
+            // 已登记关系可能发生 Drift；批量预览仍需展示真实 health，但不能重复选择。
+            !item.selectable && item.conflict_reason.is_none()
+        }
+        BatchMountDisposition::PathConflict | BatchMountDisposition::ScopeConflict => {
+            !item.selectable
+                && item
+                    .conflict_reason
+                    .is_some_and(|reason| !reason.trim().is_empty())
+        }
+    };
+    if !is_single_path_component(item.id)
+        || !is_single_path_component(item.mount_id)
+        || !is_single_path_component(item.member_id)
+        || !valid_project
+        || !is_normalized_absolute_path(item.target_path)
+        || !is_normalized_absolute_path(item.expected_target)
+        || item.member_fingerprint.is_empty()
+        || item.target_observation.is_empty()
+        || !valid_disposition
+        || (item.default_selected && !item.selectable)
+    {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    Ok(())
+}
+
+fn validate_batch_ready_item_state(
+    connection: &Connection,
+    data_root: &Path,
+    item: &StoredBatchMountPlanItem,
+) -> Result<(), StorageError> {
+    if item.disposition != BatchMountDisposition::Ready
+        || !item.selectable
+        || item.conflict_reason.is_some()
+    {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    let member = read_managed_member_from(connection, data_root, &item.member_id)?
+        .ok_or_else(|| StorageError::ManagedMemberNotFound(item.member_id.clone()))?;
+    if member.bundle_id != item.bundle_id
+        || member.skill_name != item.skill_name
+        || member.content_fingerprint != item.member_fingerprint
+        || member.expected_target != item.expected_target
+        || Path::new(&item.target_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(item.skill_name.as_str())
+    {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    if batch_mount_object_is_blocked(connection, &item.member_id, &item.target_path)? {
+        return Err(StorageError::BatchMountObjectBlocked);
+    }
+    match item.scope {
+        MountScope::Global => {
+            validate_project_binding(
+                item.scope,
+                item.project_id.as_deref(),
+                item.project_display_name.as_deref(),
+                item.project_root_path.as_deref(),
+                item.project_root_device,
+                item.project_root_inode,
+            )?;
+        }
+        MountScope::Project => {
+            let project_id = item
+                .project_id
+                .as_deref()
+                .ok_or(StorageError::InvalidBatchMountPlan)?;
+            let project = read_project_from(connection, project_id)?
+                .ok_or_else(|| StorageError::ProjectNotFound(project_id.to_owned()))?;
+            if item.project_display_name.as_deref() != Some(project.display_name.as_str())
+                || item.project_root_path.as_deref() != Some(project.root_path.as_str())
+                || item.project_root_device != Some(project.root_device)
+                || item.project_root_inode != Some(project.root_inode)
+            {
+                return Err(StorageError::InvalidBatchMountPlan);
+            }
+        }
+    }
+    let conflicting = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM mounts
+                WHERE id = ?1
+                   OR target_path = ?2
+                   OR (
+                        member_id = ?3 AND app_id = ?4 AND (
+                            scope != ?5
+                            OR ?5 = 'global'
+                            OR project_id IS ?6
+                        )
+                   )
+             )",
+            params![
+                item.mount_id,
+                item.target_path,
+                item.member_id,
+                item.app_id.as_str(),
+                item.scope.as_str(),
+                item.project_id,
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadBatchMountPlan)?;
+    if conflicting {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    Ok(())
+}
+
+fn read_batch_mount_plan_from(
+    connection: &Connection,
+    data_root: &Path,
+    plan_id: &str,
+) -> Result<Option<StoredBatchMountPlan>, StorageError> {
+    let stored = connection
+        .query_row(
+            "SELECT plan.id, plan.bundle_id, bundle.display_name,
+                    plan.created_at, plan.expires_at, plan.status
+             FROM batch_mount_plans AS plan
+             JOIN bundles AS bundle ON bundle.id = plan.bundle_id
+             WHERE plan.id = ?1",
+            [plan_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadBatchMountPlan)?;
+    let Some((id, bundle_id, bundle_display_name, created_at, expires_at, status)) = stored else {
+        return Ok(None);
+    };
+    if !is_single_path_component(&id)
+        || !is_single_path_component(&bundle_id)
+        || bundle_display_name.trim().is_empty()
+        || expires_at <= created_at
+        || !matches!(status.as_str(), "pending" | "consumed")
+    {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    let items = read_batch_mount_plan_items_from(connection, data_root, &id, &bundle_id)?;
+    if items.is_empty() {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    Ok(Some(StoredBatchMountPlan {
+        id,
+        bundle_id,
+        bundle_display_name,
+        created_at,
+        expires_at,
+        status,
+        items,
+    }))
+}
+
+fn read_batch_mount_plan_items_from(
+    connection: &Connection,
+    data_root: &Path,
+    plan_id: &str,
+    plan_bundle_id: &str,
+) -> Result<Vec<StoredBatchMountPlanItem>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT item.id, item.mount_id, item.member_id, item.bundle_id,
+                    member.skill_name, item.app_id, item.scope, item.project_id,
+                    project.display_name, item.project_root_path, item.project_root_device,
+                    item.project_root_inode, item.target_path, item.expected_target,
+                    item.member_fingerprint, item.target_observation, item.disposition,
+                    item.selectable, item.default_selected, item.conflict_reason,
+                    item.target_health,
+                    EXISTS(
+                        SELECT 1 FROM batch_mount_transaction_items AS selected
+                        WHERE selected.plan_id = item.plan_id AND selected.item_id = item.id
+                    ) AS selected
+             FROM batch_mount_plan_items AS item
+             JOIN skill_members AS member
+               ON member.id = item.member_id AND member.bundle_id = item.bundle_id
+             LEFT JOIN projects AS project ON project.id = item.project_id
+             WHERE item.plan_id = ?1
+             ORDER BY item.sort_order",
+        )
+        .map_err(StorageError::ReadBatchMountPlan)?;
+    let rows = statement
+        .query_map([plan_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<i64>>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
+                row.get::<_, String>(15)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, i64>(17)?,
+                row.get::<_, i64>(18)?,
+                row.get::<_, Option<String>>(19)?,
+                row.get::<_, String>(20)?,
+                row.get::<_, i64>(21)?,
+            ))
+        })
+        .map_err(StorageError::ReadBatchMountPlan)?;
+    let mut items = Vec::new();
+    for row in rows {
+        let (
+            id,
+            mount_id,
+            member_id,
+            bundle_id,
+            skill_name,
+            app_id,
+            scope,
+            project_id,
+            project_display_name,
+            project_root_path,
+            project_root_device,
+            project_root_inode,
+            target_path,
+            expected_target,
+            member_fingerprint,
+            target_observation,
+            disposition,
+            selectable,
+            default_selected,
+            conflict_reason,
+            target_health,
+            selected,
+        ) = row.map_err(StorageError::ReadBatchMountPlan)?;
+        let app_id = SupportedAppId::from_str(&app_id)
+            .ok_or_else(|| StorageError::UnknownSupportedApp(app_id.clone()))?;
+        let scope = MountScope::from_str(&scope)
+            .ok_or_else(|| StorageError::UnknownMountScope(scope.clone()))?;
+        let disposition = BatchMountDisposition::from_str(&disposition)
+            .ok_or_else(|| StorageError::UnknownBatchMountDisposition(disposition.clone()))?;
+        let target_health = MountHealth::from_str(&target_health)
+            .ok_or_else(|| StorageError::UnknownMountHealth(target_health.clone()))?;
+        let project_root_device = project_root_device
+            .map(filesystem_identity_from_sql)
+            .transpose()?;
+        let project_root_inode = project_root_inode
+            .map(filesystem_identity_from_sql)
+            .transpose()?;
+        validate_project_binding(
+            scope,
+            project_id.as_deref(),
+            project_display_name.as_deref(),
+            project_root_path.as_deref(),
+            project_root_device,
+            project_root_inode,
+        )?;
+        let selectable = sqlite_bool(selectable)?;
+        let default_selected = sqlite_bool(default_selected)?;
+        let selected = sqlite_bool(selected)?;
+        let item = StoredBatchMountPlanItem {
+            id,
+            mount_id,
+            member_id,
+            bundle_id,
+            skill_name,
+            app_id,
+            scope,
+            project_id,
+            project_display_name,
+            project_root_path,
+            project_root_device,
+            project_root_inode,
+            target_path,
+            expected_target,
+            member_fingerprint,
+            target_observation,
+            disposition,
+            selectable,
+            default_selected,
+            selected,
+            conflict_reason,
+            target_health,
+        };
+        validate_stored_batch_mount_item_shape(&item, plan_bundle_id)?;
+        let member = read_managed_member_from(connection, data_root, &item.member_id)?
+            .ok_or_else(|| StorageError::ManagedMemberNotFound(item.member_id.clone()))?;
+        if member.bundle_id != item.bundle_id
+            || member.skill_name != item.skill_name
+            || member.content_fingerprint != item.member_fingerprint
+            || member.expected_target != item.expected_target
+        {
+            return Err(StorageError::InvalidBatchMountPlan);
+        }
+        items.push(item);
+    }
+    Ok(items)
+}
+
+fn validate_stored_batch_mount_item_shape(
+    item: &StoredBatchMountPlanItem,
+    plan_bundle_id: &str,
+) -> Result<(), StorageError> {
+    let valid_disposition = match item.disposition {
+        BatchMountDisposition::Ready => {
+            item.selectable
+                && item.conflict_reason.is_none()
+                && item.target_health != MountHealth::Conflict
+        }
+        BatchMountDisposition::AlreadyMounted => {
+            // Drift 不改变关系已经登记这一 disposition，只影响 target_health 的展示。
+            !item.selectable && item.conflict_reason.is_none()
+        }
+        BatchMountDisposition::PathConflict | BatchMountDisposition::ScopeConflict => {
+            !item.selectable
+                && item
+                    .conflict_reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.trim().is_empty())
+        }
+    };
+    if item.bundle_id != plan_bundle_id
+        || !is_single_path_component(&item.id)
+        || !is_single_path_component(&item.mount_id)
+        || !is_single_path_component(&item.member_id)
+        || !is_normalized_absolute_path(&item.target_path)
+        || !is_normalized_absolute_path(&item.expected_target)
+        || item.member_fingerprint.is_empty()
+        || item.target_observation.is_empty()
+        || Path::new(&item.target_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(item.skill_name.as_str())
+        || !valid_disposition
+        || (item.default_selected && !item.selectable)
+        || (item.selected && !item.selectable)
+    {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    Ok(())
+}
+
+fn selected_batch_mount_items(
+    plan: &StoredBatchMountPlan,
+) -> Result<Vec<&StoredBatchMountPlanItem>, StorageError> {
+    let selected = plan
+        .items
+        .iter()
+        .filter(|item| item.selected)
+        .collect::<Vec<_>>();
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|item| !item.selectable || item.disposition != BatchMountDisposition::Ready)
+    {
+        return Err(StorageError::InvalidBatchMountSelection);
+    }
+    let mut targets = BTreeSet::new();
+    let mut scopes = BTreeMap::<(String, &'static str), MountScope>::new();
+    for item in &selected {
+        if !targets.insert(item.target_path.as_str()) {
+            return Err(StorageError::InvalidBatchMountSelection);
+        }
+        let key = (item.member_id.clone(), item.app_id.as_str());
+        if scopes
+            .insert(key, item.scope)
+            .is_some_and(|scope| scope != item.scope)
+        {
+            return Err(StorageError::InvalidBatchMountSelection);
+        }
+    }
+    Ok(selected)
+}
+
+fn validate_batch_mount_finalization(
+    transaction: &Transaction<'_>,
+    data_root: &Path,
+    transaction_id: &str,
+    plan: &StoredBatchMountPlan,
+) -> Result<bool, StorageError> {
+    let stored_plan = read_batch_mount_plan_from(transaction, data_root, &plan.id)?
+        .ok_or(StorageError::BatchMountPlanNotFound)?;
+    if &stored_plan != plan || plan.status != "consumed" {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    let state = transaction
+        .query_row(
+            "SELECT plan_id, bundle_id, phase, status
+             FROM batch_mount_transactions WHERE id = ?1",
+            [transaction_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadBatchMountTransaction)?
+        .ok_or_else(|| StorageError::BatchMountStateConflict(transaction_id.to_owned()))?;
+    if state.0 != plan.id || state.1 != plan.bundle_id {
+        return Err(StorageError::BatchMountStateConflict(
+            transaction_id.to_owned(),
+        ));
+    }
+    let selected_ids = read_batch_mount_transaction_item_ids(transaction, transaction_id)?;
+    let plan_selected_ids = plan
+        .items
+        .iter()
+        .filter(|item| item.selected)
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    if selected_ids != plan_selected_ids {
+        return Err(StorageError::InvalidBatchMountPlan);
+    }
+    if state.2 == "state_committed" && state.3 == "completed" {
+        return Ok(true);
+    }
+    if state.2 != "targets_applied" || state.3 != "in_progress" {
+        return Err(StorageError::BatchMountStateConflict(
+            transaction_id.to_owned(),
+        ));
+    }
+    for item in selected_batch_mount_items(plan)? {
+        validate_batch_ready_item_state(transaction, data_root, item)?;
+    }
+    Ok(false)
+}
+
+fn ensure_batch_mount_matches_item(
+    mount: &StoredMount,
+    item: &StoredBatchMountPlanItem,
+) -> Result<(), StorageError> {
+    if mount.id == item.mount_id
+        && mount.member_id == item.member_id
+        && mount.bundle_id == item.bundle_id
+        && mount.member_fingerprint == item.member_fingerprint
+        && mount.app_id == item.app_id
+        && mount.scope == item.scope
+        && mount.project_id == item.project_id
+        && mount.target_path == item.target_path
+        && mount.expected_target == item.expected_target
+        && mount.health == MountHealth::Healthy
+    {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidBatchMountPlan)
+    }
+}
+
+fn read_batch_mount_transaction_item_ids(
+    connection: &Connection,
+    transaction_id: &str,
+) -> Result<Vec<String>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT item_id FROM batch_mount_transaction_items
+             WHERE transaction_id = ?1 ORDER BY sort_order",
+        )
+        .map_err(StorageError::ReadBatchMountTransaction)?;
+    let rows = statement
+        .query_map([transaction_id], |row| row.get::<_, String>(0))
+        .map_err(StorageError::ReadBatchMountTransaction)?;
+    let ids = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::ReadBatchMountTransaction)?;
+    if ids.iter().any(|id| !is_single_path_component(id)) {
+        return Err(StorageError::BatchMountStateConflict(
+            transaction_id.to_owned(),
+        ));
+    }
+    Ok(ids)
 }
 
 fn read_mount_plan_from(
@@ -3069,6 +4236,17 @@ fn map_mount_transaction_insert_error(error: rusqlite::Error) -> StorageError {
     StorageError::SaveMountTransaction(error)
 }
 
+fn map_batch_mount_transaction_insert_error(error: rusqlite::Error) -> StorageError {
+    if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error
+        && ((code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            && message.contains("batch_mount_transaction_single_active"))
+            || message.contains("active_lifecycle_transaction"))
+    {
+        return StorageError::ActiveLifecycleTransaction;
+    }
+    StorageError::SaveBatchMountTransaction(error)
+}
+
 fn ensure_managed_state_matches(
     transaction: &Transaction<'_>,
     plan: &StoredInstallPlan,
@@ -3457,6 +4635,90 @@ mod tests {
             .expect("应读取测试受管成员")
     }
 
+    fn save_test_managed_bundle(storage: &mut Storage, suffix: &str) -> Vec<StoredManagedMember> {
+        let plan_id = format!("install-plan-batch-{suffix}");
+        let bundle_id = format!("bundle-batch-{suffix}");
+        let first_id = format!("member-alpha-{suffix}");
+        let second_id = format!("member-beta-{suffix}");
+        let first_name = format!("alpha-{suffix}");
+        let second_name = format!("beta-{suffix}");
+        let candidates = [
+            NewInstallCandidate {
+                candidate_id: &first_id,
+                source_relative_path: &first_name,
+                skill_name: Some(&first_name),
+                skill_description: Some("第一个测试 Skill"),
+                content_fingerprint: Some("sha256:alpha"),
+                selectable: true,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+            NewInstallCandidate {
+                candidate_id: &second_id,
+                source_relative_path: &second_name,
+                skill_name: Some(&second_name),
+                skill_description: Some("第二个测试 Skill"),
+                content_fingerprint: Some("sha256:beta"),
+                selectable: true,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+        ];
+        storage
+            .save_install_plan(NewInstallPlan {
+                id: &plan_id,
+                input_path: "/tmp/batch-bundle",
+                input_device: 1,
+                input_inode: 2,
+                input_fingerprint: "sha256:bundle",
+                bundle_id: &bundle_id,
+                bundle_display_name: &format!("Batch {suffix}"),
+                member_id: &first_id,
+                skill_name: &first_name,
+                skill_description: "第一个测试 Skill",
+                warnings: &[],
+                candidates: &candidates,
+                created_at: 100,
+                expires_at: 1_000,
+            })
+            .expect("应保存多成员安装 Plan");
+        let selected = vec![first_id.clone(), second_id.clone()];
+        let transaction_id = format!("install-txn-batch-{suffix}");
+        let plan = storage
+            .begin_install_transaction_with_selection(
+                &plan_id,
+                &selected,
+                &transaction_id,
+                &format!("journals/{transaction_id}.json"),
+                200,
+            )
+            .expect("应开始多成员安装事务");
+        advance_to_candidate_ready(storage, &transaction_id);
+        storage
+            .finalize_install(
+                &transaction_id,
+                &plan,
+                &format!("bundles/{bundle_id}"),
+                &format!("contents/{transaction_id}"),
+                &format!("members/{first_name}"),
+                203,
+            )
+            .expect("应建立多成员测试 Bundle");
+        storage
+            .forget_terminal_transaction(&transaction_id)
+            .expect("多成员安装事务应完成清理");
+        selected
+            .iter()
+            .map(|member_id| {
+                storage
+                    .read_managed_member(member_id)
+                    .expect("应读取多成员测试 Bundle")
+            })
+            .collect()
+    }
+
     fn register_test_project(storage: &mut Storage, root: &Path) -> StoredProject {
         storage
             .register_project(NewProject {
@@ -3542,8 +4804,17 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
-        for table in ["projects", "mount_plans", "mounts", "mount_transactions"] {
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        for table in [
+            "projects",
+            "mount_plans",
+            "mounts",
+            "mount_transactions",
+            "batch_mount_plans",
+            "batch_mount_plan_items",
+            "batch_mount_transactions",
+            "batch_mount_transaction_items",
+        ] {
             let exists = storage
                 .connection
                 .query_row(
@@ -3562,6 +4833,87 @@ mod tests {
             .expect("应执行外键检查")
             .count();
         assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn batch_mount_plan_round_trips_multiple_members_and_app_targets() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let members = save_test_managed_bundle(&mut storage, "roundtrip");
+        let project = register_test_project(&mut storage, &sandbox.path().join("project"));
+        let global_target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&members[0].skill_name);
+        let project_target = PathBuf::from(&project.root_path)
+            .join(".claude/skills")
+            .join(&members[1].skill_name);
+        let items = [
+            NewBatchMountPlanItem {
+                id: "batch-item-global",
+                mount_id: "batch-mount-global",
+                member_id: &members[0].id,
+                app_id: SupportedAppId::Codex,
+                scope: MountScope::Global,
+                project_id: None,
+                target_path: global_target.to_str().expect("测试路径应是 UTF-8"),
+                expected_target: &members[0].expected_target,
+                member_fingerprint: &members[0].content_fingerprint,
+                target_observation: "absent",
+                disposition: BatchMountDisposition::Ready,
+                selectable: true,
+                default_selected: true,
+                conflict_reason: None,
+                target_health: MountHealth::Missing,
+            },
+            NewBatchMountPlanItem {
+                id: "batch-item-project",
+                mount_id: "batch-mount-project",
+                member_id: &members[1].id,
+                app_id: SupportedAppId::ClaudeCode,
+                scope: MountScope::Project,
+                project_id: Some(&project.id),
+                target_path: project_target.to_str().expect("测试路径应是 UTF-8"),
+                expected_target: &members[1].expected_target,
+                member_fingerprint: &members[1].content_fingerprint,
+                target_observation: "absent",
+                disposition: BatchMountDisposition::Ready,
+                selectable: true,
+                default_selected: false,
+                conflict_reason: None,
+                target_health: MountHealth::Missing,
+            },
+        ];
+        storage
+            .save_batch_mount_plan(NewBatchMountPlan {
+                id: "batch-plan-roundtrip",
+                bundle_id: &members[0].bundle_id,
+                items: &items,
+                created_at: 300,
+                expires_at: 1_000,
+            })
+            .expect("应保存 Batch Mount Plan");
+
+        let plan = storage
+            .read_batch_mount_plan("batch-plan-roundtrip")
+            .expect("应读取 Batch Mount Plan");
+        assert_eq!(plan.bundle_id, members[0].bundle_id);
+        assert_eq!(plan.bundle_display_name, "Batch roundtrip");
+        assert_eq!(plan.status, "pending");
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[0].disposition, BatchMountDisposition::Ready);
+        assert!(plan.items[0].default_selected);
+        assert!(!plan.items[0].selected);
+        assert_eq!(plan.items[1].app_id, SupportedAppId::ClaudeCode);
+        assert_eq!(
+            plan.items[1].project_id.as_deref(),
+            Some(project.id.as_str())
+        );
+        assert_eq!(
+            plan.items[1].project_display_name.as_deref(),
+            Some("示例项目")
+        );
+        assert_eq!(plan.items[1].target_health, MountHealth::Missing);
     }
 
     #[test]
