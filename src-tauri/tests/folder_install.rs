@@ -2,8 +2,8 @@ use std::{env, fs, path::Path, process::Command};
 
 use rusqlite::Connection;
 use skillyard_lib::{
-    ApplicationPaths, LifecycleFailpoint, ManagementKind, PlatformInfo, SkillYardApplication,
-    UiIntent, UiOutcome,
+    ApplicationPaths, FolderInstallPlan, LifecycleFailpoint, ManagementKind, PlatformInfo,
+    SkillYardApplication, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -11,6 +11,7 @@ const HARD_EXIT_WORKER: &str = "SKILLYARD_HARD_EXIT_WORKER";
 const HARD_EXIT_DATA_ROOT: &str = "SKILLYARD_HARD_EXIT_DATA_ROOT";
 const HARD_EXIT_HOME: &str = "SKILLYARD_HARD_EXIT_HOME";
 const HARD_EXIT_PLAN_ID: &str = "SKILLYARD_HARD_EXIT_PLAN_ID";
+const HARD_EXIT_CANDIDATE_ID: &str = "SKILLYARD_HARD_EXIT_CANDIDATE_ID";
 const HARD_EXIT_POINT: &str = "SKILLYARD_HARD_EXIT_POINT";
 
 #[test]
@@ -29,8 +30,15 @@ fn creating_a_folder_install_plan_does_not_write_managed_content() {
         panic!("应返回文件夹安装 Plan");
     };
 
-    assert_eq!(plan.skill_name, "example-skill");
     assert_eq!(plan.bundle_display_name, "example-skill");
+    assert_eq!(plan.candidates.len(), 1);
+    assert_eq!(
+        plan.candidates[0].skill_name.as_deref(),
+        Some("example-skill")
+    );
+    assert_eq!(plan.candidates[0].source_relative_path, "");
+    assert!(plan.candidates[0].selectable);
+    assert!(plan.candidates[0].default_selected);
     assert!(!plan.will_mount);
     assert!(plan.expires_at > plan.created_at);
     assert!(!contains_entries(&data_root.join("bundles")));
@@ -44,15 +52,229 @@ fn creating_a_folder_install_plan_does_not_write_managed_content() {
 }
 
 #[test]
+fn multi_skill_folder_plan_discovers_every_member_selected_by_default() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, home) = ready_application(sandbox.path());
+    let input = sandbox.path().join("downloads/superpowers");
+    write_skill(
+        &input.join("skills/brainstorming"),
+        "brainstorming",
+        "first",
+    );
+    write_skill(&input.join("skills/tdd"), "tdd", "second");
+
+    let plan = create_plan(&application, &input);
+    let candidates = plan
+        .candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.skill_name.as_deref(),
+                candidate.source_relative_path.as_str(),
+                candidate.selectable,
+                candidate.default_selected,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(plan.bundle_display_name, "superpowers");
+    assert_eq!(
+        candidates,
+        vec![
+            (Some("brainstorming"), "skills/brainstorming", true, true),
+            (Some("tdd"), "skills/tdd", true, true),
+        ]
+    );
+    assert!(!plan.will_mount);
+    assert!(!contains_entries(&data_root.join("bundles")));
+    assert!(!contains_entries(&data_root.join("staging")));
+    assert!(!contains_entries(&data_root.join("journals")));
+    assert!(!home.join(".codex/skills/brainstorming").exists());
+    assert!(!home.join(".claude/skills/tdd").exists());
+}
+
+#[test]
+fn confirming_default_selection_installs_all_members_in_one_unmounted_bundle() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, home) = ready_application(sandbox.path());
+    let input = sandbox.path().join("downloads/superpowers");
+    write_skill(
+        &input.join("skills/brainstorming"),
+        "brainstorming",
+        "first",
+    );
+    write_skill(&input.join("skills/tdd"), "tdd", "second");
+    let plan = create_plan(&application, &input);
+
+    let UiOutcome::Inventory { entries, .. } = application
+        .handle(confirm_default_install_intent(&plan))
+        .expect("默认选择应原子安装全部有效成员")
+    else {
+        panic!("安装完成后应返回 Inventory");
+    };
+    let managed = entries
+        .iter()
+        .filter(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+        .collect::<Vec<_>>();
+    let mut managed_names = managed
+        .iter()
+        .map(|entry| entry.skill_name.as_str())
+        .collect::<Vec<_>>();
+    managed_names.sort_unstable();
+
+    assert_eq!(managed.len(), 2);
+    assert_eq!(managed[0].bundle_id, managed[1].bundle_id);
+    assert_eq!(managed_names, vec!["brainstorming", "tdd"]);
+    assert!(!home.join(".codex/skills/brainstorming").exists());
+    assert!(!home.join(".claude/skills/tdd").exists());
+    assert!(!home.join(".copilot/skills/tdd").exists());
+    assert!(!contains_entries(&data_root.join("staging")));
+    assert!(!contains_entries(&data_root.join("journals")));
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let counts = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM bundles), (SELECT COUNT(*) FROM skill_members), (SELECT COUNT(*) FROM member_selections)",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        )
+        .expect("应读取完整 Bundle 成员集合");
+    assert_eq!(counts, (1, 2, 2));
+}
+
+#[test]
+fn confirming_a_partial_selection_installs_one_bundle_with_only_selected_members() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, home) = ready_application(sandbox.path());
+    let input = sandbox.path().join("downloads/superpowers");
+    write_skill(
+        &input.join("skills/brainstorming"),
+        "brainstorming",
+        "first",
+    );
+    write_skill(&input.join("skills/tdd"), "tdd", "second");
+    let plan = create_plan(&application, &input);
+
+    let outcome = application
+        .handle(confirm_install_intent(&plan, &["tdd"]))
+        .expect("用户应能只安装最终选择的成员");
+    let UiOutcome::Inventory { entries, .. } = outcome else {
+        panic!("安装完成后应返回 Inventory");
+    };
+    let managed = entries
+        .iter()
+        .filter(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+        .collect::<Vec<_>>();
+
+    assert_eq!(managed.len(), 1);
+    assert_eq!(managed[0].skill_name, "tdd");
+    assert_eq!(
+        managed[0].bundle_display_name.as_deref(),
+        Some("superpowers")
+    );
+    assert!(
+        !Path::new(&managed[0].skill_root)
+            .parent()
+            .expect("受管成员应位于 members 下")
+            .join("brainstorming")
+            .exists()
+    );
+    assert!(!home.join(".codex/skills/tdd").exists());
+    assert!(!home.join(".claude/skills/tdd").exists());
+    assert!(!home.join(".copilot/skills/tdd").exists());
+    assert_eq!(
+        fs::read_to_string(input.join("skills/brainstorming/payload.txt"))
+            .expect("未选择成员的原内容应保持可读"),
+        "first"
+    );
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let counts = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM bundles), (SELECT COUNT(*) FROM skill_members), (SELECT COUNT(*) FROM member_selections)",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        )
+        .expect("应读取 Bundle 与最终成员选择");
+    assert_eq!(counts, (1, 1, 1));
+}
+
+#[test]
+fn confirmation_rejects_empty_duplicate_and_unknown_member_selections() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application(sandbox.path());
+    let input = sandbox.path().join("downloads/superpowers");
+    write_skill(
+        &input.join("skills/brainstorming"),
+        "brainstorming",
+        "first",
+    );
+    write_skill(&input.join("skills/tdd"), "tdd", "second");
+    let plan = create_plan(&application, &input);
+    let brainstorming_id = candidate_id(&plan, "brainstorming");
+
+    let empty = application
+        .handle(confirm_candidate_ids(plan.id.clone(), vec![]))
+        .expect_err("空选择不能创建空 Bundle");
+    assert!(empty.to_string().contains("选择"));
+
+    let duplicate = application
+        .handle(confirm_candidate_ids(
+            plan.id.clone(),
+            vec![brainstorming_id.clone(), brainstorming_id],
+        ))
+        .expect_err("重复成员不能绕过最终选择校验");
+    assert!(duplicate.to_string().contains("选择"));
+
+    let unknown = application
+        .handle(confirm_candidate_ids(
+            plan.id.clone(),
+            vec!["not-in-plan".to_owned()],
+        ))
+        .expect_err("确认只能引用 Plan 中的成员");
+    assert!(unknown.to_string().contains("选择"));
+    assert!(!contains_entries(&data_root.join("bundles")));
+    assert!(!contains_entries(&data_root.join("journals")));
+
+    application
+        .handle(confirm_install_intent(&plan, &["brainstorming"]))
+        .expect("选择校验失败不应消费仍可确认的 Plan");
+}
+
+#[test]
+fn adding_a_member_after_plan_creation_invalidates_the_old_plan() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application(sandbox.path());
+    let input = sandbox.path().join("downloads/superpowers");
+    write_skill(
+        &input.join("skills/brainstorming"),
+        "brainstorming",
+        "first",
+    );
+    let plan = create_plan(&application, &input);
+    write_skill(&input.join("skills/tdd"), "tdd", "added later");
+
+    let error = application
+        .handle(confirm_install_intent(&plan, &["brainstorming"]))
+        .expect_err("输入目录新增成员后旧 Plan 必须失效");
+
+    assert!(error.to_string().contains("前置状态已经变化"));
+    assert!(!contains_entries(&data_root.join("bundles")));
+    assert!(!contains_entries(&data_root.join("journals")));
+}
+
+#[test]
 fn confirming_a_plan_installs_one_unmounted_managed_bundle() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (application, data_root, home) = ready_application(sandbox.path());
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
 
     let outcome = application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect("确认 Plan 后应完成安装");
     let UiOutcome::Inventory { entries, .. } = outcome else {
         panic!("安装完成后应返回 Inventory");
@@ -102,9 +324,9 @@ fn startup_rebuilds_a_missing_central_store_notice_from_sqlite() {
     let (application, data_root, home) = ready_application(sandbox.path());
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect("安装应成功");
     let notice = data_root.join("SKILLYARD-INFO.md");
     fs::remove_file(&notice).expect("应模拟说明文件被误删");
@@ -132,6 +354,7 @@ fn confirmation_rejects_unknown_expired_and_changed_plans() {
     let unknown = application
         .handle(UiIntent::ConfirmInstallPlan {
             plan_id: "not-issued".to_owned(),
+            selected_candidate_ids: vec!["candidate-not-issued".to_owned()],
         })
         .expect_err("未签发 Plan 必须被拒绝");
     assert!(unknown.to_string().contains("未签发"));
@@ -142,23 +365,19 @@ fn confirmation_rejects_unknown_expired_and_changed_plans() {
     connection
         .execute(
             "UPDATE install_plans SET expires_at = 0 WHERE id = ?1",
-            [&expired_plan],
+            [&expired_plan.id],
         )
         .expect("应使 Plan 过期");
     drop(connection);
     let expired = application
-        .handle(UiIntent::ConfirmInstallPlan {
-            plan_id: expired_plan,
-        })
+        .handle(confirm_default_install_intent(&expired_plan))
         .expect_err("过期 Plan 必须被拒绝");
     assert!(expired.to_string().contains("已过期"));
 
     let changed_plan = create_plan(&application, &input);
     fs::write(input.join("payload.txt"), "changed").expect("应修改 Plan 前置内容");
     let changed = application
-        .handle(UiIntent::ConfirmInstallPlan {
-            plan_id: changed_plan,
-        })
+        .handle(confirm_default_install_intent(&changed_plan))
         .expect_err("输入变化后旧 Plan 必须被拒绝");
     assert!(changed.to_string().contains("前置状态已经变化"));
     assert!(!contains_entries(&data_root.join("bundles")));
@@ -172,15 +391,13 @@ fn permission_failure_is_rejected_before_a_lifecycle_transaction_starts() {
     let (application, data_root, _) = ready_application(sandbox.path());
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     let journals = data_root.join("journals");
     fs::set_permissions(&journals, fs::Permissions::from_mode(0o500))
         .expect("应模拟 Journal 目录不可写");
 
     let error = application
-        .handle(UiIntent::ConfirmInstallPlan {
-            plan_id: plan_id.clone(),
-        })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("权限不足必须在事务开始前拒绝");
     fs::set_permissions(&journals, fs::Permissions::from_mode(0o700)).expect("应恢复测试目录权限");
 
@@ -190,7 +407,7 @@ fn permission_failure_is_rejected_before_a_lifecycle_transaction_starts() {
     let (transactions, status) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM lifecycle_transactions), status FROM install_plans WHERE id = ?1",
-            [&plan_id],
+            [&plan.id],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
         .expect("应读取 Plan 与事务状态");
@@ -205,7 +422,7 @@ fn permission_failure_is_rejected_before_a_lifecycle_transaction_starts() {
 
 #[cfg(unix)]
 #[test]
-fn unsafe_links_are_rejected_before_a_plan_is_issued() {
+fn unsafe_links_are_visible_but_cannot_be_selected() {
     use std::os::unix::fs::symlink;
 
     let sandbox = tempdir().expect("应创建隔离测试目录");
@@ -214,15 +431,232 @@ fn unsafe_links_are_rejected_before_a_plan_is_issued() {
     write_skill(&input, "example-skill", "original");
     symlink("payload.txt", input.join("linked.txt")).expect("应创建不安全软链接");
 
-    let error = application
-        .handle(UiIntent::CreateFolderInstallPlan {
-            input_path: input.to_string_lossy().into_owned(),
-        })
-        .expect_err("包含链接的输入不能签发 Plan");
+    assert_plan_contains_only_invalid_candidates(&application, &data_root, &input, 1, "软链接");
+}
 
-    assert!(error.to_string().contains("软链接"));
+#[test]
+fn invalid_yaml_is_disabled_while_a_valid_sibling_remains_installable() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, _, _) = ready_application(sandbox.path());
+    let bundle = sandbox.path().join("downloads/mixed-bundle");
+    let broken = bundle.join("skills/broken");
+    fs::create_dir_all(&broken).expect("应创建无效成员目录");
+    fs::write(
+        broken.join("SKILL.md"),
+        "---\nname: [broken\ndescription: invalid yaml\n---\n",
+    )
+    .expect("应写入无效 YAML");
+    write_skill(&bundle.join("skills/valid"), "valid", "content");
+
+    let plan = create_plan(&application, &bundle);
+    let invalid = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source_relative_path == "skills/broken")
+        .expect("Plan 应展示 YAML 无效候选");
+    let valid = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.skill_name.as_deref() == Some("valid"))
+        .expect("Plan 应展示有效候选");
+
+    assert!(!invalid.selectable);
+    assert!(!invalid.default_selected);
+    assert!(
+        invalid
+            .validation_errors
+            .iter()
+            .any(|error| error.contains("YAML"))
+    );
+    assert!(valid.selectable);
+    assert!(valid.default_selected);
+    application
+        .handle(confirm_install_intent(&plan, &["valid"]))
+        .expect("无效成员不能阻止用户安装有效兄弟成员");
+}
+
+#[test]
+fn a_declared_name_that_differs_from_the_skill_directory_is_rejected() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application(sandbox.path());
+    let bundle = sandbox.path().join("downloads/mismatched-bundle");
+    write_skill(&bundle.join("skills/actual-name"), "other-name", "content");
+
+    assert_plan_contains_only_invalid_candidates(&application, &data_root, &bundle, 1, "name");
+}
+
+#[test]
+fn duplicate_skill_names_in_different_paths_are_rejected() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application(sandbox.path());
+    let bundle = sandbox.path().join("downloads/duplicate-bundle");
+    write_skill(&bundle.join("group-a/shared"), "shared", "first");
+    write_skill(&bundle.join("group-b/shared"), "shared", "second");
+
+    assert_plan_contains_only_invalid_candidates(&application, &data_root, &bundle, 2, "重复");
+}
+
+#[test]
+fn nested_skill_roots_are_rejected_as_an_ambiguous_bundle() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application(sandbox.path());
+    let bundle = sandbox.path().join("downloads/nested-bundle");
+    write_skill(&bundle.join("outer"), "outer", "outer content");
+    write_skill(&bundle.join("outer/inner"), "inner", "inner content");
+
+    assert_plan_contains_only_invalid_candidates(&application, &data_root, &bundle, 2, "嵌套");
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_linked_skill_content_is_visible_but_cannot_be_selected() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application(sandbox.path());
+    let bundle = sandbox.path().join("downloads/hard-link-bundle");
+    let member = bundle.join("skills/example");
+    write_skill(&member, "example", "content");
+    fs::hard_link(member.join("payload.txt"), member.join("alias.txt"))
+        .expect("应创建不安全硬链接");
+
+    assert_plan_contains_only_invalid_candidates(&application, &data_root, &bundle, 1, "硬链接");
+}
+
+#[cfg(unix)]
+#[test]
+fn fifo_skill_content_is_rejected_without_blocking_discovery() {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application(sandbox.path());
+    let bundle = sandbox.path().join("downloads/fifo-bundle");
+    let member = bundle.join("skills/example");
+    write_skill(&member, "example", "content");
+    let fifo = member.join("events.pipe");
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).expect("测试路径不能含 NUL");
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+    let plan = create_plan(&application, &bundle);
+    assert_eq!(plan.candidates.len(), 1);
+    assert!(!plan.candidates[0].selectable);
+    assert!(!plan.candidates[0].default_selected);
+    assert!(
+        plan.candidates[0]
+            .validation_errors
+            .iter()
+            .any(|error| error.contains("FIFO") || error.contains("特殊文件")),
+        "候选错误应指出特殊文件类型：{:?}",
+        plan.candidates[0].validation_errors
+    );
+    let error = application
+        .handle(confirm_candidate_ids(plan.id, vec![]))
+        .expect_err("没有有效候选时不能创建空 Bundle");
+    assert!(error.to_string().contains("选择"));
     assert!(!contains_entries(&data_root.join("bundles")));
+    assert!(!contains_entries(&data_root.join("staging")));
     assert!(!contains_entries(&data_root.join("journals")));
+}
+
+#[test]
+fn multi_member_interruption_before_current_recovers_to_zero_members() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, home) = ready_application_with_failpoint(
+        sandbox.path(),
+        LifecycleFailpoint::AfterCandidatePrepared,
+    );
+    let input = sandbox.path().join("downloads/superpowers");
+    write_skill(
+        &input.join("skills/brainstorming"),
+        "brainstorming",
+        "first",
+    );
+    write_skill(&input.join("skills/tdd"), "tdd", "second");
+    let plan = create_plan(&application, &input);
+
+    application
+        .handle(confirm_default_install_intent(&plan))
+        .expect_err("failpoint 应模拟多成员 Bundle 生效前中断");
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        entries,
+        recovery_issues,
+        ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("生效前中断应自动恢复为未安装")
+    else {
+        panic!("恢复后应返回 Inventory");
+    };
+
+    assert!(recovery_issues.is_empty());
+    assert!(!entries.iter().any(|entry| {
+        entry.management_kind == ManagementKind::SkillYardManaged
+            && matches!(entry.skill_name.as_str(), "brainstorming" | "tdd")
+    }));
+    assert!(!contains_entries(&data_root.join("bundles")));
+    assert!(!contains_entries(&data_root.join("staging")));
+    assert!(!contains_entries(&data_root.join("journals")));
+}
+
+#[test]
+fn multi_member_interruption_after_current_recovers_the_complete_selection() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, home) =
+        ready_application_with_failpoint(sandbox.path(), LifecycleFailpoint::AfterCurrentActivated);
+    let input = sandbox.path().join("downloads/superpowers");
+    write_skill(
+        &input.join("skills/brainstorming"),
+        "brainstorming",
+        "first",
+    );
+    write_skill(&input.join("skills/tdd"), "tdd", "second");
+    let plan = create_plan(&application, &input);
+
+    application
+        .handle(confirm_default_install_intent(&plan))
+        .expect_err("failpoint 应模拟多成员 Bundle 生效后中断");
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        entries,
+        recovery_issues,
+        ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("生效后中断应自动完成整个 Bundle")
+    else {
+        panic!("恢复后应返回 Inventory");
+    };
+    let managed = entries
+        .iter()
+        .filter(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+        .collect::<Vec<_>>();
+    let mut names = managed
+        .iter()
+        .map(|entry| entry.skill_name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+
+    assert!(recovery_issues.is_empty());
+    assert_eq!(names, vec!["brainstorming", "tdd"]);
+    assert_eq!(managed[0].bundle_id, managed[1].bundle_id);
+    assert!(!contains_entries(&data_root.join("staging")));
+    assert!(!contains_entries(&data_root.join("journals")));
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let counts = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM bundles), (SELECT COUNT(*) FROM skill_members), (SELECT COUNT(*) FROM member_selections)",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        )
+        .expect("恢复后应一次提交完整成员集合");
+    assert_eq!(counts, (1, 2, 2));
 }
 
 #[test]
@@ -234,10 +668,10 @@ fn interruption_before_current_activation_recovers_to_not_installed() {
     );
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
 
     let error = application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应模拟生效前中断");
     assert!(error.to_string().contains("模拟中断"));
     assert!(contains_entries(&data_root.join("journals")));
@@ -285,9 +719,9 @@ fn interruption_cleans_a_candidate_that_preserves_read_only_directories() {
     fs::set_permissions(&read_only, fs::Permissions::from_mode(0o500)).expect("应设置只读目录权限");
     fs::set_permissions(&input, fs::Permissions::from_mode(0o500))
         .expect("应设置只读 Skill 根权限");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应留下保留只读权限的候选");
 
     let reopened = SkillYardApplication::new(
@@ -326,10 +760,10 @@ fn interruption_after_temporary_current_creation_is_cleaned_automatically() {
     );
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
 
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应停在临时 current 创建之后");
     assert!(find_entry_with_prefix(&data_root.join("bundles"), ".current-").is_some());
 
@@ -363,9 +797,9 @@ fn interruption_during_candidate_cleanup_retries_the_owned_discard_directory() {
     );
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应留下未生效候选");
 
     let journal_path = only_journal_path(&data_root);
@@ -405,10 +839,10 @@ fn interruption_after_current_activation_recovers_to_installed_idempotently() {
         ready_application_with_failpoint(sandbox.path(), LifecycleFailpoint::AfterCurrentActivated);
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
 
     let error = application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应模拟生效后中断");
     assert!(error.to_string().contains("模拟中断"));
     assert!(contains_entries(&data_root.join("journals")));
@@ -443,7 +877,7 @@ fn a_real_process_exit_before_current_recovers_to_not_installed() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (data_root, home, input) = prepare_hard_exit_install(sandbox.path());
 
-    run_hard_exit_worker(&data_root, &home, &input.1, "before-current");
+    run_hard_exit_worker(&data_root, &home, &input.1, &input.2, "before-current");
 
     let reopened = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root.clone(), home),
@@ -474,7 +908,7 @@ fn a_real_process_exit_before_journal_recovers_to_not_installed() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (data_root, home, input) = prepare_hard_exit_install(sandbox.path());
 
-    run_hard_exit_worker(&data_root, &home, &input.1, "before-journal");
+    run_hard_exit_worker(&data_root, &home, &input.1, &input.2, "before-journal");
 
     let reopened = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root.clone(), home),
@@ -505,7 +939,7 @@ fn a_real_process_exit_after_current_recovers_to_installed() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (data_root, home, input) = prepare_hard_exit_install(sandbox.path());
 
-    run_hard_exit_worker(&data_root, &home, &input.1, "after-current");
+    run_hard_exit_worker(&data_root, &home, &input.1, &input.2, "after-current");
 
     let reopened = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root.clone(), home),
@@ -528,7 +962,7 @@ fn a_real_process_exit_after_domain_commit_recovers_to_installed() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (data_root, home, input) = prepare_hard_exit_install(sandbox.path());
 
-    run_hard_exit_worker(&data_root, &home, &input.1, "after-domain");
+    run_hard_exit_worker(&data_root, &home, &input.1, &input.2, "after-domain");
 
     let reopened = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root.clone(), home),
@@ -555,6 +989,7 @@ fn hard_exit_install_worker() {
     let data_root = env::var_os(HARD_EXIT_DATA_ROOT).expect("子进程必须收到数据目录");
     let home = env::var_os(HARD_EXIT_HOME).expect("子进程必须收到 home");
     let plan_id = env::var(HARD_EXIT_PLAN_ID).expect("子进程必须收到 Plan ID");
+    let candidate_id = env::var(HARD_EXIT_CANDIDATE_ID).expect("子进程必须收到候选成员 ID");
     let failpoint = match env::var(HARD_EXIT_POINT).as_deref() {
         Ok("before-journal") => LifecycleFailpoint::HardExitAfterTransactionRecord,
         Ok("before-current") => LifecycleFailpoint::HardExitAfterCandidatePublishedBeforePhase,
@@ -569,7 +1004,7 @@ fn hard_exit_install_worker() {
     );
 
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_candidate_ids(plan_id, vec![candidate_id]))
         .expect("hard-exit failpoint 必须在返回前终止进程");
 }
 
@@ -582,9 +1017,9 @@ fn a_tampered_journal_is_blocked_without_touching_other_managed_content() {
     );
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应留下可恢复 Journal");
 
     let protected = data_root.join("bundles/protected-by-contract");
@@ -645,9 +1080,9 @@ fn a_journal_with_unknown_fields_is_rejected_as_an_incompatible_contract() {
     );
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应留下 Journal");
     let journal_path = only_journal_path(&data_root);
     let mut journal: serde_json::Value =
@@ -690,9 +1125,9 @@ fn an_oversized_journal_is_bounded_and_shown_as_blocked_recovery() {
     );
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应留下 Journal");
     fs::write(only_journal_path(&data_root), vec![b'x'; 1024 * 1024 + 1])
         .expect("应模拟超大 Journal");
@@ -726,9 +1161,9 @@ fn a_fifo_journal_is_rejected_without_blocking_startup() {
     );
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应留下 Journal");
     let journal = only_journal_path(&data_root);
     fs::remove_file(&journal).expect("应移除普通 Journal");
@@ -762,9 +1197,9 @@ fn recovery_rejects_a_bundle_ancestor_replaced_by_a_symlink() {
         ready_application_with_failpoint(sandbox.path(), LifecycleFailpoint::AfterCurrentActivated);
     let input = sandbox.path().join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
     application
-        .handle(UiIntent::ConfirmInstallPlan { plan_id })
+        .handle(confirm_default_install_intent(&plan))
         .expect_err("failpoint 应留下已切换 current 的事务");
 
     let bundle = fs::read_dir(data_root.join("bundles"))
@@ -835,30 +1270,38 @@ fn prepare_hard_exit_install(
 ) -> (
     std::path::PathBuf,
     std::path::PathBuf,
-    (std::path::PathBuf, String),
+    (std::path::PathBuf, String, String),
 ) {
     let (application, data_root, home) = ready_application(base);
     let input = base.join("downloads/example-skill");
     write_skill(&input, "example-skill", "original");
-    let plan_id = create_plan(&application, &input);
+    let plan = create_plan(&application, &input);
+    let candidate_id = candidate_id(&plan, "example-skill");
     drop(application);
-    (data_root, home, (input, plan_id))
+    (data_root, home, (input, plan.id, candidate_id))
 }
 
-fn run_hard_exit_worker(data_root: &Path, home: &Path, plan_id: &str, point: &str) {
+fn run_hard_exit_worker(
+    data_root: &Path,
+    home: &Path,
+    plan_id: &str,
+    candidate_id: &str,
+    point: &str,
+) {
     let status = Command::new(env::current_exe().expect("应找到当前测试二进制"))
         .args(["--exact", "hard_exit_install_worker", "--nocapture"])
         .env(HARD_EXIT_WORKER, "1")
         .env(HARD_EXIT_DATA_ROOT, data_root)
         .env(HARD_EXIT_HOME, home)
         .env(HARD_EXIT_PLAN_ID, plan_id)
+        .env(HARD_EXIT_CANDIDATE_ID, candidate_id)
         .env(HARD_EXIT_POINT, point)
         .status()
         .expect("应启动 hard-exit 子进程");
     assert_eq!(status.code(), Some(91), "子进程必须在 failpoint 直接退出");
 }
 
-fn create_plan(application: &SkillYardApplication, input: &Path) -> String {
+fn create_plan(application: &SkillYardApplication, input: &Path) -> FolderInstallPlan {
     let UiOutcome::FolderInstallPlan { plan } = application
         .handle(UiIntent::CreateFolderInstallPlan {
             input_path: input.to_string_lossy().into_owned(),
@@ -867,7 +1310,41 @@ fn create_plan(application: &SkillYardApplication, input: &Path) -> String {
     else {
         panic!("应返回文件夹安装 Plan");
     };
-    plan.id
+    plan
+}
+
+fn confirm_install_intent(plan: &FolderInstallPlan, selected_skill_names: &[&str]) -> UiIntent {
+    let selected_candidate_ids = selected_skill_names
+        .iter()
+        .map(|selected_name| candidate_id(plan, selected_name))
+        .collect();
+    confirm_candidate_ids(plan.id.clone(), selected_candidate_ids)
+}
+
+fn candidate_id(plan: &FolderInstallPlan, skill_name: &str) -> String {
+    plan.candidates
+        .iter()
+        .find(|candidate| candidate.skill_name.as_deref() == Some(skill_name))
+        .unwrap_or_else(|| panic!("Plan 中应存在候选成员 {skill_name}"))
+        .candidate_id
+        .clone()
+}
+
+fn confirm_default_install_intent(plan: &FolderInstallPlan) -> UiIntent {
+    let selected_candidate_ids = plan
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.default_selected)
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect();
+    confirm_candidate_ids(plan.id.clone(), selected_candidate_ids)
+}
+
+fn confirm_candidate_ids(plan_id: String, selected_candidate_ids: Vec<String>) -> UiIntent {
+    UiIntent::ConfirmInstallPlan {
+        plan_id,
+        selected_candidate_ids,
+    }
 }
 
 fn assert_single_managed_skill(outcome: &UiOutcome, name: &str) {
@@ -891,6 +1368,47 @@ fn write_skill(root: &Path, name: &str, payload: &str) {
     )
     .expect("应写入 SKILL.md");
     fs::write(root.join("payload.txt"), payload).expect("应写入普通内容");
+}
+
+/// 无效成员仍需进入影响预览，但永远不能成为确认请求的一部分。
+fn assert_plan_contains_only_invalid_candidates(
+    application: &SkillYardApplication,
+    data_root: &Path,
+    input: &Path,
+    expected_count: usize,
+    expected_error: &str,
+) {
+    let plan = create_plan(application, input);
+    assert_eq!(plan.candidates.len(), expected_count);
+    assert!(
+        plan.candidates
+            .iter()
+            .all(|candidate| !candidate.selectable)
+    );
+    assert!(
+        plan.candidates
+            .iter()
+            .all(|candidate| !candidate.default_selected)
+    );
+    assert!(
+        plan.candidates.iter().any(|candidate| candidate
+            .validation_errors
+            .iter()
+            .any(|error| error.contains(expected_error))),
+        "Plan 应展示具体校验错误 {expected_error}：{:?}",
+        plan.candidates
+            .iter()
+            .flat_map(|candidate| candidate.validation_errors.iter())
+            .collect::<Vec<_>>()
+    );
+
+    let error = application
+        .handle(confirm_candidate_ids(plan.id, vec![]))
+        .expect_err("零有效成员不能创建空 Bundle");
+    assert!(error.to_string().contains("选择"));
+    assert!(!contains_entries(&data_root.join("bundles")));
+    assert!(!contains_entries(&data_root.join("staging")));
+    assert!(!contains_entries(&data_root.join("journals")));
 }
 
 fn contains_entries(path: &Path) -> bool {

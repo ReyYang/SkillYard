@@ -21,6 +21,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (2, include_str!("../migrations/0002_local_inventory.sql")),
     (3, include_str!("../migrations/0003_folder_install.sql")),
+    (
+        4,
+        include_str!("../migrations/0004_bundle_install_candidates.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -65,6 +69,10 @@ pub enum StorageError {
     InstallPlanConsumed,
     #[error("安装 Plan 已过期，请重新选择文件夹")]
     InstallPlanExpired,
+    #[error("安装 Plan 没有可保存的候选成员")]
+    EmptyInstallPlanCandidates,
+    #[error("确认的成员选择不属于当前安装 Plan")]
+    InvalidInstallSelection,
     #[error("已有一项生命周期写事务正在执行")]
     ActiveLifecycleTransaction,
     #[error("无法保存安装 Plan：{0}")]
@@ -73,6 +81,10 @@ pub enum StorageError {
     ReadInstallPlan(#[source] rusqlite::Error),
     #[error("安装 Plan 中的风险提示损坏：{0}")]
     InvalidPlanWarnings(#[source] serde_json::Error),
+    #[error("安装 Plan 中的验证结果损坏：{0}")]
+    InvalidPlanValidationErrors(#[source] serde_json::Error),
+    #[error("安装 Plan 中包含非法布尔值：{0}")]
+    InvalidPlanBoolean(i64),
     #[error("无法保存生命周期事务：{0}")]
     SaveLifecycleTransaction(#[source] rusqlite::Error),
     #[error("无法读取生命周期事务：{0}")]
@@ -103,7 +115,7 @@ pub struct SavedLocalRefresh {
     pub recovery_issues: Vec<RecoveryIssue>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredInstallPlan {
     pub id: String,
     pub input_path: String,
@@ -114,9 +126,24 @@ pub struct StoredInstallPlan {
     pub bundle_display_name: String,
     pub member_id: String,
     pub skill_name: String,
-    pub skill_description: String,
+    pub _legacy_skill_description: String,
     pub expires_at: i64,
     pub status: String,
+    pub candidates: Vec<StoredInstallCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredInstallCandidate {
+    pub candidate_id: String,
+    pub source_relative_path: String,
+    pub skill_name: Option<String>,
+    pub skill_description: Option<String>,
+    pub content_fingerprint: Option<String>,
+    pub selectable: bool,
+    pub validation_errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub default_selected: bool,
+    pub selected: bool,
 }
 
 pub struct NewInstallPlan<'a> {
@@ -131,8 +158,21 @@ pub struct NewInstallPlan<'a> {
     pub skill_name: &'a str,
     pub skill_description: &'a str,
     pub warnings: &'a [String],
+    pub candidates: &'a [NewInstallCandidate<'a>],
     pub created_at: i64,
     pub expires_at: i64,
+}
+
+pub struct NewInstallCandidate<'a> {
+    pub candidate_id: &'a str,
+    pub source_relative_path: &'a str,
+    pub skill_name: Option<&'a str>,
+    pub skill_description: Option<&'a str>,
+    pub content_fingerprint: Option<&'a str>,
+    pub selectable: bool,
+    pub validation_errors: &'a [String],
+    pub warnings: &'a [String],
+    pub default_selected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -374,9 +414,16 @@ impl Storage {
     }
 
     pub fn save_install_plan(&mut self, plan: NewInstallPlan<'_>) -> Result<(), StorageError> {
+        if plan.candidates.is_empty() {
+            return Err(StorageError::EmptyInstallPlanCandidates);
+        }
         let warnings =
             serde_json::to_string(plan.warnings).map_err(StorageError::InvalidPlanWarnings)?;
-        self.connection
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveInstallPlan)?;
+        transaction
             .execute(
                 "INSERT INTO install_plans (id, kind, input_path, input_device, input_inode, input_fingerprint, bundle_id, bundle_display_name, member_id, skill_name, skill_description, warnings_json, created_at, expires_at, status)
                  VALUES (?1, 'folder_snapshot', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending')",
@@ -397,16 +444,70 @@ impl Storage {
                 ],
             )
             .map_err(StorageError::SaveInstallPlan)?;
-        Ok(())
+        for (sort_order, candidate) in plan.candidates.iter().enumerate() {
+            let validation_errors = serde_json::to_string(candidate.validation_errors)
+                .map_err(StorageError::InvalidPlanValidationErrors)?;
+            let candidate_warnings = serde_json::to_string(candidate.warnings)
+                .map_err(StorageError::InvalidPlanWarnings)?;
+            transaction
+                .execute(
+                    "INSERT INTO install_plan_candidates (
+                        plan_id, candidate_id, source_relative_path, skill_name,
+                        skill_description, content_fingerprint, selectable,
+                        validation_errors_json, warnings_json, default_selected,
+                        selected, sort_order
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)",
+                    params![
+                        plan.id,
+                        candidate.candidate_id,
+                        candidate.source_relative_path,
+                        candidate.skill_name,
+                        candidate.skill_description,
+                        candidate.content_fingerprint,
+                        i64::from(candidate.selectable),
+                        validation_errors,
+                        candidate_warnings,
+                        i64::from(candidate.default_selected),
+                        sort_order as i64,
+                    ],
+                )
+                .map_err(StorageError::SaveInstallPlan)?;
+        }
+        transaction.commit().map_err(StorageError::SaveInstallPlan)
     }
 
     pub fn read_install_plan(&self, plan_id: &str) -> Result<StoredInstallPlan, StorageError> {
         read_install_plan_from(&self.connection, plan_id)?.ok_or(StorageError::InstallPlanNotFound)
     }
 
+    #[cfg(test)]
     pub fn begin_install_transaction(
         &mut self,
         plan_id: &str,
+        transaction_id: &str,
+        journal_path: &str,
+        now: i64,
+    ) -> Result<StoredInstallPlan, StorageError> {
+        let selected_candidate_ids = self
+            .read_install_plan(plan_id)?
+            .candidates
+            .into_iter()
+            .filter(|candidate| candidate.selectable && candidate.default_selected)
+            .map(|candidate| candidate.candidate_id)
+            .collect::<Vec<_>>();
+        self.begin_install_transaction_with_selection(
+            plan_id,
+            &selected_candidate_ids,
+            transaction_id,
+            journal_path,
+            now,
+        )
+    }
+
+    pub fn begin_install_transaction_with_selection(
+        &mut self,
+        plan_id: &str,
+        selected_candidate_ids: &[String],
         transaction_id: &str,
         journal_path: &str,
         now: i64,
@@ -415,7 +516,7 @@ impl Storage {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveLifecycleTransaction)?;
-        let plan = read_install_plan_from(&transaction, plan_id)?
+        let mut plan = read_install_plan_from(&transaction, plan_id)?
             .ok_or(StorageError::InstallPlanNotFound)?;
         if plan.status != "pending" {
             return Err(StorageError::InstallPlanConsumed);
@@ -423,6 +524,41 @@ impl Storage {
         if plan.expires_at <= now {
             return Err(StorageError::InstallPlanExpired);
         }
+        let selected = selected_candidate_ids.iter().collect::<BTreeSet<_>>();
+        if selected.is_empty() || selected.len() != selected_candidate_ids.len() {
+            return Err(StorageError::InvalidInstallSelection);
+        }
+        if selected.iter().any(|candidate_id| {
+            !plan.candidates.iter().any(|candidate| {
+                candidate.selectable && candidate.candidate_id.as_str() == candidate_id.as_str()
+            })
+        }) {
+            return Err(StorageError::InvalidInstallSelection);
+        }
+        transaction
+            .execute(
+                "UPDATE install_plan_candidates SET selected = 0 WHERE plan_id = ?1",
+                [&plan.id],
+            )
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        for candidate_id in &selected {
+            let changed = transaction
+                .execute(
+                    "UPDATE install_plan_candidates
+                     SET selected = 1
+                     WHERE plan_id = ?1 AND candidate_id = ?2 AND selectable = 1",
+                    params![plan.id, candidate_id.as_str()],
+                )
+                .map_err(StorageError::SaveLifecycleTransaction)?;
+            ensure_one_lifecycle_row(changed, transaction_id)?;
+        }
+        let anchor_member_id = plan
+            .candidates
+            .iter()
+            .find(|candidate| selected.contains(&candidate.candidate_id))
+            .expect("前面已拒绝空选择")
+            .candidate_id
+            .as_str();
         let inserted = transaction
             .execute(
                 "INSERT INTO lifecycle_transactions (id, kind, plan_id, bundle_id, member_id, journal_path, phase, status, created_at, updated_at)
@@ -431,7 +567,7 @@ impl Storage {
                     transaction_id,
                     plan.id,
                     plan.bundle_id,
-                    plan.member_id,
+                    anchor_member_id,
                     journal_path,
                     now
                 ],
@@ -445,6 +581,11 @@ impl Storage {
             )
             .map_err(StorageError::SaveLifecycleTransaction)?;
         ensure_one_lifecycle_row(consumed, transaction_id)?;
+        // 返回这次 SQLite 事务实际确认的内存快照，避免提交后第三次读取引入新的竞态窗口。
+        plan.status = "consumed".to_owned();
+        for candidate in &mut plan.candidates {
+            candidate.selected = selected.contains(&candidate.candidate_id);
+        }
         transaction
             .commit()
             .map_err(StorageError::SaveLifecycleTransaction)?;
@@ -563,9 +704,14 @@ impl Storage {
         stable_relative_path: &str,
         now: i64,
     ) -> Result<(), StorageError> {
+        let selected = selected_install_candidates(plan)?;
+        let anchor = selected
+            .first()
+            .expect("selected_install_candidates 已拒绝空集合");
         validate_managed_install_paths(
             transaction_id,
             plan,
+            &selected,
             managed_directory,
             current_target,
             stable_relative_path,
@@ -586,32 +732,47 @@ impl Storage {
                 ],
             )
             .map_err(StorageError::SaveManagedBundle)?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO skill_members (id, bundle_id, skill_name, description, stable_relative_path, content_fingerprint, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    plan.member_id,
-                    plan.bundle_id,
-                    plan.skill_name,
-                    plan.skill_description,
-                    stable_relative_path,
-                    plan.input_fingerprint,
-                    now
-                ],
-            )
-            .map_err(StorageError::SaveManagedBundle)?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO member_selections (bundle_id, member_id, selected_at) VALUES (?1, ?2, ?3)",
-                params![plan.bundle_id, plan.member_id, now],
-            )
-            .map_err(StorageError::SaveManagedBundle)?;
+        for candidate in &selected {
+            let skill_name = candidate
+                .skill_name
+                .as_deref()
+                .ok_or(StorageError::InvalidInstallSelection)?;
+            let description = candidate
+                .skill_description
+                .as_deref()
+                .ok_or(StorageError::InvalidInstallSelection)?;
+            let fingerprint = candidate
+                .content_fingerprint
+                .as_deref()
+                .ok_or(StorageError::InvalidInstallSelection)?;
+            let stable_path = format!("members/{skill_name}");
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO skill_members (id, bundle_id, skill_name, description, stable_relative_path, content_fingerprint, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        candidate.candidate_id,
+                        plan.bundle_id,
+                        skill_name,
+                        description,
+                        stable_path,
+                        fingerprint,
+                        now
+                    ],
+                )
+                .map_err(StorageError::SaveManagedBundle)?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO member_selections (bundle_id, member_id, selected_at) VALUES (?1, ?2, ?3)",
+                    params![plan.bundle_id, candidate.candidate_id, now],
+                )
+                .map_err(StorageError::SaveManagedBundle)?;
+        }
         ensure_managed_state_matches(
             &transaction,
             plan,
+            &selected,
             managed_directory,
             current_target,
-            stable_relative_path,
         )?;
         let changed = transaction
             .execute(
@@ -625,7 +786,13 @@ impl Storage {
                        (status = 'in_progress' AND phase IN ('candidate_ready', 'activated'))
                        OR (status = 'completed' AND phase = 'state_committed')
                    )",
-                params![transaction_id, plan.id, plan.bundle_id, plan.member_id, now],
+                params![
+                    transaction_id,
+                    plan.id,
+                    plan.bundle_id,
+                    anchor.candidate_id,
+                    now
+                ],
             )
             .map_err(StorageError::SaveManagedBundle)?;
         ensure_one_lifecycle_row(changed, transaction_id)?;
@@ -834,22 +1001,52 @@ fn ensure_one_lifecycle_row(changed: usize, transaction_id: &str) -> Result<(), 
 fn validate_managed_install_paths(
     transaction_id: &str,
     plan: &StoredInstallPlan,
+    selected: &[&StoredInstallCandidate],
     managed_directory: &str,
     current_target: &str,
     stable_relative_path: &str,
 ) -> Result<(), StorageError> {
+    let anchor_skill_name = selected
+        .first()
+        .and_then(|candidate| candidate.skill_name.as_deref())
+        .ok_or(StorageError::InvalidInstallSelection)?;
+    let members_are_safe = selected.iter().all(|candidate| {
+        candidate.selectable
+            && candidate
+                .skill_name
+                .as_deref()
+                .is_some_and(is_single_path_component)
+            && candidate.skill_description.is_some()
+            && candidate.content_fingerprint.is_some()
+            && is_single_path_component(&candidate.candidate_id)
+    });
     if !is_single_path_component(transaction_id)
         || !is_single_path_component(&plan.bundle_id)
-        || !is_single_path_component(&plan.skill_name)
+        || !members_are_safe
         || managed_directory != format!("bundles/{}", plan.bundle_id)
         || current_target != format!("contents/{transaction_id}")
-        || stable_relative_path != format!("members/{}", plan.skill_name)
+        || stable_relative_path != format!("members/{anchor_skill_name}")
     {
         return Err(StorageError::UnsafeManagedPath(
             managed_directory.to_owned(),
         ));
     }
     Ok(())
+}
+
+fn selected_install_candidates(
+    plan: &StoredInstallPlan,
+) -> Result<Vec<&StoredInstallCandidate>, StorageError> {
+    let selected = plan
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.selected)
+        .collect::<Vec<_>>();
+    if selected.is_empty() || selected.iter().any(|candidate| !candidate.selectable) {
+        Err(StorageError::InvalidInstallSelection)
+    } else {
+        Ok(selected)
+    }
 }
 
 fn validate_stored_managed_paths(
@@ -1047,6 +1244,7 @@ fn read_install_plan_from(
     else {
         return Ok(None);
     };
+    let candidates = read_install_candidates_from(connection, &id)?;
     Ok(Some(StoredInstallPlan {
         id,
         input_path,
@@ -1057,10 +1255,81 @@ fn read_install_plan_from(
         bundle_display_name,
         member_id,
         skill_name,
-        skill_description,
+        _legacy_skill_description: skill_description,
         expires_at,
         status,
+        candidates,
     }))
+}
+
+fn read_install_candidates_from(
+    connection: &Connection,
+    plan_id: &str,
+) -> Result<Vec<StoredInstallCandidate>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT candidate_id, source_relative_path, skill_name, skill_description,
+                    content_fingerprint, selectable, validation_errors_json, warnings_json,
+                    default_selected, selected
+             FROM install_plan_candidates
+             WHERE plan_id = ?1
+             ORDER BY sort_order",
+        )
+        .map_err(StorageError::ReadInstallPlan)?;
+    let rows = statement
+        .query_map([plan_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+            ))
+        })
+        .map_err(StorageError::ReadInstallPlan)?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (
+            candidate_id,
+            source_relative_path,
+            skill_name,
+            skill_description,
+            content_fingerprint,
+            selectable,
+            validation_errors_json,
+            warnings_json,
+            default_selected,
+            selected,
+        ) = row.map_err(StorageError::ReadInstallPlan)?;
+        candidates.push(StoredInstallCandidate {
+            candidate_id,
+            source_relative_path,
+            skill_name,
+            skill_description,
+            content_fingerprint,
+            selectable: sqlite_bool(selectable)?,
+            validation_errors: serde_json::from_str(&validation_errors_json)
+                .map_err(StorageError::InvalidPlanValidationErrors)?,
+            warnings: serde_json::from_str(&warnings_json)
+                .map_err(StorageError::InvalidPlanWarnings)?,
+            default_selected: sqlite_bool(default_selected)?,
+            selected: sqlite_bool(selected)?,
+        });
+    }
+    Ok(candidates)
+}
+
+fn sqlite_bool(value: i64) -> Result<bool, StorageError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(StorageError::InvalidPlanBoolean(other)),
+    }
 }
 
 fn inventory_item_from_observation(observation: InventoryObservation) -> InventoryItem {
@@ -1173,9 +1442,9 @@ fn map_lifecycle_insert_error(error: rusqlite::Error) -> StorageError {
 fn ensure_managed_state_matches(
     transaction: &Transaction<'_>,
     plan: &StoredInstallPlan,
+    selected: &[&StoredInstallCandidate],
     managed_directory: &str,
     current_target: &str,
-    stable_relative_path: &str,
 ) -> Result<(), StorageError> {
     let bundle = transaction
         .query_row(
@@ -1190,40 +1459,74 @@ fn ensure_managed_state_matches(
             },
         )
         .map_err(StorageError::SaveManagedBundle)?;
-    let member = transaction
-        .query_row(
-            "SELECT bundle_id, skill_name, description, stable_relative_path, content_fingerprint FROM skill_members WHERE id = ?1",
-            [&plan.member_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            },
-        )
-        .map_err(StorageError::SaveManagedBundle)?;
     let bundle_matches = bundle
         == (
             plan.bundle_display_name.clone(),
             managed_directory.to_owned(),
             current_target.to_owned(),
         );
-    let member_matches = member
-        == (
-            plan.bundle_id.clone(),
-            plan.skill_name.clone(),
-            plan.skill_description.clone(),
-            stable_relative_path.to_owned(),
-            plan.input_fingerprint.clone(),
-        );
-    if bundle_matches && member_matches {
-        Ok(())
-    } else {
-        Err(StorageError::ManagedStateConflict)
+    if !bundle_matches {
+        return Err(StorageError::ManagedStateConflict);
     }
+    let actual_count = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM skill_members WHERE bundle_id = ?1",
+            [&plan.bundle_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    if actual_count != selected.len() as i64 {
+        return Err(StorageError::ManagedStateConflict);
+    }
+    for candidate in selected {
+        let skill_name = candidate
+            .skill_name
+            .as_ref()
+            .ok_or(StorageError::InvalidInstallSelection)?;
+        let description = candidate
+            .skill_description
+            .as_ref()
+            .ok_or(StorageError::InvalidInstallSelection)?;
+        let fingerprint = candidate
+            .content_fingerprint
+            .as_ref()
+            .ok_or(StorageError::InvalidInstallSelection)?;
+        let member = transaction
+            .query_row(
+                "SELECT bundle_id, skill_name, description, stable_relative_path, content_fingerprint FROM skill_members WHERE id = ?1",
+                [&candidate.candidate_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        let selected_row = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM member_selections WHERE bundle_id = ?1 AND member_id = ?2",
+                params![plan.bundle_id, candidate.candidate_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        if member
+            != (
+                plan.bundle_id.clone(),
+                skill_name.clone(),
+                description.clone(),
+                format!("members/{skill_name}"),
+                fingerprint.clone(),
+            )
+            || selected_row != 1
+        {
+            return Err(StorageError::ManagedStateConflict);
+        }
+    }
+    Ok(())
 }
 
 fn replace_inventory_rows(
@@ -1413,6 +1716,17 @@ mod tests {
     }
 
     fn save_test_plan(storage: &mut Storage, plan_id: &str, bundle_id: &str, member_id: &str) {
+        let candidates = [NewInstallCandidate {
+            candidate_id: member_id,
+            source_relative_path: "",
+            skill_name: Some(member_id),
+            skill_description: Some("测试 Skill"),
+            content_fingerprint: Some("sha256:test"),
+            selectable: true,
+            validation_errors: &[],
+            warnings: &[],
+            default_selected: true,
+        }];
         storage
             .save_install_plan(NewInstallPlan {
                 id: plan_id,
@@ -1426,6 +1740,7 @@ mod tests {
                 skill_name: member_id,
                 skill_description: "测试 Skill",
                 warnings: &[],
+                candidates: &candidates,
                 created_at: 100,
                 expires_at: 1_000,
             })

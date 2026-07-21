@@ -268,6 +268,78 @@ code {
   display: block;
 }
 
+.install-candidates {
+  display: grid;
+  gap: 0.65rem;
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid rgb(50 70 56 / 8%);
+}
+
+.install-candidate {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: start;
+  padding: 0.85rem;
+  border: 1px solid rgb(50 70 56 / 9%);
+  border-radius: 12px;
+  background: rgb(247 249 243 / 84%);
+  cursor: pointer;
+}
+
+.install-candidate.is-invalid {
+  color: #725548;
+  background: #f4ebe5;
+  cursor: not-allowed;
+}
+
+.install-candidate input {
+  margin-top: 0.18rem;
+}
+
+.install-candidate-copy {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.install-candidate-copy code {
+  overflow: hidden;
+  color: #6c756d;
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-error,
+.candidate-warning,
+.install-selection-warning,
+.install-selection-empty {
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.candidate-error {
+  color: #98513f;
+}
+
+.candidate-warning {
+  color: #7a6227;
+}
+
+.install-selection-warning,
+.install-selection-empty {
+  margin: 0;
+  padding: 0.85rem 1.2rem;
+  color: #6f5521;
+  background: #f2e8bd;
+}
+
+.install-selection-empty {
+  color: #8b4438;
+  background: #f4e4df;
+}
+
 .install-mount-note {
   display: grid;
   gap: 0.3rem;

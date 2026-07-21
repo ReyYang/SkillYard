@@ -7,8 +7,13 @@ pub enum UiIntent {
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
-    CreateFolderInstallPlan { input_path: String },
-    ConfirmInstallPlan { plan_id: String },
+    CreateFolderInstallPlan {
+        input_path: String,
+    },
+    ConfirmInstallPlan {
+        plan_id: String,
+        selected_candidate_ids: Vec<String>,
+    },
 }
 
 /// 固定 Supported App 的稳定标识。
@@ -75,12 +80,26 @@ pub struct FolderInstallPlan {
     pub id: String,
     pub input_path: String,
     pub bundle_display_name: String,
-    pub skill_name: String,
-    pub target_directory: String,
+    pub candidates: Vec<FolderInstallCandidate>,
     pub warnings: Vec<String>,
     pub will_mount: bool,
     pub created_at: i64,
     pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderInstallCandidate {
+    pub candidate_id: String,
+    pub source_relative_path: String,
+    pub skill_name: Option<String>,
+    pub description: Option<String>,
+    pub target_directory: Option<String>,
+    pub selectable: bool,
+    pub validation_errors: Vec<String>,
+    pub warnings: Vec<String>,
+    /// 全新安装默认选择全部有效成员，界面仍可在最终确认前取消。
+    pub default_selected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Deserialize, Serialize)]

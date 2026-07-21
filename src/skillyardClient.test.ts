@@ -62,7 +62,7 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("choose_folder_install_plan");
   });
 
-  it("确认时只把 opaque Plan ID 交回 Rust", async () => {
+  it("确认时只把 opaque Plan 与候选 ID 交回 Rust", async () => {
     mocks.invoke.mockResolvedValue({
       type: "inventory",
       scanCompletedAt: 1,
@@ -73,10 +73,11 @@ describe("Tauri IPC contract", () => {
       recoveryIssues: [],
     });
 
-    await tauriSkillYardClient.confirmInstallPlan("plan-1");
+    await tauriSkillYardClient.confirmInstallPlan("plan-1", ["candidate-1"]);
 
     expect(mocks.invoke).toHaveBeenCalledWith("confirm_install_plan", {
       planId: "plan-1",
+      selectedCandidateIds: ["candidate-1"],
     });
   });
 });

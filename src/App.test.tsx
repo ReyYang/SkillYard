@@ -3,7 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import type { InventoryObservation, UiOutcome } from "./domain";
+import type {
+  FolderInstallPlan,
+  InventoryObservation,
+  UiOutcome,
+} from "./domain";
 import type { SkillYardClient } from "./skillyardClient";
 
 describe("首次使用", () => {
@@ -105,24 +109,17 @@ describe("本机清单", () => {
   it("选择文件夹后先显示影响预览，确认前不写入", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([]));
-    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue({
-      id: "plan-1",
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createFolderInstallPlan({
       inputPath: "/Users/test/Downloads/example",
-      bundleDisplayName: "example",
-      skillName: "example",
-      targetDirectory: "/Users/test/Library/Application Support/SkillYard/bundles/1/current/members/example",
       warnings: ["包含可执行文件，请确认来源可信"],
-      willMount: false,
-      createdAt: 1,
-      expiresAt: 2,
-    });
+    }));
     render(<App client={client} />);
 
     await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
 
     expect(client.chooseFolderInstallPlan).toHaveBeenCalledTimes(1);
     expect(
-      screen.getByRole("heading", { name: "确认安装这个 Skill" }),
+      screen.getByRole("heading", { name: /确认安装.*Bundle/ }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("安装影响预览")).toHaveTextContent(
       "安装后不会自动挂载",
@@ -132,21 +129,98 @@ describe("本机清单", () => {
     expect(client.confirmInstallPlan).not.toHaveBeenCalled();
   });
 
+  it("多 Skill Bundle 默认全选，并把用户最终选择提交为候选 ID", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(
+      createFolderInstallPlan({
+        bundleDisplayName: "superpowers",
+        candidates: [
+          createFolderCandidate({
+            candidateId: "candidate-brainstorming",
+            sourceRelativePath: "skills/brainstorming",
+            skillName: "brainstorming",
+          }),
+          createFolderCandidate({
+            candidateId: "candidate-tdd",
+            sourceRelativePath: "skills/tdd",
+            skillName: "tdd",
+          }),
+        ],
+      }),
+    );
+    vi.mocked(client.confirmInstallPlan).mockResolvedValue(inventoryOutcome([]));
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    const brainstorming = screen.getByRole("checkbox", { name: /brainstorming/ });
+    const tdd = screen.getByRole("checkbox", { name: /tdd/ });
+    expect(brainstorming).toBeChecked();
+    expect(tdd).toBeChecked();
+
+    await user.click(tdd);
+    expect(tdd).not.toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /部分 Skill 可能依赖.*未选择/,
+    );
+    await user.click(screen.getByRole("button", { name: "确认安装" }));
+
+    expect(client.confirmInstallPlan).toHaveBeenCalledWith("plan-1", [
+      "candidate-brainstorming",
+    ]);
+  });
+
+  it("没有选择任何有效成员时不能确认安装", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createFolderInstallPlan());
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(screen.getByRole("checkbox", { name: /example/ }));
+
+    expect(screen.getByText(/至少选择一个有效 Skill/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认安装" })).toBeDisabled();
+    expect(client.confirmInstallPlan).not.toHaveBeenCalled();
+  });
+
+  it("无效候选展示具体错误且不可选择，有效候选仍可安装", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(
+      createFolderInstallPlan({
+        candidates: [
+          createFolderCandidate({
+            candidateId: "candidate-valid",
+            sourceRelativePath: "skills/valid",
+            skillName: "valid",
+          }),
+          createFolderCandidate({
+            candidateId: "candidate-broken",
+            sourceRelativePath: "skills/broken",
+            skillName: "broken",
+            selectable: false,
+            validationErrors: ["SKILL.md YAML frontmatter 无法解析"],
+            defaultSelected: false,
+            targetDirectory: null,
+          }),
+        ],
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    expect(screen.getByRole("checkbox", { name: /valid/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /broken/ })).toBeDisabled();
+    expect(screen.getByText("SKILL.md YAML frontmatter 无法解析")).toBeInTheDocument();
+  });
+
   it("确认期间禁止取消或重复提交，成功后显示受管 Bundle", async () => {
     const user = userEvent.setup();
     let finishInstall: ((outcome: UiOutcome) => void) | undefined;
     const client = createClient(inventoryOutcome([]));
-    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue({
-      id: "plan-1",
-      inputPath: "/tmp/example",
-      bundleDisplayName: "example",
-      skillName: "example",
-      targetDirectory: "/tmp/central/example",
-      warnings: [],
-      willMount: false,
-      createdAt: 1,
-      expiresAt: 2,
-    });
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createFolderInstallPlan());
     vi.mocked(client.confirmInstallPlan).mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -157,7 +231,9 @@ describe("本机清单", () => {
     await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
     await user.click(screen.getByRole("button", { name: "确认安装" }));
 
-    expect(client.confirmInstallPlan).toHaveBeenCalledWith("plan-1");
+    expect(client.confirmInstallPlan).toHaveBeenCalledWith("plan-1", [
+      "candidate-example",
+    ]);
     expect(screen.getByRole("button", { name: "正在安全安装…" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "正在安全安装…" }));
@@ -190,17 +266,7 @@ describe("本机清单", () => {
       }),
     ]);
     const client = createClient(initial);
-    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue({
-      id: "plan-1",
-      inputPath: "/tmp/example",
-      bundleDisplayName: "example",
-      skillName: "example",
-      targetDirectory: "/tmp/central/example",
-      warnings: [],
-      willMount: false,
-      createdAt: 1,
-      expiresAt: 2,
-    });
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createFolderInstallPlan());
     vi.mocked(client.confirmInstallPlan).mockRejectedValue({
       code: "lifecycleError",
       message: "安装中断，已自动恢复",
@@ -463,6 +529,40 @@ describe("平台检查", () => {
     expect(client.refreshLocalInventory).not.toHaveBeenCalled();
   });
 });
+
+function createFolderInstallPlan(
+  overrides: Partial<FolderInstallPlan> = {},
+): FolderInstallPlan {
+  return {
+    id: "plan-1",
+    inputPath: "/tmp/example",
+    bundleDisplayName: "example",
+    candidates: [createFolderCandidate()],
+    warnings: [],
+    willMount: false,
+    createdAt: 1,
+    expiresAt: 2,
+    ...overrides,
+  };
+}
+
+function createFolderCandidate(
+  overrides: Partial<FolderInstallPlan["candidates"][number]> = {},
+): FolderInstallPlan["candidates"][number] {
+  return {
+    candidateId: "candidate-example",
+    sourceRelativePath: "",
+    skillName: "example",
+    description: "test skill",
+    selectable: true,
+    validationErrors: [],
+    warnings: [],
+    defaultSelected: true,
+    targetDirectory:
+      "/tmp/central/bundles/example/current/members/example",
+    ...overrides,
+  };
+}
 
 function createClient(startup: UiOutcome): SkillYardClient {
   return {

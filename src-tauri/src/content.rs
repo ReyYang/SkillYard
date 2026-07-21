@@ -20,7 +20,13 @@ const MAX_ENTRIES: usize = 20_000;
 const MAX_TOTAL_FILE_BYTES: u64 = 512 * 1_048_576;
 const MAX_SINGLE_FILE_BYTES: u64 = 100 * 1_048_576;
 const FINGERPRINT_VERSION: &[u8] = b"skillyard-single-skill-v1";
-const EXECUTABLE_WARNING: &str = "内容包含可执行文件或 shebang，请在挂载前确认风险";
+const BUNDLE_FINGERPRINT_VERSION: &[u8] = b"skillyard-folder-bundle-v1";
+const EXECUTABLE_WARNING: &str = "内容包含脚本或可执行文件，请在挂载前确认风险";
+const COMMON_SCRIPT_EXTENSIONS: &[&str] = &[
+    "bash", "cjs", "command", "fish", "js", "jsx", "lua", "mjs", "php", "pl", "ps1", "py", "pyw",
+    "rb", "sh", "ts", "tsx", "zsh",
+];
+const COMMON_SCRIPT_DIRECTORIES: &[&str] = &["bin", "hooks", "script", "scripts"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedSingleSkill {
@@ -29,6 +35,33 @@ pub struct ValidatedSingleSkill {
     pub description: String,
     pub fingerprint: String,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredBundleCandidate {
+    /// 相对所选 Bundle 根目录的位置；根目录本身是 Skill 时为空路径。
+    pub relative_path: PathBuf,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub fingerprint: Option<String>,
+    pub warnings: Vec<String>,
+    pub validation_errors: Vec<String>,
+}
+
+impl DiscoveredBundleCandidate {
+    pub fn selectable(&self) -> bool {
+        self.validation_errors.is_empty()
+            && self.name.is_some()
+            && self.description.is_some()
+            && self.fingerprint.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedSkillBundle {
+    pub canonical_root: PathBuf,
+    pub fingerprint: String,
+    pub candidates: Vec<DiscoveredBundleCandidate>,
 }
 
 #[derive(Debug, Error)]
@@ -50,6 +83,15 @@ pub enum ContentValidationError {
     SkillMetadataNotRegular(String),
     #[error("单 Skill 文件夹不支持嵌套 SKILL.md：{0}")]
     NestedSkillUnsupported(String),
+    #[error("所选文件夹中未发现有效的 SKILL.md")]
+    NoSkillMetadataFound,
+    #[error("Skill 目录不能互相嵌套：{ancestor} 与 {descendant}")]
+    NestedSkillConflict {
+        ancestor: String,
+        descendant: String,
+    },
+    #[error("Bundle 中存在重复 Skill 名称 {name}：{paths}")]
+    DuplicateSkillName { name: String, paths: String },
     #[error("SKILL.md metadata 无效：{0}")]
     InvalidMetadata(String),
     #[error("Skill 内容包含不安全的{kind}：{path}")]
@@ -97,6 +139,64 @@ impl ContentLimits {
         max_total_file_bytes: MAX_TOTAL_FILE_BYTES,
         max_single_file_bytes: MAX_SINGLE_FILE_BYTES,
     };
+}
+
+/// 一个 Bundle 内所有已选成员共享复制预算，避免逐成员上限被叠加放大。
+#[derive(Debug)]
+pub struct BundleCopyBudget {
+    limits: ContentLimits,
+    used_entries: usize,
+    used_file_bytes: u64,
+}
+
+impl BundleCopyBudget {
+    pub fn production() -> Self {
+        Self {
+            limits: ContentLimits::PRODUCTION,
+            used_entries: 0,
+            used_file_bytes: 0,
+        }
+    }
+
+    fn reserve(&mut self, tree: &ValidatedTree) -> Result<(), ContentValidationError> {
+        let entries = tree.entries.len();
+        let file_bytes = tree
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::File)
+            .try_fold(0_u64, |total, entry| total.checked_add(entry.length))
+            .ok_or(ContentValidationError::TotalSizeLimitExceeded {
+                limit: self.limits.max_total_file_bytes,
+                actual: u64::MAX,
+            })?;
+        let next_entries = self.used_entries.checked_add(entries).ok_or(
+            ContentValidationError::EntryLimitExceeded {
+                limit: self.limits.max_entries,
+                actual: usize::MAX,
+            },
+        )?;
+        let next_file_bytes = self.used_file_bytes.checked_add(file_bytes).ok_or(
+            ContentValidationError::TotalSizeLimitExceeded {
+                limit: self.limits.max_total_file_bytes,
+                actual: u64::MAX,
+            },
+        )?;
+        if next_entries > self.limits.max_entries {
+            return Err(ContentValidationError::EntryLimitExceeded {
+                limit: self.limits.max_entries,
+                actual: next_entries,
+            });
+        }
+        if next_file_bytes > self.limits.max_total_file_bytes {
+            return Err(ContentValidationError::TotalSizeLimitExceeded {
+                limit: self.limits.max_total_file_bytes,
+                actual: next_file_bytes,
+            });
+        }
+        self.used_entries = next_entries;
+        self.used_file_bytes = next_file_bytes;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +265,32 @@ struct InspectedTree {
 }
 
 #[derive(Debug)]
+struct InspectedDirectoryTree {
+    canonical_root: PathBuf,
+    root_identity: EntryIdentity,
+    root_permissions: u32,
+    entries: Vec<TreeEntry>,
+    skill_metadata: BTreeMap<PathBuf, Vec<u8>>,
+    fingerprint: String,
+    has_executable_risk: bool,
+}
+
+#[derive(Debug)]
+struct BundleDiscovery {
+    canonical_root: PathBuf,
+    candidate_roots: BTreeMap<PathBuf, ()>,
+    skill_metadata: BTreeMap<PathBuf, Vec<u8>>,
+    unsafe_entries: Vec<UnsafeDiscoveredEntry>,
+    fingerprint: String,
+}
+
+#[derive(Debug)]
+struct UnsafeDiscoveredEntry {
+    relative_path: PathBuf,
+    message: String,
+}
+
+#[derive(Debug)]
 struct ValidatedTree {
     skill: ValidatedSingleSkill,
     root_identity: EntryIdentity,
@@ -196,6 +322,128 @@ pub fn validate_single_skill_folder(
     validate_single_skill_folder_with_limits(root, ContentLimits::PRODUCTION)
 }
 
+/// 普通本地文件夹既可以是单 Skill，也可以是包含多个成员的完整 Bundle。
+pub fn validate_skill_bundle_folder(
+    root: &Path,
+) -> Result<ValidatedSkillBundle, ContentValidationError> {
+    let inspected = inspect_bundle_discovery(root, ContentLimits::PRODUCTION)?;
+    if inspected.candidate_roots.is_empty() {
+        return Err(ContentValidationError::NoSkillMetadataFound);
+    }
+
+    let mut member_roots = inspected
+        .candidate_roots
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    member_roots.sort();
+    let mut errors = BTreeMap::<PathBuf, Vec<String>>::new();
+    for (index, ancestor) in member_roots.iter().enumerate() {
+        for descendant in member_roots
+            .iter()
+            .skip(index + 1)
+            .filter(|candidate| candidate.starts_with(ancestor) && *candidate != ancestor)
+        {
+            let message = ContentValidationError::NestedSkillConflict {
+                ancestor: display_path(&inspected.canonical_root.join(ancestor)),
+                descendant: display_path(&inspected.canonical_root.join(descendant)),
+            }
+            .to_string();
+            errors
+                .entry(ancestor.clone())
+                .or_default()
+                .push(message.clone());
+            errors.entry(descendant.clone()).or_default().push(message);
+        }
+    }
+
+    for unsafe_entry in &inspected.unsafe_entries {
+        let owner = member_roots
+            .iter()
+            .filter(|root| unsafe_entry.relative_path.starts_with(root))
+            .max_by_key(|root| root.components().count());
+        if let Some(owner) = owner {
+            errors
+                .entry(owner.clone())
+                .or_default()
+                .push(unsafe_entry.message.clone());
+        }
+        // Bundle 根下的仓库文件不会进入任何 Member，因此不用它们否定可安装候选。
+    }
+
+    let mut candidates = Vec::with_capacity(member_roots.len());
+    let mut names = BTreeMap::<String, Vec<usize>>::new();
+    for relative_path in member_roots {
+        let mut candidate = DiscoveredBundleCandidate {
+            relative_path: relative_path.clone(),
+            name: None,
+            description: None,
+            fingerprint: None,
+            warnings: Vec::new(),
+            validation_errors: errors.remove(&relative_path).unwrap_or_default(),
+        };
+        let member_root = inspected.canonical_root.join(&relative_path);
+        if let Some(metadata) = inspected.skill_metadata.get(&relative_path) {
+            let directory_name = member_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    ContentValidationError::InvalidMetadata(
+                        "Skill 根目录名必须是有效 UTF-8 名称".to_owned(),
+                    )
+                })?;
+            match parse_skill_metadata(metadata, directory_name) {
+                Ok((name, description)) => {
+                    candidate.name = Some(name);
+                    candidate.description = Some(description);
+                }
+                Err(error) => candidate.validation_errors.push(error.to_string()),
+            }
+        }
+        match validate_single_skill_folder_with_limits(&member_root, ContentLimits::PRODUCTION) {
+            Ok(validated) => {
+                candidate.fingerprint = Some(validated.fingerprint);
+                candidate.warnings = validated.warnings;
+            }
+            Err(error) => candidate.validation_errors.push(error.to_string()),
+        }
+        if let Some(name) = &candidate.name {
+            names
+                .entry(name.clone())
+                .or_default()
+                .push(candidates.len());
+        }
+        candidate.validation_errors.sort();
+        candidate.validation_errors.dedup();
+        candidates.push(candidate);
+    }
+    for (name, indexes) in names.into_iter().filter(|(_, indexes)| indexes.len() > 1) {
+        let paths = indexes
+            .iter()
+            .map(|index| {
+                display_path(
+                    &inspected
+                        .canonical_root
+                        .join(&candidates[*index].relative_path)
+                        .join("SKILL.md"),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        let message = ContentValidationError::DuplicateSkillName { name, paths }.to_string();
+        for index in indexes {
+            candidates[index].validation_errors.push(message.clone());
+        }
+    }
+    candidates.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+
+    Ok(ValidatedSkillBundle {
+        canonical_root: inspected.canonical_root,
+        fingerprint: inspected.fingerprint,
+        candidates,
+    })
+}
+
 #[cfg(test)]
 pub fn copy_single_skill_tree(
     source: &Path,
@@ -210,8 +458,17 @@ pub fn copy_single_skill_tree_into_open_directory(
     destination_parent: &File,
     destination_parent_path: &Path,
     destination_name: &OsStr,
+    expected_name: &str,
+    expected_fingerprint: &str,
+    budget: &mut BundleCopyBudget,
 ) -> Result<(), ContentValidationError> {
     let validated = validate_tree(source, ContentLimits::PRODUCTION)?;
+    if validated.skill.name != expected_name || validated.skill.fingerprint != expected_fingerprint
+    {
+        return Err(ContentValidationError::SourceChanged(display_path(source)));
+    }
+    // 在创建目标目录前占用共享预算；确认失败不会先把超限内容写入临时区。
+    budget.reserve(&validated)?;
     let destination_parent = prepare_open_destination(
         &validated.skill.canonical_root,
         destination_parent,
@@ -331,10 +588,285 @@ fn validate_tree(
     })
 }
 
+fn inspect_bundle_discovery(
+    root: &Path,
+    limits: ContentLimits,
+) -> Result<BundleDiscovery, ContentValidationError> {
+    let supplied_metadata = symlink_metadata(root, "检查 Bundle 输入根目录")?;
+    if supplied_metadata.file_type().is_symlink() {
+        return Err(ContentValidationError::RootSymlink(display_path(root)));
+    }
+    if !supplied_metadata.is_dir() {
+        return Err(ContentValidationError::RootNotDirectory(display_path(root)));
+    }
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|source| io_error("解析 Bundle 输入根目录", root, source))?;
+    let root_metadata = symlink_metadata(&canonical_root, "重新检查 Bundle 输入根目录")?;
+    let root_identity = EntryIdentity::from_metadata(&root_metadata);
+    if root_metadata.file_type().is_symlink()
+        || root_identity != EntryIdentity::from_metadata(&supplied_metadata)
+    {
+        return Err(ContentValidationError::SourceChanged(display_path(root)));
+    }
+
+    let mut hasher = Sha256::new();
+    write_frame(&mut hasher, BUNDLE_FINGERPRINT_VERSION);
+    hash_entry_metadata(
+        &mut hasher,
+        Path::new(""),
+        EntryKind::Directory,
+        permission_bits(&root_metadata),
+        0,
+    );
+    write_frame(&mut hasher, &[]);
+
+    let mut stack = vec![(canonical_root.clone(), root_identity.clone())];
+    let mut entry_count = 0_usize;
+    let mut total_file_bytes = 0_u64;
+    let mut candidate_roots = BTreeMap::new();
+    let mut skill_metadata = BTreeMap::new();
+    let mut unsafe_entries = Vec::new();
+
+    while let Some((directory, expected_directory_identity)) = stack.pop() {
+        ensure_canonical_path(&canonical_root, &directory)?;
+        ensure_unchanged(&directory, &expected_directory_identity)?;
+        let mut children = fs::read_dir(&directory)
+            .map_err(|source| io_error("读取 Bundle 目录", &directory, source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| io_error("读取 Bundle 目录项", &directory, source))?;
+        children.sort_by_key(|entry| entry.file_name());
+
+        let mut child_directories = Vec::new();
+        for child in children {
+            let path = child.path();
+            let relative_path = path
+                .strip_prefix(&canonical_root)
+                .map_err(|_| ContentValidationError::SourceChanged(display_path(&path)))?
+                .to_path_buf();
+            if relative_path
+                .file_name()
+                .is_some_and(|name| name == "SKILL.md")
+            {
+                candidate_roots.insert(
+                    relative_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf(),
+                    (),
+                );
+            }
+
+            entry_count =
+                entry_count
+                    .checked_add(1)
+                    .ok_or(ContentValidationError::EntryLimitExceeded {
+                        limit: limits.max_entries,
+                        actual: usize::MAX,
+                    })?;
+            if entry_count > limits.max_entries {
+                return Err(ContentValidationError::EntryLimitExceeded {
+                    limit: limits.max_entries,
+                    actual: entry_count,
+                });
+            }
+
+            let metadata = symlink_metadata(&path, "检查 Bundle 内容")?;
+            let file_type = metadata.file_type();
+            let identity = EntryIdentity::from_metadata(&metadata);
+            let permissions = permission_bits(&metadata);
+            if file_type.is_dir() {
+                ensure_canonical_path(&canonical_root, &path)?;
+                hash_entry_metadata(
+                    &mut hasher,
+                    &relative_path,
+                    EntryKind::Directory,
+                    permissions,
+                    0,
+                );
+                write_frame(&mut hasher, &[]);
+                child_directories.push((path, identity));
+                continue;
+            }
+
+            if file_type.is_file() {
+                if metadata.len() > limits.max_single_file_bytes {
+                    return Err(ContentValidationError::FileSizeLimitExceeded {
+                        path: display_path(&path),
+                        limit: limits.max_single_file_bytes,
+                        actual: metadata.len(),
+                    });
+                }
+                total_file_bytes = total_file_bytes.checked_add(metadata.len()).ok_or(
+                    ContentValidationError::TotalSizeLimitExceeded {
+                        limit: limits.max_total_file_bytes,
+                        actual: u64::MAX,
+                    },
+                )?;
+                if total_file_bytes > limits.max_total_file_bytes {
+                    return Err(ContentValidationError::TotalSizeLimitExceeded {
+                        limit: limits.max_total_file_bytes,
+                        actual: total_file_bytes,
+                    });
+                }
+                ensure_canonical_path(&canonical_root, &path)?;
+                hash_entry_metadata(
+                    &mut hasher,
+                    &relative_path,
+                    EntryKind::File,
+                    permissions,
+                    metadata.len(),
+                );
+                let capture_metadata = relative_path
+                    .file_name()
+                    .is_some_and(|name| name == "SKILL.md");
+                let (captured, _) = hash_regular_file(
+                    &path,
+                    &identity,
+                    metadata.len(),
+                    capture_metadata,
+                    &mut hasher,
+                )?;
+                if capture_metadata {
+                    let candidate_root = relative_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf();
+                    skill_metadata.insert(candidate_root, captured);
+                }
+                if metadata.nlink() > 1 {
+                    let error = ContentValidationError::HardLinkedFile {
+                        path: display_path(&path),
+                        links: metadata.nlink(),
+                    };
+                    unsafe_entries.push(UnsafeDiscoveredEntry {
+                        relative_path,
+                        message: error.to_string(),
+                    });
+                }
+                continue;
+            }
+
+            let kind = if file_type.is_symlink() {
+                "软链接"
+            } else {
+                special_file_kind(&file_type)
+            };
+            // 不打开或跟随特殊条目；只把 lstat 身份和链接文本纳入完整发现快照。
+            write_frame(&mut hasher, relative_path.as_os_str().as_bytes());
+            write_frame(&mut hasher, kind.as_bytes());
+            write_frame(&mut hasher, &identity.mode.to_le_bytes());
+            write_frame(&mut hasher, &identity.inode.to_le_bytes());
+            write_frame(&mut hasher, &identity.changed_seconds.to_le_bytes());
+            write_frame(&mut hasher, &identity.changed_nanoseconds.to_le_bytes());
+            if file_type.is_symlink() {
+                let target = fs::read_link(&path)
+                    .map_err(|source| io_error("读取 Bundle 软链接", &path, source))?;
+                write_frame(&mut hasher, target.as_os_str().as_bytes());
+            } else {
+                write_frame(&mut hasher, &[]);
+            }
+            let error = ContentValidationError::UnsafeEntry {
+                path: display_path(&path),
+                kind,
+            };
+            unsafe_entries.push(UnsafeDiscoveredEntry {
+                relative_path,
+                message: error.to_string(),
+            });
+        }
+
+        ensure_unchanged(&directory, &expected_directory_identity)?;
+        for child_directory in child_directories.into_iter().rev() {
+            stack.push(child_directory);
+        }
+    }
+
+    let root_after = symlink_metadata(&canonical_root, "完成 Bundle 检查")?;
+    if EntryIdentity::from_metadata(&root_after) != root_identity {
+        return Err(ContentValidationError::SourceChanged(display_path(
+            &canonical_root,
+        )));
+    }
+    let digest = hasher.finalize();
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut fingerprint, "{byte:02x}").expect("写入 String 不会失败");
+    }
+    Ok(BundleDiscovery {
+        canonical_root,
+        candidate_roots,
+        skill_metadata,
+        unsafe_entries,
+        fingerprint,
+    })
+}
+
 fn inspect_tree(
     root: &Path,
     limits: ContentLimits,
 ) -> Result<InspectedTree, ContentValidationError> {
+    let supplied_metadata = symlink_metadata(root, "检查 Skill 输入根目录")?;
+    if supplied_metadata.file_type().is_symlink() {
+        return Err(ContentValidationError::RootSymlink(display_path(root)));
+    }
+    if !supplied_metadata.is_dir() {
+        return Err(ContentValidationError::RootNotDirectory(display_path(root)));
+    }
+    let canonical_root =
+        fs::canonicalize(root).map_err(|source| io_error("解析 Skill 输入根目录", root, source))?;
+    // 单 Skill 输入优先报告成员边界冲突，避免排序更早的其他条目掩盖真实原因。
+    reject_nested_skill_metadata(&canonical_root, limits.max_entries)?;
+    let inspected = inspect_directory_tree(root, limits, FINGERPRINT_VERSION)?;
+    let skill_metadata_path = inspected.canonical_root.join("SKILL.md");
+    let skill_file_metadata = match fs::symlink_metadata(&skill_metadata_path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ContentValidationError::MissingSkillMetadata(display_path(
+                &skill_metadata_path,
+            )));
+        }
+        Err(source) => {
+            return Err(io_error("检查根部 SKILL.md", &skill_metadata_path, source));
+        }
+    };
+    if !skill_file_metadata.file_type().is_file() {
+        return Err(ContentValidationError::SkillMetadataNotRegular(
+            display_path(&skill_metadata_path),
+        ));
+    }
+    if let Some(nested) = inspected
+        .skill_metadata
+        .keys()
+        .find(|relative| relative.as_path() != Path::new("SKILL.md"))
+    {
+        return Err(ContentValidationError::NestedSkillUnsupported(
+            display_path(&inspected.canonical_root.join(nested)),
+        ));
+    }
+    let skill_metadata_bytes = inspected
+        .skill_metadata
+        .get(Path::new("SKILL.md"))
+        .cloned()
+        .ok_or_else(|| {
+            ContentValidationError::MissingSkillMetadata(display_path(&skill_metadata_path))
+        })?;
+
+    Ok(InspectedTree {
+        canonical_root: inspected.canonical_root,
+        root_identity: inspected.root_identity,
+        root_permissions: inspected.root_permissions,
+        entries: inspected.entries,
+        skill_metadata_bytes,
+        fingerprint: inspected.fingerprint,
+        has_executable_risk: inspected.has_executable_risk,
+    })
+}
+
+fn inspect_directory_tree(
+    root: &Path,
+    limits: ContentLimits,
+    fingerprint_version: &[u8],
+) -> Result<InspectedDirectoryTree, ContentValidationError> {
     let supplied_metadata = symlink_metadata(root, "检查 Skill 输入根目录")?;
     if supplied_metadata.file_type().is_symlink() {
         return Err(ContentValidationError::RootSymlink(display_path(root)));
@@ -353,31 +885,10 @@ fn inspect_tree(
         return Err(ContentValidationError::SourceChanged(display_path(root)));
     }
 
-    let skill_metadata_path = canonical_root.join("SKILL.md");
-    let skill_file_metadata = match fs::symlink_metadata(&skill_metadata_path) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ContentValidationError::MissingSkillMetadata(display_path(
-                &skill_metadata_path,
-            )));
-        }
-        Err(source) => {
-            return Err(io_error("检查根部 SKILL.md", &skill_metadata_path, source));
-        }
-    };
-    if !skill_file_metadata.file_type().is_file() {
-        return Err(ContentValidationError::SkillMetadataNotRegular(
-            display_path(&skill_metadata_path),
-        ));
-    }
-
-    // 单 Skill 输入先完整寻找嵌套边界，避免较早排序的不安全条目掩盖更准确的产品错误。
-    reject_nested_skill_metadata(&canonical_root, limits.max_entries)?;
-
     let root_identity = EntryIdentity::from_metadata(&root_metadata);
     let root_permissions = permission_bits(&root_metadata);
     let mut hasher = Sha256::new();
-    write_frame(&mut hasher, FINGERPRINT_VERSION);
+    write_frame(&mut hasher, fingerprint_version);
     hash_entry_metadata(
         &mut hasher,
         Path::new(""),
@@ -391,7 +902,7 @@ fn inspect_tree(
     let mut stack = vec![(canonical_root.clone(), root_identity.clone())];
     let mut entry_count = 0_usize;
     let mut total_file_bytes = 0_u64;
-    let mut skill_metadata_bytes = None;
+    let mut skill_metadata = BTreeMap::new();
     let mut has_executable_risk = false;
 
     while let Some((directory, expected_directory_identity)) = stack.pop() {
@@ -410,16 +921,6 @@ fn inspect_tree(
                 .strip_prefix(&canonical_root)
                 .map_err(|_| ContentValidationError::SourceChanged(display_path(&path)))?
                 .to_path_buf();
-
-            if relative_path != Path::new("SKILL.md")
-                && relative_path
-                    .file_name()
-                    .is_some_and(|name| name == "SKILL.md")
-            {
-                return Err(ContentValidationError::NestedSkillUnsupported(
-                    display_path(&path),
-                ));
-            }
 
             entry_count =
                 entry_count
@@ -507,7 +1008,9 @@ fn inspect_tree(
                 permissions,
                 metadata.len(),
             );
-            let capture_metadata = relative_path == Path::new("SKILL.md");
+            let capture_metadata = relative_path
+                .file_name()
+                .is_some_and(|name| name == "SKILL.md");
             let (captured, has_shebang) = hash_regular_file(
                 &path,
                 &identity,
@@ -516,9 +1019,10 @@ fn inspect_tree(
                 &mut hasher,
             )?;
             if capture_metadata {
-                skill_metadata_bytes = Some(captured);
+                skill_metadata.insert(relative_path.clone(), captured);
             }
-            has_executable_risk |= permissions & 0o111 != 0 || has_shebang;
+            has_executable_risk |=
+                is_script_or_executable_risk(&relative_path, permissions, has_shebang);
             entries.push(TreeEntry {
                 relative_path,
                 kind: EntryKind::File,
@@ -541,21 +1045,18 @@ fn inspect_tree(
         )));
     }
 
-    let skill_metadata_bytes = skill_metadata_bytes.ok_or_else(|| {
-        ContentValidationError::MissingSkillMetadata(display_path(&skill_metadata_path))
-    })?;
     let digest = hasher.finalize();
     let mut fingerprint = String::with_capacity(digest.len() * 2);
     for byte in digest {
         write!(&mut fingerprint, "{byte:02x}").expect("写入 String 不会失败");
     }
 
-    Ok(InspectedTree {
+    Ok(InspectedDirectoryTree {
         canonical_root,
         root_identity,
         root_permissions,
         entries,
-        skill_metadata_bytes,
+        skill_metadata,
         fingerprint,
         has_executable_risk,
     })
@@ -613,7 +1114,6 @@ fn reject_nested_skill_metadata(
             stack.push(child_directory);
         }
     }
-
     Ok(())
 }
 
@@ -1254,6 +1754,28 @@ fn set_file_permissions(
         .map_err(|source| io_error("保留文件权限", display_path, source))
 }
 
+fn is_script_or_executable_risk(relative_path: &Path, permissions: u32, has_shebang: bool) -> bool {
+    if permissions & 0o111 != 0 || has_shebang {
+        return true;
+    }
+
+    let has_script_extension = relative_path.extension().is_some_and(|extension| {
+        let extension = extension.to_string_lossy().to_ascii_lowercase();
+        COMMON_SCRIPT_EXTENSIONS.contains(&extension.as_str())
+    });
+    if has_script_extension {
+        return true;
+    }
+
+    // 只检查父目录，避免把恰好名为 scripts 的普通文件误当成目录信号。
+    relative_path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            let component = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+            COMMON_SCRIPT_DIRECTORIES.contains(&component.as_str())
+        })
+    })
+}
+
 fn special_file_kind(file_type: &fs::FileType) -> &'static str {
     if file_type.is_fifo() {
         "FIFO"
@@ -1286,7 +1808,13 @@ fn display_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::{
+        ffi::CString,
+        os::unix::{
+            ffi::OsStrExt,
+            fs::{PermissionsExt, symlink},
+        },
+    };
 
     use tempfile::tempdir;
 
@@ -1590,8 +2118,186 @@ mod tests {
         assert!(!destination.exists());
     }
 
+    #[test]
+    fn duplicate_name_also_invalidates_a_safe_sibling_when_the_other_copy_is_unsafe() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let bundle = sandbox.path().join("bundle");
+        let first = bundle.join("one/duplicate");
+        let second = bundle.join("two/duplicate");
+        fs::create_dir_all(&first).expect("应创建第一个成员");
+        fs::create_dir_all(&second).expect("应创建第二个成员");
+        let metadata = "---\nname: duplicate\ndescription: 重复成员\n---\n";
+        fs::write(first.join("SKILL.md"), metadata).expect("应写入第一个 metadata");
+        fs::write(second.join("SKILL.md"), metadata).expect("应写入第二个 metadata");
+        symlink("SKILL.md", second.join("unsafe-link")).expect("应创建不安全内容");
+
+        let discovered = validate_skill_bundle_folder(&bundle).expect("应返回可解释的候选列表");
+
+        assert_eq!(discovered.candidates.len(), 2);
+        assert!(discovered.candidates.iter().all(|candidate| {
+            !candidate.selectable()
+                && candidate
+                    .validation_errors
+                    .iter()
+                    .any(|error| error.contains("重复 Skill 名称"))
+        }));
+        assert!(discovered.candidates.iter().any(|candidate| {
+            candidate
+                .validation_errors
+                .iter()
+                .any(|error| error.contains("软链接"))
+        }));
+    }
+
+    #[test]
+    fn unsafe_repository_entries_outside_members_do_not_block_valid_candidates() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let bundle = sandbox.path().join("bundle");
+        let member = bundle.join("skills/valid-member");
+        write_valid_skill(&member);
+
+        fs::write(bundle.join("README.md"), "repository readme").expect("应写入仓库文件");
+        symlink("README.md", bundle.join("README-link.md")).expect("应创建成员外软链接");
+        let shared = bundle.join("shared.txt");
+        fs::write(&shared, "shared inode").expect("应写入硬链接源文件");
+        fs::hard_link(&shared, bundle.join("shared-alias.txt")).expect("应创建成员外硬链接");
+        let fifo = bundle.join("events.pipe");
+        let encoded = CString::new(fifo.as_os_str().as_bytes()).expect("测试路径不应包含 NUL");
+        let result = unsafe { libc::mkfifo(encoded.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "应创建成员外 FIFO");
+
+        let discovered = validate_skill_bundle_folder(&bundle).expect("成员外特殊条目不应阻止发现");
+
+        assert_eq!(discovered.candidates.len(), 1);
+        assert!(discovered.candidates[0].selectable());
+        assert!(discovered.candidates[0].validation_errors.is_empty());
+    }
+
+    #[test]
+    fn unsafe_entry_only_disables_the_member_that_contains_it() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let bundle = sandbox.path().join("bundle");
+        let safe = bundle.join("skills/safe-member");
+        let unsafe_member = bundle.join("skills/unsafe-member");
+        write_valid_skill(&safe);
+        write_valid_skill(&unsafe_member);
+        symlink("SKILL.md", unsafe_member.join("linked.md")).expect("应创建成员内软链接");
+
+        let discovered = validate_skill_bundle_folder(&bundle).expect("应保留其他可用成员");
+        let safe_candidate = discovered
+            .candidates
+            .iter()
+            .find(|candidate| candidate.name.as_deref() == Some("safe-member"))
+            .expect("应发现安全成员");
+        let unsafe_candidate = discovered
+            .candidates
+            .iter()
+            .find(|candidate| candidate.name.as_deref() == Some("unsafe-member"))
+            .expect("应发现不安全成员");
+
+        assert!(safe_candidate.selectable());
+        assert!(!unsafe_candidate.selectable());
+        assert!(
+            unsafe_candidate
+                .validation_errors
+                .iter()
+                .any(|error| error.contains("软链接"))
+        );
+    }
+
+    #[test]
+    fn warns_for_each_deterministic_script_signal_but_not_plain_content() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let cases = [
+            ("by-extension", "helper.py", "print('safe')\n", false),
+            ("by-shebang", "helper", "#!/bin/sh\nexit 99\n", false),
+            ("by-mode", "helper.txt", "not executed\n", true),
+            (
+                "by-directory",
+                "scripts/helper.txt",
+                "not executed\n",
+                false,
+            ),
+        ];
+
+        for (name, relative_path, contents, executable) in cases {
+            let root = sandbox.path().join(name);
+            write_valid_skill(&root);
+            let path = root.join(relative_path);
+            fs::create_dir_all(path.parent().expect("测试文件应有父目录")).expect("应创建脚本目录");
+            fs::write(&path, contents).expect("应写入脚本风险 fixture");
+            if executable {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o740))
+                    .expect("应设置可执行位");
+            }
+
+            let validated = validate_single_skill_folder(&root).expect("脚本只应产生提示");
+            assert_eq!(validated.warnings, vec![EXECUTABLE_WARNING], "{name}");
+        }
+
+        let plain = sandbox.path().join("plain-content");
+        write_valid_skill(&plain);
+        fs::write(plain.join("notes.txt"), "ordinary notes").expect("应写入普通文件");
+        let validated = validate_single_skill_folder(&plain).expect("普通内容应通过验证");
+        assert!(validated.warnings.is_empty());
+    }
+
+    #[test]
+    fn bundle_copy_budget_is_shared_across_members() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let first = sandbox.path().join("first");
+        let second = sandbox.path().join("second");
+        write_valid_skill(&first);
+        write_valid_skill(&second);
+        let first_tree = validate_tree(&first, ContentLimits::PRODUCTION).expect("成员一应有效");
+        let second_tree = validate_tree(&second, ContentLimits::PRODUCTION).expect("成员二应有效");
+        let first_bytes = first_tree
+            .entries
+            .iter()
+            .map(|entry| entry.length)
+            .sum::<u64>();
+        let second_bytes = second_tree
+            .entries
+            .iter()
+            .map(|entry| entry.length)
+            .sum::<u64>();
+        let mut entry_budget = BundleCopyBudget {
+            limits: ContentLimits {
+                max_entries: first_tree.entries.len() + second_tree.entries.len() - 1,
+                max_total_file_bytes: u64::MAX,
+                max_single_file_bytes: u64::MAX,
+            },
+            used_entries: 0,
+            used_file_bytes: 0,
+        };
+        entry_budget
+            .reserve(&first_tree)
+            .expect("首个成员应占用预算");
+        assert!(matches!(
+            entry_budget.reserve(&second_tree),
+            Err(ContentValidationError::EntryLimitExceeded { .. })
+        ));
+
+        let mut byte_budget = BundleCopyBudget {
+            limits: ContentLimits {
+                max_entries: usize::MAX,
+                max_total_file_bytes: first_bytes + second_bytes - 1,
+                max_single_file_bytes: u64::MAX,
+            },
+            used_entries: 0,
+            used_file_bytes: 0,
+        };
+        byte_budget
+            .reserve(&first_tree)
+            .expect("首个成员应占用字节预算");
+        assert!(matches!(
+            byte_budget.reserve(&second_tree),
+            Err(ContentValidationError::TotalSizeLimitExceeded { .. })
+        ));
+    }
+
     fn write_valid_skill(root: &Path) {
-        fs::create_dir(root).expect("应创建 Skill 根目录");
+        fs::create_dir_all(root).expect("应创建 Skill 根目录");
         let name = root.file_name().unwrap().to_string_lossy();
         fs::write(
             root.join("SKILL.md"),

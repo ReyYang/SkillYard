@@ -63,12 +63,23 @@ export interface FolderInstallPlan {
   id: string;
   inputPath: string;
   bundleDisplayName: string;
-  skillName: string;
-  targetDirectory: string;
+  candidates: FolderInstallCandidate[];
   warnings: string[];
   willMount: boolean;
   createdAt: number;
   expiresAt: number;
+}
+
+export interface FolderInstallCandidate {
+  candidateId: string;
+  sourceRelativePath: string;
+  skillName: string | null;
+  description: string | null;
+  targetDirectory: string | null;
+  selectable: boolean;
+  validationErrors: string[];
+  warnings: string[];
+  defaultSelected: boolean;
 }
 
 export type UiOutcome =

@@ -7,7 +7,10 @@ export interface SkillYardClient {
   startInitialScan(): Promise<UiOutcome>;
   refreshLocalInventory(): Promise<UiOutcome>;
   chooseFolderInstallPlan(): Promise<FolderInstallPlan | null>;
-  confirmInstallPlan(planId: string): Promise<UiOutcome>;
+  confirmInstallPlan(
+    planId: string,
+    selectedCandidateIds: string[],
+  ): Promise<UiOutcome>;
 }
 
 // 前端只知道任务级命令；文件夹路径由 Rust 原生选择器产生，不开放通用文件能力。
@@ -17,6 +20,9 @@ export const tauriSkillYardClient: SkillYardClient = {
   refreshLocalInventory: () => invoke<UiOutcome>("refresh_local_inventory"),
   chooseFolderInstallPlan: () =>
     invoke<FolderInstallPlan | null>("choose_folder_install_plan"),
-  confirmInstallPlan: (planId) =>
-    invoke<UiOutcome>("confirm_install_plan", { planId }),
+  confirmInstallPlan: (planId, selectedCandidateIds) =>
+    invoke<UiOutcome>("confirm_install_plan", {
+      planId,
+      selectedCandidateIds,
+    }),
 };

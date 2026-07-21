@@ -86,12 +86,15 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
-  const confirmInstall = async () => {
+  const confirmInstall = async (selectedCandidateIds: string[]) => {
     if (!pendingInstallPlan || isInstalling) return;
     setIsInstalling(true);
     setInstallError(null);
     try {
-      const outcome = await client.confirmInstallPlan(pendingInstallPlan.id);
+      const outcome = await client.confirmInstallPlan(
+        pendingInstallPlan.id,
+        selectedCandidateIds,
+      );
       setPendingInstallPlan(null);
       setViewState({ status: "ready", outcome });
     } catch (error) {

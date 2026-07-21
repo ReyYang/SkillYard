@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::{CStr, CString, OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -20,18 +21,20 @@ use uuid::Uuid;
 
 use crate::{
     content::{
-        ContentValidationError, copy_single_skill_tree_into_open_directory,
-        validate_single_skill_folder,
+        BundleCopyBudget, ContentValidationError, copy_single_skill_tree_into_open_directory,
+        validate_single_skill_folder, validate_skill_bundle_folder,
     },
-    domain::FolderInstallPlan,
+    domain::{FolderInstallCandidate, FolderInstallPlan},
     paths::ApplicationPaths,
     storage::{
-        NewInstallPlan, Storage, StorageError, StoredInstallPlan, StoredLifecycleTransaction,
+        NewInstallCandidate, NewInstallPlan, Storage, StorageError, StoredInstallCandidate,
+        StoredInstallPlan, StoredLifecycleTransaction,
     },
 };
 
 const PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
 const JOURNAL_VERSION: u32 = 1;
+const MAX_JOURNAL_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleFailpoint {
@@ -76,6 +79,8 @@ pub enum LifecycleError {
     },
     #[error("事务 Journal 无法解析：{0}")]
     InvalidJournal(#[from] serde_json::Error),
+    #[error("事务 Journal 超过安全大小限制（{actual} 字节，限制 {limit} 字节）")]
+    JournalTooLarge { actual: usize, limit: usize },
     #[error("事务恢复需要人工处理：{0}")]
     RecoveryBlocked(String),
     #[error("测试模拟中断：{0}")]
@@ -122,6 +127,18 @@ struct InstallJournal {
     content_relative: String,
     current_relative: String,
     current_target: String,
+    stable_member_relative: String,
+    #[serde(default)]
+    members: Vec<InstallJournalMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallJournalMember {
+    candidate_id: String,
+    source_relative_path: String,
+    skill_name: String,
+    content_fingerprint: String,
     stable_member_relative: String,
 }
 
@@ -240,7 +257,7 @@ pub fn create_folder_install_plan(
     input: &Path,
     now: i64,
 ) -> Result<FolderInstallPlan, LifecycleError> {
-    let validated = validate_single_skill_folder(input)?;
+    let validated = validate_skill_bundle_folder(input)?;
     let input_metadata = fs::symlink_metadata(&validated.canonical_root)
         .map_err(|source| io_error("读取输入目录", &validated.canonical_root, source))?;
     use std::os::unix::fs::MetadataExt;
@@ -254,14 +271,63 @@ pub fn create_folder_install_plan(
         .to_owned();
     let plan_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
-    let member_id = Uuid::new_v4().to_string();
-    let target = paths
-        .bundle_directory(&bundle_id)
-        .join("current/members")
-        .join(&validated.name);
     ensure_absent(&paths.bundle_directory(&bundle_id))?;
     let expires_at = now.saturating_add(PLAN_TTL_MILLIS);
 
+    let mut candidates = Vec::with_capacity(validated.candidates.len());
+    for candidate in &validated.candidates {
+        let source_relative_path = path_to_string(&candidate.relative_path)?;
+        let target_directory = candidate.name.as_ref().map(|name| {
+            path_to_string(
+                &paths
+                    .bundle_directory(&bundle_id)
+                    .join("current/members")
+                    .join(name),
+            )
+        });
+        candidates.push(FolderInstallCandidate {
+            candidate_id: Uuid::new_v4().to_string(),
+            source_relative_path,
+            skill_name: candidate.name.clone(),
+            description: candidate.description.clone(),
+            target_directory: target_directory.transpose()?,
+            selectable: candidate.selectable(),
+            validation_errors: candidate.validation_errors.clone(),
+            warnings: candidate.warnings.clone(),
+            default_selected: candidate.selectable(),
+        });
+    }
+    let anchor_index = candidates
+        .iter()
+        .position(|candidate| candidate.selectable)
+        .unwrap_or(0);
+    let anchor = &candidates[anchor_index];
+    let anchor_skill_name = anchor
+        .skill_name
+        .clone()
+        .unwrap_or_else(|| anchor.candidate_id.clone());
+    let anchor_description = anchor.description.clone().unwrap_or_default();
+    let mut warnings = candidates
+        .iter()
+        .flat_map(|candidate| candidate.warnings.iter().cloned())
+        .collect::<Vec<_>>();
+    warnings.sort();
+    warnings.dedup();
+    let new_candidates = candidates
+        .iter()
+        .zip(&validated.candidates)
+        .map(|(candidate, discovered)| NewInstallCandidate {
+            candidate_id: &candidate.candidate_id,
+            source_relative_path: &candidate.source_relative_path,
+            skill_name: candidate.skill_name.as_deref(),
+            skill_description: candidate.description.as_deref(),
+            content_fingerprint: discovered.fingerprint.as_deref(),
+            selectable: candidate.selectable,
+            validation_errors: &candidate.validation_errors,
+            warnings: &candidate.warnings,
+            default_selected: candidate.default_selected,
+        })
+        .collect::<Vec<_>>();
     storage.save_install_plan(NewInstallPlan {
         id: &plan_id,
         input_path: &input_path,
@@ -270,10 +336,11 @@ pub fn create_folder_install_plan(
         input_fingerprint: &validated.fingerprint,
         bundle_id: &bundle_id,
         bundle_display_name: &bundle_display_name,
-        member_id: &member_id,
-        skill_name: &validated.name,
-        skill_description: &validated.description,
-        warnings: &validated.warnings,
+        member_id: &anchor.candidate_id,
+        skill_name: &anchor_skill_name,
+        skill_description: &anchor_description,
+        warnings: &warnings,
+        candidates: &new_candidates,
         created_at: now,
         expires_at,
     })?;
@@ -282,9 +349,8 @@ pub fn create_folder_install_plan(
         id: plan_id,
         input_path,
         bundle_display_name,
-        skill_name: validated.name,
-        target_directory: path_to_string(&target)?,
-        warnings: validated.warnings,
+        candidates,
+        warnings,
         will_mount: false,
         created_at: now,
         expires_at,
@@ -295,6 +361,7 @@ pub fn confirm_folder_install(
     paths: &ApplicationPaths,
     storage: &mut Storage,
     plan_id: &str,
+    selected_candidate_ids: &[String],
     now: i64,
     failpoint: LifecycleFailpoint,
 ) -> Result<(), LifecycleError> {
@@ -308,8 +375,30 @@ pub fn confirm_folder_install(
 
     let transaction_id = Uuid::new_v4().to_string();
     let journal_relative = format!("journals/{transaction_id}.json");
-    let plan =
-        storage.begin_install_transaction(plan_id, &transaction_id, &journal_relative, now)?;
+    // 在消费 Plan 前先固定最终选择，并证明生成的 Journal 一定能被恢复器完整读取。
+    let expected_plan = prepare_selected_plan(&preview, selected_candidate_ids)?;
+    let mut journal = build_journal(&transaction_id, &expected_plan)?;
+    ensure_journal_fits(&journal)?;
+    let plan = storage.begin_install_transaction_with_selection(
+        plan_id,
+        selected_candidate_ids,
+        &transaction_id,
+        &journal_relative,
+        now,
+    )?;
+    let transaction_contract = validate_stored_plan_identifiers(&plan).and_then(|()| {
+        if plan == expected_plan {
+            Ok(())
+        } else {
+            Err(LifecycleError::PlanPreconditionChanged)
+        }
+    });
+    if let Err(error) = transaction_contract {
+        // SQLite 重读不可信时尚未写入文件系统；立即撤销本次事务及已消费 Plan。
+        storage.abort_lifecycle_transaction(&transaction_id, Some(&error.to_string()), now)?;
+        storage.forget_terminal_transaction(&transaction_id)?;
+        return Err(error);
+    }
     lifecycle_lock.recheck(paths)?;
     inject_hard_exit(
         failpoint,
@@ -321,7 +410,6 @@ pub fn confirm_folder_install(
         ));
     }
 
-    let mut journal = build_journal(&transaction_id, &plan);
     let execution = execute_install(
         paths,
         &lifecycle_lock,
@@ -400,8 +488,11 @@ fn recover_transaction(
         return recover_without_journal(paths, lifecycle_lock, storage, transaction, &plan, now);
     }
 
-    let journal = read_journal_at(&journals, &journal_name, &journal_path)?;
+    let mut journal = read_journal_at(&journals, &journal_name, &journal_path)?;
     validate_journal_contract(&journal, transaction, &plan)?;
+    if journal.members.is_empty() {
+        journal.members = build_journal(&transaction.id, &plan)?.members;
+    }
     if transaction.status == "aborted" {
         if !matches!(
             inspect_current(paths, lifecycle_lock.root(), &journal)?,
@@ -489,12 +580,18 @@ fn execute_install(
         .staging_root()
         .join(&journal.transaction_id)
         .join("candidate/members");
-    copy_single_skill_tree_into_open_directory(
-        Path::new(&plan.input_path),
-        &members,
-        &members_path,
-        OsStr::new(&plan.skill_name),
-    )?;
+    let mut copy_budget = BundleCopyBudget::production();
+    for member in &journal.members {
+        copy_single_skill_tree_into_open_directory(
+            &Path::new(&plan.input_path).join(&member.source_relative_path),
+            &members,
+            &members_path,
+            OsStr::new(&member.skill_name),
+            &member.skill_name,
+            &member.content_fingerprint,
+            &mut copy_budget,
+        )?;
+    }
     members
         .sync_all()
         .map_err(|source| io_error("同步候选成员目录", &members_path, source))?;
@@ -507,6 +604,10 @@ fn execute_install(
     staging_root
         .sync_all()
         .map_err(|source| io_error("同步临时区", &paths.staging_root(), source))?;
+    // 发布候选前再次核对完整来源和已复制内容，任何竞态变化都不能进入 current。
+    verify_plan_snapshot(plan)?;
+    validate_prepared_candidate(&candidate, &members, &members_path, journal, plan)?;
+    lifecycle_lock.recheck(paths)?;
 
     let bundles_root =
         open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.bundles_root())?;
@@ -655,7 +756,11 @@ fn verify_plan_input(plan: &StoredInstallPlan) -> Result<(), LifecycleError> {
     if plan.status != "pending" {
         return Err(StorageError::InstallPlanConsumed.into());
     }
-    let validated = validate_single_skill_folder(Path::new(&plan.input_path))?;
+    verify_plan_snapshot(plan)
+}
+
+fn verify_plan_snapshot(plan: &StoredInstallPlan) -> Result<(), LifecycleError> {
+    let validated = validate_skill_bundle_folder(Path::new(&plan.input_path))?;
     let metadata = fs::symlink_metadata(&validated.canonical_root)
         .map_err(|source| io_error("读取输入目录", &validated.canonical_root, source))?;
     use std::os::unix::fs::MetadataExt;
@@ -664,13 +769,39 @@ fn verify_plan_input(plan: &StoredInstallPlan) -> Result<(), LifecycleError> {
         && metadata.dev() == plan.input_device
         && metadata.ino() == plan.input_inode
         && validated.fingerprint == plan.input_fingerprint
-        && validated.name == plan.skill_name
-        && validated.description == plan.skill_description;
+        && stored_candidates_match(&plan.candidates, &validated.candidates)?;
     if unchanged {
         Ok(())
     } else {
         Err(LifecycleError::PlanPreconditionChanged)
     }
+}
+
+fn prepare_selected_plan(
+    preview: &StoredInstallPlan,
+    selected_candidate_ids: &[String],
+) -> Result<StoredInstallPlan, LifecycleError> {
+    let selected = selected_candidate_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if selected.is_empty() || selected.len() != selected_candidate_ids.len() {
+        return Err(StorageError::InvalidInstallSelection.into());
+    }
+    if selected.iter().any(|candidate_id| {
+        !preview
+            .candidates
+            .iter()
+            .any(|candidate| candidate.selectable && candidate.candidate_id == *candidate_id)
+    }) {
+        return Err(StorageError::InvalidInstallSelection.into());
+    }
+    let mut selected_plan = preview.clone();
+    selected_plan.status = "consumed".to_owned();
+    for candidate in &mut selected_plan.candidates {
+        candidate.selected = selected.contains(candidate.candidate_id.as_str());
+    }
+    Ok(selected_plan)
 }
 
 fn validate_stored_plan_identifiers(plan: &StoredInstallPlan) -> Result<(), LifecycleError> {
@@ -682,7 +813,54 @@ fn validate_stored_plan_identifiers(plan: &StoredInstallPlan) -> Result<(), Life
     ] {
         ensure_single_path_component(label, value)?;
     }
+    for candidate in &plan.candidates {
+        ensure_single_path_component("candidate id", &candidate.candidate_id)?;
+        if let Some(skill_name) = &candidate.skill_name {
+            ensure_single_path_component("candidate skill name", skill_name)?;
+        }
+        ensure_safe_relative_path(
+            "candidate source relative path",
+            &candidate.source_relative_path,
+        )?;
+    }
     Ok(())
+}
+
+fn stored_candidates_match(
+    stored: &[StoredInstallCandidate],
+    discovered: &[crate::content::DiscoveredBundleCandidate],
+) -> Result<bool, LifecycleError> {
+    if stored.len() != discovered.len() {
+        return Ok(false);
+    }
+    for (stored, discovered) in stored.iter().zip(discovered) {
+        if stored.source_relative_path != path_to_string(&discovered.relative_path)?
+            || stored.skill_name != discovered.name
+            || stored.skill_description != discovered.description
+            || stored.content_fingerprint != discovered.fingerprint
+            || stored.selectable != discovered.selectable()
+            || stored.validation_errors != discovered.validation_errors
+            || stored.warnings != discovered.warnings
+            || stored.default_selected != discovered.selectable()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn ensure_safe_relative_path(label: &str, value: &str) -> Result<(), LifecycleError> {
+    if value.is_empty()
+        || Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        Ok(())
+    } else {
+        Err(LifecycleError::RecoveryBlocked(format!(
+            "SQLite 中的 {label} 不是安全相对路径"
+        )))
+    }
 }
 
 fn ensure_single_path_component(label: &str, value: &str) -> Result<(), LifecycleError> {
@@ -698,16 +876,40 @@ fn ensure_single_path_component(label: &str, value: &str) -> Result<(), Lifecycl
     }
 }
 
-fn build_journal(transaction_id: &str, plan: &StoredInstallPlan) -> InstallJournal {
+fn build_journal(
+    transaction_id: &str,
+    plan: &StoredInstallPlan,
+) -> Result<InstallJournal, LifecycleError> {
     let bundle_relative = format!("bundles/{}", plan.bundle_id);
     let content_id = transaction_id;
-    InstallJournal {
+    let members = selected_candidates(plan)?
+        .into_iter()
+        .map(|candidate| {
+            let skill_name = candidate.skill_name.clone().ok_or_else(|| {
+                LifecycleError::RecoveryBlocked("已选成员缺少 Skill 名称".to_owned())
+            })?;
+            let content_fingerprint = candidate.content_fingerprint.clone().ok_or_else(|| {
+                LifecycleError::RecoveryBlocked("已选成员缺少内容 fingerprint".to_owned())
+            })?;
+            Ok(InstallJournalMember {
+                candidate_id: candidate.candidate_id.clone(),
+                source_relative_path: candidate.source_relative_path.clone(),
+                stable_member_relative: format!("members/{skill_name}"),
+                skill_name,
+                content_fingerprint,
+            })
+        })
+        .collect::<Result<Vec<_>, LifecycleError>>()?;
+    let anchor = members
+        .first()
+        .ok_or(StorageError::InvalidInstallSelection)?;
+    Ok(InstallJournal {
         version: JOURNAL_VERSION,
         transaction_id: transaction_id.to_owned(),
         plan_id: plan.id.clone(),
         bundle_id: plan.bundle_id.clone(),
-        member_id: plan.member_id.clone(),
-        skill_name: plan.skill_name.clone(),
+        member_id: anchor.candidate_id.clone(),
+        skill_name: anchor.skill_name.clone(),
         input_fingerprint: plan.input_fingerprint.clone(),
         phase: JournalPhase::JournalReady,
         staging_relative: format!("staging/{transaction_id}"),
@@ -715,8 +917,30 @@ fn build_journal(transaction_id: &str, plan: &StoredInstallPlan) -> InstallJourn
         content_relative: format!("{bundle_relative}/contents/{content_id}"),
         current_relative: format!("{bundle_relative}/current"),
         current_target: format!("contents/{content_id}"),
-        stable_member_relative: format!("members/{}", plan.skill_name),
+        stable_member_relative: anchor.stable_member_relative.clone(),
+        members,
+    })
+}
+
+fn selected_candidates(
+    plan: &StoredInstallPlan,
+) -> Result<Vec<&StoredInstallCandidate>, LifecycleError> {
+    let selected = plan
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.selected)
+        .collect::<Vec<_>>();
+    if selected.is_empty()
+        || selected.iter().any(|candidate| {
+            !candidate.selectable
+                || candidate.skill_name.is_none()
+                || candidate.skill_description.is_none()
+                || candidate.content_fingerprint.is_none()
+        })
+    {
+        return Err(StorageError::InvalidInstallSelection.into());
     }
+    Ok(selected)
 }
 
 fn validate_journal_contract(
@@ -724,13 +948,18 @@ fn validate_journal_contract(
     transaction: &StoredLifecycleTransaction,
     plan: &StoredInstallPlan,
 ) -> Result<(), LifecycleError> {
-    let mut expected = build_journal(&transaction.id, plan);
+    let mut expected = build_journal(&transaction.id, plan)?;
     // Journal phase 可以比 SQLite 领先一步；除此之外的路径和身份必须全部由可信状态重建。
     expected.phase = actual.phase;
-    if actual == &expected
+    let mut comparable = actual.clone();
+    // 0003 的单成员 Journal 没有 members；升级后用已验证的唯一 Plan 成员补齐比较。
+    if comparable.members.is_empty() && expected.members.len() == 1 {
+        comparable.members = expected.members.clone();
+    }
+    if comparable == expected
         && transaction.plan_id == plan.id
         && transaction.bundle_id == plan.bundle_id
-        && transaction.member_id == plan.member_id
+        && transaction.member_id == expected.member_id
     {
         Ok(())
     } else {
@@ -801,7 +1030,7 @@ fn recover_without_journal(
     plan: &StoredInstallPlan,
     now: i64,
 ) -> Result<(), LifecycleError> {
-    let journal = build_journal(&transaction.id, plan);
+    let journal = build_journal(&transaction.id, plan)?;
     if transaction.status == "completed" {
         match inspect_current(paths, lifecycle_lock.root(), &journal)? {
             CurrentState::Expected => {
@@ -862,37 +1091,79 @@ fn validate_activated_content(
     journal: &InstallJournal,
     plan: &StoredInstallPlan,
 ) -> Result<ManagedContentGuard, LifecycleError> {
-    let (guard, member_path) = open_content_guard(paths, managed_root, journal)?;
+    let (guard, member_paths) = open_content_guard(paths, managed_root, journal)?;
     guard.recheck(paths)?;
     validate_content_container_open(
         &guard.directories[3].0,
         &guard.directories[4].0,
-        &journal.skill_name,
+        &journal.members,
     )?;
-    let validated = validate_single_skill_folder(&member_path)?;
-    guard.recheck(paths)?;
-    if validated.fingerprint != journal.input_fingerprint
-        || validated.fingerprint != plan.input_fingerprint
-        || validated.name != plan.skill_name
-    {
-        return Err(LifecycleError::RecoveryBlocked(
-            "current 指向的内容与安装 Plan 不一致".to_owned(),
-        ));
+    for (journal_member, member_path) in journal.members.iter().zip(member_paths) {
+        let plan_member = plan
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.selected && candidate.candidate_id == journal_member.candidate_id
+            })
+            .ok_or_else(|| {
+                LifecycleError::RecoveryBlocked("Journal 成员不属于安装 Plan 的最终选择".to_owned())
+            })?;
+        let validated = validate_single_skill_folder(&member_path)?;
+        guard.recheck(paths)?;
+        if validated.fingerprint != journal_member.content_fingerprint
+            || plan_member.content_fingerprint.as_deref()
+                != Some(journal_member.content_fingerprint.as_str())
+            || validated.name != journal_member.skill_name
+            || plan_member.skill_name.as_deref() != Some(journal_member.skill_name.as_str())
+        {
+            return Err(LifecycleError::RecoveryBlocked(
+                "current 指向的内容与安装 Plan 不一致".to_owned(),
+            ));
+        }
     }
     Ok(guard)
+}
+
+fn validate_prepared_candidate(
+    candidate: &File,
+    members: &File,
+    members_path: &Path,
+    journal: &InstallJournal,
+    plan: &StoredInstallPlan,
+) -> Result<(), LifecycleError> {
+    validate_content_container_open(candidate, members, &journal.members)?;
+    for journal_member in &journal.members {
+        let plan_member = plan
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.selected && candidate.candidate_id == journal_member.candidate_id
+            })
+            .ok_or(StorageError::InvalidInstallSelection)?;
+        let member_path = members_path.join(&journal_member.skill_name);
+        let validated = validate_single_skill_folder(&member_path)?;
+        if validated.fingerprint != journal_member.content_fingerprint
+            || plan_member.content_fingerprint.as_deref()
+                != Some(journal_member.content_fingerprint.as_str())
+            || validated.name != journal_member.skill_name
+            || plan_member.skill_name.as_deref() != Some(journal_member.skill_name.as_str())
+        {
+            return Err(LifecycleError::PlanPreconditionChanged);
+        }
+    }
+    Ok(())
 }
 
 fn open_content_guard(
     paths: &ApplicationPaths,
     managed_root: &File,
     journal: &InstallJournal,
-) -> Result<(ManagedContentGuard, PathBuf), LifecycleError> {
+) -> Result<(ManagedContentGuard, Vec<PathBuf>), LifecycleError> {
     let bundles_path = paths.bundles_root();
     let bundle_path = paths.bundle_directory(&journal.bundle_id);
     let contents_path = bundle_path.join("contents");
     let content_path = contents_path.join(&journal.transaction_id);
     let members_path = content_path.join("members");
-    let member_path = members_path.join(&journal.skill_name);
 
     let bundles = open_managed_directory_from_root(paths, managed_root, &bundles_path)?;
     let bundle =
@@ -904,32 +1175,43 @@ fn open_content_guard(
         &content_path,
     )?;
     let members = open_expected_directory_at(&content, OsStr::new("members"), &members_path)?;
-    let member =
-        open_expected_directory_at(&members, OsStr::new(&journal.skill_name), &member_path)?;
-    let guard = ManagedContentGuard {
-        directories: vec![
-            (bundles, bundles_path),
-            (bundle, bundle_path),
-            (contents, contents_path),
-            (content, content_path),
-            (members, members_path),
-            (member, member_path.clone()),
-        ],
-    };
-    Ok((guard, member_path))
+    let mut directories = vec![
+        (bundles, bundles_path),
+        (bundle, bundle_path),
+        (contents, contents_path),
+        (content, content_path),
+        (members, members_path),
+    ];
+    let mut member_paths = Vec::with_capacity(journal.members.len());
+    for member in &journal.members {
+        let member_path = directories[4].1.join(&member.skill_name);
+        let member_handle = open_expected_directory_at(
+            &directories[4].0,
+            OsStr::new(&member.skill_name),
+            &member_path,
+        )?;
+        member_paths.push(member_path.clone());
+        directories.push((member_handle, member_path));
+    }
+    Ok((ManagedContentGuard { directories }, member_paths))
 }
 
 fn validate_content_container_open(
     content: &File,
     members: &File,
-    skill_name: &str,
+    expected_members: &[InstallJournalMember],
 ) -> Result<(), LifecycleError> {
     if read_entry_names_from_handle(content)? != ["members"] {
         return Err(LifecycleError::RecoveryBlocked(
             "Current Content 包含未知顶层条目".to_owned(),
         ));
     }
-    if read_entry_names_from_handle(members)? != [skill_name] {
+    let mut expected_names = expected_members
+        .iter()
+        .map(|member| member.skill_name.clone())
+        .collect::<Vec<_>>();
+    expected_names.sort();
+    if read_entry_names_from_handle(members)? != expected_names {
         return Err(LifecycleError::RecoveryBlocked(
             "Current Content 的成员边界不一致".to_owned(),
         ));
@@ -1088,19 +1370,23 @@ fn stage_unactivated_content_for_cleanup(
         return Ok(());
     }
 
-    let (content_guard, member) = open_content_guard(paths, managed_root, journal)?;
+    let (content_guard, member_paths) = open_content_guard(paths, managed_root, journal)?;
     content_guard.recheck(paths)?;
     validate_content_container_open(
         &content_guard.directories[3].0,
         &content_guard.directories[4].0,
-        &journal.skill_name,
+        &journal.members,
     )?;
-    let validated = validate_single_skill_folder(&member)?;
-    content_guard.recheck(paths)?;
-    if validated.fingerprint != journal.input_fingerprint {
-        return Err(LifecycleError::RecoveryBlocked(
-            "生效前候选内容被外部修改".to_owned(),
-        ));
+    for (journal_member, member_path) in journal.members.iter().zip(member_paths) {
+        let validated = validate_single_skill_folder(&member_path)?;
+        content_guard.recheck(paths)?;
+        if validated.fingerprint != journal_member.content_fingerprint
+            || validated.name != journal_member.skill_name
+        {
+            return Err(LifecycleError::RecoveryBlocked(
+                "生效前候选内容被外部修改".to_owned(),
+            ));
+        }
     }
 
     let staging = resolve_relative(paths.data_root(), &journal.staging_relative)?;
@@ -1241,14 +1527,20 @@ fn cleanup_staging_before_activation(
         open_expected_directory_at(&candidate_handle, OsStr::new("members"), &members)?;
     ensure_open_directory_matches_managed_path(paths, &members_handle, &members)?;
     let member_entries = read_entry_names_from_handle(&members_handle)?;
-    if member_entries == [journal.skill_name.as_str()] {
-        // JournalReady 阶段可能在复制中途退出；仅删除精确事务目录中的唯一预期成员。
-        remove_owned_tree_at(
-            &members_handle,
-            OsStr::new(&journal.skill_name),
-            &members.join(&journal.skill_name),
-        )?;
-    } else if !member_entries.is_empty() {
+    let expected = journal
+        .members
+        .iter()
+        .map(|member| member.skill_name.as_str())
+        .collect::<BTreeSet<_>>();
+    if member_entries
+        .iter()
+        .all(|entry| expected.contains(entry.as_str()))
+    {
+        // JournalReady 阶段可能只复制了部分成员；仅删除 Journal 明确拥有的事务内容。
+        for entry in member_entries {
+            remove_owned_tree_at(&members_handle, OsStr::new(&entry), &members.join(&entry))?;
+        }
+    } else {
         return Err(LifecycleError::RecoveryBlocked(
             "候选 Bundle 包含未知成员".to_owned(),
         ));
@@ -1375,7 +1667,35 @@ fn write_journal(
     let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
     let name = OsString::from(format!("{}.json", journal.transaction_id));
     let bytes = serde_json::to_vec_pretty(journal)?;
+    ensure_serialized_journal_fits(bytes.len())?;
     write_atomic_at(&journals, &name, &journal_path(paths, journal), &bytes)
+}
+
+fn ensure_journal_fits(journal: &InstallJournal) -> Result<(), LifecycleError> {
+    // phase 文本长度不同；事务开始前必须证明后续每个持久化阶段都能被恢复器读取。
+    for phase in [
+        JournalPhase::JournalReady,
+        JournalPhase::CandidateReady,
+        JournalPhase::Activated,
+        JournalPhase::StateCommitted,
+    ] {
+        let mut candidate = journal.clone();
+        candidate.phase = phase;
+        let bytes = serde_json::to_vec_pretty(&candidate)?;
+        ensure_serialized_journal_fits(bytes.len())?;
+    }
+    Ok(())
+}
+
+fn ensure_serialized_journal_fits(actual: usize) -> Result<(), LifecycleError> {
+    if actual > MAX_JOURNAL_BYTES {
+        Err(LifecycleError::JournalTooLarge {
+            actual,
+            limit: MAX_JOURNAL_BYTES,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn read_journal_at(
@@ -1387,17 +1707,17 @@ fn read_journal_at(
     let metadata = file
         .metadata()
         .map_err(|source| io_error("检查 Journal", path, source))?;
-    if metadata.len() > 1024 * 1024 {
+    if metadata.len() > MAX_JOURNAL_BYTES as u64 {
         return Err(LifecycleError::RecoveryBlocked(
             "事务 Journal 超过安全大小限制".to_owned(),
         ));
     }
     let mut bytes = Vec::with_capacity((metadata.len() + 1) as usize);
     Read::by_ref(&mut file)
-        .take(1024 * 1024 + 1)
+        .take(MAX_JOURNAL_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|source| io_error("读取 Journal", path, source))?;
-    if bytes.len() > 1024 * 1024 {
+    if bytes.len() > MAX_JOURNAL_BYTES {
         return Err(LifecycleError::RecoveryBlocked(
             "事务 Journal 超过安全大小限制".to_owned(),
         ));
@@ -1989,5 +2309,120 @@ fn io_error(action: &'static str, path: &Path, source: io::Error) -> LifecycleEr
         action,
         path: path.display().to_string(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn stored_plan_with_candidates(candidates: Vec<StoredInstallCandidate>) -> StoredInstallPlan {
+        StoredInstallPlan {
+            id: "plan".to_owned(),
+            input_path: "/tmp/input".to_owned(),
+            input_device: 1,
+            input_inode: 1,
+            input_fingerprint: "bundle-fingerprint".to_owned(),
+            bundle_id: "bundle".to_owned(),
+            bundle_display_name: "Bundle".to_owned(),
+            member_id: candidates[0].candidate_id.clone(),
+            skill_name: candidates[0].skill_name.clone().expect("测试候选应有名称"),
+            _legacy_skill_description: "描述".to_owned(),
+            expires_at: i64::MAX,
+            status: "consumed".to_owned(),
+            candidates,
+        }
+    }
+
+    fn stored_candidate(index: usize, fingerprint: &str) -> StoredInstallCandidate {
+        StoredInstallCandidate {
+            candidate_id: format!("candidate-{index}"),
+            source_relative_path: format!("skills/skill-{index}"),
+            skill_name: Some(format!("skill-{index}")),
+            skill_description: Some("测试 Skill".to_owned()),
+            content_fingerprint: Some(fingerprint.to_owned()),
+            selectable: true,
+            validation_errors: Vec::new(),
+            warnings: Vec::new(),
+            default_selected: true,
+            selected: true,
+        }
+    }
+
+    #[test]
+    fn oversized_journal_is_rejected_before_it_can_be_persisted() {
+        // 真实 Bundle 上限允许大量成员；写入端必须使用与恢复端相同的 1 MiB 上限。
+        let candidates = (0..8_000)
+            .map(|index| stored_candidate(index, &format!("fingerprint-{index}")))
+            .collect();
+        let plan = stored_plan_with_candidates(candidates);
+        let journal =
+            build_journal("00000000-0000-4000-8000-000000000000", &plan).expect("应先构建 Journal");
+
+        assert!(matches!(
+            ensure_journal_fits(&journal),
+            Err(LifecycleError::JournalTooLarge {
+                limit: MAX_JOURNAL_BYTES,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn journal_preflight_uses_the_largest_lifecycle_phase() {
+        let plan = stored_plan_with_candidates(vec![stored_candidate(0, "fingerprint")]);
+        let mut journal =
+            build_journal("00000000-0000-4000-8000-000000000000", &plan).expect("应构建 Journal");
+        let ready_size = serde_json::to_vec_pretty(&journal)
+            .expect("应序列化初始阶段")
+            .len();
+        journal.members[0]
+            .source_relative_path
+            .push_str(&"x".repeat(MAX_JOURNAL_BYTES - ready_size));
+        assert_eq!(
+            serde_json::to_vec_pretty(&journal)
+                .expect("应序列化边界 Journal")
+                .len(),
+            MAX_JOURNAL_BYTES
+        );
+
+        assert!(matches!(
+            ensure_journal_fits(&journal),
+            Err(LifecycleError::JournalTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn changed_candidate_is_rejected_before_current_can_be_created() {
+        let temp = tempdir().expect("应创建临时目录");
+        let candidate_path = temp.path().join("candidate");
+        let members_path = candidate_path.join("members");
+        let member_path = members_path.join("demo");
+        fs::create_dir_all(&member_path).expect("应创建候选目录");
+        fs::write(
+            member_path.join("SKILL.md"),
+            "---\nname: demo\ndescription: 测试\n---\n\n正文\n",
+        )
+        .expect("应写入 Skill");
+        let validated = validate_single_skill_folder(&member_path).expect("候选应有效");
+        let mut plan =
+            stored_plan_with_candidates(vec![stored_candidate(0, &validated.fingerprint)]);
+        plan.candidates[0].candidate_id = "candidate-demo".to_owned();
+        plan.candidates[0].source_relative_path = "demo".to_owned();
+        plan.candidates[0].skill_name = Some("demo".to_owned());
+        plan.member_id = "candidate-demo".to_owned();
+        plan.skill_name = "demo".to_owned();
+        let journal =
+            build_journal("00000000-0000-4000-8000-000000000000", &plan).expect("应构建 Journal");
+        let candidate = File::open(&candidate_path).expect("应打开候选目录");
+        let members = File::open(&members_path).expect("应打开成员目录");
+        fs::write(member_path.join("extra.txt"), "发生变化").expect("应模拟复制期间内容变化");
+        let result =
+            validate_prepared_candidate(&candidate, &members, &members_path, &journal, &plan);
+        assert!(
+            matches!(&result, Err(LifecycleError::PlanPreconditionChanged)),
+            "候选变化应在发布前被拒绝：{result:?}"
+        );
     }
 }

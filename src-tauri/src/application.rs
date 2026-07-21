@@ -79,9 +79,12 @@ impl SkillYardApplication {
             UiIntent::CreateFolderInstallPlan { input_path } => {
                 self.with_write_operation(|| self.create_folder_install_plan(input_path))
             }
-            UiIntent::ConfirmInstallPlan { plan_id } => {
-                self.with_write_operation(|| self.confirm_install_plan(plan_id))
-            }
+            UiIntent::ConfirmInstallPlan {
+                plan_id,
+                selected_candidate_ids,
+            } => self.with_write_operation(|| {
+                self.confirm_install_plan(plan_id, selected_candidate_ids)
+            }),
         }
     }
 
@@ -183,13 +186,18 @@ impl SkillYardApplication {
         Ok(UiOutcome::FolderInstallPlan { plan })
     }
 
-    fn confirm_install_plan(&self, plan_id: String) -> Result<UiOutcome, ApplicationError> {
+    fn confirm_install_plan(
+        &self,
+        plan_id: String,
+        selected_candidate_ids: Vec<String>,
+    ) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_recovered_storage()?;
         ensure_onboarding_completed(&storage)?;
         confirm_folder_install(
             &self.paths,
             &mut storage,
             &plan_id,
+            &selected_candidate_ids,
             unix_timestamp_millis(),
             self.lifecycle_failpoint,
         )?;

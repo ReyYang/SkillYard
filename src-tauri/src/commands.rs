@@ -61,7 +61,7 @@ pub fn choose_folder_install_plan(
     let Some(folder) = app
         .dialog()
         .file()
-        .set_title("选择包含 SKILL.md 的 Skill 文件夹")
+        .set_title("选择包含 Skill 的 Bundle 文件夹")
         .blocking_pick_folder()
     else {
         return Ok(None);
@@ -92,8 +92,15 @@ pub fn choose_folder_install_plan(
 pub fn confirm_install_plan(
     application: State<'_, SkillYardApplication>,
     plan_id: String,
+    selected_candidate_ids: Vec<String>,
 ) -> Result<UiOutcome, UiError> {
-    dispatch(&application, UiIntent::ConfirmInstallPlan { plan_id })
+    dispatch(
+        &application,
+        UiIntent::ConfirmInstallPlan {
+            plan_id,
+            selected_candidate_ids,
+        },
+    )
 }
 
 fn dispatch(application: &SkillYardApplication, intent: UiIntent) -> Result<UiOutcome, UiError> {
@@ -174,6 +181,7 @@ mod tests {
             &application,
             UiIntent::ConfirmInstallPlan {
                 plan_id: "unknown".to_owned(),
+                selected_candidate_ids: vec!["unknown".to_owned()],
             },
         )
         .expect_err("未知 Plan 应保留生命周期错误类型");
