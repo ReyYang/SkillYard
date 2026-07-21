@@ -67,6 +67,18 @@ pub enum LifecycleFailpoint {
     HardExitAfterFirstBatchMountRollbackBeforeProgress,
     HardExitAfterAllBatchMountTargetsAppliedBeforeState,
     HardExitAfterBatchMountStateCommittedBeforeJournal,
+    AfterTakeoverTransactionRecord,
+    AfterTakeoverCandidatePrepared,
+    AfterTakeoverReplacementStaged,
+    AfterTakeoverHostSwapped,
+    AfterTakeoverStateCommitted,
+    HardExitAfterTakeoverTransactionRecord,
+    HardExitAfterTakeoverJournalWrittenBeforePhase,
+    HardExitAfterTakeoverCandidatePublishedBeforePhase,
+    HardExitAfterTakeoverReplacementStaged,
+    HardExitAfterTakeoverHostSwappedBeforePhase,
+    HardExitAfterTakeoverStateCommittedBeforeJournal,
+    HardExitAfterTakeoverOriginalMovedBeforeDiscard,
 }
 
 #[derive(Debug, Error)]
@@ -1257,7 +1269,9 @@ fn read_entry_names_from_handle(directory: &File) -> Result<Vec<String>, Lifecyc
         .collect()
 }
 
-fn read_entry_names_os_from_handle(directory: &File) -> Result<Vec<OsString>, LifecycleError> {
+pub(crate) fn read_entry_names_os_from_handle(
+    directory: &File,
+) -> Result<Vec<OsString>, LifecycleError> {
     let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
     if duplicate < 0 {
         return Err(io_error(
@@ -2093,7 +2107,11 @@ fn remove_empty_directory_at(
         .map_err(|source| io_error("同步事务目录父级", path, source))
 }
 
-fn remove_owned_tree_at(parent: &File, name: &OsStr, path: &Path) -> Result<(), LifecycleError> {
+pub(crate) fn remove_owned_tree_at(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<(), LifecycleError> {
     let child = open_directory_at(parent, name)
         .map_err(|source| io_error("安全打开事务清理目标", path, source))?;
     remove_owned_tree_contents(&child, path)?;
@@ -2283,8 +2301,6 @@ pub(crate) fn rename_at_no_replace(
 }
 
 /// macOS 通过内核级 `RENAME_SWAP` 交换两个已存在目录项，不暴露中间缺口。
-// 真实 Takeover 文件事务将在下一切片调用这个原子原语。
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn rename_at_swap(
     source_parent: &File,
     source_name: &OsStr,

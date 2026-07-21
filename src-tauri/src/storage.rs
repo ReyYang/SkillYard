@@ -491,8 +491,7 @@ pub(crate) struct StoredTakeoverPlan {
 }
 
 /// SQLite 只保存接管事务的稳定边界；逐步文件进度仍由 Journal 负责。
-// 真实 Takeover 文件事务将在下一切片调用这些持久化 seam。
-#[cfg_attr(not(test), allow(dead_code))]
+// 文件事务通过这些 seam 原子提交 Plan 消费、阶段与最终领域状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredTakeoverTransaction {
     pub id: String,
@@ -535,7 +534,6 @@ enum BatchMountTransactionPhase {
     StateCommitted,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TakeoverTransactionPhase {
     JournalPending,
@@ -547,7 +545,6 @@ enum TakeoverTransactionPhase {
     OriginalDiscarded,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl TakeoverTransactionPhase {
     fn from_str(value: &str) -> Option<Self> {
         match value {
@@ -1141,7 +1138,6 @@ impl Storage {
             .ok_or(StorageError::TakeoverPlanNotFound)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn begin_takeover_transaction(
         &mut self,
         plan_id: &str,
@@ -1250,7 +1246,6 @@ impl Storage {
         Ok(transactions)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn update_takeover_transaction_phase(
         &mut self,
         transaction_id: &str,
@@ -1288,7 +1283,6 @@ impl Storage {
         ensure_one_takeover_row(changed, transaction_id)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn abort_takeover_transaction(
         &mut self,
         transaction_id: &str,
@@ -1311,7 +1305,6 @@ impl Storage {
         ensure_one_takeover_row(changed, transaction_id)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn block_takeover_transaction(
         &mut self,
         transaction_id: &str,
@@ -1335,7 +1328,6 @@ impl Storage {
         ensure_one_takeover_row(changed, transaction_id)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn forget_terminal_takeover_transaction(
         &mut self,
         transaction_id: &str,
@@ -1376,7 +1368,6 @@ impl Storage {
             .map_err(StorageError::SaveTakeoverTransaction)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn finalize_takeover(
         &mut self,
         transaction_id: &str,
@@ -3055,7 +3046,6 @@ fn ensure_one_batch_mount_row(changed: usize, transaction_id: &str) -> Result<()
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn ensure_one_takeover_row(changed: usize, transaction_id: &str) -> Result<(), StorageError> {
     if changed == 1 {
         Ok(())
@@ -3382,7 +3372,6 @@ fn stored_takeover_plan_from_raw(
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn validate_current_takeover_snapshot(
     connection: &Connection,
     stored: &StoredTakeoverPlan,
@@ -3439,7 +3428,6 @@ fn validate_current_takeover_snapshot(
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn validate_takeover_transaction_identity(
     transaction_id: &str,
     journal_path: &str,
@@ -3452,7 +3440,6 @@ fn validate_takeover_transaction_identity(
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn stored_takeover_transaction_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<StoredTakeoverTransaction> {
@@ -3471,7 +3458,6 @@ fn stored_takeover_transaction_from_row(
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn read_takeover_transaction_from(
     connection: &Connection,
     transaction_id: &str,
@@ -3488,7 +3474,6 @@ fn read_takeover_transaction_from(
         .map_err(StorageError::ReadTakeoverTransaction)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn validate_stored_takeover_transaction(
     transaction: &StoredTakeoverTransaction,
 ) -> Result<(), StorageError> {
@@ -3508,7 +3493,6 @@ fn validate_stored_takeover_transaction(
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn validate_takeover_transaction_matches_plan(
     transaction: &StoredTakeoverTransaction,
     plan: &StoredTakeoverPlan,
@@ -3530,7 +3514,6 @@ fn validate_takeover_transaction_matches_plan(
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn ensure_takeover_managed_state_matches(
     transaction: &Transaction<'_>,
     data_root: &Path,
@@ -5702,7 +5685,6 @@ fn map_batch_mount_transaction_insert_error(error: rusqlite::Error) -> StorageEr
     StorageError::SaveBatchMountTransaction(error)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn map_takeover_transaction_insert_error(error: rusqlite::Error) -> StorageError {
     if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error
         && ((code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE

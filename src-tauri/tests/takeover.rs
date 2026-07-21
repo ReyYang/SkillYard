@@ -550,3 +550,225 @@ fn restart_keeps_plan_persisted_without_executing_it() {
         1
     );
 }
+
+#[test]
+fn confirm_takeover_preserves_the_existing_host_path_as_a_managed_mount() {
+    let harness = Harness::new();
+    let original = harness.write_skill(".codex/skills/alpha", "alpha");
+    fs::write(original.join("notes.txt"), "original payload").expect("应写入 Skill 内容");
+    let scanned = harness.scan();
+    let id = observation_id(&scanned, "alpha", ScanRootKey::CodexGlobal);
+    let plan = harness.create_plan(&id);
+
+    let outcome = harness
+        .application
+        .confirm_takeover_plan(&plan.id, &[plan.paths[0].id.clone()])
+        .expect("确认后应完成接管");
+
+    assert!(
+        fs::symlink_metadata(&original)
+            .expect("Host 路径应继续存在")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_link(&original).expect("Host 路径应指向 Central Store"),
+        Path::new(&plan.expected_target)
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(&plan.expected_target).join("notes.txt"))
+            .expect("Central Store 应保存完整内容"),
+        "original payload"
+    );
+    let UiOutcome::Inventory {
+        entries, mounts, ..
+    } = outcome
+    else {
+        panic!("接管后应返回 Inventory");
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.skill_name == "alpha")
+            .count(),
+        1
+    );
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].target_path, original.to_string_lossy());
+
+    let database = Connection::open(harness.database()).expect("应打开测试数据库");
+    assert_eq!(table_count(&database, "bundles"), 1);
+    assert_eq!(table_count(&database, "skill_members"), 1);
+    assert_eq!(table_count(&database, "mounts"), 1);
+    assert_eq!(table_count(&database, "takeover_transactions"), 0);
+    assert_eq!(table_count(&database, "takeover_plans"), 0);
+}
+
+#[test]
+fn confirm_takeover_can_install_without_leaving_a_host_mount() {
+    let harness = Harness::new();
+    let original = harness.write_skill(".claude/skills/alpha", "alpha");
+    fs::write(original.join("notes.txt"), "original payload").expect("应写入 Skill 内容");
+    let scanned = harness.scan();
+    let id = observation_id(&scanned, "alpha", ScanRootKey::ClaudeCodeGlobal);
+    let plan = harness.create_plan(&id);
+
+    let outcome = harness
+        .application
+        .confirm_takeover_plan(&plan.id, &[])
+        .expect("确认后应完成不挂载接管");
+
+    assert!(!original.exists(), "未保留挂载时 Host 路径应移除");
+    assert_eq!(
+        fs::read_to_string(Path::new(&plan.expected_target).join("notes.txt"))
+            .expect("Central Store 应保存完整内容"),
+        "original payload"
+    );
+    let UiOutcome::Inventory { mounts, .. } = outcome else {
+        panic!("接管后应返回 Inventory");
+    };
+    assert!(mounts.is_empty());
+
+    let database = Connection::open(harness.database()).expect("应打开测试数据库");
+    assert_eq!(table_count(&database, "bundles"), 1);
+    assert_eq!(table_count(&database, "mounts"), 0);
+    assert_eq!(table_count(&database, "takeover_transactions"), 0);
+}
+
+#[test]
+fn confirm_takeover_revalidates_content_before_consuming_the_plan() {
+    let harness = Harness::new();
+    let original = harness.write_skill(".codex/skills/alpha", "alpha");
+    let scanned = harness.scan();
+    let id = observation_id(&scanned, "alpha", ScanRootKey::CodexGlobal);
+    let plan = harness.create_plan(&id);
+    fs::write(original.join("external.txt"), "changed after preview")
+        .expect("应模拟确认前外部修改");
+
+    harness
+        .application
+        .confirm_takeover_plan(&plan.id, &[plan.paths[0].id.clone()])
+        .expect_err("确认必须拒绝已经变化的内容");
+
+    assert!(original.is_dir());
+    assert!(!Path::new(&plan.managed_directory).exists());
+    let database = Connection::open(harness.database()).expect("应打开测试数据库");
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT status FROM takeover_plans WHERE id = ?1",
+                [&plan.id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("确认前失败必须保留 Plan"),
+        "pending"
+    );
+    assert_eq!(table_count(&database, "takeover_transactions"), 0);
+}
+
+#[test]
+fn project_takeover_can_preserve_the_registered_host_mount() {
+    let harness = Harness::new();
+    harness.scan();
+    let project = harness.home.join("work/preserve-project");
+    let original = project.join(".codex/skills/alpha");
+    fs::create_dir_all(&original).expect("应创建 Project Skill");
+    fs::write(
+        original.join("SKILL.md"),
+        "---\nname: alpha\ndescription: project alpha\n---\n",
+    )
+    .expect("应写入 Project Skill");
+    let registered = harness
+        .application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 Project");
+    let id = observation_id(&registered, "alpha", ScanRootKey::CodexProject);
+    let plan = harness.create_plan(&id);
+
+    let outcome = harness
+        .application
+        .confirm_takeover_plan(&plan.id, &[plan.paths[0].id.clone()])
+        .expect("Project Skill 应完成保留挂载接管");
+
+    assert!(
+        fs::symlink_metadata(&original)
+            .expect("Project Host 路径应存在")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_link(&original).unwrap(),
+        Path::new(&plan.expected_target)
+    );
+    let UiOutcome::Inventory { mounts, .. } = outcome else {
+        panic!("接管后应返回 Inventory");
+    };
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].scope, MountScope::Project);
+    assert_eq!(mounts[0].project_id, plan.paths[0].project_id);
+}
+
+#[test]
+fn project_takeover_can_remove_the_host_path_without_a_mount() {
+    let harness = Harness::new();
+    harness.scan();
+    let project = harness.home.join("work/unmounted-project");
+    let original = project.join(".github/skills/alpha");
+    fs::create_dir_all(&original).expect("应创建 Project Skill");
+    fs::write(
+        original.join("SKILL.md"),
+        "---\nname: alpha\ndescription: project alpha\n---\n",
+    )
+    .expect("应写入 Project Skill");
+    let registered = harness
+        .application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 Project");
+    let id = observation_id(&registered, "alpha", ScanRootKey::GitHubCopilotProject);
+    let plan = harness.create_plan(&id);
+
+    let outcome = harness
+        .application
+        .confirm_takeover_plan(&plan.id, &[])
+        .expect("Project Skill 应完成未挂载接管");
+
+    assert!(!original.exists());
+    let UiOutcome::Inventory { mounts, .. } = outcome else {
+        panic!("接管后应返回 Inventory");
+    };
+    assert!(mounts.is_empty());
+}
+
+#[test]
+fn confirm_takeover_rejects_identical_content_with_replaced_inode_or_parent() {
+    let inode_harness = Harness::new();
+    let original = inode_harness.write_skill(".codex/skills/alpha", "alpha");
+    let scanned = inode_harness.scan();
+    let id = observation_id(&scanned, "alpha", ScanRootKey::CodexGlobal);
+    let plan = inode_harness.create_plan(&id);
+    let replacement = inode_harness.write_skill("replacement/alpha", "alpha");
+    fs::rename(&original, inode_harness.home.join("old-alpha")).expect("应移开原目录");
+    fs::rename(&replacement, &original).expect("应放入内容相同的新 inode");
+    inode_harness
+        .application
+        .confirm_takeover_plan(&plan.id, &[plan.paths[0].id.clone()])
+        .expect_err("内容相同也不能接受已经替换的 inode");
+
+    let parent_harness = Harness::new();
+    let original = parent_harness.write_skill(".claude/skills/alpha", "alpha");
+    let scanned = parent_harness.scan();
+    let id = observation_id(&scanned, "alpha", ScanRootKey::ClaudeCodeGlobal);
+    let plan = parent_harness.create_plan(&id);
+    let old_parent = parent_harness.home.join(".claude/skills-old");
+    fs::rename(original.parent().unwrap(), &old_parent).expect("应移开原 Host 父目录");
+    fs::create_dir(original.parent().unwrap()).expect("应创建替代父目录");
+    fs::rename(old_parent.join("alpha"), &original).expect("应保留原 Skill inode");
+    parent_harness
+        .application
+        .confirm_takeover_plan(&plan.id, &[plan.paths[0].id.clone()])
+        .expect_err("原 Skill inode 未变也必须拒绝替换后的父目录");
+}

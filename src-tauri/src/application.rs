@@ -18,7 +18,7 @@ use crate::{
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
     storage::{Storage, StorageError},
-    takeover_lifecycle::{TakeoverLifecycleError, create_takeover_plan},
+    takeover_lifecycle::{TakeoverLifecycleError, confirm_takeover_plan, create_takeover_plan},
 };
 
 #[derive(Debug, Error)]
@@ -324,6 +324,30 @@ impl SkillYardApplication {
         )?;
         lifecycle_lock.recheck(&self.paths)?;
         Ok(UiOutcome::TakeoverPlan { plan })
+    }
+
+    /// 后端接管 seam；1.0 UI command 会在独立切片中接入，避免文件事务与界面协议混改。
+    #[doc(hidden)]
+    pub fn confirm_takeover_plan(
+        &self,
+        plan_id: &str,
+        preserved_path_ids: &[String],
+    ) -> Result<UiOutcome, ApplicationError> {
+        self.with_write_operation(|| {
+            let mut storage = self.open_recovered_storage()?;
+            ensure_onboarding_completed(&storage)?;
+            confirm_takeover_plan(
+                &self.paths,
+                &mut storage,
+                plan_id,
+                preserved_path_ids,
+                unix_timestamp_millis(),
+                self.lifecycle_failpoint,
+            )?;
+            storage
+                .read_initial_scan()?
+                .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+        })
     }
 
     fn create_remove_mount_plan(&self, mount_id: String) -> Result<UiOutcome, ApplicationError> {
