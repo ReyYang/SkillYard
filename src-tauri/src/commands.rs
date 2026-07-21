@@ -3,7 +3,8 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
-    FolderInstallPlan, SkillYardApplication, UiIntent, UiOutcome, application::ApplicationError,
+    FolderInstallPlan, MountPlan, MountScope, SkillYardApplication, SupportedAppId, UiIntent,
+    UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -18,6 +19,7 @@ impl From<ApplicationError> for UiError {
         let code = match &error {
             ApplicationError::Storage(_) => "storageError",
             ApplicationError::Lifecycle(_) => "lifecycleError",
+            ApplicationError::MountLifecycle(_) => "mountError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",
@@ -101,6 +103,84 @@ pub fn confirm_install_plan(
             selected_candidate_ids,
         },
     )
+}
+
+/// Project 路径与安装文件夹一样，只能由 Rust 原生选择器签发。
+#[tauri::command(async)]
+pub fn choose_and_register_project(
+    app: AppHandle,
+    application: State<'_, SkillYardApplication>,
+) -> Result<Option<UiOutcome>, UiError> {
+    let Some(folder) = app
+        .dialog()
+        .file()
+        .set_title("选择要交给 SkillYard 使用的 Project")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let path = folder.into_path().map_err(|error| UiError {
+        code: "dialogError",
+        message: format!("无法读取所选 Project：{error}"),
+    })?;
+    let root_path = path.to_str().ok_or_else(|| UiError {
+        code: "invalidPath",
+        message: "所选 Project 名称包含 SkillYard 1.0 无法保存的字符".to_owned(),
+    })?;
+    dispatch(
+        &application,
+        UiIntent::RegisterProject {
+            root_path: root_path.to_owned(),
+        },
+    )
+    .map(Some)
+}
+
+#[tauri::command(async)]
+pub fn create_mount_plan(
+    application: State<'_, SkillYardApplication>,
+    member_id: String,
+    app_id: SupportedAppId,
+    scope: MountScope,
+    project_id: Option<String>,
+) -> Result<MountPlan, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::CreateMountPlan {
+            member_id,
+            app_id,
+            scope,
+            project_id,
+        },
+    )? {
+        UiOutcome::MountPlan { plan } => Ok(plan),
+        _ => Err(UiError {
+            code: "invalidOutcome",
+            message: "SkillYard 没有生成 Mount 确认信息".to_owned(),
+        }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn create_remove_mount_plan(
+    application: State<'_, SkillYardApplication>,
+    mount_id: String,
+) -> Result<MountPlan, UiError> {
+    match dispatch(&application, UiIntent::CreateRemoveMountPlan { mount_id })? {
+        UiOutcome::MountPlan { plan } => Ok(plan),
+        _ => Err(UiError {
+            code: "invalidOutcome",
+            message: "SkillYard 没有生成移除 Mount 的确认信息".to_owned(),
+        }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn confirm_mount_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(&application, UiIntent::ConfirmMountPlan { plan_id })
 }
 
 fn dispatch(application: &SkillYardApplication, intent: UiIntent) -> Result<UiOutcome, UiError> {

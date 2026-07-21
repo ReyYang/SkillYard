@@ -13,8 +13,9 @@ use thiserror::Error;
 
 use crate::domain::{
     InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
-    ManagementKind, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
-    SupportedAppId, SupportedAppSummary, UiOutcome,
+    ManagementKind, MountHealth, MountOperation, MountScope, MountSummary, ProjectSummary,
+    RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus, SupportedAppId,
+    SupportedAppSummary, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -25,6 +26,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         4,
         include_str!("../migrations/0004_bundle_install_candidates.sql"),
     ),
+    (5, include_str!("../migrations/0005_codex_mounts.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -101,6 +103,48 @@ pub enum StorageError {
     InvalidLifecyclePhase(String),
     #[error("受管内容路径不符合 Central Store 固定布局：{0}")]
     UnsafeManagedPath(String),
+    #[error("Project 不存在：{0}")]
+    ProjectNotFound(String),
+    #[error("Project 路径或文件系统身份已经由另一条记录占用")]
+    ProjectIdentityConflict,
+    #[error("受管 Skill Member 不存在：{0}")]
+    ManagedMemberNotFound(String),
+    #[error("Mount 不存在：{0}")]
+    MountNotFound(String),
+    #[error("Mount Plan 未签发或已经不存在")]
+    MountPlanNotFound,
+    #[error("Mount Plan 已经使用，不能重复确认")]
+    MountPlanConsumed,
+    #[error("Mount Plan 已过期，请重新生成")]
+    MountPlanExpired,
+    #[error("Mount Plan 的成员、Project 或目标状态不一致")]
+    InvalidMountPlan,
+    #[error("无法保存 Project：{0}")]
+    SaveProject(#[source] rusqlite::Error),
+    #[error("无法读取 Project：{0}")]
+    ReadProject(#[source] rusqlite::Error),
+    #[error("无法读取受管 Skill Member：{0}")]
+    ReadManagedMember(#[source] rusqlite::Error),
+    #[error("无法保存 Mount Plan：{0}")]
+    SaveMountPlan(#[source] rusqlite::Error),
+    #[error("无法读取 Mount Plan：{0}")]
+    ReadMountPlan(#[source] rusqlite::Error),
+    #[error("无法保存 Mount 事务：{0}")]
+    SaveMountTransaction(#[source] rusqlite::Error),
+    #[error("无法读取 Mount 事务：{0}")]
+    ReadMountTransaction(#[source] rusqlite::Error),
+    #[error("Mount 事务不存在或当前状态不允许该操作：{0}")]
+    MountStateConflict(String),
+    #[error("SQLite 中包含未知 Mount 事务阶段：{0}")]
+    InvalidMountPhase(String),
+    #[error("SQLite 中包含未知 Mount operation：{0}")]
+    UnknownMountOperation(String),
+    #[error("SQLite 中包含未知 Mount scope：{0}")]
+    UnknownMountScope(String),
+    #[error("SQLite 中包含未知 Mount health：{0}")]
+    UnknownMountHealth(String),
+    #[error("SQLite 中包含非法文件系统身份值：{0}")]
+    InvalidFilesystemIdentity(i64),
 }
 
 pub struct Storage {
@@ -113,6 +157,8 @@ pub struct SavedLocalRefresh {
     pub supported_apps: Vec<SupportedAppSummary>,
     pub summary: LocalRefreshSummary,
     pub recovery_issues: Vec<RecoveryIssue>,
+    pub projects: Vec<ProjectSummary>,
+    pub mounts: Vec<MountSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +232,109 @@ pub struct StoredLifecycleTransaction {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredProject {
+    pub id: String,
+    pub display_name: String,
+    pub root_path: String,
+    pub root_device: u64,
+    pub root_inode: u64,
+    pub created_at: i64,
+}
+
+pub(crate) struct NewProject<'a> {
+    pub id: &'a str,
+    pub display_name: &'a str,
+    pub root_path: &'a str,
+    pub root_device: u64,
+    pub root_inode: u64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredManagedMember {
+    pub id: String,
+    pub bundle_id: String,
+    pub skill_name: String,
+    pub content_fingerprint: String,
+    pub managed_directory: String,
+    pub current_target: String,
+    pub stable_relative_path: String,
+    /// Mount 始终指向 Bundle 的稳定 `current` 入口，不直接绑定某次内容目录。
+    pub expected_target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMount {
+    pub id: String,
+    pub member_id: String,
+    pub bundle_id: String,
+    pub skill_name: String,
+    pub member_fingerprint: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub project_root_path: Option<String>,
+    pub project_root_device: Option<u64>,
+    pub project_root_inode: Option<u64>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub health: MountHealth,
+}
+
+pub(crate) struct NewMountPlan<'a> {
+    pub id: &'a str,
+    pub operation: MountOperation,
+    pub mount_id: &'a str,
+    pub member_id: &'a str,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<&'a str>,
+    pub target_path: &'a str,
+    pub expected_target: &'a str,
+    pub member_fingerprint: &'a str,
+    /// 生命周期层生成的不透明快照，用于确认目标路径仍处于预览状态。
+    pub target_observation: &'a str,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMountPlan {
+    pub id: String,
+    pub operation: MountOperation,
+    pub mount_id: String,
+    pub member_id: String,
+    pub bundle_id: String,
+    pub skill_name: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub project_root_path: Option<String>,
+    pub project_root_device: Option<u64>,
+    pub project_root_inode: Option<u64>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub member_fingerprint: String,
+    pub target_observation: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMountTransaction {
+    pub id: String,
+    pub plan_id: String,
+    pub mount_id: String,
+    pub operation: MountOperation,
+    pub journal_path: String,
+    pub phase: String,
+    pub status: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LifecyclePhase {
     JournalPending,
@@ -193,6 +342,44 @@ enum LifecyclePhase {
     CandidateReady,
     Activated,
     StateCommitted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MountTransactionPhase {
+    JournalPending,
+    JournalReady,
+    TargetApplied,
+    StateCommitted,
+}
+
+impl MountTransactionPhase {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "journal_pending" => Some(Self::JournalPending),
+            "journal_ready" => Some(Self::JournalReady),
+            "target_applied" => Some(Self::TargetApplied),
+            "state_committed" => Some(Self::StateCommitted),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::JournalPending => "journal_pending",
+            Self::JournalReady => "journal_ready",
+            Self::TargetApplied => "target_applied",
+            Self::StateCommitted => "state_committed",
+        }
+    }
+
+    fn previous(self) -> Option<Self> {
+        match self {
+            Self::JournalPending => Some(Self::JournalPending),
+            Self::JournalReady => Some(Self::JournalPending),
+            Self::TargetApplied => Some(Self::JournalReady),
+            Self::StateCommitted => None,
+        }
+    }
 }
 
 impl LifecyclePhase {
@@ -312,6 +499,8 @@ impl Storage {
         let entries = self.with_managed_entries(self.read_inventory_entries()?)?;
         let scan_issues = self.read_scan_issues()?;
         let recovery_issues = self.read_recovery_issues()?;
+        let projects = self.read_projects()?;
+        let mounts = self.read_mount_summaries()?;
         let last_local_refresh = refresh_at
             .map(|completed_at| {
                 Ok(LocalRefreshSummary {
@@ -330,6 +519,8 @@ impl Storage {
             last_local_refresh,
             scan_issues,
             recovery_issues,
+            projects,
+            mounts,
         }))
     }
 
@@ -375,9 +566,15 @@ impl Storage {
             .map_err(StorageError::SaveLocalRefresh)?;
         let previous_entries = read_inventory_entries_from(&transaction)?;
         let previous_apps = read_supported_apps_from(&transaction)?;
+        let mount_targets = read_mount_target_paths_from(&transaction)?;
+        let scanned_entries = scanned_entries
+            .iter()
+            .filter(|entry| !mount_targets.contains(&entry.skill_root))
+            .cloned()
+            .collect::<Vec<_>>();
         let entries = reconcile_entries(
             &previous_entries,
-            scanned_entries,
+            &scanned_entries,
             successful_roots,
             scan_issues,
         );
@@ -410,7 +607,484 @@ impl Storage {
             supported_apps,
             summary,
             recovery_issues: self.read_recovery_issues()?,
+            projects: self.read_projects()?,
+            mounts: self.read_mount_summaries()?,
         })
+    }
+
+    pub(crate) fn register_project(
+        &mut self,
+        project: NewProject<'_>,
+    ) -> Result<StoredProject, StorageError> {
+        if !is_single_path_component(project.id)
+            || project.display_name.trim().is_empty()
+            || !is_normalized_absolute_path(project.root_path)
+        {
+            return Err(StorageError::ProjectIdentityConflict);
+        }
+        let root_device = filesystem_identity_to_sql(project.root_device)?;
+        let root_inode = filesystem_identity_to_sql(project.root_inode)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveProject)?;
+        let existing = read_project_by_identity_from(
+            &transaction,
+            project.id,
+            project.root_path,
+            root_device,
+            root_inode,
+        )?;
+        if let Some(existing) = existing {
+            if existing.root_path != project.root_path
+                || existing.root_device != project.root_device
+                || existing.root_inode != project.root_inode
+            {
+                return Err(StorageError::ProjectIdentityConflict);
+            }
+            transaction.commit().map_err(StorageError::SaveProject)?;
+            return Ok(existing);
+        }
+        transaction
+            .execute(
+                "INSERT INTO projects (id, display_name, root_path, root_device, root_inode, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    project.id,
+                    project.display_name,
+                    project.root_path,
+                    root_device,
+                    root_inode,
+                    project.created_at
+                ],
+            )
+            .map_err(StorageError::SaveProject)?;
+        transaction.commit().map_err(StorageError::SaveProject)?;
+        self.read_project(project.id)
+    }
+
+    pub(crate) fn read_project(&self, project_id: &str) -> Result<StoredProject, StorageError> {
+        read_project_from(&self.connection, project_id)?
+            .ok_or_else(|| StorageError::ProjectNotFound(project_id.to_owned()))
+    }
+
+    pub(crate) fn read_projects(&self) -> Result<Vec<ProjectSummary>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, display_name, root_path, root_device, root_inode, created_at FROM projects ORDER BY display_name, id")
+            .map_err(StorageError::ReadProject)?;
+        let rows = statement
+            .query_map([], stored_project_from_row)
+            .map_err(StorageError::ReadProject)?;
+        let projects = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadProject)?;
+        projects
+            .into_iter()
+            .map(|project| {
+                if !is_normalized_absolute_path(&project.root_path) {
+                    return Err(StorageError::ProjectIdentityConflict);
+                }
+                Ok(ProjectSummary {
+                    id: project.id,
+                    display_name: project.display_name,
+                    root_path: project.root_path,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn read_managed_member(
+        &self,
+        member_id: &str,
+    ) -> Result<StoredManagedMember, StorageError> {
+        read_managed_member_from(&self.connection, &self.data_root, member_id)?
+            .ok_or_else(|| StorageError::ManagedMemberNotFound(member_id.to_owned()))
+    }
+
+    pub(crate) fn read_mount(&self, mount_id: &str) -> Result<StoredMount, StorageError> {
+        read_mount_from(&self.connection, &self.data_root, mount_id)?
+            .ok_or_else(|| StorageError::MountNotFound(mount_id.to_owned()))
+    }
+
+    pub(crate) fn read_mounts(&self) -> Result<Vec<StoredMount>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id FROM mounts ORDER BY target_path, id")
+            .map_err(StorageError::ReadMountTransaction)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(StorageError::ReadMountTransaction)?;
+        let ids = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadMountTransaction)?;
+        ids.into_iter().map(|id| self.read_mount(&id)).collect()
+    }
+
+    pub(crate) fn save_mount_plan(&mut self, plan: NewMountPlan<'_>) -> Result<(), StorageError> {
+        validate_new_mount_plan_shape(&plan)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveMountPlan)?;
+        validate_mount_plan_state(
+            &transaction,
+            &self.data_root,
+            plan.operation,
+            plan.mount_id,
+            plan.member_id,
+            plan.app_id,
+            plan.scope,
+            plan.project_id,
+            plan.target_path,
+            plan.expected_target,
+            plan.member_fingerprint,
+        )?;
+        let project_snapshot = plan
+            .project_id
+            .map(|project_id| {
+                read_project_from(&transaction, project_id)?
+                    .ok_or_else(|| StorageError::ProjectNotFound(project_id.to_owned()))
+            })
+            .transpose()?;
+        transaction
+            .execute(
+                "INSERT INTO mount_plans (
+                    id, operation, mount_id, member_id, app_id, scope, project_id,
+                    project_root_path, project_root_device, project_root_inode, target_path,
+                    expected_target, member_fingerprint, target_observation, created_at,
+                    expires_at, status
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'pending')",
+                params![
+                    plan.id,
+                    plan.operation.as_str(),
+                    plan.mount_id,
+                    plan.member_id,
+                    plan.app_id.as_str(),
+                    plan.scope.as_str(),
+                    plan.project_id,
+                    project_snapshot.as_ref().map(|project| project.root_path.as_str()),
+                    project_snapshot
+                        .as_ref()
+                        .map(|project| filesystem_identity_to_sql(project.root_device))
+                        .transpose()?,
+                    project_snapshot
+                        .as_ref()
+                        .map(|project| filesystem_identity_to_sql(project.root_inode))
+                        .transpose()?,
+                    plan.target_path,
+                    plan.expected_target,
+                    plan.member_fingerprint,
+                    plan.target_observation,
+                    plan.created_at,
+                    plan.expires_at,
+                ],
+            )
+            .map_err(StorageError::SaveMountPlan)?;
+        transaction.commit().map_err(StorageError::SaveMountPlan)
+    }
+
+    pub(crate) fn read_mount_plan(&self, plan_id: &str) -> Result<StoredMountPlan, StorageError> {
+        read_mount_plan_from(&self.connection, &self.data_root, plan_id)?
+            .ok_or(StorageError::MountPlanNotFound)
+    }
+
+    pub(crate) fn begin_mount_transaction(
+        &mut self,
+        plan_id: &str,
+        transaction_id: &str,
+        journal_path: &str,
+        now: i64,
+    ) -> Result<StoredMountPlan, StorageError> {
+        if !is_single_path_component(transaction_id) || !is_normalized_relative_path(journal_path) {
+            return Err(StorageError::InvalidMountPlan);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveMountTransaction)?;
+        let mut plan = read_mount_plan_from(&transaction, &self.data_root, plan_id)?
+            .ok_or(StorageError::MountPlanNotFound)?;
+        if plan.status != "pending" {
+            return Err(StorageError::MountPlanConsumed);
+        }
+        if plan.expires_at <= now {
+            return Err(StorageError::MountPlanExpired);
+        }
+        validate_stored_mount_plan_state(&transaction, &self.data_root, &plan)?;
+        transaction
+            .execute(
+                "INSERT INTO mount_transactions (
+                    id, plan_id, mount_id, journal_path, phase, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'journal_pending', 'in_progress', ?5, ?5)",
+                params![transaction_id, plan.id, plan.mount_id, journal_path, now],
+            )
+            .map_err(map_mount_transaction_insert_error)?;
+        let consumed = transaction
+            .execute(
+                "UPDATE mount_plans SET status = 'consumed' WHERE id = ?1 AND status = 'pending'",
+                [&plan.id],
+            )
+            .map_err(StorageError::SaveMountTransaction)?;
+        ensure_one_mount_row(consumed, transaction_id)?;
+        plan.status = "consumed".to_owned();
+        transaction
+            .commit()
+            .map_err(StorageError::SaveMountTransaction)?;
+        Ok(plan)
+    }
+
+    pub(crate) fn update_mount_transaction_phase(
+        &mut self,
+        transaction_id: &str,
+        phase: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let next = MountTransactionPhase::from_str(phase)
+            .ok_or_else(|| StorageError::InvalidMountPhase(phase.to_owned()))?;
+        let Some(previous) = next.previous() else {
+            return Err(StorageError::MountStateConflict(transaction_id.to_owned()));
+        };
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE mount_transactions
+                 SET phase = ?2, updated_at = ?4
+                 WHERE id = ?1 AND status = 'in_progress' AND phase IN (?2, ?3)",
+                params![transaction_id, next.as_str(), previous.as_str(), now],
+            )
+            .map_err(StorageError::SaveMountTransaction)?;
+        ensure_one_mount_row(changed, transaction_id)
+    }
+
+    pub(crate) fn finalize_mount_create(
+        &mut self,
+        transaction_id: &str,
+        plan: &StoredMountPlan,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        if plan.operation != MountOperation::Create {
+            return Err(StorageError::InvalidMountPlan);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveMountTransaction)?;
+        let already_completed =
+            validate_mount_finalization(&transaction, &self.data_root, transaction_id, plan)?;
+        if already_completed {
+            let stored = read_mount_from(&transaction, &self.data_root, &plan.mount_id)?
+                .ok_or_else(|| StorageError::MountStateConflict(transaction_id.to_owned()))?;
+            ensure_mount_matches_plan(&stored, plan)?;
+            return transaction
+                .commit()
+                .map_err(StorageError::SaveMountTransaction);
+        }
+        transaction
+            .execute(
+                "INSERT INTO mounts (
+                    id, member_id, app_id, scope, project_id, target_path,
+                    expected_target, health, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                 ON CONFLICT(id) DO NOTHING",
+                params![
+                    plan.mount_id,
+                    plan.member_id,
+                    plan.app_id.as_str(),
+                    plan.scope.as_str(),
+                    plan.project_id,
+                    plan.target_path,
+                    plan.expected_target,
+                    MountHealth::Healthy.as_str(),
+                    now,
+                ],
+            )
+            .map_err(StorageError::SaveMountTransaction)?;
+        let stored = read_mount_from(&transaction, &self.data_root, &plan.mount_id)?
+            .ok_or_else(|| StorageError::MountStateConflict(transaction_id.to_owned()))?;
+        ensure_mount_matches_plan(&stored, plan)?;
+        // 已登记 Mount 已有明确管理解释，不能继续作为待接管观察重复展示。
+        transaction
+            .execute(
+                "DELETE FROM inventory_observations WHERE skill_root = ?1",
+                [&plan.target_path],
+            )
+            .map_err(StorageError::SaveMountTransaction)?;
+        complete_mount_transaction(&transaction, transaction_id, plan, now)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveMountTransaction)
+    }
+
+    pub(crate) fn finalize_mount_remove(
+        &mut self,
+        transaction_id: &str,
+        plan: &StoredMountPlan,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        if plan.operation != MountOperation::Remove {
+            return Err(StorageError::InvalidMountPlan);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveMountTransaction)?;
+        let already_completed =
+            validate_mount_finalization(&transaction, &self.data_root, transaction_id, plan)?;
+        if already_completed {
+            if read_mount_from(&transaction, &self.data_root, &plan.mount_id)?.is_some() {
+                return Err(StorageError::MountStateConflict(transaction_id.to_owned()));
+            }
+            return transaction
+                .commit()
+                .map_err(StorageError::SaveMountTransaction);
+        }
+        let stored = read_mount_from(&transaction, &self.data_root, &plan.mount_id)?
+            .ok_or_else(|| StorageError::MountStateConflict(transaction_id.to_owned()))?;
+        ensure_mount_matches_plan(&stored, plan)?;
+        let deleted = transaction
+            .execute("DELETE FROM mounts WHERE id = ?1", [&plan.mount_id])
+            .map_err(StorageError::SaveMountTransaction)?;
+        ensure_one_mount_row(deleted, transaction_id)?;
+        complete_mount_transaction(&transaction, transaction_id, plan, now)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveMountTransaction)
+    }
+
+    pub(crate) fn abort_mount_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: Option<&str>,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE mount_transactions
+                 SET status = 'aborted', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status = 'in_progress'
+                   AND phase IN ('journal_pending', 'journal_ready')",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveMountTransaction)?;
+        ensure_one_mount_row(changed, transaction_id)
+    }
+
+    pub(crate) fn block_mount_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE mount_transactions
+                 SET status = 'blocked', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status IN ('in_progress', 'completed', 'aborted')",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveMountTransaction)?;
+        ensure_one_mount_row(changed, transaction_id)
+    }
+
+    pub(crate) fn forget_terminal_mount_transaction(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveMountTransaction)?;
+        let stored = transaction
+            .query_row(
+                "SELECT plan_id, status FROM mount_transactions WHERE id = ?1",
+                [transaction_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveMountTransaction)?;
+        if let Some((plan_id, status)) = stored {
+            if !matches!(status.as_str(), "completed" | "aborted") {
+                return Err(StorageError::MountStateConflict(transaction_id.to_owned()));
+            }
+            transaction
+                .execute(
+                    "DELETE FROM mount_transactions WHERE id = ?1",
+                    [transaction_id],
+                )
+                .map_err(StorageError::SaveMountTransaction)?;
+            transaction
+                .execute("DELETE FROM mount_plans WHERE id = ?1", [plan_id])
+                .map_err(StorageError::SaveMountTransaction)?;
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveMountTransaction)
+    }
+
+    pub(crate) fn recoverable_mount_transactions(
+        &self,
+    ) -> Result<Vec<StoredMountTransaction>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT mount_tx.id, mount_tx.plan_id, mount_tx.mount_id,
+                        plan.operation, mount_tx.journal_path, mount_tx.phase, mount_tx.status
+                 FROM mount_transactions AS mount_tx
+                 JOIN mount_plans AS plan ON plan.id = mount_tx.plan_id
+                 WHERE mount_tx.status IN ('in_progress', 'completed', 'aborted', 'blocked')
+                 ORDER BY mount_tx.created_at, mount_tx.id",
+            )
+            .map_err(StorageError::ReadMountTransaction)?;
+        let rows = statement
+            .query_map([], |row| {
+                let operation = row.get::<_, String>(3)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    operation,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(StorageError::ReadMountTransaction)?;
+        let mut transactions = Vec::new();
+        for row in rows {
+            let (id, plan_id, mount_id, operation, journal_path, phase, status) =
+                row.map_err(StorageError::ReadMountTransaction)?;
+            transactions.push(StoredMountTransaction {
+                id,
+                plan_id,
+                mount_id,
+                operation: MountOperation::from_str(&operation)
+                    .ok_or_else(|| StorageError::UnknownMountOperation(operation.clone()))?,
+                journal_path,
+                phase,
+                status,
+            });
+        }
+        Ok(transactions)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn update_mount_health(
+        &mut self,
+        mount_id: &str,
+        health: MountHealth,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE mounts SET health = ?2, updated_at = ?3 WHERE id = ?1",
+                params![mount_id, health.as_str(), now],
+            )
+            .map_err(StorageError::SaveMountTransaction)?;
+        ensure_one_mount_row(changed, mount_id)
     }
 
     pub fn save_install_plan(&mut self, plan: NewInstallPlan<'_>) -> Result<(), StorageError> {
@@ -827,7 +1501,19 @@ impl Storage {
             .map_err(StorageError::ReadLifecycleTransaction)
     }
 
-    pub fn managed_bundle_notice_rows(&self) -> Result<Vec<(String, String)>, StorageError> {
+    pub fn managed_bundle_notice_rows(
+        &self,
+    ) -> Result<Vec<(String, String, Vec<String>)>, StorageError> {
+        let mut mounts_by_bundle = BTreeMap::<String, Vec<String>>::new();
+        for mount in self.read_mounts()? {
+            mounts_by_bundle
+                .entry(mount.bundle_id)
+                .or_default()
+                .push(mount.target_path);
+        }
+        for targets in mounts_by_bundle.values_mut() {
+            targets.sort();
+        }
         let mut statement = self
             .connection
             .prepare(
@@ -854,7 +1540,11 @@ impl Storage {
             {
                 return Err(StorageError::UnsafeManagedPath(managed_directory));
             }
-            safe_rows.push((display_name, managed_directory));
+            safe_rows.push((
+                display_name,
+                managed_directory,
+                mounts_by_bundle.remove(&bundle_id).unwrap_or_default(),
+            ));
         }
         Ok(safe_rows)
     }
@@ -915,15 +1605,48 @@ impl Storage {
         Ok(issues)
     }
 
+    fn read_mount_summaries(&self) -> Result<Vec<MountSummary>, StorageError> {
+        self.read_mounts()?
+            .into_iter()
+            .map(|mount| {
+                Ok(MountSummary {
+                    id: mount.id,
+                    member_id: mount.member_id,
+                    skill_name: mount.skill_name,
+                    app_id: mount.app_id,
+                    scope: mount.scope,
+                    project_id: mount.project_id,
+                    project_display_name: mount.project_display_name,
+                    target_path: mount.target_path,
+                    expected_target: mount.expected_target,
+                    health: mount.health,
+                })
+            })
+            .collect()
+    }
+
     fn read_recovery_issues(&self) -> Result<Vec<RecoveryIssue>, StorageError> {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT lifecycle.id, COALESCE(plan.bundle_display_name, lifecycle.bundle_id), COALESCE(lifecycle.error_message, '事务状态无法自动判断')
-                 FROM lifecycle_transactions AS lifecycle
-                 LEFT JOIN install_plans AS plan ON plan.id = lifecycle.plan_id
-                 WHERE lifecycle.status = 'blocked'
-                 ORDER BY lifecycle.created_at, lifecycle.id",
+                "SELECT id, display_name, message FROM (
+                    SELECT lifecycle.id AS id,
+                           COALESCE(plan.bundle_display_name, lifecycle.bundle_id) AS display_name,
+                           COALESCE(lifecycle.error_message, '事务状态无法自动判断') AS message,
+                           lifecycle.created_at AS created_at
+                    FROM lifecycle_transactions AS lifecycle
+                    LEFT JOIN install_plans AS plan ON plan.id = lifecycle.plan_id
+                    WHERE lifecycle.status = 'blocked'
+                    UNION ALL
+                    SELECT mount_tx.id AS id,
+                           COALESCE(member.skill_name, mount_tx.mount_id) AS display_name,
+                           COALESCE(mount_tx.error_message, 'Mount 事务状态无法自动判断') AS message,
+                           mount_tx.created_at AS created_at
+                    FROM mount_transactions AS mount_tx
+                    LEFT JOIN mount_plans AS plan ON plan.id = mount_tx.plan_id
+                    LEFT JOIN skill_members AS member ON member.id = plan.member_id
+                    WHERE mount_tx.status = 'blocked'
+                 ) ORDER BY created_at, id",
             )
             .map_err(StorageError::ReadRecoveryIssues)?;
         let rows = statement
@@ -996,6 +1719,676 @@ fn ensure_one_lifecycle_row(changed: usize, transaction_id: &str) -> Result<(), 
             transaction_id.to_owned(),
         ))
     }
+}
+
+fn ensure_one_mount_row(changed: usize, transaction_id: &str) -> Result<(), StorageError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::MountStateConflict(transaction_id.to_owned()))
+    }
+}
+
+fn filesystem_identity_to_sql(value: u64) -> Result<i64, StorageError> {
+    i64::try_from(value).map_err(|_| StorageError::InvalidFilesystemIdentity(i64::MAX))
+}
+
+fn filesystem_identity_from_sql(value: i64) -> Result<u64, StorageError> {
+    u64::try_from(value).map_err(|_| StorageError::InvalidFilesystemIdentity(value))
+}
+
+fn is_normalized_absolute_path(value: &str) -> bool {
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return false;
+    }
+    let normalized = path.components().collect::<PathBuf>();
+    normalized.to_str() == Some(value)
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+}
+
+fn is_normalized_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && path.components().collect::<PathBuf>().to_str() == Some(value)
+}
+
+fn stored_project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProject> {
+    let root_device = row.get::<_, i64>(3)?;
+    let root_inode = row.get::<_, i64>(4)?;
+    Ok(StoredProject {
+        id: row.get(0)?,
+        display_name: row.get(1)?,
+        root_path: row.get(2)?,
+        root_device: u64::try_from(root_device)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, root_device))?,
+        root_inode: u64::try_from(root_inode)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, root_inode))?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn read_project_from(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<StoredProject>, StorageError> {
+    connection
+        .query_row(
+            "SELECT id, display_name, root_path, root_device, root_inode, created_at
+             FROM projects WHERE id = ?1",
+            [project_id],
+            stored_project_from_row,
+        )
+        .optional()
+        .map_err(StorageError::ReadProject)
+}
+
+fn read_project_by_identity_from(
+    connection: &Connection,
+    project_id: &str,
+    root_path: &str,
+    root_device: i64,
+    root_inode: i64,
+) -> Result<Option<StoredProject>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, display_name, root_path, root_device, root_inode, created_at
+             FROM projects
+             WHERE id = ?1 OR root_path = ?2 OR (root_device = ?3 AND root_inode = ?4)",
+        )
+        .map_err(StorageError::ReadProject)?;
+    let rows = statement
+        .query_map(
+            params![project_id, root_path, root_device, root_inode],
+            stored_project_from_row,
+        )
+        .map_err(StorageError::ReadProject)?;
+    let projects = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::ReadProject)?;
+    match projects.as_slice() {
+        [] => Ok(None),
+        [project] => Ok(Some(project.clone())),
+        _ => Err(StorageError::ProjectIdentityConflict),
+    }
+}
+
+fn read_managed_member_from(
+    connection: &Connection,
+    data_root: &Path,
+    member_id: &str,
+) -> Result<Option<StoredManagedMember>, StorageError> {
+    let stored = connection
+        .query_row(
+            "SELECT member.id, member.bundle_id, member.skill_name, member.content_fingerprint,
+                    bundle.managed_directory, bundle.current_target, member.stable_relative_path
+             FROM skill_members AS member
+             JOIN bundles AS bundle ON bundle.id = member.bundle_id
+             WHERE member.id = ?1",
+            [member_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadManagedMember)?;
+    let Some((
+        id,
+        bundle_id,
+        skill_name,
+        content_fingerprint,
+        managed_directory,
+        current_target,
+        stable_relative_path,
+    )) = stored
+    else {
+        return Ok(None);
+    };
+    validate_stored_managed_paths(
+        &bundle_id,
+        &skill_name,
+        &managed_directory,
+        &current_target,
+        &stable_relative_path,
+    )?;
+    let expected_target = data_root
+        .join(&managed_directory)
+        .join("current")
+        .join(&stable_relative_path);
+    let expected_target = expected_target
+        .to_str()
+        .ok_or_else(|| StorageError::UnsafeManagedPath(managed_directory.clone()))?
+        .to_owned();
+    if !is_normalized_absolute_path(&expected_target) {
+        return Err(StorageError::UnsafeManagedPath(managed_directory));
+    }
+    Ok(Some(StoredManagedMember {
+        id,
+        bundle_id,
+        skill_name,
+        content_fingerprint,
+        managed_directory,
+        current_target,
+        stable_relative_path,
+        expected_target,
+    }))
+}
+
+fn validate_new_mount_plan_shape(plan: &NewMountPlan<'_>) -> Result<(), StorageError> {
+    let project_shape_is_valid = match plan.scope {
+        MountScope::Global => plan.project_id.is_none(),
+        MountScope::Project => plan.project_id.is_some_and(is_single_path_component),
+    };
+    if !is_single_path_component(plan.id)
+        || !is_single_path_component(plan.mount_id)
+        || !is_single_path_component(plan.member_id)
+        || !project_shape_is_valid
+        || !is_normalized_absolute_path(plan.target_path)
+        || !is_normalized_absolute_path(plan.expected_target)
+        || plan.member_fingerprint.is_empty()
+        || plan.target_observation.is_empty()
+        || plan.expires_at <= plan.created_at
+    {
+        return Err(StorageError::InvalidMountPlan);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_mount_plan_state(
+    connection: &Connection,
+    data_root: &Path,
+    operation: MountOperation,
+    mount_id: &str,
+    member_id: &str,
+    app_id: SupportedAppId,
+    scope: MountScope,
+    project_id: Option<&str>,
+    target_path: &str,
+    expected_target: &str,
+    member_fingerprint: &str,
+) -> Result<(), StorageError> {
+    let member = read_managed_member_from(connection, data_root, member_id)?
+        .ok_or_else(|| StorageError::ManagedMemberNotFound(member_id.to_owned()))?;
+    if member.content_fingerprint != member_fingerprint || member.expected_target != expected_target
+    {
+        return Err(StorageError::InvalidMountPlan);
+    }
+    if Path::new(target_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some(member.skill_name.as_str())
+    {
+        return Err(StorageError::InvalidMountPlan);
+    }
+    match (scope, project_id) {
+        (MountScope::Global, None) => {}
+        (MountScope::Project, Some(project_id)) => {
+            read_project_from(connection, project_id)?
+                .ok_or_else(|| StorageError::ProjectNotFound(project_id.to_owned()))?;
+        }
+        _ => return Err(StorageError::InvalidMountPlan),
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT id FROM mounts
+             WHERE (member_id = ?1 AND app_id = ?2) OR target_path = ?3
+             ORDER BY id",
+        )
+        .map_err(StorageError::ReadMountPlan)?;
+    let rows = statement
+        .query_map(params![member_id, app_id.as_str(), target_path], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(StorageError::ReadMountPlan)?;
+    let ids = rows
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(StorageError::ReadMountPlan)?;
+    let mounts = ids
+        .into_iter()
+        .map(|id| {
+            read_mount_from(connection, data_root, &id)?
+                .ok_or_else(|| StorageError::MountNotFound(id.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    match operation {
+        MountOperation::Create => {
+            for existing in mounts {
+                let same_slot = existing.member_id == member_id
+                    && existing.app_id == app_id
+                    && existing.scope == scope
+                    && existing.project_id.as_deref() == project_id;
+                let exact = same_slot
+                    && existing.id == mount_id
+                    && existing.target_path == target_path
+                    && existing.expected_target == expected_target;
+                if existing.target_path == target_path && !exact {
+                    return Err(StorageError::InvalidMountPlan);
+                }
+                if existing.member_id == member_id
+                    && existing.app_id == app_id
+                    && (existing.scope != scope || (same_slot && !exact))
+                {
+                    return Err(StorageError::InvalidMountPlan);
+                }
+            }
+        }
+        MountOperation::Remove => {
+            let existing = mounts
+                .iter()
+                .find(|mount| mount.id == mount_id)
+                .ok_or_else(|| StorageError::MountNotFound(mount_id.to_owned()))?;
+            if existing.member_id != member_id
+                || existing.app_id != app_id
+                || existing.scope != scope
+                || existing.project_id.as_deref() != project_id
+                || existing.target_path != target_path
+                || existing.expected_target != expected_target
+                || existing.member_fingerprint != member_fingerprint
+            {
+                return Err(StorageError::InvalidMountPlan);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_stored_mount_plan_state(
+    connection: &Connection,
+    data_root: &Path,
+    plan: &StoredMountPlan,
+) -> Result<(), StorageError> {
+    validate_mount_plan_state(
+        connection,
+        data_root,
+        plan.operation,
+        &plan.mount_id,
+        &plan.member_id,
+        plan.app_id,
+        plan.scope,
+        plan.project_id.as_deref(),
+        &plan.target_path,
+        &plan.expected_target,
+        &plan.member_fingerprint,
+    )
+}
+
+fn read_mount_plan_from(
+    connection: &Connection,
+    data_root: &Path,
+    plan_id: &str,
+) -> Result<Option<StoredMountPlan>, StorageError> {
+    let stored = connection
+        .query_row(
+            "SELECT plan.id, plan.operation, plan.mount_id, plan.member_id,
+                    member.bundle_id, member.skill_name, plan.app_id, plan.scope,
+                    plan.project_id, project.display_name, plan.project_root_path,
+                    plan.project_root_device, plan.project_root_inode, plan.target_path,
+                    plan.expected_target, plan.member_fingerprint, plan.target_observation,
+                    plan.created_at, plan.expires_at, plan.status
+             FROM mount_plans AS plan
+             JOIN skill_members AS member ON member.id = plan.member_id
+             LEFT JOIN projects AS project ON project.id = plan.project_id
+             WHERE plan.id = ?1",
+            [plan_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
+                    row.get::<_, String>(16)?,
+                    row.get::<_, i64>(17)?,
+                    row.get::<_, i64>(18)?,
+                    row.get::<_, String>(19)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadMountPlan)?;
+    let Some((
+        id,
+        operation,
+        mount_id,
+        member_id,
+        bundle_id,
+        skill_name,
+        app_id,
+        scope,
+        project_id,
+        project_display_name,
+        project_root_path,
+        project_root_device,
+        project_root_inode,
+        target_path,
+        expected_target,
+        member_fingerprint,
+        target_observation,
+        created_at,
+        expires_at,
+        status,
+    )) = stored
+    else {
+        return Ok(None);
+    };
+    let operation = MountOperation::from_str(&operation)
+        .ok_or_else(|| StorageError::UnknownMountOperation(operation.clone()))?;
+    let app_id = SupportedAppId::from_str(&app_id)
+        .ok_or_else(|| StorageError::UnknownSupportedApp(app_id.clone()))?;
+    let scope = MountScope::from_str(&scope)
+        .ok_or_else(|| StorageError::UnknownMountScope(scope.clone()))?;
+    let project_root_device = project_root_device
+        .map(filesystem_identity_from_sql)
+        .transpose()?;
+    let project_root_inode = project_root_inode
+        .map(filesystem_identity_from_sql)
+        .transpose()?;
+    validate_project_binding(
+        scope,
+        project_id.as_deref(),
+        project_display_name.as_deref(),
+        project_root_path.as_deref(),
+        project_root_device,
+        project_root_inode,
+    )?;
+    if !is_single_path_component(&id)
+        || !is_single_path_component(&mount_id)
+        || !is_single_path_component(&member_id)
+        || !is_normalized_absolute_path(&target_path)
+        || !is_normalized_absolute_path(&expected_target)
+        || member_fingerprint.is_empty()
+        || target_observation.is_empty()
+        || !matches!(status.as_str(), "pending" | "consumed")
+    {
+        return Err(StorageError::InvalidMountPlan);
+    }
+    let plan = StoredMountPlan {
+        id,
+        operation,
+        mount_id,
+        member_id,
+        bundle_id,
+        skill_name,
+        app_id,
+        scope,
+        project_id,
+        project_display_name,
+        project_root_path,
+        project_root_device,
+        project_root_inode,
+        target_path,
+        expected_target,
+        member_fingerprint,
+        target_observation,
+        created_at,
+        expires_at,
+        status,
+    };
+    let member = read_managed_member_from(connection, data_root, &plan.member_id)?
+        .ok_or_else(|| StorageError::ManagedMemberNotFound(plan.member_id.clone()))?;
+    if member.bundle_id != plan.bundle_id
+        || member.skill_name != plan.skill_name
+        || member.content_fingerprint != plan.member_fingerprint
+        || member.expected_target != plan.expected_target
+        || Path::new(&plan.target_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(plan.skill_name.as_str())
+    {
+        return Err(StorageError::InvalidMountPlan);
+    }
+    Ok(Some(plan))
+}
+
+fn read_mount_from(
+    connection: &Connection,
+    data_root: &Path,
+    mount_id: &str,
+) -> Result<Option<StoredMount>, StorageError> {
+    let stored = connection
+        .query_row(
+            "SELECT mount.id, mount.member_id, member.bundle_id, member.skill_name,
+                    member.content_fingerprint, mount.app_id, mount.scope, mount.project_id,
+                    project.display_name, project.root_path, project.root_device,
+                    project.root_inode, mount.target_path, mount.expected_target, mount.health
+             FROM mounts AS mount
+             JOIN skill_members AS member ON member.id = mount.member_id
+             LEFT JOIN projects AS project ON project.id = mount.project_id
+             WHERE mount.id = ?1",
+            [mount_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadMountTransaction)?;
+    let Some((
+        id,
+        member_id,
+        bundle_id,
+        skill_name,
+        member_fingerprint,
+        app_id,
+        scope,
+        project_id,
+        project_display_name,
+        project_root_path,
+        project_root_device,
+        project_root_inode,
+        target_path,
+        expected_target,
+        health,
+    )) = stored
+    else {
+        return Ok(None);
+    };
+    let app_id = SupportedAppId::from_str(&app_id)
+        .ok_or_else(|| StorageError::UnknownSupportedApp(app_id.clone()))?;
+    let scope = MountScope::from_str(&scope)
+        .ok_or_else(|| StorageError::UnknownMountScope(scope.clone()))?;
+    let health = MountHealth::from_str(&health)
+        .ok_or_else(|| StorageError::UnknownMountHealth(health.clone()))?;
+    let project_root_device = project_root_device
+        .map(filesystem_identity_from_sql)
+        .transpose()?;
+    let project_root_inode = project_root_inode
+        .map(filesystem_identity_from_sql)
+        .transpose()?;
+    validate_project_binding(
+        scope,
+        project_id.as_deref(),
+        project_display_name.as_deref(),
+        project_root_path.as_deref(),
+        project_root_device,
+        project_root_inode,
+    )?;
+    let member = read_managed_member_from(connection, data_root, &member_id)?
+        .ok_or_else(|| StorageError::ManagedMemberNotFound(member_id.clone()))?;
+    if member.bundle_id != bundle_id
+        || member.skill_name != skill_name
+        || member.content_fingerprint != member_fingerprint
+        || member.expected_target != expected_target
+        || !is_normalized_absolute_path(&target_path)
+        || Path::new(&target_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(skill_name.as_str())
+    {
+        return Err(StorageError::InvalidMountPlan);
+    }
+    Ok(Some(StoredMount {
+        id,
+        member_id,
+        bundle_id,
+        skill_name,
+        member_fingerprint,
+        app_id,
+        scope,
+        project_id,
+        project_display_name,
+        project_root_path,
+        project_root_device,
+        project_root_inode,
+        target_path,
+        expected_target,
+        health,
+    }))
+}
+
+fn validate_project_binding(
+    scope: MountScope,
+    project_id: Option<&str>,
+    project_display_name: Option<&str>,
+    project_root_path: Option<&str>,
+    project_root_device: Option<u64>,
+    project_root_inode: Option<u64>,
+) -> Result<(), StorageError> {
+    let valid = match scope {
+        MountScope::Global => {
+            project_id.is_none()
+                && project_display_name.is_none()
+                && project_root_path.is_none()
+                && project_root_device.is_none()
+                && project_root_inode.is_none()
+        }
+        MountScope::Project => {
+            project_id.is_some_and(is_single_path_component)
+                && project_display_name.is_some_and(|name| !name.trim().is_empty())
+                && project_root_path.is_some_and(is_normalized_absolute_path)
+                && project_root_device.is_some()
+                && project_root_inode.is_some()
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidMountPlan)
+    }
+}
+
+fn validate_mount_finalization(
+    transaction: &Transaction<'_>,
+    data_root: &Path,
+    transaction_id: &str,
+    plan: &StoredMountPlan,
+) -> Result<bool, StorageError> {
+    let stored_plan = read_mount_plan_from(transaction, data_root, &plan.id)?
+        .ok_or(StorageError::MountPlanNotFound)?;
+    if &stored_plan != plan || plan.status != "consumed" {
+        return Err(StorageError::InvalidMountPlan);
+    }
+    let state = transaction
+        .query_row(
+            "SELECT plan_id, mount_id, phase, status
+             FROM mount_transactions WHERE id = ?1",
+            [transaction_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadMountTransaction)?
+        .ok_or_else(|| StorageError::MountStateConflict(transaction_id.to_owned()))?;
+    if state.0 != plan.id || state.1 != plan.mount_id {
+        return Err(StorageError::MountStateConflict(transaction_id.to_owned()));
+    }
+    if state.2 == "state_committed" && state.3 == "completed" {
+        return Ok(true);
+    }
+    if state.2 != "target_applied" || state.3 != "in_progress" {
+        return Err(StorageError::MountStateConflict(transaction_id.to_owned()));
+    }
+    validate_stored_mount_plan_state(transaction, data_root, plan)?;
+    Ok(false)
+}
+
+fn ensure_mount_matches_plan(
+    mount: &StoredMount,
+    plan: &StoredMountPlan,
+) -> Result<(), StorageError> {
+    if mount.id == plan.mount_id
+        && mount.member_id == plan.member_id
+        && mount.member_fingerprint == plan.member_fingerprint
+        && mount.app_id == plan.app_id
+        && mount.scope == plan.scope
+        && mount.project_id == plan.project_id
+        && mount.target_path == plan.target_path
+        && mount.expected_target == plan.expected_target
+    {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidMountPlan)
+    }
+}
+
+fn complete_mount_transaction(
+    transaction: &Transaction<'_>,
+    transaction_id: &str,
+    plan: &StoredMountPlan,
+    now: i64,
+) -> Result<(), StorageError> {
+    let changed = transaction
+        .execute(
+            "UPDATE mount_transactions
+             SET phase = 'state_committed', status = 'completed', updated_at = ?4
+             WHERE id = ?1 AND plan_id = ?2 AND mount_id = ?3
+               AND status = 'in_progress' AND phase = 'target_applied'",
+            params![transaction_id, plan.id, plan.mount_id, now],
+        )
+        .map_err(StorageError::SaveMountTransaction)?;
+    ensure_one_mount_row(changed, transaction_id)
 }
 
 fn validate_managed_install_paths(
@@ -1200,6 +2593,24 @@ fn read_inventory_entries_from(
     Ok(entries)
 }
 
+fn read_mount_target_paths_from(connection: &Connection) -> Result<BTreeSet<String>, StorageError> {
+    let mut statement = connection
+        .prepare("SELECT target_path FROM mounts ORDER BY target_path")
+        .map_err(StorageError::ReadMountTransaction)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(StorageError::ReadMountTransaction)?;
+    let mut targets = BTreeSet::new();
+    for row in rows {
+        let target = row.map_err(StorageError::ReadMountTransaction)?;
+        if !is_normalized_absolute_path(&target) {
+            return Err(StorageError::UnsafeManagedPath(target));
+        }
+        targets.insert(target);
+    }
+    Ok(targets)
+}
+
 fn read_install_plan_from(
     connection: &Connection,
     plan_id: &str,
@@ -1347,6 +2758,7 @@ fn inventory_item_from_observation(observation: InventoryObservation) -> Invento
         stale: observation.stale,
         management_kind: observation.management_kind,
         bundle_id: None,
+        member_id: None,
         bundle_display_name: None,
         source_display_name: None,
         project_display_name: None,
@@ -1419,6 +2831,7 @@ fn read_managed_entries_from(
             stale: false,
             management_kind: ManagementKind::SkillYardManaged,
             bundle_id: Some(bundle_id),
+            member_id: Some(member_id),
             bundle_display_name: Some(bundle_display_name),
             source_display_name: None,
             project_display_name: None,
@@ -1430,13 +2843,25 @@ fn read_managed_entries_from(
 fn map_lifecycle_insert_error(error: rusqlite::Error) -> StorageError {
     if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error {
         // 只有单写者 partial unique index 冲突才表示已有活跃事务；主键等约束必须保留原因。
-        if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-            && message.contains("lifecycle_single_active")
+        if (code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            && message.contains("lifecycle_single_active"))
+            || message.contains("active_lifecycle_transaction")
         {
             return StorageError::ActiveLifecycleTransaction;
         }
     }
     StorageError::SaveLifecycleTransaction(error)
+}
+
+fn map_mount_transaction_insert_error(error: rusqlite::Error) -> StorageError {
+    if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error
+        && ((code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            && message.contains("mount_transaction_single_active"))
+            || message.contains("active_lifecycle_transaction"))
+    {
+        return StorageError::ActiveLifecycleTransaction;
+    }
+    StorageError::SaveMountTransaction(error)
 }
 
 fn ensure_managed_state_matches(
@@ -1754,6 +3179,589 @@ mod tests {
         storage
             .update_lifecycle_phase(transaction_id, "candidate_ready", 202)
             .expect("应记录候选内容已就绪");
+    }
+
+    fn save_test_managed_member(storage: &mut Storage, suffix: &str) -> StoredManagedMember {
+        let plan_id = format!("install-plan-{suffix}");
+        let bundle_id = format!("bundle-{suffix}");
+        let member_id = format!("member-{suffix}");
+        let transaction_id = format!("install-txn-{suffix}");
+        save_test_plan(storage, &plan_id, &bundle_id, &member_id);
+        let plan = storage
+            .begin_install_transaction(
+                &plan_id,
+                &transaction_id,
+                &format!("journals/{transaction_id}.json"),
+                200,
+            )
+            .expect("应开始测试安装事务");
+        advance_to_candidate_ready(storage, &transaction_id);
+        storage
+            .finalize_install(
+                &transaction_id,
+                &plan,
+                &format!("bundles/{bundle_id}"),
+                &format!("contents/{transaction_id}"),
+                &format!("members/{member_id}"),
+                203,
+            )
+            .expect("应建立测试受管成员");
+        storage
+            .forget_terminal_transaction(&transaction_id)
+            .expect("测试安装事务应完成清理");
+        storage
+            .read_managed_member(&member_id)
+            .expect("应读取测试受管成员")
+    }
+
+    fn register_test_project(storage: &mut Storage, root: &Path) -> StoredProject {
+        storage
+            .register_project(NewProject {
+                id: "project-one",
+                display_name: "示例项目",
+                root_path: root.to_str().expect("测试路径应是 UTF-8"),
+                root_device: 11,
+                root_inode: 22,
+                created_at: 300,
+            })
+            .expect("应登记测试 Project")
+    }
+
+    // 测试需要逐项控制持久化前置条件，保留显式参数比另建仅测试用配置类型更清楚。
+    #[allow(clippy::too_many_arguments)]
+    fn save_test_mount_plan(
+        storage: &mut Storage,
+        member: &StoredManagedMember,
+        operation: MountOperation,
+        mount_id: &str,
+        plan_id: &str,
+        scope: MountScope,
+        project_id: Option<&str>,
+        target_path: &Path,
+    ) {
+        storage
+            .save_mount_plan(NewMountPlan {
+                id: plan_id,
+                operation,
+                mount_id,
+                member_id: &member.id,
+                app_id: SupportedAppId::Codex,
+                scope,
+                project_id,
+                target_path: target_path.to_str().expect("测试路径应是 UTF-8"),
+                expected_target: &member.expected_target,
+                member_fingerprint: &member.content_fingerprint,
+                target_observation: "missing",
+                created_at: 300,
+                expires_at: 1_000,
+            })
+            .expect("应保存测试 Mount Plan");
+    }
+
+    fn finalize_test_mount_create(
+        storage: &mut Storage,
+        plan_id: &str,
+        transaction_id: &str,
+    ) -> StoredMountPlan {
+        let plan = storage
+            .begin_mount_transaction(
+                plan_id,
+                transaction_id,
+                &format!("journals/{transaction_id}.json"),
+                400,
+            )
+            .expect("应开始 Mount 事务");
+        storage
+            .update_mount_transaction_phase(transaction_id, "journal_ready", 401)
+            .expect("应记录 Mount Journal 已就绪");
+        storage
+            .update_mount_transaction_phase(transaction_id, "target_applied", 402)
+            .expect("应记录 Mount 已作用于目标");
+        storage
+            .finalize_mount_create(transaction_id, &plan, 403)
+            .expect("应提交 Mount 状态");
+        plan
+    }
+
+    #[test]
+    fn mount_migration_creates_normalized_tables_and_constraints() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let storage = open_test_storage(sandbox.path());
+        let versions = storage
+            .connection
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .expect("应读取 migration")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("应查询 migration")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("应收集 migration");
+        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
+        for table in ["projects", "mount_plans", "mounts", "mount_transactions"] {
+            let exists = storage
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("应检查 Mount 表");
+            assert!(exists, "migration 应创建 {table}");
+        }
+        let foreign_key_issues = storage
+            .connection
+            .prepare("PRAGMA foreign_key_check")
+            .expect("应检查外键")
+            .query_map([], |_| Ok(()))
+            .expect("应执行外键检查")
+            .count();
+        assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn sqlite_constraints_reject_scope_target_and_project_tampering() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let first = save_test_managed_member(&mut storage, "constraint-one");
+        let second = save_test_managed_member(&mut storage, "constraint-two");
+        let project = register_test_project(&mut storage, &sandbox.path().join("project"));
+        let first_target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&first.skill_name);
+        storage
+            .connection
+            .execute(
+                "INSERT INTO mounts (
+                    id, member_id, app_id, scope, project_id, target_path,
+                    expected_target, health, created_at, updated_at
+                 ) VALUES (?1, ?2, 'codex', 'global', NULL, ?3, ?4, 'healthy', 1, 1)",
+                params![
+                    "mount-global",
+                    first.id,
+                    first_target.to_str().expect("测试路径应是 UTF-8"),
+                    first.expected_target,
+                ],
+            )
+            .expect("应建立约束测试基线 Mount");
+
+        let project_target = PathBuf::from(&project.root_path)
+            .join(".codex/skills")
+            .join(&first.skill_name);
+        let scope_conflict = storage.connection.execute(
+            "INSERT INTO mounts (
+                id, member_id, app_id, scope, project_id, target_path,
+                expected_target, health, created_at, updated_at
+             ) VALUES (?1, ?2, 'codex', 'project', ?3, ?4, ?5, 'healthy', 1, 1)",
+            params![
+                "mount-project",
+                first.id,
+                project.id,
+                project_target.to_str().expect("测试路径应是 UTF-8"),
+                first.expected_target,
+            ],
+        );
+        assert!(
+            scope_conflict.is_err(),
+            "SQLite trigger 必须拒绝 scope 并存"
+        );
+
+        let duplicate_target = storage.connection.execute(
+            "INSERT INTO mounts (
+                id, member_id, app_id, scope, project_id, target_path,
+                expected_target, health, created_at, updated_at
+             ) VALUES (?1, ?2, 'claude_code', 'global', NULL, ?3, ?4, 'healthy', 1, 1)",
+            params![
+                "mount-duplicate-target",
+                second.id,
+                first_target.to_str().expect("测试路径应是 UTF-8"),
+                second.expected_target,
+            ],
+        );
+        assert!(duplicate_target.is_err(), "Mount target 必须全局唯一");
+
+        let missing_project = storage.connection.execute(
+            "INSERT INTO mounts (
+                id, member_id, app_id, scope, project_id, target_path,
+                expected_target, health, created_at, updated_at
+             ) VALUES (?1, ?2, 'codex', 'project', 'missing', ?3, ?4, 'healthy', 1, 1)",
+            params![
+                "mount-missing-project",
+                second.id,
+                sandbox
+                    .path()
+                    .join("missing/.codex/skills")
+                    .join(&second.skill_name)
+                    .to_str()
+                    .expect("测试路径应是 UTF-8"),
+                second.expected_target,
+            ],
+        );
+        assert!(
+            missing_project.is_err(),
+            "project Mount 必须绑定已登记 Project"
+        );
+
+        let invalid_plan_binding = storage.connection.execute(
+            "INSERT INTO mount_plans (
+                id, operation, mount_id, member_id, app_id, scope, project_id,
+                target_path, expected_target, member_fingerprint, target_observation,
+                created_at, expires_at, status
+             ) VALUES ('bad-plan', 'create', 'bad-mount', ?1, 'codex', 'project', NULL,
+                       ?2, ?3, ?4, 'absent', 1, 2, 'pending')",
+            params![
+                second.id,
+                sandbox
+                    .path()
+                    .join("bad/.codex/skills")
+                    .join(&second.skill_name)
+                    .to_str()
+                    .expect("测试路径应是 UTF-8"),
+                second.expected_target,
+                second.content_fingerprint,
+            ],
+        );
+        assert!(
+            invalid_plan_binding.is_err(),
+            "Mount Plan 的 scope 与 Project 绑定必须由 CHECK 保护"
+        );
+    }
+
+    #[test]
+    fn project_registration_is_idempotent_but_rejects_identity_conflicts() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let project_root = sandbox.path().join("project");
+        let project = register_test_project(&mut storage, &project_root);
+
+        let same = storage
+            .register_project(NewProject {
+                id: "another-id",
+                display_name: "不会覆盖原名称",
+                root_path: project_root.to_str().expect("测试路径应是 UTF-8"),
+                root_device: 11,
+                root_inode: 22,
+                created_at: 301,
+            })
+            .expect("同一个 canonical Project 应复用原记录");
+        assert_eq!(same, project);
+        assert_eq!(storage.read_projects().expect("应读取 Project").len(), 1);
+
+        let other_root = sandbox.path().join("other");
+        let conflict = storage
+            .register_project(NewProject {
+                id: "project-one",
+                display_name: "冲突项目",
+                root_path: other_root.to_str().expect("测试路径应是 UTF-8"),
+                root_device: 33,
+                root_inode: 44,
+                created_at: 302,
+            })
+            .expect_err("同一 ID 不能改指另一目录");
+        assert!(matches!(conflict, StorageError::ProjectIdentityConflict));
+    }
+
+    #[test]
+    fn mount_create_finalization_is_atomic_idempotent_and_visible_in_inventory() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let member = save_test_managed_member(&mut storage, "alpha");
+        let project = register_test_project(&mut storage, &sandbox.path().join("project"));
+        let target = PathBuf::from(&project.root_path)
+            .join(".codex/skills")
+            .join(&member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Create,
+            "mount-one",
+            "mount-plan-create",
+            MountScope::Project,
+            Some(&project.id),
+            &target,
+        );
+
+        let plan =
+            finalize_test_mount_create(&mut storage, "mount-plan-create", "mount-txn-create");
+        storage
+            .finalize_mount_create("mount-txn-create", &plan, 404)
+            .expect("重复 finalize 应保持幂等");
+        let mount = storage.read_mount("mount-one").expect("应读取 Mount");
+        assert_eq!(mount.member_id, member.id);
+        assert_eq!(mount.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(mount.health, MountHealth::Healthy);
+
+        storage
+            .save_initial_scan(500, &[], &[])
+            .expect("应保存初始清单");
+        let Some(UiOutcome::Inventory {
+            projects, mounts, ..
+        }) = storage.read_initial_scan().expect("应读取清单")
+        else {
+            panic!("完成扫描后应返回 Inventory");
+        };
+        assert_eq!(projects.len(), 1);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].id, "mount-one");
+    }
+
+    #[test]
+    fn mount_scope_is_mutually_exclusive_per_member_and_app() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let member = save_test_managed_member(&mut storage, "scope");
+        let global_target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Create,
+            "mount-global",
+            "mount-plan-global",
+            MountScope::Global,
+            None,
+            &global_target,
+        );
+        finalize_test_mount_create(&mut storage, "mount-plan-global", "mount-txn-global");
+        storage
+            .forget_terminal_mount_transaction("mount-txn-global")
+            .expect("应清理已完成事务");
+
+        let project = register_test_project(&mut storage, &sandbox.path().join("project"));
+        let project_target = PathBuf::from(&project.root_path)
+            .join(".codex/skills")
+            .join(&member.skill_name);
+        let error = storage
+            .save_mount_plan(NewMountPlan {
+                id: "mount-plan-project",
+                operation: MountOperation::Create,
+                mount_id: "mount-project",
+                member_id: &member.id,
+                app_id: SupportedAppId::Codex,
+                scope: MountScope::Project,
+                project_id: Some(&project.id),
+                target_path: project_target.to_str().expect("测试路径应是 UTF-8"),
+                expected_target: &member.expected_target,
+                member_fingerprint: &member.content_fingerprint,
+                target_observation: "missing",
+                created_at: 500,
+                expires_at: 1_000,
+            })
+            .expect_err("同一 App 已有 global Mount 时必须拒绝 project Mount");
+        assert!(matches!(error, StorageError::InvalidMountPlan));
+    }
+
+    #[test]
+    fn mount_remove_finalization_only_removes_the_selected_mount() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let member = save_test_managed_member(&mut storage, "remove");
+        let target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Create,
+            "mount-remove",
+            "mount-plan-seed",
+            MountScope::Global,
+            None,
+            &target,
+        );
+        finalize_test_mount_create(&mut storage, "mount-plan-seed", "mount-txn-seed");
+        storage
+            .forget_terminal_mount_transaction("mount-txn-seed")
+            .expect("应清理创建事务");
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Remove,
+            "mount-remove",
+            "mount-plan-remove",
+            MountScope::Global,
+            None,
+            &target,
+        );
+        let plan = storage
+            .begin_mount_transaction(
+                "mount-plan-remove",
+                "mount-txn-remove",
+                "journals/mount-txn-remove.json",
+                600,
+            )
+            .expect("应开始移除事务");
+        storage
+            .update_mount_transaction_phase("mount-txn-remove", "journal_ready", 601)
+            .expect("应记录 Journal");
+        storage
+            .update_mount_transaction_phase("mount-txn-remove", "target_applied", 602)
+            .expect("应记录目标已移除");
+        storage
+            .finalize_mount_remove("mount-txn-remove", &plan, 603)
+            .expect("应提交移除状态");
+        storage
+            .finalize_mount_remove("mount-txn-remove", &plan, 604)
+            .expect("重复 finalize 应保持幂等");
+        assert!(matches!(
+            storage.read_mount("mount-remove"),
+            Err(StorageError::MountNotFound(_))
+        ));
+        assert_eq!(storage.read_managed_member(&member.id).unwrap(), member);
+    }
+
+    #[test]
+    fn mount_transaction_rejects_invalid_phases_and_exposes_blocked_recovery() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let member = save_test_managed_member(&mut storage, "recovery");
+        let target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Create,
+            "mount-recovery",
+            "mount-plan-recovery",
+            MountScope::Global,
+            None,
+            &target,
+        );
+        storage
+            .begin_mount_transaction(
+                "mount-plan-recovery",
+                "mount-txn-recovery",
+                "journals/mount-txn-recovery.json",
+                400,
+            )
+            .expect("应开始 Mount 事务");
+        assert!(matches!(
+            storage.update_mount_transaction_phase("mount-txn-recovery", "target_applied", 401),
+            Err(StorageError::MountStateConflict(_))
+        ));
+        storage
+            .block_mount_transaction("mount-txn-recovery", "目标归属无法判断", 402)
+            .expect("应阻塞 Mount 事务");
+        let recoverable = storage
+            .recoverable_mount_transactions()
+            .expect("应读取 Mount 恢复事务");
+        assert_eq!(recoverable.len(), 1);
+        assert_eq!(recoverable[0].status, "blocked");
+
+        storage
+            .save_initial_scan(500, &[], &[])
+            .expect("应保存初始清单");
+        let Some(UiOutcome::Inventory {
+            recovery_issues, ..
+        }) = storage.read_initial_scan().expect("应读取恢复问题")
+        else {
+            panic!("完成扫描后应返回 Inventory");
+        };
+        assert_eq!(recovery_issues.len(), 1);
+        assert_eq!(recovery_issues[0].id, "mount-txn-recovery");
+        assert_eq!(recovery_issues[0].bundle_display_name, member.skill_name);
+    }
+
+    #[test]
+    fn mount_plan_confirmation_rejects_sqlite_tampering_without_consuming_it() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let member = save_test_managed_member(&mut storage, "tamper");
+        let target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Create,
+            "mount-tamper",
+            "mount-plan-tamper",
+            MountScope::Global,
+            None,
+            &target,
+        );
+        storage
+            .connection
+            .execute(
+                "UPDATE mount_plans SET member_fingerprint = 'sha256:tampered' WHERE id = 'mount-plan-tamper'",
+                [],
+            )
+            .expect("应模拟 SQLite 外部篡改");
+
+        assert!(matches!(
+            storage.begin_mount_transaction(
+                "mount-plan-tamper",
+                "mount-txn-tamper",
+                "journals/mount-txn-tamper.json",
+                400,
+            ),
+            Err(StorageError::InvalidMountPlan)
+        ));
+        let status = storage
+            .connection
+            .query_row(
+                "SELECT status FROM mount_plans WHERE id = 'mount-plan-tamper'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("失败确认后 Plan 应仍存在");
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn install_and_mount_transactions_share_one_active_writer_boundary() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let member = save_test_managed_member(&mut storage, "writer");
+        let target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Create,
+            "mount-writer",
+            "mount-plan-writer",
+            MountScope::Global,
+            None,
+            &target,
+        );
+        storage
+            .begin_mount_transaction(
+                "mount-plan-writer",
+                "mount-txn-writer",
+                "journals/mount-txn-writer.json",
+                400,
+            )
+            .expect("应开始 Mount 事务");
+        save_test_plan(
+            &mut storage,
+            "install-plan-concurrent",
+            "bundle-concurrent",
+            "member-concurrent",
+        );
+        let error = storage
+            .begin_install_transaction(
+                "install-plan-concurrent",
+                "install-txn-concurrent",
+                "journals/install-txn-concurrent.json",
+                401,
+            )
+            .expect_err("Mount 执行中不能开始安装事务");
+        assert!(matches!(error, StorageError::ActiveLifecycleTransaction));
+        assert_eq!(
+            storage
+                .read_install_plan("install-plan-concurrent")
+                .expect("失败事务不能消费安装 Plan")
+                .status,
+            "pending"
+        );
     }
 
     #[test]

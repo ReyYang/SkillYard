@@ -5,6 +5,7 @@ mod commands;
 mod content;
 mod domain;
 mod lifecycle;
+mod mount_lifecycle;
 mod paths;
 mod scanner;
 mod storage;
@@ -12,7 +13,8 @@ mod storage;
 pub use application::SkillYardApplication;
 pub use domain::{
     FolderInstallPlan, InventoryItem, InventoryLocationKind, InventoryObservation,
-    LocalRefreshSummary, ManagementKind, PlatformInfo, RecoveryIssue, ScanIssue, ScanIssueCode,
+    LocalRefreshSummary, ManagementKind, MountHealth, MountOperation, MountPlan, MountScope,
+    MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode,
     ScanRootKey, SkillMetadataStatus, SupportedAppId, UiIntent, UiOutcome,
 };
 pub use lifecycle::LifecycleFailpoint;
@@ -36,7 +38,11 @@ pub fn run() {
             commands::start_initial_scan,
             commands::refresh_local_inventory,
             commands::choose_folder_install_plan,
-            commands::confirm_install_plan
+            commands::confirm_install_plan,
+            commands::choose_and_register_project,
+            commands::create_mount_plan,
+            commands::create_remove_mount_plan,
+            commands::confirm_mount_plan
         ])
         .run(tauri::generate_context!())
         .expect("SkillYard.app 运行失败");

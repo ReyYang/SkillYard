@@ -14,6 +14,21 @@ pub enum UiIntent {
         plan_id: String,
         selected_candidate_ids: Vec<String>,
     },
+    RegisterProject {
+        root_path: String,
+    },
+    CreateMountPlan {
+        member_id: String,
+        app_id: SupportedAppId,
+        scope: MountScope,
+        project_id: Option<String>,
+    },
+    CreateRemoveMountPlan {
+        mount_id: String,
+    },
+    ConfirmMountPlan {
+        plan_id: String,
+    },
 }
 
 /// 固定 Supported App 的稳定标识。
@@ -32,6 +47,123 @@ pub struct SupportedAppSummary {
     pub display_name: String,
     /// 首次扫描前不读取检测路径，因此这里保持未知。
     pub detected: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MountScope {
+    Global,
+    Project,
+}
+
+impl MountScope {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Project => "project",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "global" => Some(Self::Global),
+            "project" => Some(Self::Project),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MountOperation {
+    Create,
+    Remove,
+}
+
+impl MountOperation {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Remove => "remove",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "create" => Some(Self::Create),
+            "remove" => Some(Self::Remove),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MountHealth {
+    Healthy,
+    Missing,
+    Conflict,
+}
+
+impl MountHealth {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Missing => "missing",
+            Self::Conflict => "conflict",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "healthy" => Some(Self::Healthy),
+            "missing" => Some(Self::Missing),
+            "conflict" => Some(Self::Conflict),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSummary {
+    pub id: String,
+    pub display_name: String,
+    pub root_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MountSummary {
+    pub id: String,
+    pub member_id: String,
+    pub skill_name: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub health: MountHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MountPlan {
+    pub id: String,
+    pub operation: MountOperation,
+    pub mount_id: String,
+    pub member_id: String,
+    pub skill_name: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub target_health: MountHealth,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -69,6 +201,8 @@ pub struct InventoryItem {
     pub stale: bool,
     pub management_kind: ManagementKind,
     pub bundle_id: Option<String>,
+    /// 受管条目公开稳定 Member ID；扫描观察保持为空，前端不能解析展示 ID。
+    pub member_id: Option<String>,
     pub bundle_display_name: Option<String>,
     pub source_display_name: Option<String>,
     pub project_display_name: Option<String>,
@@ -297,9 +431,14 @@ pub enum UiOutcome {
         last_local_refresh: Option<LocalRefreshSummary>,
         scan_issues: Vec<ScanIssue>,
         recovery_issues: Vec<RecoveryIssue>,
+        projects: Vec<ProjectSummary>,
+        mounts: Vec<MountSummary>,
     },
     FolderInstallPlan {
         plan: FolderInstallPlan,
+    },
+    MountPlan {
+        plan: MountPlan,
     },
 }
 
@@ -413,6 +552,8 @@ mod tests {
                 bundle_display_name: "example".to_owned(),
                 message: "需要人工恢复".to_owned(),
             }],
+            projects: Vec::new(),
+            mounts: Vec::new(),
         };
 
         let value = serde_json::to_value(outcome).expect("应序列化 UI 状态");

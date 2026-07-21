@@ -50,6 +50,15 @@ pub enum LifecycleFailpoint {
     HardExitAfterCandidatePublishedBeforePhase,
     HardExitAfterCurrentSwitchedBeforePhase,
     HardExitAfterDomainCommittedBeforeJournal,
+    AfterMountTransactionRecord,
+    AfterMountTargetApplied,
+    AfterMountStateCommitted,
+    HardExitAfterMountTransactionRecord,
+    HardExitAfterMountJournalWrittenBeforePhase,
+    HardExitAfterMountTargetAppliedBeforePhase,
+    HardExitAfterMountTargetApplied,
+    HardExitAfterMountStateCommittedBeforeJournal,
+    HardExitAfterMountJournalRemovedBeforeForget,
 }
 
 #[derive(Debug, Error)]
@@ -172,7 +181,7 @@ impl LifecycleLock {
         Ok(())
     }
 
-    fn root(&self) -> &File {
+    pub(crate) fn root(&self) -> &File {
         &self.root
     }
 }
@@ -1626,7 +1635,7 @@ fn block_recovery(
     Err(LifecycleError::RecoveryBlocked(message.to_owned()))
 }
 
-fn write_notice_from_storage(
+pub(crate) fn write_notice_from_storage(
     paths: &ApplicationPaths,
     managed_root: &File,
     storage: &Storage,
@@ -1641,21 +1650,29 @@ fn write_notice_from_storage(
     )
 }
 
-fn render_notice(paths: &ApplicationPaths, bundles: &[(String, String)]) -> String {
+fn render_notice(paths: &ApplicationPaths, bundles: &[(String, String, Vec<String>)]) -> String {
     let mut notice = String::from(
         "# SkillYard Central Store\n\n这里保存的是用户 Skill 的实际主副本，不是缓存。请勿把整个目录作为临时数据删除。\n\n## 已安装 Bundle\n",
     );
     if bundles.is_empty() {
         notice.push_str("\n- 暂无\n");
     } else {
-        for (display_name, relative) in bundles {
+        for (display_name, relative, mount_targets) in bundles {
             notice.push_str(&format!(
-                "\n- {display_name}: `{}`（未挂载）\n",
+                "\n- {display_name}: `{}`",
                 paths.data_root().join(relative).display()
             ));
+            if mount_targets.is_empty() {
+                notice.push_str("（未挂载）\n");
+            } else {
+                notice.push('\n');
+                for target in mount_targets {
+                    notice.push_str(&format!("  - Mount: `{target}`\n"));
+                }
+            }
         }
     }
-    notice.push_str("\n## Source 与 Mount\n\n- 当前没有已登记 Source；所有已安装成员均未挂载。\n");
+    notice.push_str("\n## Source\n\n- 当前没有已登记 Source。\n");
     notice
 }
 
@@ -1825,7 +1842,7 @@ fn open_managed_directory(paths: &ApplicationPaths, path: &Path) -> Result<File,
     open_managed_directory_from_root(paths, &root, path)
 }
 
-fn open_managed_directory_from_root(
+pub(crate) fn open_managed_directory_from_root(
     paths: &ApplicationPaths,
     root: &File,
     path: &Path,
@@ -1903,7 +1920,7 @@ fn managed_relative_path<'a>(
     }
 }
 
-fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
+pub(crate) fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
     let name = c_string(name)?;
     let descriptor = unsafe {
         libc::openat(
@@ -1920,7 +1937,7 @@ fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
     }
 }
 
-fn mkdir_at(parent: &File, name: &OsStr, mode: u32) -> io::Result<()> {
+pub(crate) fn mkdir_at(parent: &File, name: &OsStr, mode: u32) -> io::Result<()> {
     let name = c_string(name)?;
     if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) } == 0 {
         Ok(())
@@ -1929,7 +1946,7 @@ fn mkdir_at(parent: &File, name: &OsStr, mode: u32) -> io::Result<()> {
     }
 }
 
-fn symlink_at(target: &Path, parent: &File, name: &OsStr) -> io::Result<()> {
+pub(crate) fn symlink_at(target: &Path, parent: &File, name: &OsStr) -> io::Result<()> {
     let target = CString::new(target.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target contains NUL"))?;
     let name = c_string(name)?;
@@ -1940,7 +1957,7 @@ fn symlink_at(target: &Path, parent: &File, name: &OsStr) -> io::Result<()> {
     }
 }
 
-fn open_regular_file_at(
+pub(crate) fn open_regular_file_at(
     parent: &File,
     name: &OsStr,
     path: &Path,
@@ -2012,7 +2029,7 @@ fn ensure_regular_file_at(parent: &File, name: &OsStr, path: &Path) -> Result<()
     }
 }
 
-fn rename_at_replace(
+pub(crate) fn rename_at_replace(
     source_parent: &File,
     source_name: &OsStr,
     destination_parent: &File,
@@ -2035,7 +2052,7 @@ fn rename_at_replace(
     }
 }
 
-fn unlink_at(parent: &File, name: &OsStr, directory: bool) -> io::Result<()> {
+pub(crate) fn unlink_at(parent: &File, name: &OsStr, directory: bool) -> io::Result<()> {
     let name = c_string(name)?;
     let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
     if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) } == 0 {
@@ -2112,7 +2129,7 @@ fn remove_owned_tree_contents(directory: &File, path: &Path) -> Result<(), Lifec
         .map_err(|source| io_error("同步事务清理目录", path, source))
 }
 
-fn write_atomic_at(
+pub(crate) fn write_atomic_at(
     parent: &File,
     name: &OsStr,
     path: &Path,
@@ -2165,7 +2182,7 @@ fn ensure_entry_absent_at(parent: &File, name: &OsStr) -> io::Result<()> {
     }
 }
 
-fn entry_metadata_at(parent: &File, name: &OsStr) -> io::Result<Option<libc::stat>> {
+pub(crate) fn entry_metadata_at(parent: &File, name: &OsStr) -> io::Result<Option<libc::stat>> {
     let name = c_string(name)?;
     let mut metadata = MaybeUninit::<libc::stat>::uninit();
     let result = unsafe {
@@ -2189,7 +2206,7 @@ fn entry_metadata_at(parent: &File, name: &OsStr) -> io::Result<Option<libc::sta
     }
 }
 
-fn read_link_at(parent: &File, name: &OsStr) -> io::Result<PathBuf> {
+pub(crate) fn read_link_at(parent: &File, name: &OsStr) -> io::Result<PathBuf> {
     let name = c_string(name)?;
     let mut buffer = vec![0_u8; 256];
     loop {
@@ -2219,7 +2236,7 @@ fn read_link_at(parent: &File, name: &OsStr) -> io::Result<PathBuf> {
     }
 }
 
-fn rename_at_no_replace(
+pub(crate) fn rename_at_no_replace(
     source_parent: &File,
     source_name: &OsStr,
     destination_parent: &File,

@@ -8,6 +8,10 @@ use crate::{
         LifecycleError, LifecycleFailpoint, acquire_lifecycle_lock, confirm_folder_install,
         create_folder_install_plan, ensure_central_store_layout, recover_pending_transactions,
     },
+    mount_lifecycle::{
+        MountLifecycleError, confirm_mount_plan, create_mount_plan, create_remove_mount_plan,
+        recover_pending_mount_transactions, register_project,
+    },
     paths::ApplicationPaths,
     scanner::scan,
     storage::{Storage, StorageError},
@@ -19,6 +23,8 @@ pub enum ApplicationError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Lifecycle(#[from] LifecycleError),
+    #[error(transparent)]
+    MountLifecycle(#[from] MountLifecycleError),
     #[error("首次扫描未完整完成：{0}")]
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
@@ -85,6 +91,23 @@ impl SkillYardApplication {
             } => self.with_write_operation(|| {
                 self.confirm_install_plan(plan_id, selected_candidate_ids)
             }),
+            UiIntent::RegisterProject { root_path } => {
+                self.with_write_operation(|| self.register_project(root_path))
+            }
+            UiIntent::CreateMountPlan {
+                member_id,
+                app_id,
+                scope,
+                project_id,
+            } => self.with_write_operation(|| {
+                self.create_mount_plan(member_id, app_id, scope, project_id)
+            }),
+            UiIntent::CreateRemoveMountPlan { mount_id } => {
+                self.with_write_operation(|| self.create_remove_mount_plan(mount_id))
+            }
+            UiIntent::ConfirmMountPlan { plan_id } => {
+                self.with_write_operation(|| self.confirm_mount_plan(plan_id))
+            }
         }
     }
 
@@ -164,6 +187,8 @@ impl SkillYardApplication {
             last_local_refresh: Some(saved.summary),
             scan_issues: result.issues,
             recovery_issues: saved.recovery_issues,
+            projects: saved.projects,
+            mounts: saved.mounts,
         })
     }
 
@@ -206,10 +231,82 @@ impl SkillYardApplication {
             .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
     }
 
+    fn register_project(&self, root_path: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        register_project(
+            &self.paths,
+            &mut storage,
+            std::path::Path::new(&root_path),
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn create_mount_plan(
+        &self,
+        member_id: String,
+        app_id: crate::domain::SupportedAppId,
+        scope: crate::domain::MountScope,
+        project_id: Option<String>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_mount_plan(
+            &self.paths,
+            &mut storage,
+            &member_id,
+            app_id,
+            scope,
+            project_id.as_deref(),
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::MountPlan { plan })
+    }
+
+    fn create_remove_mount_plan(&self, mount_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_remove_mount_plan(
+            &self.paths,
+            &mut storage,
+            &mount_id,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::MountPlan { plan })
+    }
+
+    fn confirm_mount_plan(&self, plan_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        confirm_mount_plan(
+            &self.paths,
+            &mut storage,
+            &plan_id,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
     fn open_recovered_storage(&self) -> Result<Storage, ApplicationError> {
         let mut storage = Storage::open(self.paths.data_root(), &self.paths.database())?;
         ensure_central_store_layout(&self.paths)?;
         recover_pending_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
+        recover_pending_mount_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
         Ok(storage)
     }
 }
