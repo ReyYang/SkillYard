@@ -1,0 +1,30 @@
+[package]
+name = "skillyard"
+version = "1.0.0"
+description = "SkillYard 本地 Skill 生命周期管理应用"
+authors = ["Yang Dongyu"]
+edition = "2024"
+build = "build.rs"
+
+[lib]
+name = "skillyard_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+# Tauri staticlib 会让无示例的 rustdoc 测试重复链接完整桌面 runtime；业务测试使用正式 application seam。
+doctest = false
+
+[dependencies]
+dirs = "6"
+os_info = { version = "3.15.0", default-features = false }
+# 0.40.x 的底层构建脚本需要 Rust 1.95；固定到当前 stable 1.94 可构建的系列。
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10.0"
+tauri = { version = "2", features = [] }
+thiserror = "2.0.19"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

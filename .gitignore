@@ -3,4 +3,8 @@ work/
 .codex/
 build/
 dist/
+node_modules/
+.pnpm-store/
+target/
+src-tauri/gen/
 .DS_Store
