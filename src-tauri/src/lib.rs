@@ -22,8 +22,7 @@ pub fn run() {
     let application = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root, home),
         PlatformInfo::current(),
-    )
-    .expect("应初始化 SkillYard Lifecycle Core");
+    );
 
     tauri::Builder::default()
         .manage(application)

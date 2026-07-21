@@ -22,9 +22,9 @@ pub struct SkillYardApplication {
 }
 
 impl SkillYardApplication {
-    pub fn new(paths: ApplicationPaths, platform: PlatformInfo) -> Result<Self, ApplicationError> {
-        Storage::open(paths.data_root(), &paths.database())?;
-        Ok(Self { paths, platform })
+    pub fn new(paths: ApplicationPaths, platform: PlatformInfo) -> Self {
+        // SQLite 延迟到 intent 中打开，确保初始化失败能通过 UiError 呈现，而不是在窗口创建前 panic。
+        Self { paths, platform }
     }
 
     pub fn handle(&self, intent: UiIntent) -> Result<UiOutcome, ApplicationError> {

@@ -109,10 +109,15 @@ fn scan_optional_root(
         }
 
         let fallback_name = child.file_name().to_string_lossy().into_owned();
-        let (declared_name, metadata_status) = read_skill_name(&skill_file);
-        let skill_name = declared_name
-            .clone()
-            .unwrap_or_else(|| fallback_name.clone());
+        let (declared_name, metadata_status) = read_skill_metadata(&skill_file, &fallback_name);
+        // 无效声明只能作为诊断证据展示，不能冒充可信 Skill Name。
+        let skill_name = if metadata_status == SkillMetadataStatus::Valid {
+            declared_name
+                .clone()
+                .unwrap_or_else(|| fallback_name.clone())
+        } else {
+            fallback_name
+        };
         let root_string = skill_root.to_string_lossy().into_owned();
         observations.push(InventoryObservation {
             id: format!("{}:{root_string}", location_kind.as_str()),
@@ -132,9 +137,10 @@ fn scan_optional_root(
 #[derive(Deserialize)]
 struct SkillFrontmatter {
     name: Option<String>,
+    description: Option<String>,
 }
 
-fn read_skill_name(path: &Path) -> (Option<String>, SkillMetadataStatus) {
+fn read_skill_metadata(path: &Path, directory_name: &str) -> (Option<String>, SkillMetadataStatus) {
     let Ok(contents) = fs::read_to_string(path) else {
         return (None, SkillMetadataStatus::Unreadable);
     };
@@ -144,10 +150,32 @@ fn read_skill_name(path: &Path) -> (Option<String>, SkillMetadataStatus) {
     let Ok(metadata) = serde_yaml_ng::from_str::<SkillFrontmatter>(frontmatter) else {
         return (None, SkillMetadataStatus::Invalid);
     };
-    match metadata.name {
-        Some(name) if !name.trim().is_empty() => (Some(name), SkillMetadataStatus::Valid),
-        _ => (None, SkillMetadataStatus::Invalid),
-    }
+    let SkillFrontmatter { name, description } = metadata;
+    let valid_name = name
+        .as_deref()
+        .is_some_and(|value| is_valid_skill_name(value, directory_name));
+    let valid_description = description.as_deref().is_some_and(|value| {
+        let length = value.trim().chars().count();
+        (1..=1024).contains(&length)
+    });
+    let status = if valid_name && valid_description {
+        SkillMetadataStatus::Valid
+    } else {
+        SkillMetadataStatus::Invalid
+    };
+    (name, status)
+}
+
+fn is_valid_skill_name(name: &str, directory_name: &str) -> bool {
+    let length = name.len();
+    (1..=64).contains(&length)
+        && name == directory_name
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name.bytes().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == b'-'
+        })
 }
 
 fn path_exists(path: &Path) -> Result<bool, ScanError> {

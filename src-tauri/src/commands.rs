@@ -56,8 +56,7 @@ mod tests {
         let sandbox = tempdir().expect("应创建隔离测试目录");
         let paths =
             ApplicationPaths::for_home(sandbox.path().join("data"), sandbox.path().join("home"));
-        let application = SkillYardApplication::new(paths, PlatformInfo::supported_for_test())
-            .expect("应初始化应用");
+        let application = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
 
         let expected = application
             .handle(UiIntent::GetStartupState)
@@ -77,8 +76,7 @@ mod tests {
         let application = SkillYardApplication::new(
             ApplicationPaths::for_home(sandbox.path().join("data"), home),
             PlatformInfo::supported_for_test(),
-        )
-        .expect("应初始化应用");
+        );
 
         let expected = application
             .handle(UiIntent::StartInitialScan)

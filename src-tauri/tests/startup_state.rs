@@ -21,8 +21,7 @@ fn new_database_starts_on_onboarding_without_reading_skill_roots() {
     let application = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root.clone(), home),
         PlatformInfo::supported_for_test(),
-    )
-    .expect("应初始化应用");
+    );
 
     let outcome = application
         .handle(UiIntent::GetStartupState)
@@ -33,6 +32,21 @@ fn new_database_starts_on_onboarding_without_reading_skill_roots() {
 }
 
 #[test]
+fn storage_initialization_failure_is_returned_through_the_application_seam() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let data_root = sandbox.path().join("blocked-data-root");
+    fs::write(&data_root, "not a directory").expect("应创建不可用的数据根目录");
+
+    // 构造应用本身不能 panic；存储错误应在 UI intent 中成为结构化失败。
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, sandbox.path().join("home")),
+        PlatformInfo::supported_for_test(),
+    );
+
+    assert!(application.handle(UiIntent::GetStartupState).is_err());
+}
+
+#[test]
 fn empty_scan_is_persisted_and_reopened_without_creating_host_directories() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
@@ -40,8 +54,7 @@ fn empty_scan_is_persisted_and_reopened_without_creating_host_directories() {
     fs::create_dir_all(&home).expect("应创建测试 home");
 
     let paths = ApplicationPaths::for_home(data_root, home.clone());
-    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test())
-        .expect("应初始化应用");
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
 
     let scanned = application
         .handle(UiIntent::StartInitialScan)
@@ -56,8 +69,7 @@ fn empty_scan_is_persisted_and_reopened_without_creating_host_directories() {
     assert!(!home.join(".copilot/skills").exists());
     assert!(!home.join(".agents/skills").exists());
 
-    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test())
-        .expect("应重新打开同一 SQLite");
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
     let restored = reopened
         .handle(UiIntent::GetStartupState)
         .expect("返回用户启动应读取保存结果");
@@ -93,8 +105,7 @@ fn scan_discovers_only_fixed_global_and_shared_roots_without_modifying_content()
     let application = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root, home.clone()),
         PlatformInfo::supported_for_test(),
-    )
-    .expect("应初始化应用");
+    );
     let outcome = application
         .handle(UiIntent::StartInitialScan)
         .expect("首次扫描应成功");
@@ -141,6 +152,62 @@ fn scan_discovers_only_fixed_global_and_shared_roots_without_modifying_content()
 }
 
 #[test]
+fn scan_marks_invalid_frontmatter_without_trusting_the_declared_name() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let fixtures = [
+        (
+            "valid-skill",
+            "---\nname: valid-skill\ndescription: Valid fixture\n---\n",
+            SkillMetadataStatus::Valid,
+        ),
+        (
+            "missing-description",
+            "---\nname: missing-description\n---\n",
+            SkillMetadataStatus::Invalid,
+        ),
+        (
+            "invalid-name",
+            "---\nname: Invalid_Name\ndescription: Invalid fixture\n---\n",
+            SkillMetadataStatus::Invalid,
+        ),
+        (
+            "actual-directory",
+            "---\nname: another-name\ndescription: Mismatched fixture\n---\n",
+            SkillMetadataStatus::Invalid,
+        ),
+    ];
+    for (directory, contents, _) in &fixtures {
+        let skill_root = home.join(".codex/skills").join(directory);
+        fs::create_dir_all(&skill_root).expect("应创建 Skill fixture");
+        fs::write(skill_root.join("SKILL.md"), contents).expect("应写入 Skill fixture");
+    }
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory { entries, .. } = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    else {
+        panic!("扫描后应进入 Inventory");
+    };
+
+    for (directory, _, expected_status) in fixtures {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.skill_root.ends_with(directory))
+            .expect("应保留无效 Skill candidate");
+        assert_eq!(entry.metadata_status, expected_status);
+        if expected_status == SkillMetadataStatus::Invalid {
+            assert_eq!(entry.skill_name, directory);
+        }
+    }
+}
+
+#[test]
 fn unsupported_platform_returns_a_typed_state_before_scanning() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
@@ -156,8 +223,7 @@ fn unsupported_platform_returns_a_typed_state_before_scanning() {
             architecture: "x86_64".to_owned(),
             major_version: 13,
         },
-    )
-    .expect("应初始化应用");
+    );
 
     let outcome = application
         .handle(UiIntent::StartInitialScan)
@@ -189,8 +255,7 @@ fn returning_user_reads_persisted_inventory_without_rescanning() {
     .expect("应写入 Skill fixture");
 
     let paths = ApplicationPaths::for_home(data_root, home.clone());
-    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test())
-        .expect("应初始化应用");
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
     let scanned = application
         .handle(UiIntent::StartInitialScan)
         .expect("首次扫描应成功");
@@ -199,8 +264,7 @@ fn returning_user_reads_persisted_inventory_without_rescanning() {
     fs::remove_dir_all(home.join(".codex/skills")).expect("应移除测试扫描根");
     fs::write(home.join(".codex/skills"), "must not rescan").expect("应创建不可扫描的哨兵文件");
 
-    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test())
-        .expect("应重新打开同一 SQLite");
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
     assert_eq!(
         reopened
             .handle(UiIntent::GetStartupState)
@@ -218,12 +282,10 @@ fn failed_scan_does_not_mark_onboarding_complete() {
     fs::write(home.join(".claude/skills"), "not a directory").expect("应创建非法扫描根");
 
     let paths = ApplicationPaths::for_home(data_root, home);
-    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test())
-        .expect("应初始化应用");
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
     assert!(application.handle(UiIntent::StartInitialScan).is_err());
 
-    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test())
-        .expect("应重新打开同一 SQLite");
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
     assert_eq!(
         reopened
             .handle(UiIntent::GetStartupState)
@@ -246,8 +308,10 @@ fn inventory_and_completion_marker_commit_atomically() {
     .expect("应写入 Skill fixture");
 
     let paths = ApplicationPaths::for_home(data_root.clone(), home);
-    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test())
-        .expect("应初始化应用");
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    application
+        .handle(UiIntent::GetStartupState)
+        .expect("读取启动状态应创建正式 SQLite");
     let database = data_root.join("skillyard.sqlite3");
     let connection = Connection::open(&database).expect("应打开测试 SQLite");
     connection
@@ -261,8 +325,7 @@ fn inventory_and_completion_marker_commit_atomically() {
         .execute_batch("DROP TRIGGER fail_completion;")
         .expect("应移除数据库 failpoint");
 
-    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test())
-        .expect("应重新打开同一 SQLite");
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
     assert_eq!(
         reopened
             .handle(UiIntent::GetStartupState)
