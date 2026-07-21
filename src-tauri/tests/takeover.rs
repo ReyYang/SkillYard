@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     os::unix::fs::{MetadataExt, symlink},
     path::{Path, PathBuf},
     process::Command,
@@ -7,10 +7,17 @@ use std::{
 
 use rusqlite::{Connection, params};
 use skillyard_lib::{
-    ApplicationPaths, MountScope, PlatformInfo, ScanRootKey, SkillMetadataStatus,
-    SkillYardApplication, SupportedAppId, TakeoverPlan, UiIntent, UiOutcome,
+    ApplicationPaths, LifecycleFailpoint, MountScope, PlatformInfo, ScanRootKey,
+    SkillMetadataStatus, SkillYardApplication, SupportedAppId, TakeoverPlan, UiIntent, UiOutcome,
 };
 use tempfile::{TempDir, tempdir};
+
+const TAKEOVER_HARD_EXIT_WORKER: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_WORKER";
+const TAKEOVER_HARD_EXIT_DATA_ROOT: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_DATA_ROOT";
+const TAKEOVER_HARD_EXIT_HOME: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_HOME";
+const TAKEOVER_HARD_EXIT_PLAN_ID: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_PLAN_ID";
+const TAKEOVER_HARD_EXIT_PATH_ID: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_PATH_ID";
+const TAKEOVER_HARD_EXIT_POINT: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_POINT";
 
 struct Harness {
     _sandbox: TempDir,
@@ -664,6 +671,227 @@ fn confirm_takeover_revalidates_content_before_consuming_the_plan() {
         "pending"
     );
     assert_eq!(table_count(&database, "takeover_transactions"), 0);
+}
+
+#[test]
+fn restart_aborts_takeover_interrupted_before_journal_without_touching_the_original() {
+    let harness = Harness::new();
+    let original = harness.write_skill(".codex/skills/alpha", "alpha");
+    fs::write(original.join("notes.txt"), "original payload").expect("应写入 Skill 内容");
+    let scanned = harness.scan();
+    let id = observation_id(&scanned, "alpha", ScanRootKey::CodexGlobal);
+    let plan = harness.create_plan(&id);
+    let interrupted = SkillYardApplication::new_with_lifecycle_failpoint(
+        harness.paths.clone(),
+        PlatformInfo::supported_for_test(),
+        LifecycleFailpoint::AfterTakeoverTransactionRecord,
+    );
+
+    interrupted
+        .confirm_takeover_plan(&plan.id, &[plan.paths[0].id.clone()])
+        .expect_err("failpoint 应在写入 Journal 前中断接管");
+
+    let reopened =
+        SkillYardApplication::new(harness.paths.clone(), PlatformInfo::supported_for_test());
+    reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("重启应自动终止尚未写入 Journal 的接管");
+    reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("恢复必须可以重复执行");
+
+    assert!(original.is_dir());
+    assert_eq!(
+        fs::read_to_string(original.join("notes.txt")).expect("原 Skill 应保持不变"),
+        "original payload"
+    );
+    assert!(!Path::new(&plan.managed_directory).exists());
+    assert_takeover_recovery_artifacts_clean(&harness);
+}
+
+#[test]
+fn restart_aborts_takeover_interrupted_after_candidate_preparation() {
+    let harness = Harness::new();
+    let original = harness.write_skill(".claude/skills/alpha", "alpha");
+    fs::write(original.join("notes.txt"), "original payload").expect("应写入 Skill 内容");
+    let scanned = harness.scan();
+    let id = observation_id(&scanned, "alpha", ScanRootKey::ClaudeCodeGlobal);
+    let plan = harness.create_plan(&id);
+    let interrupted = SkillYardApplication::new_with_lifecycle_failpoint(
+        harness.paths.clone(),
+        PlatformInfo::supported_for_test(),
+        LifecycleFailpoint::AfterTakeoverCandidatePrepared,
+    );
+
+    interrupted
+        .confirm_takeover_plan(&plan.id, &[])
+        .expect_err("failpoint 应在候选准备后中断接管");
+
+    let reopened =
+        SkillYardApplication::new(harness.paths.clone(), PlatformInfo::supported_for_test());
+    reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("重启应删除未生效候选并保留原 Skill");
+    reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("恢复必须可以重复执行");
+
+    assert!(original.is_dir());
+    assert_eq!(
+        fs::read_to_string(original.join("notes.txt")).expect("原 Skill 应保持不变"),
+        "original payload"
+    );
+    assert!(!Path::new(&plan.managed_directory).exists());
+    assert_takeover_recovery_artifacts_clean(&harness);
+}
+
+#[test]
+fn real_exit_after_takeover_transaction_record_recovers_the_original() {
+    let harness = Harness::new();
+    let original = harness.write_skill(".codex/skills/alpha", "alpha");
+    fs::write(original.join("notes.txt"), "original payload").expect("应写入 Skill 内容");
+    let plan = takeover_plan_for_hard_exit(&harness, "alpha", ScanRootKey::CodexGlobal);
+
+    run_takeover_hard_exit_worker(&harness, &plan, "after-transaction-record");
+
+    let database = Connection::open(harness.database()).expect("应打开测试数据库");
+    assert_eq!(
+        database
+            .query_row("SELECT phase FROM takeover_transactions", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("应读取中断阶段"),
+        "journal_pending"
+    );
+    assert!(
+        fs::read_dir(harness.data_root.join("journals"))
+            .expect("Journal 目录应存在")
+            .next()
+            .is_none()
+    );
+    drop(database);
+
+    assert_takeover_restart_restores_original(&harness, &plan, &original);
+}
+
+#[test]
+fn real_exit_after_journal_write_before_phase_recovers_the_original() {
+    let harness = Harness::new();
+    let original = harness.write_skill(".codex/skills/alpha", "alpha");
+    fs::write(original.join("notes.txt"), "original payload").expect("应写入 Skill 内容");
+    let plan = takeover_plan_for_hard_exit(&harness, "alpha", ScanRootKey::CodexGlobal);
+
+    run_takeover_hard_exit_worker(&harness, &plan, "after-journal-before-phase");
+
+    let database = Connection::open(harness.database()).expect("应打开测试数据库");
+    assert_eq!(
+        database
+            .query_row("SELECT phase FROM takeover_transactions", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("应读取 SQLite 落后阶段"),
+        "journal_pending"
+    );
+    assert!(
+        fs::read_dir(harness.data_root.join("journals"))
+            .expect("Journal 目录应存在")
+            .next()
+            .is_some(),
+        "真实退出必须留下已持久化 Journal"
+    );
+    drop(database);
+
+    assert_takeover_restart_restores_original(&harness, &plan, &original);
+}
+
+/// 父测试精确启动本 worker；`_exit` 会绕过析构并留下真实磁盘现场。
+#[test]
+fn hard_exit_takeover_worker() {
+    if env::var_os(TAKEOVER_HARD_EXIT_WORKER).is_none() {
+        return;
+    }
+    let data_root = env::var_os(TAKEOVER_HARD_EXIT_DATA_ROOT).expect("子进程必须收到数据目录");
+    let home = env::var_os(TAKEOVER_HARD_EXIT_HOME).expect("子进程必须收到 home");
+    let plan_id = env::var(TAKEOVER_HARD_EXIT_PLAN_ID).expect("子进程必须收到 Plan ID");
+    let path_id = env::var(TAKEOVER_HARD_EXIT_PATH_ID).expect("子进程必须收到路径 ID");
+    let failpoint = match env::var(TAKEOVER_HARD_EXIT_POINT).as_deref() {
+        Ok("after-transaction-record") => {
+            LifecycleFailpoint::HardExitAfterTakeoverTransactionRecord
+        }
+        Ok("after-journal-before-phase") => {
+            LifecycleFailpoint::HardExitAfterTakeoverJournalWrittenBeforePhase
+        }
+        _ => panic!("子进程收到未知 Takeover failpoint"),
+    };
+    let application = SkillYardApplication::new_with_lifecycle_failpoint(
+        ApplicationPaths::for_home(data_root.into(), home.into()),
+        PlatformInfo::supported_for_test(),
+        failpoint,
+    );
+    application
+        .confirm_takeover_plan(&plan_id, &[path_id])
+        .expect("hard-exit failpoint 必须在返回前终止进程");
+}
+
+fn takeover_plan_for_hard_exit(
+    harness: &Harness,
+    name: &str,
+    root_key: ScanRootKey,
+) -> TakeoverPlan {
+    let scanned = harness.scan();
+    let id = observation_id(&scanned, name, root_key);
+    harness.create_plan(&id)
+}
+
+fn run_takeover_hard_exit_worker(harness: &Harness, plan: &TakeoverPlan, point: &str) {
+    let status = Command::new(env::current_exe().expect("应找到当前测试二进制"))
+        .args(["--exact", "hard_exit_takeover_worker", "--nocapture"])
+        .env(TAKEOVER_HARD_EXIT_WORKER, "1")
+        .env(TAKEOVER_HARD_EXIT_DATA_ROOT, &harness.data_root)
+        .env(TAKEOVER_HARD_EXIT_HOME, &harness.home)
+        .env(TAKEOVER_HARD_EXIT_PLAN_ID, &plan.id)
+        .env(TAKEOVER_HARD_EXIT_PATH_ID, &plan.paths[0].id)
+        .env(TAKEOVER_HARD_EXIT_POINT, point)
+        .status()
+        .expect("应启动 Takeover hard-exit 子进程");
+    assert_eq!(status.code(), Some(91), "子进程必须在 failpoint 直接退出");
+}
+
+fn assert_takeover_restart_restores_original(
+    harness: &Harness,
+    plan: &TakeoverPlan,
+    original: &Path,
+) {
+    let reopened =
+        SkillYardApplication::new(harness.paths.clone(), PlatformInfo::supported_for_test());
+    reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("重启应自动终止生效前接管");
+    reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("恢复必须可以重复执行");
+    assert!(original.is_dir());
+    assert_eq!(
+        fs::read_to_string(original.join("notes.txt")).expect("原 Skill 应保持不变"),
+        "original payload"
+    );
+    assert!(!Path::new(&plan.managed_directory).exists());
+    assert_takeover_recovery_artifacts_clean(harness);
+}
+
+fn assert_takeover_recovery_artifacts_clean(harness: &Harness) {
+    let database = Connection::open(harness.database()).expect("应打开测试数据库");
+    assert_eq!(table_count(&database, "takeover_transactions"), 0);
+    assert_eq!(table_count(&database, "takeover_plans"), 0);
+    for directory in ["staging", "journals"] {
+        assert!(
+            fs::read_dir(harness.data_root.join(directory))
+                .expect("恢复目录应存在")
+                .next()
+                .is_none(),
+            "恢复后 {directory} 应为空"
+        );
+    }
 }
 
 #[test]

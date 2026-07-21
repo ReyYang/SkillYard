@@ -41,6 +41,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         11,
         include_str!("../migrations/0011_takeover_transactions.sql"),
     ),
+    (
+        12,
+        include_str!("../migrations/0012_takeover_journal_contract.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -501,6 +505,7 @@ pub(crate) struct StoredTakeoverTransaction {
     pub content_id: String,
     pub path_id: String,
     pub journal_path: String,
+    pub journal_contract_sha256: Option<String>,
     pub preserve_mount: bool,
     pub phase: String,
     pub status: String,
@@ -1138,15 +1143,19 @@ impl Storage {
             .ok_or(StorageError::TakeoverPlanNotFound)
     }
 
-    pub(crate) fn begin_takeover_transaction(
+    pub(crate) fn begin_takeover_transaction_with_journal_contract(
         &mut self,
         plan_id: &str,
         preserved_path_ids: &[String],
         transaction_id: &str,
         journal_path: &str,
+        journal_contract_sha256: &str,
         now: i64,
     ) -> Result<StoredTakeoverPlan, StorageError> {
         validate_takeover_transaction_identity(transaction_id, journal_path)?;
+        if !is_lower_hex_sha256(journal_contract_sha256) {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1174,10 +1183,11 @@ impl Storage {
             .execute(
                 "INSERT INTO takeover_transactions (
                     id, plan_id, bundle_id, member_id, content_id, path_id,
-                    journal_path, preserve_mount, phase, status, created_at, updated_at
+                    journal_path, journal_contract_sha256, preserve_mount,
+                    phase, status, created_at, updated_at
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                    'journal_pending', 'in_progress', ?9, ?9
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                    'journal_pending', 'in_progress', ?10, ?10
                  )",
                 params![
                     transaction_id,
@@ -1187,6 +1197,7 @@ impl Storage {
                     plan.plan.content_id,
                     path.id,
                     journal_path,
+                    journal_contract_sha256,
                     preserve_mount,
                     now,
                 ],
@@ -1216,6 +1227,26 @@ impl Storage {
         Ok(plan)
     }
 
+    /// 单元测试旧调用点只验证事务状态机；固定合法 seal 避免重复构造文件 Journal。
+    #[cfg(test)]
+    pub(crate) fn begin_takeover_transaction(
+        &mut self,
+        plan_id: &str,
+        preserved_path_ids: &[String],
+        transaction_id: &str,
+        journal_path: &str,
+        now: i64,
+    ) -> Result<StoredTakeoverPlan, StorageError> {
+        self.begin_takeover_transaction_with_journal_contract(
+            plan_id,
+            preserved_path_ids,
+            transaction_id,
+            journal_path,
+            &"0".repeat(64),
+            now,
+        )
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn recoverable_takeover_transactions(
         &self,
@@ -1224,7 +1255,8 @@ impl Storage {
             .connection
             .prepare(
                 "SELECT id, plan_id, bundle_id, member_id, content_id, path_id,
-                        journal_path, preserve_mount, phase, status, error_message
+                        journal_path, journal_contract_sha256, preserve_mount,
+                        phase, status, error_message
                  FROM takeover_transactions
                  WHERE status IN ('in_progress', 'completed', 'aborted', 'blocked')
                  ORDER BY created_at, id",
@@ -3440,6 +3472,13 @@ fn validate_takeover_transaction_identity(
     Ok(())
 }
 
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn stored_takeover_transaction_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<StoredTakeoverTransaction> {
@@ -3451,10 +3490,11 @@ fn stored_takeover_transaction_from_row(
         content_id: row.get(4)?,
         path_id: row.get(5)?,
         journal_path: row.get(6)?,
-        preserve_mount: row.get(7)?,
-        phase: row.get(8)?,
-        status: row.get(9)?,
-        error_message: row.get(10)?,
+        journal_contract_sha256: row.get(7)?,
+        preserve_mount: row.get(8)?,
+        phase: row.get(9)?,
+        status: row.get(10)?,
+        error_message: row.get(11)?,
     })
 }
 
@@ -3465,7 +3505,8 @@ fn read_takeover_transaction_from(
     connection
         .query_row(
             "SELECT id, plan_id, bundle_id, member_id, content_id, path_id,
-                    journal_path, preserve_mount, phase, status, error_message
+                    journal_path, journal_contract_sha256, preserve_mount,
+                    phase, status, error_message
              FROM takeover_transactions WHERE id = ?1",
             [transaction_id],
             stored_takeover_transaction_from_row,
@@ -3482,6 +3523,10 @@ fn validate_stored_takeover_transaction(
         || uuid::Uuid::parse_str(&transaction.member_id).is_err()
         || uuid::Uuid::parse_str(&transaction.content_id).is_err()
         || uuid::Uuid::parse_str(&transaction.path_id).is_err()
+        || transaction
+            .journal_contract_sha256
+            .as_deref()
+            .is_some_and(|seal| !is_lower_hex_sha256(seal))
         || TakeoverTransactionPhase::from_str(&transaction.phase).is_none()
         || !matches!(
             transaction.status.as_str(),
@@ -6477,7 +6522,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         for table in [
             "projects",
             "mount_plans",

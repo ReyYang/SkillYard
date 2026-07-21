@@ -18,7 +18,10 @@ use crate::{
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
     storage::{Storage, StorageError},
-    takeover_lifecycle::{TakeoverLifecycleError, confirm_takeover_plan, create_takeover_plan},
+    takeover_lifecycle::{
+        TakeoverLifecycleError, confirm_takeover_plan, create_takeover_plan,
+        recover_pending_takeover_transactions,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -439,6 +442,7 @@ impl SkillYardApplication {
         let mut storage = Storage::open(self.paths.data_root(), &self.paths.database())?;
         ensure_central_store_layout(&self.paths)?;
         recover_pending_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
+        recover_pending_takeover_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
         recover_pending_mount_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
         recover_pending_batch_mount_transactions(
             &self.paths,

@@ -28,12 +28,16 @@ use crate::{
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
         entry_metadata_at, mkdir_at, open_directory_at, open_managed_directory_from_root,
-        open_regular_file_at, read_entry_names_os_from_handle, read_link_at, rename_at_no_replace,
-        rename_at_swap, symlink_at, unlink_at, write_atomic_at, write_notice_from_storage,
+        open_regular_file_at, read_entry_names_os_from_handle, read_link_at, remove_owned_tree_at,
+        rename_at_no_replace, rename_at_swap, symlink_at, unlink_at, write_atomic_at,
+        write_notice_from_storage,
     },
     paths::{ApplicationPaths, SupportedAppPathConfig},
     scanner::{ScanError, fingerprint_skill_root},
-    storage::{Storage, StorageError, StoredProject, StoredTakeoverPlan, takeover_plan_seal},
+    storage::{
+        Storage, StorageError, StoredProject, StoredTakeoverPlan, StoredTakeoverTransaction,
+        takeover_plan_seal,
+    },
 };
 
 const TAKEOVER_PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
@@ -307,13 +311,15 @@ pub fn confirm_takeover_plan(
     let preserve_mount = selected_preserve_mount(&preview, preserved_path_ids)?;
     let mut journal = build_takeover_journal(&transaction_id, &preview, preserve_mount)?;
     ensure_takeover_journal_fits(&journal)?;
+    let journal_contract_sha256 = takeover_journal_contract_sha256(&journal)?;
     validate_takeover_execution_snapshot(paths, storage, &lifecycle_lock, &preview, &journal)?;
 
-    let plan = storage.begin_takeover_transaction(
+    let plan = storage.begin_takeover_transaction_with_journal_contract(
         plan_id,
         preserved_path_ids,
         &transaction_id,
         &journal_relative,
+        &journal_contract_sha256,
         now,
     )?;
     let mut expected = preview.clone();
@@ -363,6 +369,172 @@ pub fn confirm_takeover_plan(
     }
     cleanup_completed_takeover(paths, &lifecycle_lock, storage, &journal)?;
     lifecycle_lock.recheck(paths)?;
+    Ok(())
+}
+
+/// 启动恢复以实际文件系统状态为准；单个异常事务只进入 blocked，不影响其他 Skill。
+pub fn recover_pending_takeover_transactions(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    now: i64,
+) -> Result<(), TakeoverLifecycleError> {
+    let lifecycle_lock = acquire_lifecycle_lock(paths)?;
+    lifecycle_lock.recheck(paths)?;
+    for transaction in storage.recoverable_takeover_transactions()? {
+        if transaction.status == "blocked" {
+            continue;
+        }
+        if let Err(error) =
+            recover_takeover_transaction(paths, &lifecycle_lock, storage, &transaction, now)
+        {
+            storage.block_takeover_transaction(&transaction.id, &error.to_string(), now)?;
+        }
+        lifecycle_lock.recheck(paths)?;
+    }
+    write_notice_from_storage(paths, lifecycle_lock.root(), storage)?;
+    Ok(())
+}
+
+fn recover_takeover_transaction(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    transaction: &StoredTakeoverTransaction,
+    now: i64,
+) -> Result<(), TakeoverLifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let plan = storage.read_takeover_plan(&transaction.plan_id)?;
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    let journal_name = OsString::from(format!("{}.json", transaction.id));
+    let journal_path = paths.journals_root().join(&journal_name);
+    let journal_metadata = entry_metadata_at(&journals, &journal_name)
+        .map_err(|source| takeover_io("检查接管 Journal", &journal_path, source))?;
+
+    let journal = if journal_metadata.is_some() {
+        let journal = read_takeover_journal_at(&journals, &journal_name, &journal_path)?;
+        validate_takeover_journal_contract(&journal, transaction, &plan)?;
+        journal
+    } else {
+        return recover_takeover_without_journal(
+            paths,
+            lifecycle_lock,
+            storage,
+            transaction,
+            &plan,
+            now,
+        );
+    };
+
+    if transaction.status == "aborted" {
+        cleanup_before_takeover_effect(paths, lifecycle_lock, storage, &plan, &journal)?;
+        remove_takeover_journal(paths, lifecycle_lock.root(), &journal)?;
+        storage.forget_terminal_takeover_transaction(&transaction.id)?;
+        return Ok(());
+    }
+    if transaction.status != "in_progress"
+        || !matches!(
+            transaction.phase.as_str(),
+            "journal_pending" | "journal_ready" | "candidate_ready" | "replacement_staged"
+        )
+    {
+        return Err(TakeoverLifecycleError::RecoveryBlocked(
+            "接管事务已越过 Host 生效点，当前恢复切片不能处理".to_owned(),
+        ));
+    }
+    cleanup_before_takeover_effect(paths, lifecycle_lock, storage, &plan, &journal)?;
+    storage.abort_takeover_transaction(&transaction.id, None, now)?;
+    remove_takeover_journal(paths, lifecycle_lock.root(), &journal)?;
+    storage.forget_terminal_takeover_transaction(&transaction.id)?;
+    Ok(())
+}
+
+fn recover_takeover_without_journal(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    transaction: &StoredTakeoverTransaction,
+    plan: &StoredTakeoverPlan,
+    now: i64,
+) -> Result<(), TakeoverLifecycleError> {
+    if transaction.status != "in_progress" || transaction.phase != "journal_pending" {
+        return Err(TakeoverLifecycleError::RecoveryBlocked(
+            "接管 Journal 缺失且事务已进入文件系统阶段".to_owned(),
+        ));
+    }
+    // Journal 尚未落盘时，重新采集未触碰的原目录；只有 seal 完全一致才能安全终止。
+    let journal = build_takeover_journal(&transaction.id, plan, transaction.preserve_mount)?;
+    validate_takeover_journal_seal(&journal, transaction)?;
+    validate_takeover_execution_snapshot(paths, storage, lifecycle_lock, plan, &journal)?;
+    storage.abort_takeover_transaction(&transaction.id, None, now)?;
+    storage.forget_terminal_takeover_transaction(&transaction.id)?;
+    Ok(())
+}
+
+fn read_takeover_journal_at(
+    journals: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<TakeoverJournal, TakeoverLifecycleError> {
+    let mut file = open_regular_file_at(journals, name, path, false)?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| takeover_io("检查接管 Journal", path, source))?;
+    if metadata.len() > MAX_TAKEOVER_JOURNAL_BYTES as u64 {
+        return Err(TakeoverLifecycleError::JournalTooLarge {
+            actual: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+            limit: MAX_TAKEOVER_JOURNAL_BYTES,
+        });
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_TAKEOVER_JOURNAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| takeover_io("读取接管 Journal", path, source))?;
+    if bytes.len() > MAX_TAKEOVER_JOURNAL_BYTES {
+        return Err(TakeoverLifecycleError::JournalTooLarge {
+            actual: bytes.len(),
+            limit: MAX_TAKEOVER_JOURNAL_BYTES,
+        });
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn validate_takeover_journal_contract(
+    actual: &TakeoverJournal,
+    transaction: &StoredTakeoverTransaction,
+    plan: &StoredTakeoverPlan,
+) -> Result<(), TakeoverLifecycleError> {
+    let mut expected = build_takeover_journal_with_entries(
+        &transaction.id,
+        plan,
+        transaction.preserve_mount,
+        actual.original_entries.clone(),
+    )?;
+    expected.phase = actual.phase;
+    if actual != &expected {
+        return Err(TakeoverLifecycleError::RecoveryBlocked(
+            "SQLite、Plan 与接管 Journal 的事务边界不一致".to_owned(),
+        ));
+    }
+    validate_takeover_journal_seal(actual, transaction)
+}
+
+fn validate_takeover_journal_seal(
+    journal: &TakeoverJournal,
+    transaction: &StoredTakeoverTransaction,
+) -> Result<(), TakeoverLifecycleError> {
+    let expected = transaction
+        .journal_contract_sha256
+        .as_deref()
+        .ok_or_else(|| {
+            TakeoverLifecycleError::RecoveryBlocked("接管事务缺少 Journal contract seal".to_owned())
+        })?;
+    if takeover_journal_contract_sha256(journal)? != expected {
+        return Err(TakeoverLifecycleError::RecoveryBlocked(
+            "接管 Journal 与 SQLite seal 不一致".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -494,6 +666,21 @@ fn build_takeover_journal(
         .paths
         .first()
         .ok_or(StorageError::InvalidTakeoverPlan)?;
+    let original_entries = collect_original_manifest_path(Path::new(&path.original_path))?;
+    build_takeover_journal_with_entries(transaction_id, plan, preserve_mount, original_entries)
+}
+
+fn build_takeover_journal_with_entries(
+    transaction_id: &str,
+    plan: &StoredTakeoverPlan,
+    preserve_mount: bool,
+    original_entries: Vec<TakeoverOriginalEntry>,
+) -> Result<TakeoverJournal, TakeoverLifecycleError> {
+    let path = plan
+        .plan
+        .paths
+        .first()
+        .ok_or(StorageError::InvalidTakeoverPlan)?;
     let original = Path::new(&path.original_path);
     let parent = original
         .parent()
@@ -531,8 +718,18 @@ fn build_takeover_journal(
         original_device: path.original_device,
         original_inode: path.original_inode,
         original_mode: path.original_mode,
-        original_entries: collect_original_manifest_path(original)?,
+        original_entries,
     })
+}
+
+/// Phase 会随事务推进；seal 只覆盖其余不可变合同与原目录逐项删除授权。
+fn takeover_journal_contract_sha256(
+    journal: &TakeoverJournal,
+) -> Result<String, TakeoverLifecycleError> {
+    let mut contract = journal.clone();
+    contract.phase = TakeoverJournalPhase::JournalReady;
+    let bytes = serde_json::to_vec(&contract)?;
+    Ok(hex_path_bytes(&Sha256::digest(bytes)))
 }
 
 fn ensure_takeover_journal_fits(journal: &TakeoverJournal) -> Result<(), TakeoverLifecycleError> {
@@ -1535,6 +1732,112 @@ fn discard_original_after_commit(
         journal,
     )?;
     Ok(())
+}
+
+fn cleanup_before_takeover_effect(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &Storage,
+    plan: &StoredTakeoverPlan,
+    journal: &TakeoverJournal,
+) -> Result<(), TakeoverLifecycleError> {
+    validate_original_snapshot(paths, storage, plan, journal)?;
+    validate_original_manifest(
+        Path::new(&plan.observation.skill_root),
+        &journal.original_entries,
+    )?;
+    let parent = open_takeover_parent(paths, storage, plan, journal)?;
+    let hidden = entry_metadata_at(&parent.handle, OsStr::new(&journal.hidden_name))
+        .map_err(|source| takeover_io("检查 Host 隐藏替换项", &parent.path, source))?;
+    if hidden.is_some() {
+        if !journal.preserve_mount {
+            return Err(TakeoverLifecycleError::RecoveryBlocked(
+                "Host 生效前出现未知隐藏原目录".to_owned(),
+            ));
+        }
+        validate_hidden_link(&parent, journal)?;
+    }
+
+    let bundles =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.bundles_root())?;
+    if entry_metadata_at(&bundles, OsStr::new(&journal.bundle_id))
+        .map_err(|source| takeover_io("检查接管 Bundle", &paths.bundles_root(), source))?
+        .is_some()
+    {
+        return Err(TakeoverLifecycleError::RecoveryBlocked(
+            "Host 生效前出现已发布 Bundle，当前阶段无法安全清理".to_owned(),
+        ));
+    }
+
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging_path = paths.staging_root().join(&journal.transaction_id);
+    let staging = match open_directory_at(&staging_root, OsStr::new(&journal.transaction_id)) {
+        Ok(staging) => Some(staging),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => return Err(takeover_io("打开接管临时目录", &staging_path, source)),
+    };
+    if let Some(staging) = staging {
+        let entries = read_entry_names_os_from_handle(&staging)?;
+        if entries == [OsString::from("candidate")] {
+            let candidate_path = staging_path.join("candidate");
+            let candidate = open_directory_at(&staging, OsStr::new("candidate"))
+                .map_err(|source| takeover_io("打开接管候选目录", &candidate_path, source))?;
+            let members = open_directory_at(&candidate, OsStr::new("members"))
+                .map_err(|source| takeover_io("打开接管成员目录", &candidate_path, source))?;
+            validate_candidate_container(
+                &candidate,
+                &members,
+                &candidate_path.join("members"),
+                &journal.skill_name,
+                &journal.content_fingerprint,
+            )?;
+            drop(members);
+            drop(candidate);
+            remove_owned_tree_at(&staging, OsStr::new("candidate"), &candidate_path)?;
+        } else if !entries.is_empty() {
+            return Err(TakeoverLifecycleError::RecoveryBlocked(
+                "接管临时目录包含未知内容".to_owned(),
+            ));
+        }
+        drop(staging);
+        unlink_at(&staging_root, OsStr::new(&journal.transaction_id), true)
+            .map_err(|source| takeover_io("清理接管临时目录", &staging_path, source))?;
+        staging_root
+            .sync_all()
+            .map_err(|source| takeover_io("同步 staging", &paths.staging_root(), source))?;
+    }
+
+    if hidden.is_some() {
+        unlink_at(&parent.handle, OsStr::new(&journal.hidden_name), false)
+            .map_err(|source| takeover_io("清理 Host 隐藏替换项", &parent.path, source))?;
+        parent
+            .handle
+            .sync_all()
+            .map_err(|source| takeover_io("同步 Host Skill 父目录", &parent.path, source))?;
+    }
+    lifecycle_lock.recheck(paths)?;
+    Ok(())
+}
+
+fn remove_takeover_journal(
+    paths: &ApplicationPaths,
+    managed_root: &File,
+    journal: &TakeoverJournal,
+) -> Result<(), TakeoverLifecycleError> {
+    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
+    let name = OsString::from(format!("{}.json", journal.transaction_id));
+    match unlink_at(&journals, &name, false) {
+        Ok(()) => journals
+            .sync_all()
+            .map_err(|source| takeover_io("同步 Journal 目录", &paths.journals_root(), source)),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(takeover_io(
+            "删除接管 Journal",
+            &paths.journals_root(),
+            source,
+        )),
+    }
 }
 
 fn cleanup_completed_takeover(
