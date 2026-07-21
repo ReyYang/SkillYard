@@ -48,6 +48,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0012_takeover_journal_contract.sql"),
     ),
     (13, include_str!("../migrations/0013_takeover_v2_plans.sql")),
+    (
+        14,
+        include_str!("../migrations/0014_takeover_v2_transactions.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -230,8 +234,20 @@ pub enum StorageError {
     TakeoverV2PlanNotFound,
     #[error("Takeover v2 Plan 已不再等待确认")]
     TakeoverV2PlanNotPending,
+    #[error("Takeover v2 Plan 已经使用，不能重复确认")]
+    TakeoverV2PlanConsumed,
+    #[error("Takeover v2 Plan 已过期，请重新生成")]
+    TakeoverV2PlanExpired,
     #[error("Takeover v2 Plan 的持久化快照无效或已经被修改")]
     InvalidTakeoverV2Plan,
+    #[error("无法保存 Takeover v2 事务：{0}")]
+    SaveTakeoverV2Transaction(#[source] rusqlite::Error),
+    #[error("无法读取 Takeover v2 事务：{0}")]
+    ReadTakeoverV2Transaction(#[source] rusqlite::Error),
+    #[error("Takeover v2 事务不存在或当前状态不允许该操作：{0}")]
+    TakeoverV2StateConflict(String),
+    #[error("SQLite 中包含未知 Takeover v2 事务阶段：{0}")]
+    InvalidTakeoverV2Phase(String),
 }
 
 pub struct Storage {
@@ -525,6 +541,29 @@ pub(crate) struct StoredTakeoverTransaction {
     pub error_message: Option<String>,
 }
 
+/// v2 事务冗余保存 Plan 的不可变身份，恢复时即使 join 结果被篡改也能独立核对。
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredTakeoverV2Transaction {
+    pub id: String,
+    pub plan_id: String,
+    pub bundle_id: String,
+    pub member_id: String,
+    pub content_id: String,
+    pub selected_origin_id: String,
+    pub bundle_display_name: String,
+    pub plan_seal: String,
+    pub journal_path: String,
+    pub journal_contract_sha256: String,
+    pub phase: String,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// 单条恢复项的 Plan 损坏只隔离自身，生命周期层据此转为 blocked。
+    pub recovery_validation_error: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LifecyclePhase {
     JournalPending,
@@ -561,6 +600,59 @@ enum TakeoverTransactionPhase {
     HostSwapped,
     StateCommitted,
     OriginalDiscarded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TakeoverV2TransactionPhase {
+    JournalPending,
+    Preparing,
+    Prepared,
+    EffectStarted,
+    StateCommitted,
+    CleanupCompleted,
+}
+
+impl TakeoverV2TransactionPhase {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "journal_pending" => Some(Self::JournalPending),
+            "preparing" => Some(Self::Preparing),
+            "prepared" => Some(Self::Prepared),
+            "effect_started" => Some(Self::EffectStarted),
+            "state_committed" => Some(Self::StateCommitted),
+            "cleanup_completed" => Some(Self::CleanupCompleted),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::JournalPending => "journal_pending",
+            Self::Preparing => "preparing",
+            Self::Prepared => "prepared",
+            Self::EffectStarted => "effect_started",
+            Self::StateCommitted => "state_committed",
+            Self::CleanupCompleted => "cleanup_completed",
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::JournalPending => Self::JournalPending,
+            Self::Preparing => Self::JournalPending,
+            Self::Prepared => Self::Preparing,
+            Self::EffectStarted => Self::Prepared,
+            Self::StateCommitted => Self::EffectStarted,
+            Self::CleanupCompleted => Self::StateCommitted,
+        }
+    }
+
+    fn is_before_effect(self) -> bool {
+        matches!(
+            self,
+            Self::JournalPending | Self::Preparing | Self::Prepared
+        )
+    }
 }
 
 impl TakeoverTransactionPhase {
@@ -1377,6 +1469,302 @@ impl Storage {
             .map_err(StorageError::SaveTakeoverV2Plan)
     }
 
+    /// 启动只持久化不可变事务边界；文件系统 Journal 会在下一层按此身份创建。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn begin_takeover_v2_transaction(
+        &mut self,
+        plan_id: &str,
+        transaction_id: &str,
+        journal_path: &str,
+        journal_contract_sha256: &str,
+        now: i64,
+    ) -> Result<TakeoverV2Plan, StorageError> {
+        validate_takeover_v2_transaction_identity(
+            transaction_id,
+            journal_path,
+            journal_contract_sha256,
+        )?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        let mut plan = read_takeover_v2_plan_from(&transaction, &self.data_root, plan_id)?
+            .ok_or(StorageError::TakeoverV2PlanNotFound)?;
+        if plan.status != TakeoverV2PlanStatus::Pending {
+            return Err(StorageError::TakeoverV2PlanConsumed);
+        }
+        if plan.expires_at <= now {
+            return Err(StorageError::TakeoverV2PlanExpired);
+        }
+        validate_current_takeover_v2_snapshots(&transaction, &plan)?;
+
+        let inserted = transaction
+            .execute(
+                "INSERT INTO takeover_v2_transactions (
+                    id, plan_id, bundle_id, member_id, content_id, selected_origin_id,
+                    bundle_display_name, plan_seal, journal_path, journal_contract_sha256,
+                    phase, status, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    'journal_pending', 'in_progress', ?11, ?11
+                 )",
+                params![
+                    transaction_id,
+                    plan.id,
+                    plan.bundle_id,
+                    plan.member_id,
+                    plan.content_id,
+                    plan.selected_origin_id,
+                    plan.bundle_display_name,
+                    plan.seal,
+                    journal_path,
+                    journal_contract_sha256,
+                    now,
+                ],
+            )
+            .map_err(map_takeover_v2_transaction_insert_error)?;
+        ensure_one_takeover_v2_row(inserted, transaction_id)?;
+        let consumed = transaction
+            .execute(
+                "UPDATE takeover_v2_plans SET status = 'consumed'
+                 WHERE id = ?1 AND status = 'pending' AND seal = ?2",
+                params![plan.id, plan.seal],
+            )
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        ensure_one_takeover_v2_row(consumed, transaction_id)?;
+
+        // 任一相同 Observation 都表示同一份本机事实，确认后不能保留另一个可执行预览。
+        transaction
+            .execute(
+                "DELETE FROM takeover_v2_plans
+                 WHERE id <> ?1 AND status = 'pending' AND EXISTS (
+                    SELECT 1
+                    FROM takeover_v2_origins AS other_origin
+                    JOIN takeover_v2_origins AS selected_origin
+                      ON selected_origin.plan_id = ?1
+                     AND selected_origin.observation_id = other_origin.observation_id
+                    WHERE other_origin.plan_id = takeover_v2_plans.id
+                 )",
+                [&plan.id],
+            )
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        transaction
+            .execute(
+                "DELETE FROM takeover_plans
+                 WHERE status = 'pending' AND observation_id IN (
+                    SELECT observation_id FROM takeover_v2_origins WHERE plan_id = ?1
+                 )",
+                [&plan.id],
+            )
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+
+        plan.status = TakeoverV2PlanStatus::Consumed;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        Ok(plan)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn recoverable_takeover_v2_transactions(
+        &self,
+    ) -> Result<Vec<StoredTakeoverV2Transaction>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, plan_id, bundle_id, member_id, content_id, selected_origin_id,
+                        bundle_display_name, plan_seal, journal_path, journal_contract_sha256,
+                        phase, status, error_message, created_at, updated_at
+                 FROM takeover_v2_transactions
+                 WHERE status IN ('in_progress', 'completed', 'aborted', 'blocked')
+                 ORDER BY created_at, id",
+            )
+            .map_err(StorageError::ReadTakeoverV2Transaction)?;
+        let rows = statement
+            .query_map([], stored_takeover_v2_transaction_from_row)
+            .map_err(StorageError::ReadTakeoverV2Transaction)?;
+        let mut transactions = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadTakeoverV2Transaction)?;
+        for stored in &mut transactions {
+            if let Err(error) = validate_stored_takeover_v2_transaction(stored) {
+                // 一条事务记录损坏只能阻塞自身，不能阻止其他独立事务恢复。
+                stored.recovery_validation_error = Some(error.to_string());
+                continue;
+            }
+            if let Err(error) = self.read_takeover_v2_plan_for_transaction(stored) {
+                match error {
+                    // 真正的 SQLite 读取失败是全局故障；其余均是当前 Plan 的可隔离完整性问题。
+                    StorageError::ReadTakeoverV2Plan(error) => {
+                        return Err(StorageError::ReadTakeoverV2Plan(error));
+                    }
+                    StorageError::ReadProject(error) => {
+                        return Err(StorageError::ReadProject(error));
+                    }
+                    isolated => {
+                        stored.recovery_validation_error = Some(isolated.to_string());
+                    }
+                }
+            }
+        }
+        Ok(transactions)
+    }
+
+    /// 恢复器逐项调用；Plan 缺失、篡改或冗余身份不一致都只影响当前事务。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn read_takeover_v2_plan_for_transaction(
+        &self,
+        stored: &StoredTakeoverV2Transaction,
+    ) -> Result<TakeoverV2Plan, StorageError> {
+        validate_stored_takeover_v2_transaction(stored)?;
+        let plan = read_takeover_v2_plan_from(&self.connection, &self.data_root, &stored.plan_id)?
+            .ok_or(StorageError::TakeoverV2PlanNotFound)?;
+        validate_takeover_v2_transaction_matches_plan(stored, &plan)?;
+        Ok(plan)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn update_takeover_v2_transaction_phase(
+        &mut self,
+        transaction_id: &str,
+        phase: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let next = TakeoverV2TransactionPhase::from_str(phase)
+            .ok_or_else(|| StorageError::InvalidTakeoverV2Phase(phase.to_owned()))?;
+        // state_committed 必须和领域状态在同一 SQLite 事务提交；cleanup 也有独立终态 API。
+        if matches!(
+            next,
+            TakeoverV2TransactionPhase::StateCommitted
+                | TakeoverV2TransactionPhase::CleanupCompleted
+        ) {
+            return Err(StorageError::TakeoverV2StateConflict(
+                transaction_id.to_owned(),
+            ));
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE takeover_v2_transactions
+                 SET phase = ?2, updated_at = ?4
+                 WHERE id = ?1 AND status = 'in_progress' AND updated_at <= ?4
+                   AND phase IN (?2, ?3)",
+                params![transaction_id, next.as_str(), next.previous().as_str(), now],
+            )
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        ensure_one_takeover_v2_row(changed, transaction_id)
+    }
+
+    /// 领域状态已经提交后，清理完成与 completed 必须作为同一个终态写入。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn complete_takeover_v2_cleanup(
+        &mut self,
+        transaction_id: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE takeover_v2_transactions
+                 SET phase = 'cleanup_completed', status = 'completed', updated_at = ?2
+                 WHERE id = ?1 AND updated_at <= ?2 AND (
+                    (status = 'in_progress' AND phase = 'state_committed')
+                    OR (status = 'completed' AND phase = 'cleanup_completed')
+                 )",
+                params![transaction_id, now],
+            )
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        ensure_one_takeover_v2_row(changed, transaction_id)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn abort_takeover_v2_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: Option<&str>,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE takeover_v2_transactions
+                 SET status = 'aborted', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status IN ('in_progress', 'aborted')
+                   AND phase IN ('journal_pending', 'preparing', 'prepared', 'effect_started')
+                   AND updated_at <= ?3",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        ensure_one_takeover_v2_row(changed, transaction_id)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn block_takeover_v2_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        if error_message.trim().is_empty() {
+            return Err(StorageError::TakeoverV2StateConflict(
+                transaction_id.to_owned(),
+            ));
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE takeover_v2_transactions
+                 SET status = 'blocked', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1
+                   AND status IN ('in_progress', 'completed', 'aborted', 'blocked')
+                   AND updated_at <= ?3",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        ensure_one_takeover_v2_row(changed, transaction_id)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn forget_terminal_takeover_v2_transaction(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        let stored = transaction
+            .query_row(
+                "SELECT plan_id, status FROM takeover_v2_transactions WHERE id = ?1",
+                [transaction_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        if let Some((plan_id, status)) = stored {
+            if !matches!(status.as_str(), "completed" | "aborted") {
+                return Err(StorageError::TakeoverV2StateConflict(
+                    transaction_id.to_owned(),
+                ));
+            }
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM takeover_v2_transactions
+                     WHERE id = ?1 AND status IN ('completed', 'aborted')",
+                    [transaction_id],
+                )
+                .map_err(StorageError::SaveTakeoverV2Transaction)?;
+            ensure_one_takeover_v2_row(deleted, transaction_id)?;
+            let deleted_plan = transaction
+                .execute("DELETE FROM takeover_v2_plans WHERE id = ?1", [plan_id])
+                .map_err(StorageError::SaveTakeoverV2Transaction)?;
+            ensure_one_takeover_v2_row(deleted_plan, transaction_id)?;
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveTakeoverV2Transaction)
+    }
+
     pub(crate) fn begin_takeover_transaction_with_journal_contract(
         &mut self,
         plan_id: &str,
@@ -1452,6 +1840,16 @@ impl Storage {
                 "DELETE FROM takeover_plans
                  WHERE observation_id = ?1 AND id <> ?2 AND status = 'pending'",
                 params![plan.observation.id, plan.plan.id],
+            )
+            .map_err(StorageError::SaveTakeoverTransaction)?;
+        transaction
+            .execute(
+                "DELETE FROM takeover_v2_plans
+                 WHERE status = 'pending' AND EXISTS (
+                    SELECT 1 FROM takeover_v2_origins
+                    WHERE plan_id = takeover_v2_plans.id AND observation_id = ?1
+                 )",
+                [&plan.observation.id],
             )
             .map_err(StorageError::SaveTakeoverTransaction)?;
         plan.status = "consumed".to_owned();
@@ -3219,6 +3617,14 @@ impl Storage {
                     FROM takeover_transactions AS takeover_tx
                     LEFT JOIN takeover_plans AS plan ON plan.id = takeover_tx.plan_id
                     WHERE takeover_tx.status = 'blocked'
+                    UNION ALL
+                    SELECT takeover_v2_tx.id AS id,
+                           takeover_v2_tx.bundle_display_name AS display_name,
+                           COALESCE(takeover_v2_tx.error_message,
+                                    'Takeover v2 事务状态无法自动判断') AS message,
+                           takeover_v2_tx.created_at AS created_at
+                    FROM takeover_v2_transactions AS takeover_v2_tx
+                    WHERE takeover_v2_tx.status = 'blocked'
                  ) ORDER BY created_at, id",
             )
             .map_err(StorageError::ReadRecoveryIssues)?;
@@ -3317,6 +3723,16 @@ fn ensure_one_takeover_row(changed: usize, transaction_id: &str) -> Result<(), S
         Ok(())
     } else {
         Err(StorageError::TakeoverStateConflict(
+            transaction_id.to_owned(),
+        ))
+    }
+}
+
+fn ensure_one_takeover_v2_row(changed: usize, transaction_id: &str) -> Result<(), StorageError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::TakeoverV2StateConflict(
             transaction_id.to_owned(),
         ))
     }
@@ -4174,6 +4590,147 @@ fn validate_takeover_transaction_matches_plan(
         || transaction.path_id != path.id
     {
         return Err(StorageError::TakeoverStateConflict(transaction.id.clone()));
+    }
+    Ok(())
+}
+
+fn stored_takeover_v2_transaction_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredTakeoverV2Transaction> {
+    Ok(StoredTakeoverV2Transaction {
+        id: row.get(0)?,
+        plan_id: row.get(1)?,
+        bundle_id: row.get(2)?,
+        member_id: row.get(3)?,
+        content_id: row.get(4)?,
+        selected_origin_id: row.get(5)?,
+        bundle_display_name: row.get(6)?,
+        plan_seal: row.get(7)?,
+        journal_path: row.get(8)?,
+        journal_contract_sha256: row.get(9)?,
+        phase: row.get(10)?,
+        status: row.get(11)?,
+        error_message: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        recovery_validation_error: None,
+    })
+}
+
+fn validate_takeover_v2_transaction_identity(
+    transaction_id: &str,
+    journal_path: &str,
+    journal_contract_sha256: &str,
+) -> Result<(), StorageError> {
+    let expected_journal = format!("journals/takeover-v2-{transaction_id}.json");
+    if uuid::Uuid::parse_str(transaction_id).is_err()
+        || journal_path != expected_journal
+        || !is_normalized_relative_path(journal_path)
+        || !is_lower_hex_sha256(journal_contract_sha256)
+    {
+        return Err(StorageError::TakeoverV2StateConflict(
+            transaction_id.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stored_takeover_v2_transaction(
+    transaction: &StoredTakeoverV2Transaction,
+) -> Result<(), StorageError> {
+    validate_takeover_v2_transaction_identity(
+        &transaction.id,
+        &transaction.journal_path,
+        &transaction.journal_contract_sha256,
+    )?;
+    let phase = TakeoverV2TransactionPhase::from_str(&transaction.phase)
+        .ok_or_else(|| StorageError::InvalidTakeoverV2Phase(transaction.phase.clone()))?;
+    let valid_status_phase = match transaction.status.as_str() {
+        "in_progress" => phase != TakeoverV2TransactionPhase::CleanupCompleted,
+        "completed" => phase == TakeoverV2TransactionPhase::CleanupCompleted,
+        "aborted" => phase.is_before_effect() || phase == TakeoverV2TransactionPhase::EffectStarted,
+        "blocked" => true,
+        _ => false,
+    };
+    let valid_error = match transaction.status.as_str() {
+        "blocked" => transaction
+            .error_message
+            .as_deref()
+            .is_some_and(|message| !message.trim().is_empty()),
+        "in_progress" | "completed" => transaction.error_message.is_none(),
+        "aborted" => true,
+        _ => false,
+    };
+    if uuid::Uuid::parse_str(&transaction.plan_id).is_err()
+        || uuid::Uuid::parse_str(&transaction.bundle_id).is_err()
+        || uuid::Uuid::parse_str(&transaction.member_id).is_err()
+        || uuid::Uuid::parse_str(&transaction.content_id).is_err()
+        || uuid::Uuid::parse_str(&transaction.selected_origin_id).is_err()
+        || transaction.bundle_display_name.is_empty()
+        || !is_lower_hex_sha256(&transaction.plan_seal)
+        || transaction.updated_at < transaction.created_at
+        || !valid_status_phase
+        || !valid_error
+    {
+        return Err(StorageError::TakeoverV2StateConflict(
+            transaction.id.clone(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_takeover_v2_transaction_matches_plan(
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+) -> Result<(), StorageError> {
+    if plan.status != TakeoverV2PlanStatus::Consumed
+        || transaction.plan_id != plan.id
+        || transaction.bundle_id != plan.bundle_id
+        || transaction.member_id != plan.member_id
+        || transaction.content_id != plan.content_id
+        || transaction.selected_origin_id != plan.selected_origin_id
+        || transaction.bundle_display_name != plan.bundle_display_name
+        || transaction.plan_seal != plan.seal
+    {
+        return Err(StorageError::TakeoverV2StateConflict(
+            transaction.id.clone(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_current_takeover_v2_snapshots(
+    connection: &Connection,
+    plan: &TakeoverV2Plan,
+) -> Result<(), StorageError> {
+    let current = read_inventory_entries_from(connection)?
+        .into_iter()
+        .map(|observation| (observation.id.clone(), observation))
+        .collect::<BTreeMap<_, _>>();
+    for origin in &plan.origins {
+        let observation = current.get(&origin.observation_id).ok_or_else(|| {
+            StorageError::InventoryObservationNotFound(origin.observation_id.clone())
+        })?;
+        if observation.skill_name != origin.observation_skill_name
+            || observation.declared_name != origin.observation_declared_name
+            || observation.skill_root != origin.original_path
+            || observation.skill_file != origin.observation_skill_file
+            || observation.location_kind != origin.observation_location_kind
+            || observation.metadata_status != origin.observation_metadata_status
+            || observation.observed_by != origin.observation_observed_by
+            || observation.observed_fingerprint != origin.observation_fingerprint
+            || observation.root_key != origin.root_key
+            || observation.project_id != origin.project_id
+            || observation.stale != origin.observation_stale
+            || observation.management_kind != origin.observation_management_kind
+            || observation.management_evidence != origin.observation_management_evidence
+            || observation.stale
+            || observation.metadata_status != SkillMetadataStatus::Valid
+            || observation.management_kind != ManagementKind::TakeoverCandidate
+            || observation.management_evidence.is_some()
+        {
+            return Err(StorageError::InvalidTakeoverV2Plan);
+        }
     }
     Ok(())
 }
@@ -6895,6 +7452,17 @@ fn map_takeover_transaction_insert_error(error: rusqlite::Error) -> StorageError
     StorageError::SaveTakeoverTransaction(error)
 }
 
+fn map_takeover_v2_transaction_insert_error(error: rusqlite::Error) -> StorageError {
+    if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error
+        && ((code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            && message.contains("takeover_v2_transaction_single_active"))
+            || message.contains("active_lifecycle_transaction"))
+    {
+        return StorageError::ActiveLifecycleTransaction;
+    }
+    StorageError::SaveTakeoverV2Transaction(error)
+}
+
 fn ensure_managed_state_matches(
     transaction: &Transaction<'_>,
     plan: &StoredInstallPlan,
@@ -7571,6 +8139,58 @@ mod tests {
         plan
     }
 
+    fn takeover_v2_inventory_entries(plan: &TakeoverV2Plan) -> Vec<InventoryObservation> {
+        plan.origins
+            .iter()
+            .map(|origin| InventoryObservation {
+                id: origin.observation_id.clone(),
+                skill_name: origin.observation_skill_name.clone(),
+                declared_name: origin.observation_declared_name.clone(),
+                skill_root: origin.original_path.clone(),
+                skill_file: origin.observation_skill_file.clone(),
+                location_kind: origin.observation_location_kind,
+                metadata_status: origin.observation_metadata_status,
+                observed_by: origin.observation_observed_by.clone(),
+                observed_fingerprint: origin.observation_fingerprint.clone(),
+                root_key: origin.root_key,
+                project_id: origin.project_id.clone(),
+                stale: origin.observation_stale,
+                management_kind: origin.observation_management_kind,
+                management_evidence: origin.observation_management_evidence.clone(),
+            })
+            .collect()
+    }
+
+    fn save_takeover_v2_inventory(storage: &mut Storage, plan: &TakeoverV2Plan) {
+        let entries = takeover_v2_inventory_entries(plan);
+        storage
+            .save_initial_scan(250, &entries, &[])
+            .expect("应保存 v2 当前 Inventory 快照");
+    }
+
+    fn align_v2_origin_with_observation(
+        plan: &mut TakeoverV2Plan,
+        observation: &InventoryObservation,
+    ) {
+        let origin = &mut plan.origins[0];
+        origin.observation_id = observation.id.clone();
+        origin.observation_skill_name = observation.skill_name.clone();
+        origin.observation_declared_name = observation.declared_name.clone();
+        origin.observation_skill_file = observation.skill_file.clone();
+        origin.observation_location_kind = observation.location_kind;
+        origin.observation_metadata_status = observation.metadata_status;
+        origin.observation_observed_by = observation.observed_by.clone();
+        origin.observation_fingerprint = observation.observed_fingerprint.clone();
+        origin.root_key = observation.root_key;
+        origin.observation_stale = observation.stale;
+        origin.observation_management_kind = observation.management_kind;
+        origin.observation_management_evidence = observation.management_evidence.clone();
+        origin.original_path = observation.skill_root.clone();
+        plan.targets[0].target_path = observation.skill_root.clone();
+        canonicalize_takeover_v2_plan(plan);
+        plan.seal = takeover_v2_plan_seal(plan);
+    }
+
     fn save_alternate_takeover_plan(
         storage: &mut Storage,
         original: &StoredTakeoverPlan,
@@ -7832,6 +8452,101 @@ mod tests {
         plan
     }
 
+    fn start_test_old_writer(
+        storage: &mut Storage,
+        root: &Path,
+        writer: &str,
+        suffix: &str,
+    ) -> String {
+        match writer {
+            "install" => {
+                let plan_id = format!("reactivate-install-plan-{suffix}");
+                let transaction_id = format!("reactivate-install-{suffix}");
+                save_test_plan(
+                    storage,
+                    &plan_id,
+                    &format!("reactivate-install-bundle-{suffix}"),
+                    &format!("reactivate-install-member-{suffix}"),
+                );
+                storage
+                    .begin_install_transaction(
+                        &plan_id,
+                        &transaction_id,
+                        &format!("journals/{transaction_id}.json"),
+                        300,
+                    )
+                    .expect("应启动 Install writer");
+                transaction_id
+            }
+            "mount" => {
+                let member = save_test_managed_member(storage, &format!("reactivate-{suffix}"));
+                let plan_id = format!("reactivate-mount-plan-{suffix}");
+                let transaction_id = format!("reactivate-mount-{suffix}");
+                save_test_mount_plan(
+                    storage,
+                    &member,
+                    MountOperation::Create,
+                    &format!("reactivate-mount-id-{suffix}"),
+                    &plan_id,
+                    MountScope::Global,
+                    None,
+                    &root.join("mount-host").join(&member.skill_name),
+                );
+                storage
+                    .begin_mount_transaction(
+                        &plan_id,
+                        &transaction_id,
+                        &format!("journals/{transaction_id}.json"),
+                        300,
+                    )
+                    .expect("应启动 Mount writer");
+                transaction_id
+            }
+            "batch" => {
+                let member = save_test_managed_member(storage, &format!("reactivate-{suffix}"));
+                let plan_id = format!("reactivate-batch-plan-{suffix}");
+                let item_id = format!("reactivate-batch-item-{suffix}");
+                let transaction_id = format!("reactivate-batch-{suffix}");
+                save_test_batch_plan(
+                    storage,
+                    &member,
+                    &plan_id,
+                    &item_id,
+                    &root.join("batch-host").join(&member.skill_name),
+                );
+                storage
+                    .begin_batch_mount_transaction(
+                        &plan_id,
+                        &[item_id],
+                        &transaction_id,
+                        &format!("journals/{transaction_id}.json"),
+                        300,
+                    )
+                    .expect("应启动 Batch writer");
+                transaction_id
+            }
+            "takeover-v1" => {
+                let plan = test_takeover_v1_plan(storage, suffix);
+                storage
+                    .save_initial_scan(250, std::slice::from_ref(&plan.observation), &[])
+                    .expect("应保存 v1 Inventory");
+                storage.save_takeover_plan(&plan).expect("应保存 v1 Plan");
+                let transaction_id = uuid::Uuid::new_v4().to_string();
+                storage
+                    .begin_takeover_transaction(
+                        &plan.plan.id,
+                        &[],
+                        &transaction_id,
+                        &format!("journals/{transaction_id}.json"),
+                        300,
+                    )
+                    .expect("应启动 v1 Takeover writer");
+                transaction_id
+            }
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
     fn mount_migration_creates_normalized_tables_and_constraints() {
         let sandbox = tempdir().expect("应创建隔离测试目录");
@@ -7844,7 +8559,10 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            versions,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        );
         for table in [
             "projects",
             "mount_plans",
@@ -7861,6 +8579,7 @@ mod tests {
             "takeover_v2_plans",
             "takeover_v2_origins",
             "takeover_v2_targets",
+            "takeover_v2_transactions",
         ] {
             let exists = storage
                 .connection
@@ -7915,6 +8634,896 @@ mod tests {
         assert!(saved_shared.origins[0].app_id.is_none());
         assert!(saved_shared.origins[0].scope.is_none());
         assert!(saved_shared.targets.is_empty());
+    }
+
+    #[test]
+    fn takeover_v2_begin_atomically_consumes_plan() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &plan);
+        let pending = storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存 v2 Plan");
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        let consumed = storage
+            .begin_takeover_v2_transaction(
+                &pending.id,
+                &transaction_id,
+                &format!("journals/takeover-v2-{transaction_id}.json"),
+                &"b".repeat(64),
+                300,
+            )
+            .expect("应原子启动 v2 接管事务");
+
+        assert_eq!(consumed.status, TakeoverV2PlanStatus::Consumed);
+        assert_eq!(
+            storage
+                .read_takeover_v2_plan(&pending.id)
+                .expect("消费后的 Plan 必须留给恢复")
+                .status,
+            TakeoverV2PlanStatus::Consumed
+        );
+        let recoverable = storage
+            .recoverable_takeover_v2_transactions()
+            .expect("事务必须可恢复");
+        assert_eq!(recoverable.len(), 1);
+        assert_eq!(recoverable[0].id, transaction_id);
+        assert_eq!(recoverable[0].phase, "journal_pending");
+        assert_eq!(recoverable[0].status, "in_progress");
+    }
+
+    #[test]
+    fn takeover_v2_begin_rejects_invalid_inputs_and_rolls_back_insert_failure() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let missing_id = uuid::Uuid::new_v4().to_string();
+        let missing_transaction = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            storage.begin_takeover_v2_transaction(
+                &missing_id,
+                &missing_transaction,
+                &format!("journals/takeover-v2-{missing_transaction}.json"),
+                &"a".repeat(64),
+                300,
+            ),
+            Err(StorageError::TakeoverV2PlanNotFound)
+        ));
+
+        let plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &plan);
+        let pending = storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存待确认 Plan");
+        for (transaction_id, journal_path, seal) in [
+            (
+                "not-a-uuid".to_owned(),
+                "journals/takeover-v2-not-a-uuid.json".to_owned(),
+                "a".repeat(64),
+            ),
+            (
+                uuid::Uuid::new_v4().to_string(),
+                "journals/wrong.json".to_owned(),
+                "a".repeat(64),
+            ),
+            (
+                uuid::Uuid::new_v4().to_string(),
+                "journals/ignored.json".to_owned(),
+                "A".repeat(64),
+            ),
+        ] {
+            let journal_path = if seal.starts_with('A') {
+                format!("journals/takeover-v2-{transaction_id}.json")
+            } else {
+                journal_path
+            };
+            assert!(matches!(
+                storage.begin_takeover_v2_transaction(
+                    &pending.id,
+                    &transaction_id,
+                    &journal_path,
+                    &seal,
+                    300,
+                ),
+                Err(StorageError::TakeoverV2StateConflict(_))
+            ));
+        }
+        assert_eq!(
+            storage
+                .read_takeover_v2_plan(&pending.id)
+                .expect("非法参数不能消费 Plan")
+                .status,
+            TakeoverV2PlanStatus::Pending
+        );
+
+        let first_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &pending.id,
+                &first_id,
+                &format!("journals/takeover-v2-{first_id}.json"),
+                &"a".repeat(64),
+                300,
+            )
+            .expect("应启动第一条事务");
+        storage
+            .abort_takeover_v2_transaction(&first_id, None, 301)
+            .expect("应释放单写者");
+        let duplicate = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &duplicate);
+        storage
+            .save_takeover_v2_plan(&duplicate)
+            .expect("应保存第二个 Plan");
+        assert!(matches!(
+            storage.begin_takeover_v2_transaction(
+                &duplicate.id,
+                &first_id,
+                &format!("journals/takeover-v2-{first_id}.json"),
+                &"b".repeat(64),
+                400,
+            ),
+            Err(StorageError::SaveTakeoverV2Transaction(_))
+        ));
+        assert_eq!(
+            storage
+                .read_takeover_v2_plan(&duplicate.id)
+                .expect("事务插入失败必须回滚 Plan 消费")
+                .status,
+            TakeoverV2PlanStatus::Pending
+        );
+
+        let expired = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &expired);
+        storage
+            .save_takeover_v2_plan(&expired)
+            .expect("应保存过期测试 Plan");
+        let expired_transaction = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            storage.begin_takeover_v2_transaction(
+                &expired.id,
+                &expired_transaction,
+                &format!("journals/takeover-v2-{expired_transaction}.json"),
+                &"c".repeat(64),
+                expired.expires_at,
+            ),
+            Err(StorageError::TakeoverV2PlanExpired)
+        ));
+
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_v2_plans SET bundle_display_name = 'tampered' WHERE id = ?1",
+                [&expired.id],
+            )
+            .expect("应模拟 Plan 篡改");
+        let tampered_transaction = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            storage.begin_takeover_v2_transaction(
+                &expired.id,
+                &tampered_transaction,
+                &format!("journals/takeover-v2-{tampered_transaction}.json"),
+                &"d".repeat(64),
+                300,
+            ),
+            Err(StorageError::InvalidTakeoverV2Plan)
+        ));
+    }
+
+    #[test]
+    fn takeover_v1_and_v2_confirmation_invalidate_only_overlapping_pending_plans() {
+        for confirmer in ["v1", "v2"] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let mut storage = open_test_storage(&sandbox.path().join(confirmer));
+            let v1 = test_takeover_v1_plan(&storage, confirmer);
+            let mut confirmed_v2 = test_takeover_v2_plan(&storage);
+            let mut pending_v2 = test_takeover_v2_plan(&storage);
+            let mut consumed_v2 = test_takeover_v2_plan(&storage);
+            for plan in [&mut confirmed_v2, &mut pending_v2, &mut consumed_v2] {
+                align_v2_origin_with_observation(plan, &v1.observation);
+            }
+            storage
+                .save_initial_scan(250, std::slice::from_ref(&v1.observation), &[])
+                .expect("应保存共享 Observation");
+            storage.save_takeover_plan(&v1).expect("应保存 v1 Plan");
+            storage
+                .save_takeover_v2_plan(&confirmed_v2)
+                .expect("应保存待确认 v2 Plan");
+            storage
+                .save_takeover_v2_plan(&pending_v2)
+                .expect("应保存相交 pending v2 Plan");
+            storage
+                .save_takeover_v2_plan(&consumed_v2)
+                .expect("应保存相交 consumed v2 Plan");
+            storage
+                .connection
+                .execute(
+                    "UPDATE takeover_v2_plans SET status = 'consumed' WHERE id = ?1",
+                    [&consumed_v2.id],
+                )
+                .expect("应模拟已消费 v2 Plan");
+
+            if confirmer == "v2" {
+                let transaction_id = uuid::Uuid::new_v4().to_string();
+                storage
+                    .begin_takeover_v2_transaction(
+                        &confirmed_v2.id,
+                        &transaction_id,
+                        &format!("journals/takeover-v2-{transaction_id}.json"),
+                        &"a".repeat(64),
+                        300,
+                    )
+                    .expect("v2 确认应成功");
+                assert!(matches!(
+                    storage.read_takeover_plan(&v1.plan.id),
+                    Err(StorageError::TakeoverPlanNotFound)
+                ));
+            } else {
+                let transaction_id = uuid::Uuid::new_v4().to_string();
+                storage
+                    .begin_takeover_transaction(
+                        &v1.plan.id,
+                        &[],
+                        &transaction_id,
+                        &format!("journals/{transaction_id}.json"),
+                        300,
+                    )
+                    .expect("v1 确认应成功");
+                assert!(matches!(
+                    storage.read_takeover_v2_plan(&confirmed_v2.id),
+                    Err(StorageError::TakeoverV2PlanNotFound)
+                ));
+            }
+            assert!(matches!(
+                storage.read_takeover_v2_plan(&pending_v2.id),
+                Err(StorageError::TakeoverV2PlanNotFound)
+            ));
+            assert_eq!(
+                storage
+                    .read_takeover_v2_plan(&consumed_v2.id)
+                    .expect("consumed Plan 不能被另一确认删除")
+                    .status,
+                TakeoverV2PlanStatus::Consumed
+            );
+        }
+    }
+
+    #[test]
+    fn takeover_v2_begin_revalidates_the_current_inventory_snapshot() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &plan);
+        storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存待确认 Plan");
+        storage
+            .connection
+            .execute(
+                "UPDATE inventory_observations SET observed_fingerprint = ?1 WHERE id = ?2",
+                params!["f".repeat(64), plan.origins[0].observation_id],
+            )
+            .expect("应模拟确认前 Inventory 变化");
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+
+        assert!(matches!(
+            storage.begin_takeover_v2_transaction(
+                &plan.id,
+                &transaction_id,
+                &format!("journals/takeover-v2-{transaction_id}.json"),
+                &"a".repeat(64),
+                300,
+            ),
+            Err(StorageError::InvalidTakeoverV2Plan)
+        ));
+        assert_eq!(
+            storage
+                .read_takeover_v2_plan(&plan.id)
+                .expect("确认失败后 Plan 必须仍可重新检查")
+                .status,
+            TakeoverV2PlanStatus::Pending
+        );
+    }
+
+    #[test]
+    fn takeover_v2_state_machine_is_adjacent_idempotent_and_strict() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &plan);
+        storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存状态机 Plan");
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &plan.id,
+                &transaction_id,
+                &format!("journals/takeover-v2-{transaction_id}.json"),
+                &"a".repeat(64),
+                300,
+            )
+            .expect("应启动状态机事务");
+        assert!(matches!(
+            storage.update_takeover_v2_transaction_phase(&transaction_id, "prepared", 301),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+        for (phase, now) in [
+            ("journal_pending", 301),
+            ("preparing", 302),
+            ("preparing", 303),
+            ("prepared", 304),
+            ("effect_started", 305),
+        ] {
+            storage
+                .update_takeover_v2_transaction_phase(&transaction_id, phase, now)
+                .expect("相邻或幂等阶段必须成功");
+        }
+        assert!(matches!(
+            storage.update_takeover_v2_transaction_phase(&transaction_id, "state_committed", 306,),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+        storage
+            .abort_takeover_v2_transaction(&transaction_id, Some("已完整回退"), 306)
+            .expect("effect_started 完整回退后允许标记 aborted");
+        storage
+            .abort_takeover_v2_transaction(&transaction_id, Some("已完整回退"), 307)
+            .expect("重复 abort 必须幂等");
+        storage
+            .forget_terminal_takeover_v2_transaction(&transaction_id)
+            .expect("aborted 事务允许清理");
+
+        let blocked_plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &blocked_plan);
+        storage
+            .save_takeover_v2_plan(&blocked_plan)
+            .expect("应保存 blocked Plan");
+        let blocked_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &blocked_plan.id,
+                &blocked_id,
+                &format!("journals/takeover-v2-{blocked_id}.json"),
+                &"b".repeat(64),
+                400,
+            )
+            .expect("应启动 blocked 测试事务");
+        assert!(matches!(
+            storage.block_takeover_v2_transaction(&blocked_id, "   ", 401),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+        storage
+            .block_takeover_v2_transaction(&blocked_id, "需要人工恢复", 401)
+            .expect("应阻塞单条事务");
+        assert!(matches!(
+            storage.forget_terminal_takeover_v2_transaction(&blocked_id),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+        let issues = storage.read_recovery_issues().expect("应读取恢复问题");
+        assert!(issues.iter().any(|issue| {
+            issue.id == blocked_id
+                && issue.bundle_display_name == blocked_plan.bundle_display_name
+                && issue.message == "需要人工恢复"
+        }));
+
+        let completed_plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &completed_plan);
+        storage
+            .save_takeover_v2_plan(&completed_plan)
+            .expect("应保存 completed Plan");
+        let completed_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &completed_plan.id,
+                &completed_id,
+                &format!("journals/takeover-v2-{completed_id}.json"),
+                &"c".repeat(64),
+                500,
+            )
+            .expect("应启动 completed 测试事务");
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_v2_transactions
+                 SET phase = 'state_committed', updated_at = 501 WHERE id = ?1",
+                [&completed_id],
+            )
+            .expect("模拟后续领域事务的原子提交点");
+        storage
+            .complete_takeover_v2_cleanup(&completed_id, 502)
+            .expect("应原子记录清理终态");
+        storage
+            .complete_takeover_v2_cleanup(&completed_id, 503)
+            .expect("重复清理终态必须幂等");
+        storage
+            .forget_terminal_takeover_v2_transaction(&completed_id)
+            .expect("completed 事务允许清理");
+    }
+
+    #[test]
+    fn takeover_v2_recovery_isolates_missing_or_tampered_plans_per_transaction() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let missing_plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &missing_plan);
+        storage
+            .save_takeover_v2_plan(&missing_plan)
+            .expect("应保存将缺失的 Plan");
+        let missing_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &missing_plan.id,
+                &missing_id,
+                &format!("journals/takeover-v2-{missing_id}.json"),
+                &"a".repeat(64),
+                300,
+            )
+            .expect("应启动第一条恢复事务");
+        storage
+            .abort_takeover_v2_transaction(&missing_id, None, 301)
+            .expect("应释放第一条 writer");
+
+        let tampered_plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &tampered_plan);
+        storage
+            .save_takeover_v2_plan(&tampered_plan)
+            .expect("应保存将篡改的 Plan");
+        let blocked_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &tampered_plan.id,
+                &blocked_id,
+                &format!("journals/takeover-v2-{blocked_id}.json"),
+                &"b".repeat(64),
+                400,
+            )
+            .expect("应启动第二条恢复事务");
+        storage
+            .block_takeover_v2_transaction(&blocked_id, "需要人工恢复", 401)
+            .expect("应阻塞第二条事务");
+
+        storage
+            .connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("应关闭测试连接外键");
+        storage
+            .connection
+            .execute(
+                "DELETE FROM takeover_v2_plans WHERE id = ?1",
+                [&missing_plan.id],
+            )
+            .expect("应模拟 Plan 缺失");
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_v2_plans SET bundle_display_name = 'poisoned' WHERE id = ?1",
+                [&tampered_plan.id],
+            )
+            .expect("应模拟 Plan 篡改");
+        storage
+            .connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("应恢复测试连接外键");
+
+        let recoverable = storage
+            .recoverable_takeover_v2_transactions()
+            .expect("单条 Plan 异常不能拖垮恢复列表");
+        assert_eq!(recoverable.len(), 2);
+        assert!(recoverable.iter().all(|item| {
+            item.recovery_validation_error
+                .as_deref()
+                .is_some_and(|message| !message.is_empty())
+        }));
+        let missing = recoverable
+            .iter()
+            .find(|item| item.id == missing_id)
+            .expect("缺失 Plan 的事务仍必须返回");
+        assert!(matches!(
+            storage.read_takeover_v2_plan_for_transaction(missing),
+            Err(StorageError::TakeoverV2PlanNotFound)
+        ));
+        let issues = storage.read_recovery_issues().expect("应读取 blocked 提示");
+        let issue = issues
+            .iter()
+            .find(|issue| issue.id == blocked_id)
+            .expect("blocked v2 必须展示");
+        assert_eq!(issue.bundle_display_name, tampered_plan.bundle_display_name);
+        assert_eq!(issue.message, "需要人工恢复");
+    }
+
+    #[test]
+    fn takeover_v2_recovery_isolates_a_tampered_transaction_row() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let damaged_plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &damaged_plan);
+        storage
+            .save_takeover_v2_plan(&damaged_plan)
+            .expect("应保存损坏事务的 Plan");
+        let damaged_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &damaged_plan.id,
+                &damaged_id,
+                &format!("journals/takeover-v2-{damaged_id}.json"),
+                &"a".repeat(64),
+                300,
+            )
+            .expect("应启动待损坏事务");
+        storage
+            .abort_takeover_v2_transaction(&damaged_id, None, 301)
+            .expect("应释放单写者");
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_v2_transactions SET journal_path = 'journals/tampered.json'
+                 WHERE id = ?1",
+                [&damaged_id],
+            )
+            .expect("应模拟事务行被篡改");
+
+        let healthy_plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &healthy_plan);
+        storage
+            .save_takeover_v2_plan(&healthy_plan)
+            .expect("应保存健康事务的 Plan");
+        let healthy_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &healthy_plan.id,
+                &healthy_id,
+                &format!("journals/takeover-v2-{healthy_id}.json"),
+                &"b".repeat(64),
+                400,
+            )
+            .expect("应启动健康事务");
+
+        let recoverable = storage
+            .recoverable_takeover_v2_transactions()
+            .expect("损坏事务不能拖垮健康事务");
+        assert_eq!(recoverable.len(), 2);
+        assert!(
+            recoverable
+                .iter()
+                .find(|item| item.id == damaged_id)
+                .expect("损坏事务仍应可定位")
+                .recovery_validation_error
+                .is_some()
+        );
+        assert!(
+            recoverable
+                .iter()
+                .find(|item| item.id == healthy_id)
+                .expect("健康事务必须继续返回")
+                .recovery_validation_error
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn all_five_high_assurance_transactions_share_one_sqlite_writer() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(&sandbox.path().join("v2-first"));
+        save_test_plan(
+            &mut storage,
+            "v2-writer-install-plan",
+            "v2-writer-install-bundle",
+            "v2-writer-install-member",
+        );
+        let member = save_test_managed_member(&mut storage, "v2-writer");
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Create,
+            "v2-writer-mount",
+            "v2-writer-mount-plan",
+            MountScope::Global,
+            None,
+            &sandbox
+                .path()
+                .join("v2-mount-target")
+                .join(&member.skill_name),
+        );
+        save_test_batch_plan(
+            &mut storage,
+            &member,
+            "v2-writer-batch-plan",
+            "v2-writer-batch-item",
+            &sandbox
+                .path()
+                .join("v2-batch-target")
+                .join(&member.skill_name),
+        );
+        let v1 = test_takeover_v1_plan(&storage, "v2-writer-v1");
+        let v2 = test_takeover_v2_plan(&storage);
+        let second_v2 = test_takeover_v2_plan(&storage);
+        let mut inventory = vec![v1.observation.clone()];
+        inventory.extend(takeover_v2_inventory_entries(&v2));
+        inventory.extend(takeover_v2_inventory_entries(&second_v2));
+        storage
+            .save_initial_scan(250, &inventory, &[])
+            .expect("应保存五类 writer 的 Inventory");
+        storage.save_takeover_plan(&v1).expect("应保存 v1 Plan");
+        storage
+            .save_takeover_v2_plan(&v2)
+            .expect("应保存第一条 v2 Plan");
+        storage
+            .save_takeover_v2_plan(&second_v2)
+            .expect("应保存第二条 v2 Plan");
+        let active_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &v2.id,
+                &active_id,
+                &format!("journals/takeover-v2-{active_id}.json"),
+                &"a".repeat(64),
+                300,
+            )
+            .expect("应先启动 v2 writer");
+        assert!(matches!(
+            storage.begin_install_transaction(
+                "v2-writer-install-plan",
+                "blocked-install",
+                "journals/blocked-install.json",
+                400,
+            ),
+            Err(StorageError::ActiveLifecycleTransaction)
+        ));
+        assert!(matches!(
+            storage.begin_mount_transaction(
+                "v2-writer-mount-plan",
+                "blocked-mount",
+                "journals/blocked-mount.json",
+                400,
+            ),
+            Err(StorageError::ActiveLifecycleTransaction)
+        ));
+        assert!(matches!(
+            storage.begin_batch_mount_transaction(
+                "v2-writer-batch-plan",
+                &["v2-writer-batch-item".to_owned()],
+                "blocked-batch",
+                "journals/blocked-batch.json",
+                400,
+            ),
+            Err(StorageError::ActiveLifecycleTransaction)
+        ));
+        let v1_id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            storage.begin_takeover_transaction(
+                &v1.plan.id,
+                &[],
+                &v1_id,
+                &format!("journals/{v1_id}.json"),
+                400,
+            ),
+            Err(StorageError::ActiveLifecycleTransaction)
+        ));
+        let second_v2_id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            storage.begin_takeover_v2_transaction(
+                &second_v2.id,
+                &second_v2_id,
+                &format!("journals/takeover-v2-{second_v2_id}.json"),
+                &"b".repeat(64),
+                400,
+            ),
+            Err(StorageError::ActiveLifecycleTransaction)
+        ));
+
+        for writer in ["install", "mount", "batch", "takeover-v1"] {
+            let root = sandbox.path().join(format!("{writer}-first-v2"));
+            let mut storage = open_test_storage(&root);
+            let v2 = test_takeover_v2_plan(&storage);
+            match writer {
+                "install" => {
+                    save_test_plan(
+                        &mut storage,
+                        "old-active-install-plan",
+                        "old-active-install-bundle",
+                        "old-active-install-member",
+                    );
+                    save_takeover_v2_inventory(&mut storage, &v2);
+                    storage.save_takeover_v2_plan(&v2).expect("应保存 v2 Plan");
+                    storage
+                        .begin_install_transaction(
+                            "old-active-install-plan",
+                            "old-active-install",
+                            "journals/old-active-install.json",
+                            300,
+                        )
+                        .expect("应启动 Install writer");
+                }
+                "mount" => {
+                    let member = save_test_managed_member(&mut storage, "old-active-mount");
+                    save_test_mount_plan(
+                        &mut storage,
+                        &member,
+                        MountOperation::Create,
+                        "old-active-mount",
+                        "old-active-mount-plan",
+                        MountScope::Global,
+                        None,
+                        &root.join("host").join(&member.skill_name),
+                    );
+                    save_takeover_v2_inventory(&mut storage, &v2);
+                    storage.save_takeover_v2_plan(&v2).expect("应保存 v2 Plan");
+                    storage
+                        .begin_mount_transaction(
+                            "old-active-mount-plan",
+                            "old-active-mount-transaction",
+                            "journals/old-active-mount-transaction.json",
+                            300,
+                        )
+                        .expect("应启动 Mount writer");
+                }
+                "batch" => {
+                    let member = save_test_managed_member(&mut storage, "old-active-batch");
+                    save_test_batch_plan(
+                        &mut storage,
+                        &member,
+                        "old-active-batch-plan",
+                        "old-active-batch-item",
+                        &root.join("host").join(&member.skill_name),
+                    );
+                    save_takeover_v2_inventory(&mut storage, &v2);
+                    storage.save_takeover_v2_plan(&v2).expect("应保存 v2 Plan");
+                    storage
+                        .begin_batch_mount_transaction(
+                            "old-active-batch-plan",
+                            &["old-active-batch-item".to_owned()],
+                            "old-active-batch-transaction",
+                            "journals/old-active-batch-transaction.json",
+                            300,
+                        )
+                        .expect("应启动 Batch writer");
+                }
+                "takeover-v1" => {
+                    let v1 = test_takeover_v1_plan(&storage, "old-active-v1");
+                    let mut inventory = vec![v1.observation.clone()];
+                    inventory.extend(takeover_v2_inventory_entries(&v2));
+                    storage
+                        .save_initial_scan(250, &inventory, &[])
+                        .expect("应保存 v1/v2 Inventory");
+                    storage.save_takeover_plan(&v1).expect("应保存 v1 Plan");
+                    storage.save_takeover_v2_plan(&v2).expect("应保存 v2 Plan");
+                    let v1_id = uuid::Uuid::new_v4().to_string();
+                    storage
+                        .begin_takeover_transaction(
+                            &v1.plan.id,
+                            &[],
+                            &v1_id,
+                            &format!("journals/{v1_id}.json"),
+                            300,
+                        )
+                        .expect("应启动 v1 Takeover writer");
+                }
+                _ => unreachable!(),
+            }
+            let transaction_id = uuid::Uuid::new_v4().to_string();
+            assert!(matches!(
+                storage.begin_takeover_v2_transaction(
+                    &v2.id,
+                    &transaction_id,
+                    &format!("journals/takeover-v2-{transaction_id}.json"),
+                    &"c".repeat(64),
+                    400,
+                ),
+                Err(StorageError::ActiveLifecycleTransaction)
+            ));
+        }
+    }
+
+    #[test]
+    fn all_five_writer_reactivation_guards_are_bidirectional() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let root = sandbox.path().join("v2-active");
+        let mut storage = open_test_storage(&root);
+        let mut terminal = Vec::new();
+        for writer in ["install", "mount", "batch", "takeover-v1"] {
+            let id = start_test_old_writer(&mut storage, &root, writer, writer);
+            match writer {
+                "install" => storage
+                    .abort_lifecycle_transaction(&id, None, 301)
+                    .expect("应终止 Install 测试事务"),
+                "mount" => storage
+                    .abort_mount_transaction(&id, None, 301)
+                    .expect("应终止 Mount 测试事务"),
+                "batch" => storage
+                    .abort_batch_mount_transaction(&id, None, 301)
+                    .expect("应终止 Batch 测试事务"),
+                "takeover-v1" => storage
+                    .abort_takeover_transaction(&id, None, 301)
+                    .expect("应终止 v1 Takeover 测试事务"),
+                _ => unreachable!(),
+            }
+            terminal.push((writer, id));
+        }
+
+        let terminal_v2 = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &terminal_v2);
+        storage
+            .save_takeover_v2_plan(&terminal_v2)
+            .expect("应保存终态 v2 Plan");
+        let terminal_v2_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &terminal_v2.id,
+                &terminal_v2_id,
+                &format!("journals/takeover-v2-{terminal_v2_id}.json"),
+                &"a".repeat(64),
+                350,
+            )
+            .expect("应启动终态 v2 测试事务");
+        storage
+            .abort_takeover_v2_transaction(&terminal_v2_id, None, 351)
+            .expect("应终止 v2 测试事务");
+
+        let v2 = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &v2);
+        storage.save_takeover_v2_plan(&v2).expect("应保存 v2 Plan");
+        let v2_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &v2.id,
+                &v2_id,
+                &format!("journals/takeover-v2-{v2_id}.json"),
+                &"a".repeat(64),
+                400,
+            )
+            .expect("应启动 v2 writer");
+        for (writer, id) in &terminal {
+            let table = match *writer {
+                "install" => "lifecycle_transactions",
+                "mount" => "mount_transactions",
+                "batch" => "batch_mount_transactions",
+                "takeover-v1" => "takeover_transactions",
+                _ => unreachable!(),
+            };
+            let result = storage.connection.execute(
+                &format!("UPDATE {table} SET status = 'in_progress' WHERE id = ?1"),
+                [id],
+            );
+            assert!(result.is_err(), "v2 active 必须阻止 {writer} 重新激活");
+        }
+        assert!(
+            storage
+                .connection
+                .execute(
+                    "UPDATE takeover_v2_transactions
+                     SET status = 'in_progress', error_message = NULL WHERE id = ?1",
+                    [&terminal_v2_id],
+                )
+                .is_err(),
+            "v2 active 也必须阻止另一条 v2 重新激活"
+        );
+
+        for writer in ["install", "mount", "batch", "takeover-v1"] {
+            let root = sandbox.path().join(format!("{writer}-active-reactivation"));
+            let mut storage = open_test_storage(&root);
+            let v2 = test_takeover_v2_plan(&storage);
+            save_takeover_v2_inventory(&mut storage, &v2);
+            storage.save_takeover_v2_plan(&v2).expect("应保存 v2 Plan");
+            let v2_id = uuid::Uuid::new_v4().to_string();
+            storage
+                .begin_takeover_v2_transaction(
+                    &v2.id,
+                    &v2_id,
+                    &format!("journals/takeover-v2-{v2_id}.json"),
+                    &"b".repeat(64),
+                    300,
+                )
+                .expect("应启动 v2 终态测试事务");
+            storage
+                .abort_takeover_v2_transaction(&v2_id, None, 301)
+                .expect("应先终止 v2 事务");
+            start_test_old_writer(&mut storage, &root, writer, "old-active");
+            let result = storage.connection.execute(
+                "UPDATE takeover_v2_transactions
+                 SET status = 'in_progress', error_message = NULL WHERE id = ?1",
+                [&v2_id],
+            );
+            assert!(result.is_err(), "{writer} active 必须阻止 v2 重新激活");
+        }
     }
 
     #[test]
@@ -8471,16 +10080,32 @@ mod tests {
             )
             .expect("应保存 v12 Observation 应用关系");
         let transaction_id = uuid::Uuid::new_v4().to_string();
-        let consumed = v12
-            .begin_takeover_transaction(
-                &active_plan.plan.id,
-                &[],
-                &transaction_id,
-                &format!("journals/{transaction_id}.json"),
-                300,
+        v12.connection
+            .execute(
+                "INSERT INTO takeover_transactions (
+                    id, plan_id, bundle_id, member_id, content_id, path_id,
+                    journal_path, journal_contract_sha256, preserve_mount,
+                    phase, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0,
+                    'journal_pending', 'in_progress', 300, 300)",
+                params![
+                    transaction_id,
+                    active_plan.plan.id,
+                    active_plan.plan.bundle_id,
+                    active_plan.plan.member_id,
+                    active_plan.plan.content_id,
+                    active_plan.plan.paths[0].id,
+                    format!("journals/{transaction_id}.json"),
+                    "0".repeat(64),
+                ],
             )
-            .expect("v12 应保存可恢复接管事务");
-        assert_eq!(consumed.status, "consumed");
+            .expect("应写入真实 v12 可恢复事务状态");
+        v12.connection
+            .execute(
+                "UPDATE takeover_plans SET status = 'consumed' WHERE id = ?1",
+                [&active_plan.plan.id],
+            )
+            .expect("应消费真实 v12 Plan");
         drop(v12);
 
         let upgraded = Storage::open(&data_root, &database).expect("应从真实 v12 升级到 v13");
@@ -8510,6 +10135,117 @@ mod tests {
             .expect("应检查升级后的外键")
             .query_map([], |_| Ok(()))
             .expect("应执行升级后的外键检查")
+            .count();
+        assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn takeover_v2_transaction_migration_preserves_real_v13_state() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        let database = data_root.join("skillyard.sqlite3");
+        fs::create_dir_all(&data_root).expect("应创建 v13 数据目录");
+        let mut connection = Connection::open(&database).expect("应创建 v13 SQLite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("应初始化 v13 migration 记录");
+        for (version, migration) in MIGRATIONS.iter().take(13) {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("应开始 v13 migration");
+            transaction
+                .execute_batch(migration)
+                .expect("应应用 v1-v13 migration");
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 100)",
+                    [version],
+                )
+                .expect("应记录 v13 migration");
+            transaction.commit().expect("应提交 v13 migration");
+        }
+        let mut v13 = Storage {
+            connection,
+            data_root: data_root.clone(),
+        };
+        let pending = v13
+            .save_takeover_v2_plan(&test_takeover_v2_plan(&v13))
+            .expect("v13 应保存 pending v2 Plan");
+        let consumed = v13
+            .save_takeover_v2_plan(&test_takeover_v2_plan(&v13))
+            .expect("v13 应保存 consumed v2 Plan");
+        v13.connection
+            .execute(
+                "UPDATE takeover_v2_plans SET status = 'consumed' WHERE id = ?1",
+                [&consumed.id],
+            )
+            .expect("应模拟 v13 consumed Plan");
+        let v1 = test_takeover_v1_plan(&v13, "v13-active-v1");
+        v13.save_takeover_plan(&v1)
+            .expect("v13 应保存 active v1 Plan");
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        v13.connection
+            .execute(
+                "INSERT INTO takeover_transactions (
+                    id, plan_id, bundle_id, member_id, content_id, path_id,
+                    journal_path, journal_contract_sha256, preserve_mount,
+                    phase, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0,
+                    'journal_pending', 'in_progress', 300, 300)",
+                params![
+                    transaction_id,
+                    v1.plan.id,
+                    v1.plan.bundle_id,
+                    v1.plan.member_id,
+                    v1.plan.content_id,
+                    v1.plan.paths[0].id,
+                    format!("journals/{transaction_id}.json"),
+                    "0".repeat(64),
+                ],
+            )
+            .expect("应写入 v13 active v1 事务");
+        v13.connection
+            .execute(
+                "UPDATE takeover_plans SET status = 'consumed' WHERE id = ?1",
+                [&v1.plan.id],
+            )
+            .expect("应消费 v13 v1 Plan");
+        drop(v13);
+
+        let upgraded = Storage::open(&data_root, &database).expect("应从 v13 升级到 v14");
+        assert_eq!(
+            upgraded
+                .read_takeover_v2_plan(&pending.id)
+                .expect("pending v2 Plan 必须保留")
+                .status,
+            TakeoverV2PlanStatus::Pending
+        );
+        assert_eq!(
+            upgraded
+                .read_takeover_v2_plan(&consumed.id)
+                .expect("consumed v2 Plan 必须保留")
+                .status,
+            TakeoverV2PlanStatus::Consumed
+        );
+        assert_eq!(
+            upgraded
+                .recoverable_takeover_transactions()
+                .expect("active v1 事务必须保留")[0]
+                .id,
+            transaction_id
+        );
+        let foreign_key_issues = upgraded
+            .connection
+            .prepare("PRAGMA foreign_key_check")
+            .expect("应准备外键检查")
+            .query_map([], |_| Ok(()))
+            .expect("应执行外键检查")
             .count();
         assert_eq!(foreign_key_issues, 0);
     }
