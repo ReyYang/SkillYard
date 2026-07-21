@@ -9,8 +9,9 @@ mod storage;
 
 pub use application::SkillYardApplication;
 pub use domain::{
-    InventoryLocationKind, InventoryObservation, PlatformInfo, SkillMetadataStatus, SupportedAppId,
-    UiIntent, UiOutcome,
+    InventoryLocationKind, InventoryObservation, LocalRefreshSummary, ManagementKind, PlatformInfo,
+    ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus, SupportedAppId, UiIntent,
+    UiOutcome,
 };
 pub use paths::ApplicationPaths;
 
@@ -28,7 +29,8 @@ pub fn run() {
         .manage(application)
         .invoke_handler(tauri::generate_handler![
             commands::get_startup_state,
-            commands::start_initial_scan
+            commands::start_initial_scan,
+            commands::refresh_local_inventory
         ])
         .run(tauri::generate_context!())
         .expect("SkillYard.app 运行失败");

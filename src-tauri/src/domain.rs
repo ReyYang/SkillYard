@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum UiIntent {
     GetStartupState,
     StartInitialScan,
+    RefreshLocalInventory,
 }
 
 /// 固定 Supported App 的稳定标识。
@@ -37,6 +38,119 @@ pub struct InventoryObservation {
     pub location_kind: InventoryLocationKind,
     pub metadata_status: SkillMetadataStatus,
     pub observed_by: Vec<SupportedAppId>,
+    /// 仅用于比较本机观察变化，不作为 Skill Identity 或受管内容摘要。
+    pub observed_fingerprint: String,
+    pub root_key: ScanRootKey,
+    pub stale: bool,
+    pub management_kind: ManagementKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScanRootKey {
+    CodexGlobal,
+    ClaudeCodeGlobal,
+    GitHubCopilotGlobal,
+    SharedAgents,
+}
+
+impl ScanRootKey {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CodexGlobal => "codex_global",
+            Self::ClaudeCodeGlobal => "claude_code_global",
+            Self::GitHubCopilotGlobal => "github_copilot_global",
+            Self::SharedAgents => "shared_agents",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "codex_global" => Some(Self::CodexGlobal),
+            "claude_code_global" => Some(Self::ClaudeCodeGlobal),
+            "github_copilot_global" => Some(Self::GitHubCopilotGlobal),
+            "shared_agents" => Some(Self::SharedAgents),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ManagementKind {
+    SkillYardManaged,
+    TakeoverCandidate,
+    AgentManaged,
+    ProjectManaged,
+}
+
+impl ManagementKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SkillYardManaged => "skillyard_managed",
+            Self::TakeoverCandidate => "takeover_candidate",
+            Self::AgentManaged => "agent_managed",
+            Self::ProjectManaged => "project_managed",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "skillyard_managed" => Some(Self::SkillYardManaged),
+            "takeover_candidate" => Some(Self::TakeoverCandidate),
+            "agent_managed" => Some(Self::AgentManaged),
+            "project_managed" => Some(Self::ProjectManaged),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScanIssueCode {
+    InspectPath,
+    RootNotDirectory,
+    ReadRoot,
+    ReadSkillContent,
+}
+
+impl ScanIssueCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::InspectPath => "inspect_path",
+            Self::RootNotDirectory => "root_not_directory",
+            Self::ReadRoot => "read_root",
+            Self::ReadSkillContent => "read_skill_content",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "inspect_path" => Some(Self::InspectPath),
+            "root_not_directory" => Some(Self::RootNotDirectory),
+            "read_root" => Some(Self::ReadRoot),
+            "read_skill_content" => Some(Self::ReadSkillContent),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanIssue {
+    pub root_key: ScanRootKey,
+    pub path: String,
+    pub code: ScanIssueCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRefreshSummary {
+    pub completed_at: i64,
+    pub added: usize,
+    pub changed: usize,
+    pub removed: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -108,6 +222,8 @@ pub enum UiOutcome {
         scan_completed_at: i64,
         entries: Vec<InventoryObservation>,
         supported_apps: Vec<SupportedAppSummary>,
+        last_local_refresh: Option<LocalRefreshSummary>,
+        scan_issues: Vec<ScanIssue>,
     },
 }
 

@@ -2,8 +2,8 @@ use std::fs;
 
 use rusqlite::Connection;
 use skillyard_lib::{
-    ApplicationPaths, InventoryLocationKind, PlatformInfo, SkillMetadataStatus,
-    SkillYardApplication, SupportedAppId, UiIntent, UiOutcome,
+    ApplicationPaths, InventoryLocationKind, ManagementKind, PlatformInfo, ScanRootKey,
+    SkillMetadataStatus, SkillYardApplication, SupportedAppId, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -143,6 +143,7 @@ fn scan_discovers_only_fixed_global_and_shared_roots_without_modifying_content()
     assert_eq!(codex.location_kind, InventoryLocationKind::AppGlobal);
     assert_eq!(codex.observed_by, vec![SupportedAppId::Codex]);
     assert_eq!(codex.declared_name.as_deref(), Some("codex-one"));
+    assert_eq!(codex.management_kind, ManagementKind::TakeoverCandidate);
 
     assert!(supported_apps.iter().all(|app| app.detected == Some(true)));
     assert_eq!(
@@ -205,6 +206,32 @@ fn scan_marks_invalid_frontmatter_without_trusting_the_declared_name() {
             assert_eq!(entry.skill_name, directory);
         }
     }
+}
+
+#[test]
+fn same_name_in_different_roots_does_not_create_a_false_identity() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    for root in [".codex/skills/same-skill", ".claude/skills/same-skill"] {
+        write_skill(&home.join(root), "same-skill", root);
+    }
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(sandbox.path().join("data"), home),
+        PlatformInfo::supported_for_test(),
+    );
+
+    let UiOutcome::Inventory { entries, .. } = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    else {
+        panic!("扫描后应返回 Inventory");
+    };
+    let same_name = entries
+        .iter()
+        .filter(|entry| entry.skill_name == "same-skill")
+        .collect::<Vec<_>>();
+    assert_eq!(same_name.len(), 2);
+    assert_ne!(same_name[0].id, same_name[1].id);
 }
 
 #[test]
@@ -339,4 +366,297 @@ fn inventory_and_completion_marker_commit_atomically() {
         panic!("重试后应进入 Inventory");
     };
     assert_eq!(entries.len(), 1);
+}
+
+#[test]
+fn local_refresh_reconciles_added_removed_and_changed_skills() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    for name in ["kept-skill", "changed-skill", "removed-skill"] {
+        write_skill(&home.join(".codex/skills").join(name), name, "initial");
+    }
+    let paths = ApplicationPaths::for_home(data_root, home.clone());
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let initial = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+
+    fs::write(
+        home.join(".codex/skills/changed-skill/script.txt"),
+        "changed",
+    )
+    .expect("应修改 Skill 内普通文件");
+    fs::remove_dir_all(home.join(".codex/skills/removed-skill")).expect("应移除一个 Skill");
+    write_skill(
+        &home.join(".codex/skills/added-skill"),
+        "added-skill",
+        "added",
+    );
+
+    let refreshed = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("用户主动刷新应成功");
+    let UiOutcome::Inventory {
+        entries,
+        last_local_refresh: Some(summary),
+        scan_issues,
+        ..
+    } = &refreshed
+    else {
+        panic!("刷新后应返回包含摘要的 Inventory");
+    };
+    assert_eq!((summary.added, summary.changed, summary.removed), (1, 1, 1));
+    assert!(scan_issues.is_empty());
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.skill_name == "added-skill")
+    );
+    assert!(entries.iter().any(|entry| entry.skill_name == "kept-skill"));
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry.skill_name == "removed-skill")
+    );
+
+    let UiOutcome::Inventory {
+        entries: initial_entries,
+        ..
+    } = initial
+    else {
+        panic!("首次扫描应返回 Inventory");
+    };
+    let old_fingerprint = initial_entries
+        .iter()
+        .find(|entry| entry.skill_name == "changed-skill")
+        .expect("首次扫描应包含待修改 Skill")
+        .observed_fingerprint
+        .clone();
+    let new_fingerprint = entries
+        .iter()
+        .find(|entry| entry.skill_name == "changed-skill")
+        .expect("刷新后应保留已修改 Skill")
+        .observed_fingerprint
+        .clone();
+    assert_ne!(new_fingerprint, old_fingerprint);
+
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    assert_eq!(
+        reopened
+            .handle(UiIntent::GetStartupState)
+            .expect("重开后应读取刷新结果"),
+        refreshed
+    );
+}
+
+#[test]
+fn local_refresh_is_rejected_before_initial_scan_without_reading_roots() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    fs::create_dir_all(home.join(".codex")).expect("应创建测试父目录");
+    fs::write(home.join(".codex/skills"), "must not scan").expect("应创建不可扫描哨兵");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(sandbox.path().join("data"), home),
+        PlatformInfo::supported_for_test(),
+    );
+
+    let error = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect_err("首次扫描前不能刷新本机");
+
+    assert!(error.to_string().contains("完成首次扫描后才能刷新本机"));
+}
+
+#[test]
+fn local_refresh_preserves_the_last_snapshot_for_a_failed_root() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    write_skill(
+        &home.join(".codex/skills/codex-existing"),
+        "codex-existing",
+        "initial",
+    );
+    write_skill(
+        &home.join(".claude/skills/claude-existing"),
+        "claude-existing",
+        "initial",
+    );
+    let paths = ApplicationPaths::for_home(data_root, home.clone());
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+
+    fs::remove_dir_all(home.join(".codex/skills")).expect("应移除 Codex 扫描根");
+    fs::write(home.join(".codex/skills"), "not a directory").expect("应创建失败扫描根");
+    write_skill(
+        &home.join(".claude/skills/claude-added"),
+        "claude-added",
+        "added",
+    );
+
+    let refreshed = application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("部分失败应返回带告警的刷新结果");
+    let UiOutcome::Inventory {
+        entries,
+        last_local_refresh: Some(summary),
+        scan_issues,
+        ..
+    } = &refreshed
+    else {
+        panic!("刷新后应返回 Inventory");
+    };
+
+    let preserved = entries
+        .iter()
+        .find(|entry| entry.skill_name == "codex-existing")
+        .expect("失败根应保留上次成功观察");
+    assert!(preserved.stale);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.skill_name == "claude-added")
+    );
+    assert_eq!((summary.added, summary.changed, summary.removed), (1, 0, 0));
+    assert_eq!(scan_issues.len(), 1);
+    assert_eq!(scan_issues[0].root_key, ScanRootKey::CodexGlobal);
+
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    assert_eq!(
+        reopened
+            .handle(UiIntent::GetStartupState)
+            .expect("重开后应读取带告警的刷新结果"),
+        refreshed
+    );
+}
+
+#[test]
+fn local_refresh_database_failure_keeps_the_previous_snapshot() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    write_skill(
+        &home.join(".copilot/skills/existing-skill"),
+        "existing-skill",
+        "initial",
+    );
+    let paths = ApplicationPaths::for_home(data_root.clone(), home.clone());
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let initial = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+    write_skill(
+        &home.join(".copilot/skills/added-skill"),
+        "added-skill",
+        "added",
+    );
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开测试 SQLite");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_local_refresh BEFORE UPDATE OF last_local_refresh_at ON app_state BEGIN SELECT RAISE(ABORT, 'test failpoint'); END;",
+        )
+        .expect("应创建刷新 failpoint");
+    assert!(application.handle(UiIntent::RefreshLocalInventory).is_err());
+    connection
+        .execute_batch("DROP TRIGGER fail_local_refresh;")
+        .expect("应移除刷新 failpoint");
+
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    assert_eq!(
+        reopened
+            .handle(UiIntent::GetStartupState)
+            .expect("失败后应读取旧快照"),
+        initial
+    );
+}
+
+#[test]
+fn version_one_database_migrates_without_losing_inventory() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    fs::create_dir_all(&data_root).expect("应创建测试数据目录");
+    let database = data_root.join("skillyard.sqlite3");
+    let connection = Connection::open(&database).expect("应创建 v1 SQLite");
+    connection
+        .execute_batch(include_str!("../migrations/0001_initial.sql"))
+        .expect("应执行 v1 migration");
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (1, 1)",
+            [],
+        )
+        .expect("应记录 v1 migration");
+    connection
+        .execute(
+            "UPDATE app_state SET initial_scan_completed_at = 100 WHERE singleton = 1",
+            [],
+        )
+        .expect("应写入 v1 首次扫描状态");
+    connection
+        .execute(
+            "INSERT INTO supported_app_status (app_id, display_name, detected, sort_order) VALUES ('codex', 'Codex', 1, 0)",
+            [],
+        )
+        .expect("应写入 v1 App 状态");
+    connection
+        .execute(
+            "INSERT INTO inventory_observations (id, skill_name, declared_name, skill_root, skill_file, location_kind, metadata_status) VALUES ('old', 'old-skill', 'old-skill', '/tmp/.codex/skills/old-skill', '/tmp/.codex/skills/old-skill/SKILL.md', 'app_global', 'valid')",
+            [],
+        )
+        .expect("应写入 v1 observation");
+    connection
+        .execute(
+            "INSERT INTO inventory_observation_apps (observation_id, app_id) VALUES ('old', 'codex')",
+            [],
+        )
+        .expect("应写入 v1 observation App");
+    drop(connection);
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, sandbox.path().join("home")),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        entries,
+        last_local_refresh,
+        ..
+    } = application
+        .handle(UiIntent::GetStartupState)
+        .expect("v1 数据库应自动迁移")
+    else {
+        panic!("迁移后应返回 Inventory");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].skill_name, "old-skill");
+    assert_eq!(entries[0].root_key, ScanRootKey::CodexGlobal);
+    assert_eq!(
+        entries[0].management_kind,
+        ManagementKind::TakeoverCandidate
+    );
+    assert!(last_local_refresh.is_none());
+
+    let connection = Connection::open(database).expect("应重开迁移后的 SQLite");
+    let versions: String = connection
+        .query_row(
+            "SELECT group_concat(version, ',') FROM schema_migrations ORDER BY version",
+            [],
+            |row| row.get(0),
+        )
+        .expect("应读取 migration 版本");
+    assert_eq!(versions, "1,2");
+}
+
+fn write_skill(root: &std::path::Path, name: &str, script_contents: &str) {
+    fs::create_dir_all(root).expect("应创建 Skill fixture");
+    fs::write(
+        root.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: Test fixture\n---\n"),
+    )
+    .expect("应写入 SKILL.md fixture");
+    fs::write(root.join("script.txt"), script_contents).expect("应写入 Skill 内容 fixture");
 }

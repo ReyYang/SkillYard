@@ -1,0 +1,313 @@
+import { useMemo, useState } from "react";
+
+import type { InventoryObservation, SupportedAppId, UiOutcome } from "../domain";
+
+type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
+type ManagementFilter = "all" | "managed" | "takeover" | "other";
+
+interface InventoryPageProps {
+  outcome: InventoryOutcome;
+  isRefreshing: boolean;
+  refreshError: string | null;
+  onRefresh(): void;
+}
+
+const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
+  { id: "all", label: "全部" },
+  { id: "managed", label: "由 SkillYard 管理" },
+  { id: "takeover", label: "待接管" },
+  { id: "other", label: "其他管理方" },
+];
+
+export function InventoryPage({
+  outcome,
+  isRefreshing,
+  refreshError,
+  onRefresh,
+}: InventoryPageProps) {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<ManagementFilter>("all");
+
+  // 搜索与筛选只操作已经加载的 read model，不能触发 IPC 或写回 SQLite。
+  const visibleEntries = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
+    return outcome.entries
+      .filter((entry) => matchesFilter(entry, filter))
+      .filter((entry) => matchesQuery(entry, normalizedQuery))
+      .sort((left, right) =>
+        presentationLabel(left).localeCompare(presentationLabel(right), "zh-CN"),
+      );
+  }, [filter, outcome.entries, query]);
+
+  const managedGroups = useMemo(
+    () => groupManagedEntries(visibleEntries),
+    [visibleEntries],
+  );
+  const takeoverEntries = visibleEntries.filter(
+    (entry) => entry.managementKind === "takeoverCandidate",
+  );
+  const agentEntries = visibleEntries.filter(
+    (entry) => entry.managementKind === "agentManaged",
+  );
+  const projectEntries = visibleEntries.filter(
+    (entry) => entry.managementKind === "projectManaged",
+  );
+  const hasVisibleEntries = visibleEntries.length > 0;
+
+  return (
+    <main className="inventory-shell">
+      <header className="inventory-header">
+        <div>
+          <p className="eyebrow">SKILLYARD · LOCAL INVENTORY</p>
+          <h1>Skill 清单</h1>
+          <p className="inventory-summary">
+            {outcome.entries.length === 0
+              ? "本机暂未发现 Skill"
+              : `本机已有 ${outcome.entries.length} 个 Skill`}
+          </p>
+        </div>
+        <button
+          className="secondary-action"
+          type="button"
+          disabled={isRefreshing}
+          onClick={onRefresh}
+        >
+          {isRefreshing ? "正在刷新本机…" : "刷新本机"}
+        </button>
+      </header>
+
+      <section className="inventory-controls" aria-label="清单筛选">
+        <label className="search-field">
+          <span className="sr-only">搜索 Skill</span>
+          <input
+            type="search"
+            value={query}
+            placeholder="搜索 Skill"
+            aria-label="搜索 Skill"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <div className="filter-group" aria-label="管理状态">
+          {FILTERS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              aria-pressed={filter === item.id}
+              onClick={() => setFilter(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {refreshError ? (
+        <div className="inline-error" role="alert">
+          <strong>刷新未完成</strong>
+          <span>{refreshError}</span>
+        </div>
+      ) : null}
+
+      {outcome.scanIssues.length > 0 ? (
+        <section className="scan-warning" aria-label="刷新告警">
+          <strong>部分目录暂时无法读取</strong>
+          <p>这些目录继续显示上次成功结果，SkillYard 没有把它们当作已删除。</p>
+          <ul>
+            {outcome.scanIssues.map((issue) => (
+              <li key={issue.rootKey}>
+                <code>{issue.path}</code>
+                <span>{issue.message}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {outcome.lastLocalRefresh ? (
+        <p className="refresh-summary" aria-label="最近刷新结果">
+          最近刷新：新增 {outcome.lastLocalRefresh.added} · 变化{" "}
+          {outcome.lastLocalRefresh.changed} · 移除 {outcome.lastLocalRefresh.removed}
+          <span>{formatTimestamp(outcome.lastLocalRefresh.completedAt)}</span>
+        </p>
+      ) : (
+        <p className="refresh-summary">尚未执行本机刷新</p>
+      )}
+
+      <div className="inventory-content">
+        {managedGroups.map(([bundleName, entries]) => (
+          <InventorySection
+            key={bundleName}
+            title={bundleName}
+            eyebrow="由 SkillYard 管理 · BUNDLE"
+            entries={entries}
+          />
+        ))}
+        <InventorySection
+          title="待接管"
+          eyebrow="本机已有 · 只读"
+          entries={takeoverEntries}
+        />
+        <InventorySection
+          title="Agent 应用管理"
+          eyebrow="交回原管理方"
+          entries={agentEntries}
+        />
+        <InventorySection
+          title="项目仓库管理"
+          eyebrow="交回项目仓库"
+          entries={projectEntries}
+        />
+        {!hasVisibleEntries ? (
+          <section className="empty-inventory">
+            <h2>{outcome.entries.length === 0 ? "未发现 Skill" : "没有匹配结果"}</h2>
+            <p>
+              {outcome.entries.length === 0
+                ? "你可以继续使用现有安装方式，再主动刷新本机。"
+                : "换一个关键词或管理状态看看。"}
+            </p>
+          </section>
+        ) : null}
+      </div>
+    </main>
+  );
+}
+
+function InventorySection({
+  title,
+  eyebrow,
+  entries,
+}: {
+  title: string;
+  eyebrow: string;
+  entries: InventoryObservation[];
+}) {
+  if (entries.length === 0) return null;
+  return (
+    <section className="inventory-section" aria-label={title}>
+      <header>
+        <div>
+          <p className="section-eyebrow">{eyebrow}</p>
+          <h2>{title}</h2>
+        </div>
+        <span>{entries.length}</span>
+      </header>
+      <ul className="inventory-list">
+        {entries.map((entry) => (
+          <SkillCard key={entry.id} entry={entry} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function SkillCard({ entry }: { entry: InventoryObservation }) {
+  return (
+    <li className="skill-card">
+      <div className="skill-card-heading">
+        <div>
+          <strong>{presentationLabel(entry)}</strong>
+          <span className={`management-badge ${entry.managementKind}`}>
+            {managementLabel(entry.managementKind)}
+          </span>
+        </div>
+        {entry.stale ? <span className="stale-badge">上次结果</span> : null}
+      </div>
+      <code title={entry.skillRoot}>{entry.skillRoot}</code>
+      <div className="skill-meta">
+        <span>{entry.sourceDisplayName ?? "来源未知"}</span>
+        {entry.observedBy.map((app) => (
+          <span key={app}>{supportedAppLabel(app)}</span>
+        ))}
+        {entry.projectDisplayName ? <span>{entry.projectDisplayName}</span> : null}
+        {entry.metadataStatus !== "valid" ? <span>Skill metadata 无效</span> : null}
+      </div>
+      {managementDirection(entry) ? (
+        <p className="management-direction">{managementDirection(entry)}</p>
+      ) : null}
+    </li>
+  );
+}
+
+function groupManagedEntries(
+  entries: InventoryObservation[],
+): Array<[string, InventoryObservation[]]> {
+  const groups = new Map<string, InventoryObservation[]>();
+  for (const entry of entries) {
+    if (entry.managementKind !== "skillYardManaged") continue;
+    const name = entry.bundleDisplayName ?? "本地 Bundle";
+    groups.set(name, [...(groups.get(name) ?? []), entry]);
+  }
+  return [...groups.entries()].sort(([left], [right]) =>
+    left.localeCompare(right, "zh-CN"),
+  );
+}
+
+function matchesFilter(
+  entry: InventoryObservation,
+  filter: ManagementFilter,
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "managed") return entry.managementKind === "skillYardManaged";
+  if (filter === "takeover") return entry.managementKind === "takeoverCandidate";
+  return (
+    entry.managementKind === "agentManaged" ||
+    entry.managementKind === "projectManaged"
+  );
+}
+
+function matchesQuery(entry: InventoryObservation, query: string): boolean {
+  if (!query) return true;
+  return [
+    entry.skillName,
+    entry.declaredName,
+    entry.bundleDisplayName,
+    entry.sourceDisplayName,
+    entry.projectDisplayName,
+    ...entry.observedBy.map(supportedAppLabel),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .some((value) => value.toLocaleLowerCase("zh-CN").includes(query));
+}
+
+function presentationLabel(entry: InventoryObservation): string {
+  return entry.managementKind === "skillYardManaged" && entry.bundleDisplayName
+    ? `${entry.bundleDisplayName}: ${entry.skillName}`
+    : entry.skillName;
+}
+
+function managementLabel(kind: InventoryObservation["managementKind"]): string {
+  return {
+    skillYardManaged: "由 SkillYard 管理",
+    takeoverCandidate: "待接管",
+    agentManaged: "Agent 应用管理",
+    projectManaged: "项目仓库管理",
+  }[kind];
+}
+
+function managementDirection(entry: InventoryObservation): string | null {
+  if (entry.managementKind === "agentManaged") {
+    const apps = entry.observedBy.map(supportedAppLabel).join("、");
+    return `请前往 ${apps || "对应 Agent 应用"} 管理此 Skill。`;
+  }
+  if (entry.managementKind === "projectManaged") {
+    return `请在 ${entry.projectDisplayName ?? "对应项目仓库"} 中管理此 Skill。`;
+  }
+  return null;
+}
+
+function supportedAppLabel(app: SupportedAppId): string {
+  return {
+    codex: "Codex",
+    claudeCode: "Claude Code",
+    gitHubCopilot: "GitHub Copilot",
+  }[app];
+}
+
+function formatTimestamp(timestamp: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}

@@ -34,4 +34,19 @@ describe("Tauri IPC contract", () => {
 
     expect(mocks.invoke).toHaveBeenCalledWith("start_initial_scan");
   });
+
+  it("只通过任务级命令刷新本机清单", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+    });
+
+    await tauriSkillYardClient.refreshLocalInventory();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("refresh_local_inventory");
+  });
 });

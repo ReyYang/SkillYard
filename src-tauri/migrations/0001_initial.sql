@@ -33,8 +33,5 @@ CREATE TABLE IF NOT EXISTS inventory_observation_apps (
     PRIMARY KEY (observation_id, app_id)
 );
 
-INSERT OR IGNORE INTO schema_migrations (version, applied_at)
-VALUES (1, unixepoch());
-
 INSERT OR IGNORE INTO app_state (singleton, initial_scan_completed_at)
 VALUES (1, NULL);

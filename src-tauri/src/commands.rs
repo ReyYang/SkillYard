@@ -14,7 +14,8 @@ impl From<ApplicationError> for UiError {
     fn from(error: ApplicationError) -> Self {
         let code = match &error {
             ApplicationError::Storage(_) => "storageError",
-            ApplicationError::Scan(_) => "scanError",
+            ApplicationError::InitialScan(_) => "scanError",
+            ApplicationError::InvalidState(_) => "invalidState",
         };
         Self {
             code,
@@ -36,6 +37,13 @@ pub fn start_initial_scan(
     application: State<'_, SkillYardApplication>,
 ) -> Result<UiOutcome, UiError> {
     dispatch(&application, UiIntent::StartInitialScan)
+}
+
+#[tauri::command(async)]
+pub fn refresh_local_inventory(
+    application: State<'_, SkillYardApplication>,
+) -> Result<UiOutcome, UiError> {
+    dispatch(&application, UiIntent::RefreshLocalInventory)
 }
 
 fn dispatch(application: &SkillYardApplication, intent: UiIntent) -> Result<UiOutcome, UiError> {
@@ -87,5 +95,19 @@ mod tests {
 
         assert_eq!(actual.code, "scanError");
         assert_eq!(actual.message, expected);
+    }
+
+    #[test]
+    fn ipc_dispatch_maps_refresh_before_onboarding_to_invalid_state() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let application = SkillYardApplication::new(
+            ApplicationPaths::for_home(sandbox.path().join("data"), sandbox.path().join("home")),
+            PlatformInfo::supported_for_test(),
+        );
+
+        let error = dispatch(&application, UiIntent::RefreshLocalInventory)
+            .expect_err("首次扫描前不能刷新本机");
+
+        assert_eq!(error.code, "invalidState");
     }
 }

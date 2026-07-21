@@ -200,6 +200,299 @@ code {
   background: rgb(255 255 251 / 76%);
 }
 
+.inventory-shell {
+  max-width: 1180px;
+}
+
+.inventory-header {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.inventory-header h1 {
+  font-size: clamp(2.7rem, 6vw, 4.5rem);
+}
+
+.inventory-summary {
+  margin: 1rem 0 0;
+  color: #69726a;
+  font-size: 1rem;
+}
+
+.secondary-action {
+  min-width: 138px;
+  padding: 0.82rem 1.1rem;
+  border: 1px solid rgb(43 68 47 / 15%);
+  border-radius: 11px;
+  color: #24412c;
+  background: rgb(255 255 251 / 80%);
+  box-shadow: 0 8px 20px rgb(34 57 41 / 7%);
+  cursor: pointer;
+  font-weight: 720;
+}
+
+.secondary-action:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.inventory-controls {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  margin: 3rem 0 1.2rem;
+  padding: 0.7rem;
+  border: 1px solid rgb(50 70 56 / 9%);
+  border-radius: 16px;
+  background: rgb(255 255 251 / 72%);
+  box-shadow: 0 14px 34px rgb(34 57 41 / 6%);
+}
+
+.search-field {
+  flex: 1 1 260px;
+}
+
+.search-field input {
+  width: 100%;
+  padding: 0.72rem 0.85rem;
+  border: 0;
+  outline: 0;
+  color: #213528;
+  background: transparent;
+  font: inherit;
+}
+
+.search-field input::placeholder {
+  color: #8b938c;
+}
+
+.filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.filter-group button {
+  padding: 0.58rem 0.78rem;
+  border: 0;
+  border-radius: 9px;
+  color: #69726a;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.filter-group button[aria-pressed="true"] {
+  color: #effbe9;
+  background: #294632;
+}
+
+.inline-error,
+.scan-warning {
+  margin: 1rem 0;
+  padding: 1rem 1.1rem;
+  border-radius: 13px;
+}
+
+.inline-error {
+  display: flex;
+  gap: 0.7rem;
+  align-items: baseline;
+  color: #7a3529;
+  background: #f6ded6;
+}
+
+.scan-warning {
+  color: #655424;
+  background: #f2e8bd;
+}
+
+.scan-warning p {
+  margin: 0.4rem 0 0;
+  line-height: 1.5;
+}
+
+.scan-warning ul {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0.85rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scan-warning li {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.refresh-summary {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  margin: 1rem 0 0;
+  color: #758077;
+  font-size: 0.82rem;
+}
+
+.refresh-summary span {
+  padding-left: 0.7rem;
+  border-left: 1px solid rgb(50 70 56 / 14%);
+}
+
+.inventory-content {
+  display: grid;
+  gap: 2rem;
+  margin-top: 2.3rem;
+}
+
+.inventory-section > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  padding: 0 0.15rem;
+}
+
+.inventory-section h2,
+.empty-inventory h2 {
+  margin: 0;
+  font-size: 1.55rem;
+  letter-spacing: -0.03em;
+}
+
+.inventory-section > header > span {
+  display: grid;
+  min-width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 50%;
+  color: #536357;
+  background: #dde5d8;
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.section-eyebrow {
+  margin: 0 0 0.35rem;
+  color: #7d887f;
+  font-size: 0.68rem;
+  font-weight: 760;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.inventory-section .inventory-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 1rem;
+}
+
+.skill-card {
+  align-content: start;
+  min-width: 0;
+  padding: 1.15rem !important;
+}
+
+.skill-card-heading,
+.skill-card-heading > div {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.skill-card-heading > div {
+  justify-content: flex-start;
+}
+
+.skill-card-heading strong {
+  overflow: hidden;
+  font-size: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-badge,
+.stale-badge {
+  flex: 0 0 auto;
+  padding: 0.28rem 0.48rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 750;
+}
+
+.management-badge.skillYardManaged {
+  color: #315928;
+  background: #dcefc4;
+}
+
+.management-badge.takeoverCandidate {
+  color: #75561c;
+  background: #f3e7b8;
+}
+
+.management-badge.agentManaged,
+.management-badge.projectManaged {
+  color: #3e536d;
+  background: #dce6ee;
+}
+
+.stale-badge {
+  color: #785229;
+  background: #f1dbc6;
+}
+
+.skill-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+  margin-top: 0.35rem;
+}
+
+.skill-meta span {
+  padding: 0.28rem 0.48rem;
+  border: 1px solid rgb(50 70 56 / 9%);
+  border-radius: 7px;
+  color: #667069;
+  background: rgb(244 246 239 / 82%);
+  font-size: 0.68rem;
+}
+
+.management-direction {
+  margin: 0.3rem 0 0;
+  color: #647068;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.empty-inventory {
+  padding: 4rem 1.5rem;
+  border: 1px dashed rgb(50 70 56 / 18%);
+  border-radius: 18px;
+  text-align: center;
+}
+
+.empty-inventory p {
+  margin: 0.7rem 0 0;
+  color: #778078;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .state-page {
   display: grid;
   align-content: center;
@@ -237,6 +530,16 @@ code {
 
   h1 {
     font-size: clamp(2.6rem, 10vw, 4rem);
+  }
+
+  .inventory-header,
+  .inventory-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .inventory-section .inventory-list {
+    grid-template-columns: 1fr;
   }
 }
 

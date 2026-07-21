@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::{
     domain::{PlatformInfo, UiIntent, UiOutcome},
     paths::ApplicationPaths,
-    scanner::{ScanError, scan},
+    scanner::scan,
     storage::{Storage, StorageError},
 };
 
@@ -11,8 +11,10 @@ use crate::{
 pub enum ApplicationError {
     #[error(transparent)]
     Storage(#[from] StorageError),
-    #[error(transparent)]
-    Scan(#[from] ScanError),
+    #[error("首次扫描未完整完成：{0}")]
+    InitialScan(String),
+    #[error("当前状态不能执行这个操作：{0}")]
+    InvalidState(&'static str),
 }
 
 /// 所有业务行为都从这个 seam 进入；Tauri command 只负责薄适配。
@@ -41,6 +43,7 @@ impl SkillYardApplication {
         match intent {
             UiIntent::GetStartupState => self.get_startup_state(),
             UiIntent::StartInitialScan => self.start_initial_scan(),
+            UiIntent::RefreshLocalInventory => self.refresh_local_inventory(),
         }
     }
 
@@ -59,7 +62,10 @@ impl SkillYardApplication {
             return Ok(outcome);
         }
 
-        let result = scan(&self.paths)?;
+        let result = scan(&self.paths);
+        if let Some(issue) = result.issues.first() {
+            return Err(ApplicationError::InitialScan(issue.message.clone()));
+        }
         let scan_completed_at = unix_timestamp_millis();
         storage.save_initial_scan(scan_completed_at, &result.entries, &result.supported_apps)?;
 
@@ -67,6 +73,36 @@ impl SkillYardApplication {
             scan_completed_at,
             entries: result.entries,
             supported_apps: result.supported_apps,
+            last_local_refresh: None,
+            scan_issues: Vec::new(),
+        })
+    }
+
+    fn refresh_local_inventory(&self) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = Storage::open(self.paths.data_root(), &self.paths.database())?;
+        let Some(UiOutcome::Inventory {
+            scan_completed_at, ..
+        }) = storage.read_initial_scan()?
+        else {
+            return Err(ApplicationError::InvalidState("完成首次扫描后才能刷新本机"));
+        };
+
+        let result = scan(&self.paths);
+        let completed_at = unix_timestamp_millis();
+        let saved = storage.save_local_refresh(
+            completed_at,
+            &result.entries,
+            &result.supported_apps,
+            &result.successful_roots,
+            &result.issues,
+        )?;
+
+        Ok(UiOutcome::Inventory {
+            scan_completed_at,
+            entries: saved.entries,
+            supported_apps: saved.supported_apps,
+            last_local_refresh: Some(saved.summary),
+            scan_issues: result.issues,
         })
     }
 }

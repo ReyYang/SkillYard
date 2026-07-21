@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::domain::SupportedAppId;
+use crate::domain::{ScanRootKey, SupportedAppId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SupportedAppPathConfig {
@@ -8,6 +8,7 @@ pub(crate) struct SupportedAppPathConfig {
     pub display_name: &'static str,
     pub global_root: PathBuf,
     pub detection_root: PathBuf,
+    pub root_key: ScanRootKey,
 }
 
 /// 生产路径固定，测试只能通过构造隔离实例替换根目录。
@@ -42,18 +43,21 @@ impl ApplicationPaths {
                 display_name: "Codex",
                 global_root: self.home.join(".codex/skills"),
                 detection_root: self.home.join(".codex"),
+                root_key: ScanRootKey::CodexGlobal,
             },
             SupportedAppPathConfig {
                 id: SupportedAppId::ClaudeCode,
                 display_name: "Claude Code",
                 global_root: self.home.join(".claude/skills"),
                 detection_root: self.home.join(".claude"),
+                root_key: ScanRootKey::ClaudeCodeGlobal,
             },
             SupportedAppPathConfig {
                 id: SupportedAppId::GitHubCopilot,
                 display_name: "GitHub Copilot",
                 global_root: self.home.join(".copilot/skills"),
                 detection_root: self.home.join(".copilot"),
+                root_key: ScanRootKey::GitHubCopilotGlobal,
             },
         ]
     }
