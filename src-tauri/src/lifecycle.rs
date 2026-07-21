@@ -2018,7 +2018,11 @@ pub(crate) fn open_regular_file_at(
     Ok(file)
 }
 
-fn create_new_file_at(parent: &File, name: &OsStr, path: &Path) -> Result<File, LifecycleError> {
+pub(crate) fn create_new_file_at(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<File, LifecycleError> {
     let name = c_string(name).map_err(|source| io_error("解析受管文件名", path, source))?;
     let descriptor = unsafe {
         libc::openat(
