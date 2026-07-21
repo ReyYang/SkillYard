@@ -175,6 +175,49 @@ pub(crate) struct TakeoverOriginalEntry {
     content_sha256: Option<String>,
 }
 
+impl TakeoverOriginalEntry {
+    /// v2 候选审计只读取预封印 manifest，不获得修改 v1 事务结构的能力。
+    pub(crate) fn relative_path_hex(&self) -> &str {
+        &self.relative_path_hex
+    }
+
+    pub(crate) fn is_directory(&self) -> bool {
+        self.kind == TakeoverOriginalEntryKind::Directory
+    }
+
+    pub(crate) fn is_file(&self) -> bool {
+        self.kind == TakeoverOriginalEntryKind::File
+    }
+
+    pub(crate) fn mode(&self) -> u32 {
+        self.mode
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub(crate) fn content_sha256(&self) -> Option<&str> {
+        self.content_sha256.as_deref()
+    }
+
+    pub(crate) fn matches_original_stat(&self, metadata: &libc::stat) -> bool {
+        manifest_stat_matches_entry(metadata, self)
+    }
+
+    pub(crate) fn matches_original_metadata(&self, metadata: &fs::Metadata) -> bool {
+        metadata.dev() == self.device
+            && metadata.ino() == self.inode
+            && metadata.mode() == self.mode
+            && metadata.nlink() == self.links
+            && metadata.size() == self.size
+            && metadata.mtime() == self.modified_seconds
+            && metadata.mtime_nsec() == self.modified_nanoseconds
+            && metadata.ctime() == self.changed_seconds
+            && metadata.ctime_nsec() == self.changed_nanoseconds
+    }
+}
+
 struct OpenTakeoverParent {
     handle: File,
     path: PathBuf,

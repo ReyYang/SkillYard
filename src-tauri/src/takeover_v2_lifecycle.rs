@@ -1,10 +1,11 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::Read,
     os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt},
+        ffi::{OsStrExt, OsStringExt},
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Component, Path, PathBuf},
 };
@@ -15,13 +16,16 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    content::ContentValidationError,
+    content::{
+        BundleCopyBudget, ContentValidationError,
+        copy_single_skill_tree_into_open_directory_preserving_partial,
+    },
     domain::{
         MountScope, ScanRootKey, SupportedAppId, TakeoverTargetInitialState, TakeoverV2Origin,
         TakeoverV2Plan, TakeoverV2PlanStatus, TakeoverV2Target,
     },
     lifecycle::{
-        LifecycleError, LifecycleLock, acquire_lifecycle_lock, entry_metadata_at,
+        LifecycleError, LifecycleLock, acquire_lifecycle_lock, entry_metadata_at, mkdir_at,
         open_directory_at, open_managed_directory_from_root, open_regular_file_at,
         read_entry_names_os_from_handle, unlink_at, write_new_atomic_at,
     },
@@ -34,6 +38,7 @@ use crate::{
 };
 
 const TAKEOVER_V2_JOURNAL_VERSION: u32 = 1;
+const TAKEOVER_V2_CANDIDATE_SHAPE_VERSION: u32 = 1;
 const MAX_TAKEOVER_V2_JOURNAL_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -96,8 +101,10 @@ struct TakeoverV2Journal {
     selected_origin_id: String,
     skill_name: String,
     content_fingerprint: String,
+    candidate_shape_version: u32,
     phase: TakeoverV2JournalPhase,
     staging_relative: String,
+    candidate_relative: String,
     bundle_relative: String,
     content_relative: String,
     current_target: String,
@@ -123,7 +130,43 @@ struct JournalEntrySnapshot {
     changed_nanoseconds: i64,
 }
 
-/// 本批只把事务推进到 preparing；候选复制与任何可见路径切换由后续批次负责。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CandidateDirectoryAudit {
+    name: OsString,
+    path: PathBuf,
+    snapshot: JournalEntrySnapshot,
+    children: Vec<CandidateEntryAudit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CandidateEntryAudit {
+    Directory(CandidateDirectoryAudit),
+    File {
+        name: OsString,
+        path: PathBuf,
+        snapshot: JournalEntrySnapshot,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CandidateAudit {
+    staging: Option<CandidateDirectoryAudit>,
+    complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CandidateSkillAuditState {
+    content_complete: bool,
+    all_directories_final: bool,
+    has_distinguishable_final_directory: bool,
+}
+
+struct SelectedOriginRoot {
+    handle: File,
+    visible_path: PathBuf,
+}
+
+/// 本批准备完整候选，但仍停留在生效点之前，不发布 Bundle 或修改 Host。
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_takeover_v2_journal(
     paths: &ApplicationPaths,
@@ -184,8 +227,999 @@ pub(crate) fn prepare_takeover_v2_journal(
         return Err(error);
     }
     storage.update_takeover_v2_transaction_phase(&transaction_id, "preparing", now)?;
+    prepare_takeover_v2_candidate(paths, &lifecycle_lock, &consumed, &journal)?;
     lifecycle_lock.recheck(paths)?;
     Ok(transaction_id)
+}
+
+fn prepare_takeover_v2_candidate(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    prepare_takeover_v2_candidate_with_hook(paths, lifecycle_lock, plan, journal, || {})
+}
+
+fn prepare_takeover_v2_candidate_with_hook(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+    after_candidate_audited: impl FnOnce(),
+) -> Result<(), TakeoverV2LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    validate_all_origin_manifests(paths, plan, &journal.origins)?;
+    validate_all_targets(paths, plan)?;
+    let (selected, _) = selected_origin_contract(plan, journal)?;
+
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging_path = paths.staging_root().join(&journal.transaction_id);
+    let staging = create_synced_candidate_directory(
+        &staging_root,
+        OsStr::new(&journal.transaction_id),
+        &staging_path,
+        "创建 v2 接管临时目录",
+    )?;
+    let candidate_path = staging_path.join("candidate");
+    let candidate = create_synced_candidate_directory(
+        &staging,
+        OsStr::new("candidate"),
+        &candidate_path,
+        "创建 v2 接管候选目录",
+    )?;
+    let members_path = candidate_path.join("members");
+    let members = create_synced_candidate_directory(
+        &candidate,
+        OsStr::new("members"),
+        &members_path,
+        "创建 v2 接管成员目录",
+    )?;
+
+    let mut budget = BundleCopyBudget::production();
+    copy_single_skill_tree_into_open_directory_preserving_partial(
+        Path::new(&selected.original_path),
+        &members,
+        &members_path,
+        OsStr::new(&journal.skill_name),
+        &journal.skill_name,
+        &journal.content_fingerprint,
+        &mut budget,
+    )?;
+    members
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 接管成员目录", &members_path, source))?;
+    candidate
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 接管候选目录", &candidate_path, source))?;
+    staging
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 接管临时目录", &staging_path, source))?;
+    staging_root
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 staging", &paths.staging_root(), source))?;
+
+    let audit = audit_takeover_v2_candidate(paths, lifecycle_lock, plan, journal)?;
+    if !audit.complete {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 接管候选复制完成后仍不是完整合同内容".to_owned(),
+        ));
+    }
+    after_candidate_audited();
+    // 复制和候选验证都可能耗时；结束前必须交叉复核所有外部输入。
+    validate_all_origin_manifests(paths, plan, &journal.origins)?;
+    validate_all_targets(paths, plan)?;
+    lifecycle_lock.recheck(paths)?;
+    // 初次审计后 Candidate 仍可能被外部修改；成功返回前必须重新验证整棵合同内容。
+    let final_audit = audit_takeover_v2_candidate(paths, lifecycle_lock, plan, journal)?;
+    if !final_audit.complete {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 接管候选在最终审计时已不再完整".to_owned(),
+        ));
+    }
+    lifecycle_lock.recheck(paths)?;
+    Ok(())
+}
+
+fn create_synced_candidate_directory(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    action: &'static str,
+) -> Result<File, TakeoverV2LifecycleError> {
+    mkdir_at(parent, name, 0o700).map_err(|source| v2_io(action, path, source))?;
+    parent
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 接管候选父目录", path, source))?;
+    open_directory_at(parent, name).map_err(|source| v2_io("打开 v2 接管候选目录", path, source))
+}
+
+fn selected_origin_contract<'a>(
+    plan: &'a TakeoverV2Plan,
+    journal: &'a TakeoverV2Journal,
+) -> Result<(&'a TakeoverV2Origin, &'a TakeoverV2OriginManifest), TakeoverV2LifecycleError> {
+    let selected = plan
+        .origins
+        .iter()
+        .find(|origin| origin.id == journal.selected_origin_id)
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::RecoveryBlocked("Plan 缺少 selected Origin".to_owned())
+        })?;
+    let manifest = journal
+        .origins
+        .iter()
+        .find(|manifest| manifest.origin_id == journal.selected_origin_id)
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::RecoveryBlocked(
+                "Journal 缺少 selected Origin manifest".to_owned(),
+            )
+        })?;
+    Ok((selected, manifest))
+}
+
+fn audit_takeover_v2_candidate(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+) -> Result<CandidateAudit, TakeoverV2LifecycleError> {
+    let (selected, manifest) = selected_origin_contract(plan, journal)?;
+    let selected_root = open_selected_origin_root(paths, selected, manifest)?;
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging_name = OsString::from(&journal.transaction_id);
+    let staging_path = paths.staging_root().join(&staging_name);
+    if entry_metadata_at(&staging_root, &staging_name)
+        .map_err(|source| v2_io("检查 v2 接管临时目录", &staging_path, source))?
+        .is_none()
+    {
+        return Ok(CandidateAudit {
+            staging: None,
+            complete: false,
+        });
+    }
+
+    let (staging, staging_snapshot) =
+        open_audited_candidate_directory(&staging_root, &staging_name, &staging_path, &[0o700])?;
+    let staging_names = read_entry_names_os_from_handle(&staging)?;
+    let mut staging_children = Vec::new();
+    let complete = match staging_names.as_slice() {
+        [] => false,
+        [name] if name == OsStr::new("candidate") => {
+            let (candidate, candidate_complete) =
+                audit_candidate_container(&staging, &staging_path, plan, manifest, &selected_root)?;
+            staging_children.push(CandidateEntryAudit::Directory(candidate));
+            candidate_complete
+        }
+        _ => {
+            return Err(candidate_blocked(
+                "v2 接管临时目录包含未授权条目",
+                &staging_path,
+            ));
+        }
+    };
+    let staging = finish_audited_candidate_directory(
+        &staging_root,
+        &staging_name,
+        &staging_path,
+        &staging,
+        staging_snapshot,
+        staging_children,
+    )?;
+    Ok(CandidateAudit {
+        staging: Some(staging),
+        complete,
+    })
+}
+
+fn audit_candidate_container(
+    staging: &File,
+    staging_path: &Path,
+    plan: &TakeoverV2Plan,
+    manifest: &TakeoverV2OriginManifest,
+    selected_root: &SelectedOriginRoot,
+) -> Result<(CandidateDirectoryAudit, bool), TakeoverV2LifecycleError> {
+    let name = OsStr::new("candidate");
+    let path = staging_path.join(name);
+    let (candidate, snapshot) = open_audited_candidate_directory(staging, name, &path, &[0o700])?;
+    let names = read_entry_names_os_from_handle(&candidate)?;
+    let mut children = Vec::new();
+    let complete = match names.as_slice() {
+        [] => false,
+        [member_name] if member_name == OsStr::new("members") => {
+            let (members, members_complete) =
+                audit_candidate_members(&candidate, &path, plan, manifest, selected_root)?;
+            children.push(CandidateEntryAudit::Directory(members));
+            members_complete
+        }
+        _ => {
+            return Err(candidate_blocked("v2 接管 candidate 包含未授权条目", &path));
+        }
+    };
+    Ok((
+        finish_audited_candidate_directory(staging, name, &path, &candidate, snapshot, children)?,
+        complete,
+    ))
+}
+
+fn audit_candidate_members(
+    candidate: &File,
+    candidate_path: &Path,
+    plan: &TakeoverV2Plan,
+    manifest: &TakeoverV2OriginManifest,
+    selected_root: &SelectedOriginRoot,
+) -> Result<(CandidateDirectoryAudit, bool), TakeoverV2LifecycleError> {
+    let name = OsStr::new("members");
+    let path = candidate_path.join(name);
+    let (members, snapshot) = open_audited_candidate_directory(candidate, name, &path, &[0o700])?;
+    let names = read_entry_names_os_from_handle(&members)?;
+    let mut children = Vec::new();
+    let complete = match names.as_slice() {
+        [] => false,
+        [skill_name] if skill_name == OsStr::new(&plan.skill_name) => {
+            let (skill, skill_complete) =
+                audit_candidate_skill(&members, &path, skill_name, manifest, selected_root)?;
+            children.push(CandidateEntryAudit::Directory(skill));
+            skill_complete
+        }
+        _ => {
+            return Err(candidate_blocked("v2 接管 members 包含未授权 Skill", &path));
+        }
+    };
+    Ok((
+        finish_audited_candidate_directory(candidate, name, &path, &members, snapshot, children)?,
+        complete,
+    ))
+}
+
+fn audit_candidate_skill(
+    members: &File,
+    members_path: &Path,
+    skill_name: &OsStr,
+    manifest: &TakeoverV2OriginManifest,
+    selected_root: &SelectedOriginRoot,
+) -> Result<(CandidateDirectoryAudit, bool), TakeoverV2LifecycleError> {
+    let path = members_path.join(skill_name);
+    let final_permissions = manifest.root_mode & 0o7777;
+    let (skill, snapshot) =
+        open_audited_candidate_directory(members, skill_name, &path, &[0o700, final_permissions])?;
+    let expected = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.relative_path_hex().to_owned(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    let (children, state) = audit_candidate_skill_entries(
+        &skill,
+        Vec::new(),
+        &path,
+        &expected,
+        &mut seen,
+        selected_root,
+    )?;
+    let root_has_final_permissions = permission_bits(snapshot.mode) == final_permissions;
+    if state.has_distinguishable_final_directory && !state.content_complete {
+        return Err(candidate_blocked(
+            "v2 接管候选已有目录使用最终权限但整棵内容并不完整",
+            &path,
+        ));
+    }
+    if final_permissions != 0o700
+        && root_has_final_permissions
+        && (!state.content_complete || !state.all_directories_final)
+    {
+        return Err(candidate_blocked(
+            "v2 接管候选根目录已使用最终权限但整棵目录尚未完成 chmod",
+            &path,
+        ));
+    }
+    let skill =
+        finish_audited_candidate_directory(members, skill_name, &path, &skill, snapshot, children)?;
+    Ok((
+        skill,
+        state.content_complete && state.all_directories_final && root_has_final_permissions,
+    ))
+}
+
+fn audit_candidate_skill_entries(
+    directory: &File,
+    prefix: Vec<u8>,
+    visible_path: &Path,
+    expected: &BTreeMap<String, &TakeoverOriginalEntry>,
+    seen: &mut BTreeSet<String>,
+    selected_root: &SelectedOriginRoot,
+) -> Result<(Vec<CandidateEntryAudit>, CandidateSkillAuditState), TakeoverV2LifecycleError> {
+    let seen_before = seen.len();
+    let expected_descendants = if prefix.is_empty() {
+        expected.len()
+    } else {
+        let descendant_prefix = format!("{}2f", hex_bytes(&prefix));
+        expected
+            .keys()
+            .filter(|path| path.starts_with(&descendant_prefix))
+            .count()
+    };
+    let mut audited = Vec::new();
+    let mut state = CandidateSkillAuditState {
+        content_complete: true,
+        all_directories_final: true,
+        has_distinguishable_final_directory: false,
+    };
+    for name in read_entry_names_os_from_handle(directory)? {
+        let relative = join_relative_bytes(&prefix, &name);
+        let key = hex_bytes(&relative);
+        let child_path = visible_path.join(&name);
+        let expected_entry = expected
+            .get(&key)
+            .ok_or_else(|| candidate_blocked("v2 接管候选包含未授权条目", &child_path))?;
+        if !seen.insert(key) {
+            return Err(candidate_blocked(
+                "v2 接管候选 manifest 出现重复路径",
+                &child_path,
+            ));
+        }
+        let metadata = entry_metadata_at(directory, &name)
+            .map_err(|source| v2_io("检查 v2 接管候选条目", &child_path, source))?
+            .ok_or_else(|| candidate_blocked("v2 接管候选条目在审计期间消失", &child_path))?;
+        match metadata.st_mode & libc::S_IFMT {
+            libc::S_IFDIR if expected_entry.is_directory() => {
+                let final_permissions = expected_entry.mode() & 0o7777;
+                let (child, snapshot) = open_audited_candidate_directory(
+                    directory,
+                    &name,
+                    &child_path,
+                    &[0o700, final_permissions],
+                )?;
+                let has_final_permissions = permission_bits(snapshot.mode) == final_permissions;
+                let (children, child_state) = audit_candidate_skill_entries(
+                    &child,
+                    relative,
+                    &child_path,
+                    expected,
+                    seen,
+                    selected_root,
+                )?;
+                state.content_complete &= child_state.content_complete;
+                state.all_directories_final &=
+                    has_final_permissions && child_state.all_directories_final;
+                state.has_distinguishable_final_directory |= child_state
+                    .has_distinguishable_final_directory
+                    || final_permissions != 0o700 && has_final_permissions;
+                audited.push(CandidateEntryAudit::Directory(
+                    finish_audited_candidate_directory(
+                        directory,
+                        &name,
+                        &child_path,
+                        &child,
+                        snapshot,
+                        children,
+                    )?,
+                ));
+            }
+            libc::S_IFREG if expected_entry.is_file() => {
+                let (entry, complete) = audit_candidate_file(
+                    directory,
+                    &name,
+                    &child_path,
+                    &relative,
+                    expected_entry,
+                    selected_root,
+                    &metadata,
+                )?;
+                if !complete {
+                    state.content_complete = false;
+                }
+                audited.push(entry);
+            }
+            _ => {
+                return Err(candidate_blocked(
+                    "v2 接管候选包含错误类型、软链接、硬链接或特殊文件",
+                    &child_path,
+                ));
+            }
+        }
+    }
+    let seen_descendants = seen.len().saturating_sub(seen_before);
+    state.content_complete &= seen_descendants == expected_descendants;
+    Ok((audited, state))
+}
+
+fn audit_candidate_file(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    relative: &[u8],
+    expected: &TakeoverOriginalEntry,
+    selected_root: &SelectedOriginRoot,
+    metadata: &libc::stat,
+) -> Result<(CandidateEntryAudit, bool), TakeoverV2LifecycleError> {
+    let final_permissions = expected.mode() & 0o7777;
+    let actual_permissions = permission_bits(u32::from(metadata.st_mode));
+    let actual_size = u64::try_from(metadata.st_size)
+        .map_err(|_| candidate_blocked("v2 接管候选文件大小无效", path))?;
+    // 只有完整文件可以进入最终权限；部分内容必须保持 copy primitive 的 0600 协议。
+    let permissions_allowed = if actual_size < expected.size() {
+        actual_permissions == 0o600
+    } else {
+        matches!(actual_permissions, 0o600) || actual_permissions == final_permissions
+    };
+    if metadata.st_nlink != 1 || !permissions_allowed || actual_size > expected.size() {
+        return Err(candidate_blocked(
+            "v2 接管候选文件的链接数、权限或大小不符合合同",
+            path,
+        ));
+    }
+
+    let snapshot = journal_snapshot_from_stat(metadata);
+    let mut candidate = open_regular_file_at(parent, name, path, false)?;
+    let opened = candidate
+        .metadata()
+        .map_err(|source| v2_io("检查已打开的 v2 接管候选文件", path, source))?;
+    if journal_snapshot_from_metadata(&opened) != snapshot {
+        return Err(candidate_blocked("v2 接管候选文件在打开期间被替换", path));
+    }
+
+    if actual_size == expected.size() {
+        let expected_hash = expected
+            .content_sha256()
+            .ok_or_else(|| candidate_blocked("v2 接管文件 manifest 缺少内容摘要", path))?;
+        if hash_open_file(&mut candidate, path)? != expected_hash {
+            return Err(candidate_blocked(
+                "v2 接管候选完整文件内容不符合 manifest",
+                path,
+            ));
+        }
+    } else {
+        compare_candidate_prefix_with_selected_origin(
+            &mut candidate,
+            actual_size,
+            relative,
+            expected,
+            selected_root,
+            path,
+        )?;
+    }
+
+    recheck_audited_file(parent, name, path, &candidate, snapshot)?;
+    Ok((
+        CandidateEntryAudit::File {
+            name: name.to_os_string(),
+            path: path.to_path_buf(),
+            snapshot,
+        },
+        actual_size == expected.size() && actual_permissions == final_permissions,
+    ))
+}
+
+fn hash_open_file(file: &mut File, path: &Path) -> Result<String, TakeoverV2LifecycleError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|source| v2_io("读取 v2 接管候选文件", path, source))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex_bytes(&hasher.finalize()))
+}
+
+fn compare_candidate_prefix_with_selected_origin(
+    candidate: &mut File,
+    candidate_size: u64,
+    relative: &[u8],
+    expected: &TakeoverOriginalEntry,
+    selected_root: &SelectedOriginRoot,
+    candidate_path: &Path,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let (source_parent, source_name, source_path) =
+        open_selected_source_parent(selected_root, relative)?;
+    let source_metadata = entry_metadata_at(&source_parent, &source_name)
+        .map_err(|source| v2_io("检查 selected Origin 文件", &source_path, source))?
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::OriginChanged(source_path.display().to_string())
+        })?;
+    if source_metadata.st_mode & libc::S_IFMT != libc::S_IFREG
+        || source_metadata.st_nlink != 1
+        || !expected.matches_original_stat(&source_metadata)
+    {
+        return Err(TakeoverV2LifecycleError::OriginChanged(
+            source_path.display().to_string(),
+        ));
+    }
+    let mut source = open_regular_file_at(&source_parent, &source_name, &source_path, false)?;
+    let source_opened = source
+        .metadata()
+        .map_err(|error| v2_io("检查已打开的 selected Origin 文件", &source_path, error))?;
+    if !expected.matches_original_metadata(&source_opened) {
+        return Err(TakeoverV2LifecycleError::OriginChanged(
+            source_path.display().to_string(),
+        ));
+    }
+
+    let mut remaining = candidate_size;
+    let mut candidate_buffer = [0_u8; 64 * 1024];
+    let mut source_buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let limit = usize::try_from(remaining.min(candidate_buffer.len() as u64))
+            .expect("buffer 大小可转换为 usize");
+        let candidate_count = candidate
+            .read(&mut candidate_buffer[..limit])
+            .map_err(|error| v2_io("读取部分 v2 接管候选文件", candidate_path, error))?;
+        if candidate_count == 0 {
+            return Err(candidate_blocked(
+                "v2 接管候选文件大小在读取期间缩短",
+                candidate_path,
+            ));
+        }
+        source
+            .read_exact(&mut source_buffer[..candidate_count])
+            .map_err(|_| {
+                TakeoverV2LifecycleError::OriginChanged(source_path.display().to_string())
+            })?;
+        if candidate_buffer[..candidate_count] != source_buffer[..candidate_count] {
+            return Err(candidate_blocked(
+                "v2 接管候选半写文件不是 selected Origin 的正确前缀",
+                candidate_path,
+            ));
+        }
+        remaining -= candidate_count as u64;
+    }
+    let mut extra = [0_u8; 1];
+    if candidate
+        .read(&mut extra)
+        .map_err(|error| v2_io("确认部分 v2 接管候选文件边界", candidate_path, error))?
+        != 0
+    {
+        return Err(candidate_blocked(
+            "v2 接管候选文件大小在读取期间增长",
+            candidate_path,
+        ));
+    }
+
+    let source_after = source
+        .metadata()
+        .map_err(|error| v2_io("重新检查 selected Origin 文件", &source_path, error))?;
+    let source_visible = entry_metadata_at(&source_parent, &source_name)
+        .map_err(|error| v2_io("重新检查可见 selected Origin 文件", &source_path, error))?
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::OriginChanged(source_path.display().to_string())
+        })?;
+    if !expected.matches_original_metadata(&source_after)
+        || !expected.matches_original_stat(&source_visible)
+    {
+        return Err(TakeoverV2LifecycleError::OriginChanged(
+            source_path.display().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn open_selected_origin_root(
+    paths: &ApplicationPaths,
+    origin: &TakeoverV2Origin,
+    manifest: &TakeoverV2OriginManifest,
+) -> Result<SelectedOriginRoot, TakeoverV2LifecycleError> {
+    let parent = open_verified_origin_parent(paths, origin)?;
+    let visible_path = PathBuf::from(&origin.original_path);
+    let metadata = entry_metadata_at(&parent.handle, &parent.leaf)
+        .map_err(|source| v2_io("检查 selected Origin 根目录", &visible_path, source))?
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::OriginChanged(visible_path.display().to_string())
+        })?;
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || metadata.st_dev as u64 != manifest.root_device
+        || metadata.st_ino != manifest.root_inode
+        || u32::from(metadata.st_mode) != manifest.root_mode
+    {
+        return Err(TakeoverV2LifecycleError::OriginChanged(
+            visible_path.display().to_string(),
+        ));
+    }
+    let handle = open_directory_at(&parent.handle, &parent.leaf)
+        .map_err(|source| v2_io("打开 selected Origin 根目录", &visible_path, source))?;
+    let opened = handle
+        .metadata()
+        .map_err(|source| v2_io("检查已打开的 selected Origin 根目录", &visible_path, source))?;
+    if (opened.dev(), opened.ino(), opened.mode())
+        != (
+            manifest.root_device,
+            manifest.root_inode,
+            manifest.root_mode,
+        )
+    {
+        return Err(TakeoverV2LifecycleError::OriginChanged(
+            visible_path.display().to_string(),
+        ));
+    }
+    parent.recheck(
+        origin.parent_device,
+        origin.parent_inode,
+        origin.parent_mode,
+    )?;
+    Ok(SelectedOriginRoot {
+        handle,
+        visible_path,
+    })
+}
+
+fn open_selected_source_parent(
+    selected_root: &SelectedOriginRoot,
+    relative: &[u8],
+) -> Result<(File, OsString, PathBuf), TakeoverV2LifecycleError> {
+    let components = relative.split(|byte| *byte == b'/').collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| component.is_empty() || matches!(*component, b"." | b".."))
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 接管 manifest 包含非法相对路径".to_owned(),
+        ));
+    }
+    let mut parent = selected_root.handle.try_clone().map_err(|source| {
+        v2_io(
+            "保留 selected Origin 根目录",
+            &selected_root.visible_path,
+            source,
+        )
+    })?;
+    let mut visible = selected_root.visible_path.clone();
+    for component in &components[..components.len() - 1] {
+        let name = OsString::from_vec(component.to_vec());
+        visible.push(&name);
+        parent = open_directory_at(&parent, &name)
+            .map_err(|source| v2_io("打开 selected Origin 子目录", &visible, source))?;
+    }
+    let name = OsString::from_vec(
+        components
+            .last()
+            .expect("非空 relative 至少有一个组件")
+            .to_vec(),
+    );
+    visible.push(&name);
+    Ok((parent, name, visible))
+}
+
+fn open_audited_candidate_directory(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    allowed_permissions: &[u32],
+) -> Result<(File, JournalEntrySnapshot), TakeoverV2LifecycleError> {
+    let metadata = entry_metadata_at(parent, name)
+        .map_err(|source| v2_io("检查 v2 接管候选目录", path, source))?
+        .ok_or_else(|| candidate_blocked("v2 接管候选目录在审计期间消失", path))?;
+    let permissions = permission_bits(u32::from(metadata.st_mode));
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || !allowed_permissions.contains(&permissions)
+    {
+        return Err(candidate_blocked(
+            "v2 接管候选目录类型或权限不符合合同",
+            path,
+        ));
+    }
+    let snapshot = journal_snapshot_from_stat(&metadata);
+    let directory = open_directory_at(parent, name)
+        .map_err(|source| v2_io("打开 v2 接管候选目录", path, source))?;
+    let opened = directory
+        .metadata()
+        .map_err(|source| v2_io("检查已打开的 v2 接管候选目录", path, source))?;
+    if journal_snapshot_from_metadata(&opened) != snapshot {
+        return Err(candidate_blocked("v2 接管候选目录在打开期间被替换", path));
+    }
+    Ok((directory, snapshot))
+}
+
+fn finish_audited_candidate_directory(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    directory: &File,
+    snapshot: JournalEntrySnapshot,
+    children: Vec<CandidateEntryAudit>,
+) -> Result<CandidateDirectoryAudit, TakeoverV2LifecycleError> {
+    let opened = directory
+        .metadata()
+        .map_err(|source| v2_io("重新检查已打开的 v2 接管候选目录", path, source))?;
+    let visible = entry_metadata_at(parent, name)
+        .map_err(|source| v2_io("重新检查可见 v2 接管候选目录", path, source))?
+        .ok_or_else(|| candidate_blocked("v2 接管候选目录在审计期间消失", path))?;
+    if journal_snapshot_from_metadata(&opened) != snapshot
+        || journal_snapshot_from_stat(&visible) != snapshot
+    {
+        return Err(candidate_blocked(
+            "v2 接管候选目录在只读审计期间发生变化",
+            path,
+        ));
+    }
+    Ok(CandidateDirectoryAudit {
+        name: name.to_os_string(),
+        path: path.to_path_buf(),
+        snapshot,
+        children,
+    })
+}
+
+fn recheck_audited_file(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    file: &File,
+    snapshot: JournalEntrySnapshot,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let opened = file
+        .metadata()
+        .map_err(|source| v2_io("重新检查已打开的 v2 接管候选文件", path, source))?;
+    let visible = entry_metadata_at(parent, name)
+        .map_err(|source| v2_io("重新检查可见 v2 接管候选文件", path, source))?
+        .ok_or_else(|| candidate_blocked("v2 接管候选文件在审计期间消失", path))?;
+    if journal_snapshot_from_metadata(&opened) != snapshot
+        || journal_snapshot_from_stat(&visible) != snapshot
+    {
+        return Err(candidate_blocked(
+            "v2 接管候选文件在只读审计期间发生变化",
+            path,
+        ));
+    }
+    Ok(())
+}
+
+fn join_relative_bytes(prefix: &[u8], name: &OsStr) -> Vec<u8> {
+    let mut relative =
+        Vec::with_capacity(prefix.len() + usize::from(!prefix.is_empty()) + name.len());
+    relative.extend_from_slice(prefix);
+    if !relative.is_empty() {
+        relative.push(b'/');
+    }
+    relative.extend_from_slice(name.as_bytes());
+    relative
+}
+
+fn permission_bits(mode: u32) -> u32 {
+    mode & 0o7777
+}
+
+fn candidate_blocked(message: &str, path: &Path) -> TakeoverV2LifecycleError {
+    TakeoverV2LifecycleError::RecoveryBlocked(format!("{message}：{}", path.display()))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn remove_audited_takeover_v2_candidate(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    audit: &CandidateAudit,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let mut no_hook = |_: &Path| {};
+    remove_audited_takeover_v2_candidate_with_hook(paths, lifecycle_lock, audit, &mut no_hook)
+}
+
+fn remove_audited_takeover_v2_candidate_with_hook(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    audit: &CandidateAudit,
+    before_remove: &mut dyn FnMut(&Path),
+) -> Result<(), TakeoverV2LifecycleError> {
+    let Some(staging) = &audit.staging else {
+        return Ok(());
+    };
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    remove_audited_candidate_directory(&staging_root, staging, before_remove)?;
+    staging_root
+        .sync_all()
+        .map_err(|source| v2_io("同步已清理的 v2 staging", &paths.staging_root(), source))?;
+    Ok(())
+}
+
+fn remove_audited_candidate_directory(
+    parent: &File,
+    audit: &CandidateDirectoryAudit,
+    before_remove: &mut dyn FnMut(&Path),
+) -> Result<(), TakeoverV2LifecycleError> {
+    before_remove(&audit.path);
+    let visible = entry_metadata_at(parent, &audit.name)
+        .map_err(|source| v2_io("删除前检查 v2 接管候选目录", &audit.path, source))?
+        .ok_or_else(|| candidate_blocked("v2 接管候选目录在删除前消失", &audit.path))?;
+    if journal_snapshot_from_stat(&visible) != audit.snapshot {
+        return Err(candidate_blocked(
+            "v2 接管候选目录在删除前被替换",
+            &audit.path,
+        ));
+    }
+    let directory = open_directory_at(parent, &audit.name)
+        .map_err(|source| v2_io("打开待删除的 v2 接管候选目录", &audit.path, source))?;
+    let opened = directory
+        .metadata()
+        .map_err(|source| v2_io("检查待删除的 v2 接管候选目录", &audit.path, source))?;
+    if journal_snapshot_from_metadata(&opened) != audit.snapshot {
+        return Err(candidate_blocked(
+            "v2 接管候选目录在删除打开期间被替换",
+            &audit.path,
+        ));
+    }
+
+    let expected_names = audit
+        .children
+        .iter()
+        .map(candidate_audit_entry_name)
+        .collect::<BTreeSet<_>>();
+    let current_names = read_entry_names_os_from_handle(&directory)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if current_names != expected_names {
+        return Err(candidate_blocked(
+            "v2 接管候选目录在删除前出现未知或缺失条目",
+            &audit.path,
+        ));
+    }
+
+    let mut trusted_snapshot = audit.snapshot;
+    // 整棵 Candidate 已完成只读审计，此后才允许放宽本事务目录权限。
+    if permission_bits(opened.mode()) != 0o700 {
+        directory
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(|source| v2_io("准备删除 v2 接管候选目录", &audit.path, source))?;
+        trusted_snapshot = refresh_candidate_directory_snapshot_after_owned_change(
+            parent,
+            audit,
+            &directory,
+            trusted_snapshot,
+        )?;
+    }
+    for child in &audit.children {
+        recheck_candidate_directory_snapshot(parent, audit, &directory, trusted_snapshot)?;
+        match child {
+            CandidateEntryAudit::Directory(child) => {
+                remove_audited_candidate_directory(&directory, child, before_remove)?;
+            }
+            CandidateEntryAudit::File {
+                name,
+                path,
+                snapshot,
+            } => {
+                before_remove(path);
+                // 测试 hook 代表任意外部并发修改；删除子项前再次核对父目录完整快照。
+                recheck_candidate_directory_snapshot(parent, audit, &directory, trusted_snapshot)?;
+                let current = entry_metadata_at(&directory, name)
+                    .map_err(|source| v2_io("删除前检查 v2 接管候选文件", path, source))?
+                    .ok_or_else(|| candidate_blocked("v2 接管候选文件在删除前消失", path))?;
+                if current.st_mode & libc::S_IFMT != libc::S_IFREG
+                    || current.st_nlink != 1
+                    || journal_snapshot_from_stat(&current) != *snapshot
+                {
+                    return Err(candidate_blocked("v2 接管候选文件在删除前被替换", path));
+                }
+                unlink_at(&directory, name, false)
+                    .map_err(|source| v2_io("删除已验证的 v2 接管候选文件", path, source))?;
+            }
+        }
+        // chmod 和删除子项是本事务唯一允许改变目录 metadata 的操作。
+        trusted_snapshot = refresh_candidate_directory_snapshot_after_owned_change(
+            parent,
+            audit,
+            &directory,
+            trusted_snapshot,
+        )?;
+    }
+    recheck_candidate_directory_snapshot(parent, audit, &directory, trusted_snapshot)?;
+    if !read_entry_names_os_from_handle(&directory)?.is_empty() {
+        return Err(candidate_blocked(
+            "v2 接管候选目录在删除期间出现新内容",
+            &audit.path,
+        ));
+    }
+    directory
+        .sync_all()
+        .map_err(|source| v2_io("同步已清理的 v2 接管候选目录", &audit.path, source))?;
+    recheck_candidate_directory_snapshot(parent, audit, &directory, trusted_snapshot)?;
+    drop(directory);
+    let before_unlink = entry_metadata_at(parent, &audit.name)
+        .map_err(|source| v2_io("移除前检查 v2 接管候选目录", &audit.path, source))?
+        .ok_or_else(|| candidate_blocked("v2 接管候选目录在移除前消失", &audit.path))?;
+    if journal_snapshot_from_stat(&before_unlink) != trusted_snapshot {
+        return Err(candidate_blocked(
+            "v2 接管候选目录在最终移除前发生变化",
+            &audit.path,
+        ));
+    }
+    unlink_at(parent, &audit.name, true)
+        .map_err(|source| v2_io("移除已验证的 v2 接管候选目录", &audit.path, source))?;
+    parent
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 接管候选父目录", &audit.path, source))?;
+    Ok(())
+}
+
+fn recheck_candidate_directory_snapshot(
+    parent: &File,
+    audit: &CandidateDirectoryAudit,
+    directory: &File,
+    expected: JournalEntrySnapshot,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let opened = directory
+        .metadata()
+        .map_err(|source| v2_io("重新检查待删除的 v2 接管候选目录", &audit.path, source))?;
+    let visible = entry_metadata_at(parent, &audit.name)
+        .map_err(|source| v2_io("重新检查可见 v2 接管候选目录", &audit.path, source))?
+        .ok_or_else(|| candidate_blocked("v2 接管候选目录在删除期间消失", &audit.path))?;
+    if journal_snapshot_from_metadata(&opened) != expected
+        || journal_snapshot_from_stat(&visible) != expected
+    {
+        return Err(candidate_blocked(
+            "v2 接管候选目录在删除期间发生未授权变化",
+            &audit.path,
+        ));
+    }
+    Ok(())
+}
+
+fn refresh_candidate_directory_snapshot_after_owned_change(
+    parent: &File,
+    audit: &CandidateDirectoryAudit,
+    directory: &File,
+    previous: JournalEntrySnapshot,
+) -> Result<JournalEntrySnapshot, TakeoverV2LifecycleError> {
+    let opened = directory
+        .metadata()
+        .map_err(|source| v2_io("刷新待删除的 v2 接管候选目录", &audit.path, source))?;
+    let visible = entry_metadata_at(parent, &audit.name)
+        .map_err(|source| v2_io("刷新可见 v2 接管候选目录", &audit.path, source))?
+        .ok_or_else(|| candidate_blocked("v2 接管候选目录在删除期间消失", &audit.path))?;
+    let opened_snapshot = journal_snapshot_from_metadata(&opened);
+    let visible_snapshot = journal_snapshot_from_stat(&visible);
+    if opened_snapshot != visible_snapshot
+        || opened_snapshot.device != previous.device
+        || opened_snapshot.inode != previous.inode
+        || opened_snapshot.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
+        || permission_bits(opened_snapshot.mode) != 0o700
+    {
+        return Err(candidate_blocked(
+            "v2 接管候选目录在授权变更期间发生额外变化",
+            &audit.path,
+        ));
+    }
+    Ok(opened_snapshot)
+}
+
+fn candidate_audit_entry_name(entry: &CandidateEntryAudit) -> OsString {
+    match entry {
+        CandidateEntryAudit::Directory(directory) => directory.name.clone(),
+        CandidateEntryAudit::File { name, .. } => name.clone(),
+    }
+}
+
+fn ensure_takeover_v2_staging_absent_without_journal(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction_id: &str,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let name = OsStr::new(transaction_id);
+    let path = paths.staging_root().join(name);
+    if entry_metadata_at(&staging_root, name)
+        .map_err(|source| v2_io("检查无 Journal 的 v2 staging", &path, source))?
+        .is_some()
+    {
+        return Err(candidate_blocked(
+            "正式 Journal 尚未建立，但事务 staging 已存在",
+            &path,
+        ));
+    }
+    Ok(())
 }
 
 /// 启动恢复只处理生效点之前的窗口；未知或后续阶段统一隔离，绝不猜测。
@@ -241,60 +1275,68 @@ fn recover_pre_effect_takeover_v2_transaction(
     let metadata = entry_metadata_at(&journals, &name)
         .map_err(|source| v2_io("检查正式 Journal", &path, source))?;
 
-    if transaction.status == "aborted" {
-        if metadata.is_some() {
-            let (journal, owned) = read_takeover_v2_journal_at(&journals, &name, &path)?;
-            validate_takeover_v2_journal_contract(&journal, transaction, &plan)?;
-            validate_all_origin_manifests(paths, &plan, &journal.origins)?;
-            validate_all_targets(paths, &plan)?;
-            remove_owned_journal(paths, &journals, &owned)?;
-        } else {
-            validate_all_origins_without_journal(paths, &plan)?;
-            validate_all_targets(paths, &plan)?;
-        }
-        if let Some(temporary) = temporary.as_ref() {
-            remove_owned_journal(paths, &journals, temporary)?;
-        }
-        storage.forget_terminal_takeover_v2_transaction(&transaction.id)?;
-        return Ok(());
-    }
-    if transaction.status != "in_progress" {
+    if !matches!(transaction.status.as_str(), "in_progress" | "aborted") {
         return Err(TakeoverV2LifecycleError::RecoveryBlocked(format!(
             "事务状态不属于生效前恢复窗口：{}",
             transaction.status
         )));
     }
 
-    match (transaction.phase.as_str(), metadata) {
-        ("journal_pending", None) => {
-            // 没有正式 Journal 意味着原子 rename 尚未成功；只重验 Origin，不删除任何业务路径。
-            validate_all_origins_without_journal(paths, &plan)?;
-            validate_all_targets(paths, &plan)?;
-            storage.abort_takeover_v2_transaction(&transaction.id, None, now)?;
+    match metadata {
+        None if transaction.status == "aborted" && transaction.phase == "preparing" => {
+            // 清理顺序是 staging → Journal → forget；两份文件证据都已消失时只剩幂等 forget。
+            ensure_takeover_v2_staging_absent_without_journal(
+                paths,
+                lifecycle_lock,
+                &transaction.id,
+            )?;
             if let Some(temporary) = temporary.as_ref() {
                 remove_owned_journal(paths, &journals, temporary)?;
             }
             storage.forget_terminal_takeover_v2_transaction(&transaction.id)?;
         }
-        ("journal_pending" | "preparing", Some(_)) => {
+        None if transaction.phase == "journal_pending" => {
+            // 正式 Journal 未建立时，协议还没有授权创建 staging；存在任何同名目录都必须保留。
+            validate_all_origins_without_journal(paths, &plan)?;
+            validate_all_targets(paths, &plan)?;
+            ensure_takeover_v2_staging_absent_without_journal(
+                paths,
+                lifecycle_lock,
+                &transaction.id,
+            )?;
+            if transaction.status == "in_progress" {
+                storage.abort_takeover_v2_transaction(&transaction.id, None, now)?;
+            }
+            if let Some(temporary) = temporary.as_ref() {
+                remove_owned_journal(paths, &journals, temporary)?;
+            }
+            storage.forget_terminal_takeover_v2_transaction(&transaction.id)?;
+        }
+        Some(_) => {
             let (journal, owned) = read_takeover_v2_journal_at(&journals, &name, &path)?;
             validate_takeover_v2_journal_contract(&journal, transaction, &plan)?;
             validate_all_origin_manifests(paths, &plan, &journal.origins)?;
             validate_all_targets(paths, &plan)?;
+            let audit = audit_takeover_v2_candidate(paths, lifecycle_lock, &plan, &journal)?;
+            // 候选与外部输入必须通过同一轮交叉审计，避免用已变化的 Origin 授权删除。
+            validate_all_origin_manifests(paths, &plan, &journal.origins)?;
+            validate_all_targets(paths, &plan)?;
             // 先把已验证的安全结论写入 SQLite；后续清理中断时 aborted 仍可幂等续做。
-            storage.abort_takeover_v2_transaction(&transaction.id, None, now)?;
+            if transaction.status == "in_progress" {
+                storage.abort_takeover_v2_transaction(&transaction.id, None, now)?;
+            }
+            remove_audited_takeover_v2_candidate(paths, lifecycle_lock, &audit)?;
             remove_owned_journal(paths, &journals, &owned)?;
             if let Some(temporary) = temporary.as_ref() {
                 remove_owned_journal(paths, &journals, temporary)?;
             }
             storage.forget_terminal_takeover_v2_transaction(&transaction.id)?;
         }
-        ("preparing", None) => {
+        None => {
             return Err(TakeoverV2LifecycleError::RecoveryBlocked(
                 "preparing 事务缺少正式 Journal".to_owned(),
             ));
         }
-        _ => unreachable!("阶段已在入口限制"),
     }
     Ok(())
 }
@@ -328,8 +1370,13 @@ fn build_takeover_v2_journal(
         selected_origin_id: plan.selected_origin_id.clone(),
         skill_name: plan.skill_name.clone(),
         content_fingerprint: selected.content_fingerprint.clone(),
+        candidate_shape_version: TAKEOVER_V2_CANDIDATE_SHAPE_VERSION,
         phase: TakeoverV2JournalPhase::Preparing,
         staging_relative: format!("staging/{transaction_id}"),
+        candidate_relative: format!(
+            "staging/{transaction_id}/candidate/members/{}",
+            plan.skill_name
+        ),
         bundle_relative: bundle_relative.clone(),
         content_relative: format!("{bundle_relative}/contents/{}", plan.content_id),
         current_target: format!("contents/{}", plan.content_id),
@@ -752,7 +1799,13 @@ fn validate_takeover_v2_journal_contract(
         && journal.selected_origin_id == plan.selected_origin_id
         && journal.skill_name == plan.skill_name
         && journal.content_fingerprint == selected.content_fingerprint
+        && journal.candidate_shape_version == TAKEOVER_V2_CANDIDATE_SHAPE_VERSION
         && journal.staging_relative == format!("staging/{}", transaction.id)
+        && journal.candidate_relative
+            == format!(
+                "staging/{}/candidate/members/{}",
+                transaction.id, plan.skill_name
+            )
         && journal.bundle_relative == bundle_relative
         && journal.content_relative
             == format!("bundles/{}/contents/{}", plan.bundle_id, plan.content_id)
@@ -1066,8 +2119,18 @@ mod tests {
         }
 
         fn save_single_plan(&mut self, name: &str) -> TakeoverV2Plan {
+            self.save_single_plan_with_setup(name, |_| {})
+        }
+
+        fn save_single_plan_with_setup(
+            &mut self,
+            name: &str,
+            setup: impl FnOnce(&Path),
+        ) -> TakeoverV2Plan {
             let skill_root = self.paths.home().join(".codex/skills").join(name);
             write_skill(&skill_root, name);
+            // 测试可在快照生成前补充特定的合法目录结构。
+            setup(&skill_root);
             let parent = fs::symlink_metadata(skill_root.parent().expect("应有父目录"))
                 .expect("应读取父目录");
             let root = fs::symlink_metadata(&skill_root).expect("应读取 Skill 根");
@@ -1163,9 +2226,22 @@ mod tests {
         }
 
         fn save_two_origin_plan(&mut self, name: &str) -> TakeoverV2Plan {
+            self.save_two_origin_plan_with_selected_content(name, None, false)
+        }
+
+        fn save_two_origin_plan_with_selected_content(
+            &mut self,
+            name: &str,
+            second_helper: Option<&str>,
+            select_second: bool,
+        ) -> TakeoverV2Plan {
             let mut plan = self.save_single_plan(name);
             let skill_root = self.paths.home().join(".claude/skills").join(name);
             write_skill(&skill_root, name);
+            if let Some(contents) = second_helper {
+                fs::write(skill_root.join("helper.txt"), contents)
+                    .expect("应写第二份 Origin 的区分内容");
+            }
             let parent = fs::symlink_metadata(skill_root.parent().expect("应有父目录"))
                 .expect("应读取 Claude 父目录");
             let root = fs::symlink_metadata(&skill_root).expect("应读取 Claude Skill 根");
@@ -1204,10 +2280,15 @@ mod tests {
                 warnings: validated.warnings,
                 final_disposition: TakeoverOriginDisposition::Remove,
             };
-            assert_eq!(
-                plan.origins[0].content_fingerprint, second_origin.content_fingerprint,
-                "测试合同要求两份 Origin 内容相同"
-            );
+            if second_helper.is_none() {
+                assert_eq!(
+                    plan.origins[0].content_fingerprint, second_origin.content_fingerprint,
+                    "默认双 Origin fixture 应保持内容相同"
+                );
+            }
+            if select_second {
+                plan.selected_origin_id = second_origin.id.clone();
+            }
             plan.identity_basis = TakeoverIdentityBasis::UserConfirmed;
             plan.origins.push(second_origin);
             plan.origins.sort_by(|left, right| {
@@ -1317,10 +2398,24 @@ mod tests {
                 .into_iter()
                 .find(|transaction| transaction.id == transaction_id)
         }
+
+        fn begin_preparing_with_journal(
+            &mut self,
+            plan: &TakeoverV2Plan,
+        ) -> (String, TakeoverV2Journal) {
+            let (transaction_id, journal) = self.begin_without_journal(plan);
+            let lock = acquire_lifecycle_lock(&self.paths).expect("应取得生命周期锁");
+            write_takeover_v2_journal(&self.paths, &lock, &journal).expect("应写正式 Journal");
+            drop(lock);
+            self.storage
+                .update_takeover_v2_transaction_phase(&transaction_id, "preparing", 201)
+                .expect("应推进 preparing");
+            (transaction_id, journal)
+        }
     }
 
     #[test]
-    fn prepare_writes_complete_journal_then_advances_to_preparing() {
+    fn prepare_writes_complete_journal_and_candidate_then_stays_preparing() {
         let mut harness = Harness::new();
         let plan = harness.save_single_plan("alpha");
 
@@ -1344,10 +2439,136 @@ mod tests {
             takeover_v2_journal_contract_sha256(&journal).expect("应计算 seal"),
             transaction.journal_contract_sha256
         );
+        let candidate = harness
+            .paths
+            .staging_root()
+            .join(&transaction_id)
+            .join("candidate/members/alpha");
+        assert_eq!(
+            fs::read(candidate.join("helper.txt")).expect("候选应复制 selected Origin"),
+            b"alpha helper"
+        );
+        assert!(candidate.join("SKILL.md").is_file());
     }
 
     #[test]
-    fn two_origin_journal_blocks_on_either_replacement_without_deleting_content() {
+    fn multi_origin_preparation_copies_only_the_explicitly_selected_origin() {
+        for select_second in [false, true] {
+            let mut harness = Harness::new();
+            let plan = harness.save_two_origin_plan_with_selected_content(
+                "alpha",
+                Some("claude selected helper"),
+                select_second,
+            );
+            let selected = plan
+                .origins
+                .iter()
+                .find(|origin| origin.id == plan.selected_origin_id)
+                .expect("应找到 selected Origin");
+            let expected = fs::read(Path::new(&selected.original_path).join("helper.txt"))
+                .expect("应读取 selected Origin");
+
+            let transaction_id =
+                prepare_takeover_v2_journal(&harness.paths, &mut harness.storage, &plan.id, 200)
+                    .expect("双 Origin 应准备候选");
+            let candidate = harness
+                .paths
+                .staging_root()
+                .join(&transaction_id)
+                .join("candidate/members/alpha/helper.txt");
+            assert_eq!(
+                fs::read(candidate).expect("候选应存在"),
+                expected,
+                "select_second={select_second}"
+            );
+            let journal: TakeoverV2Journal = serde_json::from_slice(
+                &fs::read(
+                    harness
+                        .paths
+                        .journals_root()
+                        .join(journal_file_name(&transaction_id)),
+                )
+                .expect("Journal 应存在"),
+            )
+            .expect("Journal 应可解析");
+            assert_eq!(journal.origins.len(), 2);
+            assert_eq!(journal.selected_origin_id, selected.id);
+            assert_eq!(journal.content_fingerprint, selected.content_fingerprint);
+        }
+    }
+
+    #[test]
+    fn candidate_preparation_rejects_selected_origin_replaced_after_copy() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, journal) = harness.begin_preparing_with_journal(&plan);
+        plan.status = TakeoverV2PlanStatus::Consumed;
+        let selected = PathBuf::from(&plan.origins[0].original_path);
+        let backup = selected.with_file_name("alpha-after-copy-backup");
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+
+        prepare_takeover_v2_candidate_with_hook(&harness.paths, &lock, &plan, &journal, || {
+            fs::rename(&selected, &backup).expect("应在 copy 后替换 selected Origin");
+            write_skill(&selected, "alpha");
+        })
+        .expect_err("copy 后的同内容 inode 替换必须被最终交叉检查拒绝");
+
+        let candidate = harness
+            .paths
+            .staging_root()
+            .join(&transaction_id)
+            .join("candidate/members/alpha/helper.txt");
+        assert!(candidate.exists(), "失败时完整候选必须留给恢复器");
+        assert!(
+            backup.join("SKILL.md").exists(),
+            "原 selected Origin 必须保留"
+        );
+        assert!(selected.join("SKILL.md").exists(), "外部替换内容必须保留");
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务应保持 recoverable")
+                .status,
+            "in_progress"
+        );
+    }
+
+    #[test]
+    fn candidate_preparation_rejects_candidate_changed_after_initial_audit() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, journal) = harness.begin_preparing_with_journal(&plan);
+        plan.status = TakeoverV2PlanStatus::Consumed;
+        let candidate = harness
+            .paths
+            .staging_root()
+            .join(&transaction_id)
+            .join("candidate/members/alpha/helper.txt");
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+
+        let result =
+            prepare_takeover_v2_candidate_with_hook(&harness.paths, &lock, &plan, &journal, || {
+                // 模拟初次审计完成后，外部进程原地修改 Candidate。
+                fs::write(&candidate, b"external candidate replacement")
+                    .expect("应修改已审计 Candidate");
+            });
+
+        result.expect_err("返回成功前必须再次完整审计 Candidate");
+        assert_eq!(
+            fs::read(&candidate).expect("被修改的 Candidate 必须保留"),
+            b"external candidate replacement"
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务应保持 recoverable")
+                .status,
+            "in_progress"
+        );
+    }
+
+    #[test]
+    fn two_origin_candidate_blocks_on_any_origin_replacement_without_deleting_content() {
         for replaced_index in 0..2 {
             let mut harness = Harness::new();
             let plan = harness.save_two_origin_plan("alpha");
@@ -1370,6 +2591,12 @@ mod tests {
                 serde_json::from_slice(&fs::read(&journal_path).expect("Journal 应存在"))
                     .expect("Journal 应可解析");
             assert_eq!(journal.origins.len(), 2);
+            let candidate_file = harness
+                .paths
+                .staging_root()
+                .join(&transaction_id)
+                .join("candidate/members/alpha/helper.txt");
+            let candidate_before = fs::read(&candidate_file).expect("候选应已准备");
 
             let replaced = Path::new(&plan.origins[replaced_index].original_path);
             let backup = replaced.with_file_name(format!("alpha-backup-{replaced_index}"));
@@ -1389,6 +2616,10 @@ mod tests {
                 "blocked"
             );
             assert!(journal_path.exists());
+            assert_eq!(
+                fs::read(&candidate_file).expect("Origin 变化时候选现场必须保留"),
+                candidate_before
+            );
             for (index, origin) in plan.origins.iter().enumerate() {
                 let visible = fs::read(Path::new(&origin.original_path).join("helper.txt"))
                     .expect("两边可见内容都不得被删除");
@@ -1460,6 +2691,29 @@ mod tests {
     }
 
     #[test]
+    fn transaction_without_a_formal_journal_never_claims_a_same_named_staging_directory() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_without_journal(&plan);
+        let staging = harness.paths.staging_root().join(&transaction_id);
+        fs::create_dir(&staging).expect("应注入同名 staging");
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+            .expect("应设置 staging 权限");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("异常只应阻塞当前事务");
+
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .status,
+            "blocked"
+        );
+        assert!(staging.exists(), "无正式 Journal 时不能删除同名目录");
+    }
+
+    #[test]
     fn formal_journal_before_phase_update_is_cleaned_safely() {
         let mut harness = Harness::new();
         let plan = harness.save_single_plan("alpha");
@@ -1478,6 +2732,564 @@ mod tests {
                 .journals_root()
                 .join(journal_file_name(&transaction_id))
                 .exists()
+        );
+    }
+
+    #[test]
+    fn journal_pending_with_a_formal_contract_cleans_a_semantic_partial_candidate() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let (transaction_id, journal) = harness.begin_without_journal(&plan);
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得锁");
+        write_takeover_v2_journal(&harness.paths, &lock, &journal).expect("应写正式 Journal");
+        drop(lock);
+        let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+        let source = fs::read(Path::new(&plan.origins[0].original_path).join("helper.txt"))
+            .expect("应读取源文件");
+        let partial = levels[3].join("helper.txt");
+        fs::write(&partial, &source[..1]).expect("应写合法部分候选");
+        fs::set_permissions(&partial, fs::Permissions::from_mode(0o600)).expect("应设置构建中权限");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("正式合同应授权清理 journal_pending 候选");
+
+        assert!(harness.transaction(&transaction_id).is_none());
+        assert!(!harness.paths.staging_root().join(transaction_id).exists());
+    }
+
+    #[test]
+    fn preparing_recovery_removes_every_candidate_mkdir_window_idempotently() {
+        for created_depth in 1..=4 {
+            let mut harness = Harness::new();
+            let plan = harness.save_single_plan("alpha");
+            let origin_before =
+                fs::read(Path::new(&plan.origins[0].original_path).join("SKILL.md"))
+                    .expect("应读取 Origin");
+            let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+            create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", created_depth);
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("mkdir 中断窗口应自动恢复");
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 301)
+                .expect("重复恢复应幂等");
+
+            assert!(harness.transaction(&transaction_id).is_none());
+            assert!(!harness.paths.staging_root().join(&transaction_id).exists());
+            assert!(
+                !harness
+                    .paths
+                    .journals_root()
+                    .join(journal_file_name(&transaction_id))
+                    .exists()
+            );
+            assert_eq!(
+                fs::read(Path::new(&plan.origins[0].original_path).join("SKILL.md"))
+                    .expect("Origin 必须保留"),
+                origin_before,
+                "created_depth={created_depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn preparing_recovery_removes_zero_partial_and_complete_selected_prefixes() {
+        for variant in ["zero", "partial", "complete_build_mode", "complete"] {
+            let mut harness = Harness::new();
+            let plan = harness.save_single_plan("alpha");
+            let source = Path::new(&plan.origins[0].original_path).join("helper.txt");
+            let source_bytes = fs::read(&source).expect("应读取 selected Origin 文件");
+            let source_mode = fs::symlink_metadata(&source).expect("应读取源权限").mode() & 0o7777;
+            let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+            let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+            let destination = levels[3].join("helper.txt");
+            let (bytes, mode) = match variant {
+                "zero" => (&source_bytes[..0], 0o600),
+                "partial" => (&source_bytes[..source_bytes.len() / 2], 0o600),
+                "complete_build_mode" => (source_bytes.as_slice(), 0o600),
+                "complete" => (source_bytes.as_slice(), source_mode),
+                _ => unreachable!(),
+            };
+            fs::write(&destination, bytes).expect("应写候选文件窗口");
+            fs::set_permissions(&destination, fs::Permissions::from_mode(mode))
+                .expect("应设置候选文件协议权限");
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("合法文件前缀应自动恢复");
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 301)
+                .expect("重复恢复应幂等");
+
+            assert!(
+                harness.transaction(&transaction_id).is_none(),
+                "variant={variant}"
+            );
+            assert!(
+                !harness.paths.staging_root().join(&transaction_id).exists(),
+                "variant={variant}"
+            );
+            assert_eq!(
+                fs::read(&source).expect("selected Origin 必须保留"),
+                source_bytes,
+                "variant={variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn preparing_recovery_blocks_partial_file_with_final_permissions() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan_with_setup("alpha", |root| {
+            fs::set_permissions(root.join("helper.txt"), fs::Permissions::from_mode(0o644))
+                .expect("应固定源文件最终权限");
+        });
+        let source = Path::new(&plan.origins[0].original_path).join("helper.txt");
+        let source_bytes = fs::read(&source).expect("应读取 selected Origin 文件");
+        let final_mode = fs::symlink_metadata(&source).expect("应读取源权限").mode() & 0o7777;
+        assert!(!source_bytes.is_empty(), "测试源文件必须非空");
+        let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+        let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+        let candidate_file = levels[3].join("helper.txt");
+        fs::write(&candidate_file, &source_bytes[..source_bytes.len() - 1])
+            .expect("应写未完成 Candidate 文件");
+        fs::set_permissions(&candidate_file, fs::Permissions::from_mode(final_mode))
+            .expect("应模拟提前使用最终权限");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("不可信 Candidate 只应阻塞当前事务");
+
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .status,
+            "blocked"
+        );
+        assert!(candidate_file.exists(), "不可信 Candidate 必须原样保留");
+    }
+
+    #[test]
+    fn preparing_recovery_blocks_final_mode_root_with_incomplete_subtree() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan_with_setup("alpha", |root| {
+            fs::set_permissions(root, fs::Permissions::from_mode(0o755))
+                .expect("应固定源根目录最终权限");
+        });
+        let source_root = Path::new(&plan.origins[0].original_path);
+        let final_mode = fs::symlink_metadata(source_root)
+            .expect("应读取源根目录权限")
+            .mode()
+            & 0o7777;
+        let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+        let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+        fs::set_permissions(&levels[3], fs::Permissions::from_mode(final_mode))
+            .expect("应模拟根目录提前进入最终权限");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("不可信 Candidate 只应阻塞当前事务");
+
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .status,
+            "blocked"
+        );
+        assert!(levels[3].exists(), "不完整的最终权限根目录必须保留");
+    }
+
+    #[test]
+    fn preparing_recovery_blocks_final_mode_directory_with_incomplete_subtree() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan_with_setup("alpha", |root| {
+            let scripts = root.join("scripts");
+            fs::create_dir(&scripts).expect("应创建源子目录");
+            fs::set_permissions(&scripts, fs::Permissions::from_mode(0o755))
+                .expect("应固定源子目录最终权限");
+            fs::write(scripts.join("run.sh"), b"#!/bin/sh\n").expect("应写源子文件");
+        });
+        let source_directory = Path::new(&plan.origins[0].original_path).join("scripts");
+        let final_mode = fs::symlink_metadata(&source_directory)
+            .expect("应读取源子目录权限")
+            .mode()
+            & 0o7777;
+        let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+        let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+        let candidate_directory = levels[3].join("scripts");
+        fs::create_dir(&candidate_directory).expect("应创建未完成 Candidate 子目录");
+        fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(final_mode))
+            .expect("应模拟子目录提前进入最终权限");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("不可信 Candidate 只应阻塞当前事务");
+
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .status,
+            "blocked"
+        );
+        assert!(
+            candidate_directory.exists(),
+            "不完整的最终权限子目录必须保留"
+        );
+    }
+
+    #[test]
+    fn preparing_recovery_blocks_final_directory_when_sibling_content_is_incomplete() {
+        for variant in ["missing", "partial"] {
+            let mut harness = Harness::new();
+            let plan = save_sibling_plan(&mut harness);
+            let source_root = Path::new(&plan.origins[0].original_path);
+            let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+            let levels =
+                create_sibling_candidate(&harness.paths, &transaction_id, source_root, variant);
+            let candidate_a = levels[3].join("a");
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("不可信 Candidate 只应阻塞当前事务");
+
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("事务必须保留")
+                    .status,
+                "blocked",
+                "variant={variant}"
+            );
+            assert!(candidate_a.exists(), "已 final 的目录必须保留");
+        }
+    }
+
+    #[test]
+    fn preparing_recovery_allows_partial_directory_chmod_but_keeps_root_last() {
+        for root_is_final in [false, true] {
+            let mut harness = Harness::new();
+            let plan = save_sibling_plan(&mut harness);
+            let source_root = Path::new(&plan.origins[0].original_path);
+            let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+            let levels =
+                create_sibling_candidate(&harness.paths, &transaction_id, source_root, "complete");
+            if root_is_final {
+                fs::set_permissions(&levels[3], fs::Permissions::from_mode(0o755))
+                    .expect("应模拟 root 提前完成 chmod");
+            }
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("目录 chmod 中断只应影响当前事务");
+
+            if root_is_final {
+                assert_eq!(
+                    harness
+                        .transaction(&transaction_id)
+                        .expect("root 不是最后 chmod 时事务必须保留")
+                        .status,
+                    "blocked"
+                );
+                assert!(levels[3].exists());
+            } else {
+                assert!(
+                    harness.transaction(&transaction_id).is_none(),
+                    "文件已完整时 sibling 目录允许仍为 0700"
+                );
+                assert!(!harness.paths.staging_root().join(transaction_id).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn preparing_recovery_removes_nested_build_mode_partial_subtree() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan_with_setup("alpha", |root| {
+            let scripts = root.join("scripts");
+            fs::create_dir(&scripts).expect("应创建源子目录");
+            fs::set_permissions(&scripts, fs::Permissions::from_mode(0o755))
+                .expect("应固定源子目录最终权限");
+            fs::write(scripts.join("run.sh"), b"#!/bin/sh\necho alpha\n").expect("应写源子文件");
+        });
+        let source_file = Path::new(&plan.origins[0].original_path).join("scripts/run.sh");
+        let source_bytes = fs::read(&source_file).expect("应读取源子文件");
+        let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+        let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+        let candidate_directory = levels[3].join("scripts");
+        fs::create_dir(&candidate_directory).expect("应创建构建中 Candidate 子目录");
+        fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700))
+            .expect("构建中子目录必须保持 0700");
+        let candidate_file = candidate_directory.join("run.sh");
+        fs::write(&candidate_file, &source_bytes[..source_bytes.len() / 2])
+            .expect("应写合法嵌套前缀");
+        fs::set_permissions(&candidate_file, fs::Permissions::from_mode(0o600))
+            .expect("构建中文件必须保持 0600");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("自然形成的嵌套 partial 应自动恢复");
+
+        assert!(harness.transaction(&transaction_id).is_none());
+        assert!(!harness.paths.staging_root().join(transaction_id).exists());
+        assert_eq!(
+            fs::read(source_file).expect("selected Origin 必须保留"),
+            source_bytes
+        );
+    }
+
+    #[test]
+    fn complete_and_already_aborted_partial_candidates_recover_idempotently() {
+        for variant in ["complete", "aborted_partial"] {
+            let mut harness = Harness::new();
+            let plan = harness.save_single_plan("alpha");
+            let transaction_id = if variant == "complete" {
+                prepare_takeover_v2_journal(&harness.paths, &mut harness.storage, &plan.id, 200)
+                    .expect("应准备完整候选")
+            } else {
+                let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+                let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+                let source = fs::read(Path::new(&plan.origins[0].original_path).join("helper.txt"))
+                    .expect("应读取源文件");
+                let partial = levels[3].join("helper.txt");
+                fs::write(&partial, &source[..1]).expect("应写部分候选");
+                fs::set_permissions(&partial, fs::Permissions::from_mode(0o600))
+                    .expect("应设置构建中权限");
+                harness
+                    .storage
+                    .abort_takeover_v2_transaction(&transaction_id, None, 250)
+                    .expect("应模拟 abort 已提交、文件尚未清理");
+                transaction_id
+            };
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("生效前候选应恢复");
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 301)
+                .expect("重复恢复应幂等");
+
+            assert!(
+                harness.transaction(&transaction_id).is_none(),
+                "variant={variant}"
+            );
+            assert!(
+                !harness.paths.staging_root().join(&transaction_id).exists(),
+                "variant={variant}"
+            );
+            assert!(Path::new(&plan.origins[0].original_path).exists());
+        }
+    }
+
+    #[test]
+    fn aborted_preparing_after_filesystem_cleanup_is_forgotten_without_a_journal() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+        harness
+            .storage
+            .abort_takeover_v2_transaction(&transaction_id, None, 250)
+            .expect("应记录 aborted");
+        fs::remove_file(
+            harness
+                .paths
+                .journals_root()
+                .join(journal_file_name(&transaction_id)),
+        )
+        .expect("应模拟 Journal 已清理、尚未 forget 的崩溃窗口");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("已清理的 aborted 事务应完成 forget");
+
+        assert!(harness.transaction(&transaction_id).is_none());
+        assert!(!harness.paths.staging_root().join(transaction_id).exists());
+    }
+
+    #[test]
+    fn preparing_recovery_blocks_wrong_prefix_unknown_entries_links_modes_and_types() {
+        for variant in [
+            "wrong_prefix",
+            "extra_top",
+            "extra_descendant",
+            "symlink",
+            "hard_link",
+            "special",
+            "wrong_mode",
+            "wrong_type",
+        ] {
+            let mut harness = Harness::new();
+            let plan = harness.save_single_plan("alpha");
+            let source = Path::new(&plan.origins[0].original_path).join("helper.txt");
+            let source_before = fs::read(&source).expect("应读取 Origin 文件");
+            let (transaction_id, _) = harness.begin_preparing_with_journal(&plan);
+            let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+            let skill = &levels[3];
+            let candidate_file = skill.join("helper.txt");
+            match variant {
+                "wrong_prefix" => {
+                    fs::write(&candidate_file, b"X").expect("应写错误前缀");
+                    fs::set_permissions(&candidate_file, fs::Permissions::from_mode(0o600))
+                        .expect("应设置构建中权限");
+                }
+                "extra_top" => {
+                    fs::write(levels[1].join("external.txt"), b"external")
+                        .expect("应注入 candidate sibling");
+                }
+                "extra_descendant" => {
+                    fs::write(&candidate_file, &source_before[..1]).expect("应写合法前缀");
+                    fs::set_permissions(&candidate_file, fs::Permissions::from_mode(0o600))
+                        .expect("应设置构建中权限");
+                    fs::write(skill.join("external.txt"), b"external")
+                        .expect("应注入 Skill descendant");
+                }
+                "symlink" => {
+                    std::os::unix::fs::symlink(&source, &candidate_file).expect("应注入软链接");
+                }
+                "hard_link" => {
+                    let external = harness._temp.path().join("external-hard-link");
+                    fs::write(&external, &source_before).expect("应创建外部文件");
+                    fs::hard_link(&external, &candidate_file).expect("应注入硬链接");
+                }
+                "special" => {
+                    let encoded = std::ffi::CString::new(candidate_file.as_os_str().as_bytes())
+                        .expect("测试路径不能包含 NUL");
+                    // SAFETY: CString 保证 NUL 终止，目标位于隔离测试目录。
+                    let result = unsafe { libc::mkfifo(encoded.as_ptr(), 0o600) };
+                    assert_eq!(result, 0, "应注入 FIFO 特殊文件");
+                }
+                "wrong_mode" => {
+                    fs::write(&candidate_file, &source_before[..1]).expect("应写合法前缀");
+                    fs::set_permissions(&candidate_file, fs::Permissions::from_mode(0o666))
+                        .expect("应设置错误权限");
+                }
+                "wrong_type" => {
+                    fs::create_dir(&candidate_file).expect("应以目录替换预期文件");
+                    fs::set_permissions(&candidate_file, fs::Permissions::from_mode(0o700))
+                        .expect("应设置目录权限");
+                }
+                _ => unreachable!(),
+            }
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("不安全候选只应阻塞当前事务");
+
+            let transaction = harness
+                .transaction(&transaction_id)
+                .expect("blocked 事务必须保留");
+            assert_eq!(transaction.status, "blocked", "variant={variant}");
+            assert!(
+                harness.paths.staging_root().join(&transaction_id).exists(),
+                "不安全现场必须保留，variant={variant}"
+            );
+            assert_eq!(
+                fs::read(&source).expect("Origin 必须保留"),
+                source_before,
+                "variant={variant}"
+            );
+            if variant == "extra_descendant" {
+                assert!(candidate_file.exists(), "审计失败前不得删除合法条目");
+                assert!(skill.join("external.txt").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_cleanup_preserves_files_and_directories_replaced_after_read_only_audit() {
+        for variant in ["file", "directory"] {
+            let mut harness = Harness::new();
+            let plan = harness.save_single_plan("alpha");
+            let source_bytes =
+                fs::read(Path::new(&plan.origins[0].original_path).join("helper.txt"))
+                    .expect("应读取源文件");
+            let (transaction_id, journal) = harness.begin_preparing_with_journal(&plan);
+            let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+            let candidate_file = levels[3].join("helper.txt");
+            fs::write(&candidate_file, &source_bytes[..1]).expect("应写合法前缀");
+            fs::set_permissions(&candidate_file, fs::Permissions::from_mode(0o600))
+                .expect("应设置构建中权限");
+            let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+            let audit = audit_takeover_v2_candidate(&harness.paths, &lock, &plan, &journal)
+                .expect("初始候选应通过只读审计");
+            let mut replaced = false;
+            let skill_path = levels[3].clone();
+            let backup = levels[2].join("alpha-audited-backup");
+            let result = remove_audited_takeover_v2_candidate_with_hook(
+                &harness.paths,
+                &lock,
+                &audit,
+                &mut |path| {
+                    if replaced {
+                        return;
+                    }
+                    if variant == "file" && path == candidate_file {
+                        fs::remove_file(&candidate_file).expect("应替换候选文件");
+                        fs::write(&candidate_file, b"external replacement")
+                            .expect("应写外部替换文件");
+                        fs::set_permissions(&candidate_file, fs::Permissions::from_mode(0o600))
+                            .expect("应设置外部文件权限");
+                        replaced = true;
+                    } else if variant == "directory" && path == skill_path {
+                        fs::rename(&skill_path, &backup).expect("应替换候选目录 inode");
+                        fs::create_dir(&skill_path).expect("应创建外部替换目录");
+                        fs::set_permissions(&skill_path, fs::Permissions::from_mode(0o700))
+                            .expect("应设置替换目录权限");
+                        fs::write(skill_path.join("external.txt"), b"external")
+                            .expect("应写外部目录内容");
+                        replaced = true;
+                    }
+                },
+            );
+
+            result.expect_err("审计后的替换必须阻止删除");
+            assert!(replaced, "variant={variant}");
+            if variant == "file" {
+                assert_eq!(
+                    fs::read(&candidate_file).expect("替换文件必须保留"),
+                    b"external replacement"
+                );
+            } else {
+                assert_eq!(
+                    fs::read(skill_path.join("external.txt")).expect("替换目录必须保留"),
+                    b"external"
+                );
+                assert!(backup.join("helper.txt").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_cleanup_blocks_directory_metadata_change_during_deletion() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let source_bytes = fs::read(Path::new(&plan.origins[0].original_path).join("helper.txt"))
+            .expect("应读取源文件");
+        let (transaction_id, journal) = harness.begin_preparing_with_journal(&plan);
+        let levels = create_candidate_skeleton(&harness.paths, &transaction_id, "alpha", 4);
+        let skill_path = levels[3].clone();
+        let candidate_file = skill_path.join("helper.txt");
+        fs::write(&candidate_file, &source_bytes[..1]).expect("应写合法前缀");
+        fs::set_permissions(&candidate_file, fs::Permissions::from_mode(0o600))
+            .expect("应设置构建中权限");
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+        let audit = audit_takeover_v2_candidate(&harness.paths, &lock, &plan, &journal)
+            .expect("初始 Candidate 应通过只读审计");
+        let mut changed = false;
+
+        let result = remove_audited_takeover_v2_candidate_with_hook(
+            &harness.paths,
+            &lock,
+            &audit,
+            &mut |path| {
+                if !changed && path == candidate_file {
+                    // 模拟删除期间仅修改父目录 metadata，不替换 inode 或增加条目。
+                    fs::set_permissions(&skill_path, fs::Permissions::from_mode(0o711))
+                        .expect("应修改已审计目录 metadata");
+                    changed = true;
+                }
+            },
+        );
+
+        result.expect_err("目录 metadata 变化必须阻止删除");
+        assert!(changed);
+        assert!(skill_path.exists(), "发生变化的目录必须保留");
+        assert!(candidate_file.exists(), "变化被发现前不得删除子文件");
+        assert_eq!(
+            fs::symlink_metadata(&skill_path)
+                .expect("目录必须保留")
+                .mode()
+                & 0o7777,
+            0o711
         );
     }
 
@@ -1783,6 +3595,99 @@ mod tests {
             .expect_err("原地修改后的 Journal 必须保留");
 
         assert!(path.exists());
+    }
+
+    fn create_candidate_skeleton(
+        paths: &ApplicationPaths,
+        transaction_id: &str,
+        skill_name: &str,
+        created_depth: usize,
+    ) -> Vec<PathBuf> {
+        let levels = vec![
+            paths.staging_root().join(transaction_id),
+            paths.staging_root().join(transaction_id).join("candidate"),
+            paths
+                .staging_root()
+                .join(transaction_id)
+                .join("candidate/members"),
+            paths
+                .staging_root()
+                .join(transaction_id)
+                .join("candidate/members")
+                .join(skill_name),
+        ];
+        for path in levels.iter().take(created_depth) {
+            fs::create_dir(path).expect("应逐层创建候选骨架");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .expect("候选骨架应使用协议权限");
+        }
+        levels
+    }
+
+    fn save_sibling_plan(harness: &mut Harness) -> TakeoverV2Plan {
+        harness.save_single_plan_with_setup("alpha", |root| {
+            fs::set_permissions(root, fs::Permissions::from_mode(0o755))
+                .expect("应固定源 root 最终权限");
+            for directory_name in ["a", "b"] {
+                let directory = root.join(directory_name);
+                fs::create_dir(&directory).expect("应创建源 sibling 目录");
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+                    .expect("应固定源 sibling 目录最终权限");
+                let file = directory.join(format!("{directory_name}.txt"));
+                fs::write(&file, format!("{directory_name} content")).expect("应写源 sibling 文件");
+                fs::set_permissions(file, fs::Permissions::from_mode(0o644))
+                    .expect("应固定源 sibling 文件最终权限");
+            }
+        })
+    }
+
+    fn create_sibling_candidate(
+        paths: &ApplicationPaths,
+        transaction_id: &str,
+        source_root: &Path,
+        sibling_b_state: &str,
+    ) -> Vec<PathBuf> {
+        let levels = create_candidate_skeleton(paths, transaction_id, "alpha", 4);
+        let candidate_root = &levels[3];
+        for relative in ["SKILL.md", "helper.txt"] {
+            copy_test_candidate_file(source_root, candidate_root, relative);
+        }
+        let candidate_a = candidate_root.join("a");
+        fs::create_dir(&candidate_a).expect("应创建 Candidate A");
+        copy_test_candidate_file(source_root, candidate_root, "a/a.txt");
+        fs::set_permissions(&candidate_a, fs::Permissions::from_mode(0o755))
+            .expect("Candidate A 应模拟已完成目录 chmod");
+
+        if sibling_b_state != "missing" {
+            let candidate_b = candidate_root.join("b");
+            fs::create_dir(&candidate_b).expect("应创建 Candidate B");
+            fs::set_permissions(&candidate_b, fs::Permissions::from_mode(0o700))
+                .expect("Candidate B 应保持构建中权限");
+            if sibling_b_state == "complete" {
+                copy_test_candidate_file(source_root, candidate_root, "b/b.txt");
+            } else {
+                let source_b = fs::read(source_root.join("b/b.txt")).expect("应读取源 B 文件");
+                let candidate_b_file = candidate_b.join("b.txt");
+                fs::write(&candidate_b_file, &source_b[..source_b.len() / 2])
+                    .expect("应写 Candidate B 的合法半文件");
+                fs::set_permissions(&candidate_b_file, fs::Permissions::from_mode(0o600))
+                    .expect("Candidate B 半文件应保持 0600");
+            }
+        }
+        levels
+    }
+
+    fn copy_test_candidate_file(source_root: &Path, candidate_root: &Path, relative: &str) {
+        let source = source_root.join(relative);
+        let destination = candidate_root.join(relative);
+        fs::write(&destination, fs::read(&source).expect("应读取测试源文件"))
+            .expect("应复制测试 Candidate 文件");
+        let final_mode = fs::symlink_metadata(source)
+            .expect("应读取测试源权限")
+            .mode()
+            & 0o7777;
+        fs::set_permissions(destination, fs::Permissions::from_mode(final_mode))
+            .expect("测试 Candidate 文件应使用最终权限");
     }
 
     fn reset_plan_storage_identity(paths: &ApplicationPaths, plan: &mut TakeoverV2Plan) {
