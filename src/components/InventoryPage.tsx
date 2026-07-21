@@ -283,7 +283,7 @@ function InventorySection({
             key={entry.id}
             entry={entry}
             mounts={mounts.filter(
-              (mount) => mount.memberId === entry.memberId && mount.appId === "codex",
+              (mount) => mount.memberId === entry.memberId,
             )}
             onManageMount={onManageMount}
           />
@@ -327,7 +327,7 @@ function SkillCard({
       ) : null}
       {entry.managementKind === "skillYardManaged" && entry.memberId ? (
         <div className="mount-card-controls">
-          <div className="mount-badges" aria-label="当前 Codex 挂载">
+          <div className="mount-badges" aria-label="当前挂载">
             {mounts.length > 0 ? (
               mounts.map((mount) => (
                 <span key={mount.id} className={`mount-badge ${mount.health}`}>
@@ -338,7 +338,7 @@ function SkillCard({
                 </span>
               ))
             ) : (
-              <span className="mount-empty">Codex 未挂载</span>
+              <span className="mount-empty">未挂载</span>
             )}
           </div>
           <button
@@ -355,9 +355,10 @@ function SkillCard({
 }
 
 function mountLabel(mount: MountSummary): string {
+  const appName = supportedAppLabel(mount.appId);
   return mount.scope === "global"
-    ? "Codex · 全局"
-    : `Codex · ${mount.projectDisplayName ?? "已登记项目"}`;
+    ? `${appName} · 全局`
+    : `${appName} · ${mount.projectDisplayName ?? "已登记项目"}`;
 }
 
 function mountHealthLabel(health: MountSummary["health"]): string {

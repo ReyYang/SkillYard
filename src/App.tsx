@@ -9,6 +9,7 @@ import type {
   FolderInstallPlan,
   MountPlan,
   MountScope,
+  SupportedAppId,
   UiOutcome,
 } from "./domain";
 import {
@@ -151,6 +152,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   };
 
   const createMountPlan = async (
+    appId: SupportedAppId,
     scope: MountScope,
     projectId: string | null,
   ) => {
@@ -160,7 +162,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     try {
       const plan = await client.createMountPlan(
         managedMemberId,
-        "codex",
+        appId,
         scope,
         projectId,
       );
@@ -300,6 +302,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     return (
       <MountManagementPage
         entry={managedEntry}
+        supportedApps={viewState.outcome.supportedApps}
         projects={viewState.outcome.projects}
         mounts={viewState.outcome.mounts}
         isPlanning={isPlanningMount}

@@ -1,4 +1,4 @@
-import type { MountPlan } from "../domain";
+import type { MountPlan, SupportedAppId } from "../domain";
 
 interface MountPlanPageProps {
   plan: MountPlan;
@@ -15,14 +15,15 @@ export function MountPlanPage({
 }: MountPlanPageProps) {
   const isCreate = plan.operation === "create";
   const action = isCreate ? "创建" : "移除";
+  const appName = supportedAppLabel(plan.appId);
 
   return (
     <main className="mount-shell">
       <p className="eyebrow">SKILLYARD · CONFIRM MOUNT</p>
-      <h1>{`确认${action} Codex 挂载`}</h1>
+      <h1>{`确认${action} ${appName} 挂载`}</h1>
       <section className="install-plan" aria-label="挂载影响预览">
         <PlanRow label="Skill" value={plan.skillName} />
-        <PlanRow label="应用" value="Codex" />
+        <PlanRow label="应用" value={appName} />
         <PlanRow label="位置" value={mountDestinationLabel(plan)} />
         <PlanRow label="Mount 路径" value={plan.targetPath} isCode />
         <PlanRow label="指向" value={plan.expectedTarget} isCode />
@@ -40,6 +41,12 @@ export function MountPlanPage({
               : "移除挂载不会删除 Skill 或 Bundle，也不会影响其他使用位置。"}
           </span>
         </div>
+        {plan.appId === "claudeCode" && plan.scope === "project" ? (
+          <p className="mount-project-hint">
+            这个位置位于 <code>.claude/skills</code>，GitHub Copilot
+            也可能读取这里的 Skill。
+          </p>
+        ) : null}
       </section>
 
       <p className="mount-confirm-warning">
@@ -85,9 +92,18 @@ function PlanRow({
 }
 
 function mountDestinationLabel(plan: MountPlan): string {
+  const appName = supportedAppLabel(plan.appId);
   return plan.scope === "global"
-    ? "Codex 全局"
-    : `Codex 项目 ${plan.projectDisplayName ?? "已登记项目"}`;
+    ? `${appName} 全局`
+    : `${appName} 项目 ${plan.projectDisplayName ?? "已登记项目"}`;
+}
+
+function supportedAppLabel(appId: SupportedAppId): string {
+  return {
+    codex: "Codex",
+    claudeCode: "Claude Code",
+    gitHubCopilot: "GitHub Copilot",
+  }[appId];
 }
 
 function createImpactCopy(plan: MountPlan): string {

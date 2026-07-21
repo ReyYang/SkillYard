@@ -318,7 +318,7 @@ describe("本机清单", () => {
     expect(client.createMountPlan).not.toHaveBeenCalled();
   });
 
-  it("受管 Skill 卡直接显示当前 Codex global 和 project Mount", async () => {
+  it("受管 Skill 卡直接显示三个应用的真实 Mount", async () => {
     const client = createClient(
       inventoryOutcome(
         [createManagedEntry()],
@@ -327,11 +327,17 @@ describe("本机清单", () => {
           mounts: [
             createMount({ id: "mount-global", scope: "global" }),
             createMount({
-              id: "mount-project",
+              id: "mount-claude-project",
+              appId: "claudeCode",
               scope: "project",
               projectId: "project-1",
               projectDisplayName: "SkillYard",
-              targetPath: "/tmp/SkillYard/.codex/skills/example",
+              targetPath: "/tmp/SkillYard/.claude/skills/example",
+            }),
+            createMount({
+              id: "mount-copilot-global",
+              appId: "gitHubCopilot",
+              targetPath: "/tmp/.copilot/skills/example",
             }),
           ],
         },
@@ -342,8 +348,107 @@ describe("本机清单", () => {
 
     const bundle = await screen.findByRole("region", { name: "example-bundle" });
     expect(bundle).toHaveTextContent("Codex · 全局");
-    expect(bundle).toHaveTextContent("Codex · SkillYard");
+    expect(bundle).toHaveTextContent("Claude Code · SkillYard");
+    expect(bundle).toHaveTextContent("GitHub Copilot · 全局");
     expect(within(bundle).getByRole("button", { name: "管理挂载" })).toBeEnabled();
+  });
+
+  it("挂载管理按三个固定应用分区，未检测到也允许用户选择", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [createManagedEntry()],
+        null,
+        {
+          supportedApps: [
+            { id: "codex", displayName: "Codex", detected: true },
+            { id: "claudeCode", displayName: "Claude Code", detected: true },
+            {
+              id: "gitHubCopilot",
+              displayName: "GitHub Copilot",
+              detected: false,
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createMountPlan).mockResolvedValue(
+      createMountPlan({
+        appId: "gitHubCopilot",
+        targetPath: "/tmp/.copilot/skills/example",
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+
+    expect(screen.getByRole("region", { name: "Codex 挂载" })).toHaveTextContent(
+      "已检测到",
+    );
+    expect(
+      screen.getByRole("region", { name: "GitHub Copilot 挂载" }),
+    ).toHaveTextContent("未检测到");
+    const copilotGlobal = screen.getByRole("button", {
+      name: "挂载到 GitHub Copilot 全局",
+    });
+    expect(copilotGlobal).toBeEnabled();
+    await user.click(copilotGlobal);
+
+    expect(client.createMountPlan).toHaveBeenCalledWith(
+      "member-1",
+      "gitHubCopilot",
+      "global",
+      null,
+    );
+    expect(
+      screen.getByRole("heading", { name: "确认创建 GitHub Copilot 挂载" }),
+    ).toBeInTheDocument();
+  });
+
+  it("Claude Code project Mount 明确提示 Copilot 交叉可见性", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [createManagedEntry()],
+        null,
+        {
+          projects: [
+            {
+              id: "project-1",
+              displayName: "SkillYard",
+              rootPath: "/tmp/SkillYard",
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createMountPlan).mockResolvedValue(
+      createMountPlan({
+        appId: "claudeCode",
+        scope: "project",
+        projectId: "project-1",
+        projectDisplayName: "SkillYard",
+        targetPath: "/tmp/SkillYard/.claude/skills/example",
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: "挂载到 Claude Code 项目 SkillYard",
+      }),
+    );
+
+    expect(client.createMountPlan).toHaveBeenCalledWith(
+      "member-1",
+      "claudeCode",
+      "project",
+      "project-1",
+    );
+    expect(screen.getByLabelText("挂载影响预览")).toHaveTextContent(
+      "GitHub Copilot 也可能读取",
+    );
   });
 
   it("创建 global Mount 前先生成并确认精确 Plan", async () => {
@@ -424,7 +529,7 @@ describe("本机清单", () => {
 
     await user.click(await screen.findByRole("button", { name: "管理挂载" }));
     await user.click(
-      screen.getByRole("button", { name: "挂载到项目 SkillYard" }),
+      screen.getByRole("button", { name: "挂载到 Codex 项目 SkillYard" }),
     );
 
     expect(client.createMountPlan).toHaveBeenCalledWith(

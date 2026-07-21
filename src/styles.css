@@ -717,6 +717,27 @@ code {
   letter-spacing: -0.025em;
 }
 
+.mount-app-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mount-app-heading > span {
+  padding: 0.32rem 0.55rem;
+  border-radius: 999px;
+  color: #5f6d62;
+  background: #e8ede4;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.mount-panel h3 {
+  margin: 1.3rem 0 0;
+  color: #455249;
+  font-size: 0.9rem;
+}
+
 .mount-empty-copy,
 .mount-project-hint,
 .mount-confirm-warning {
