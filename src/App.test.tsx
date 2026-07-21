@@ -102,6 +102,139 @@ describe("本机清单", () => {
     expect(client.refreshLocalInventory).not.toHaveBeenCalled();
   });
 
+  it("选择文件夹后先显示影响预览，确认前不写入", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue({
+      id: "plan-1",
+      inputPath: "/Users/test/Downloads/example",
+      bundleDisplayName: "example",
+      skillName: "example",
+      targetDirectory: "/Users/test/Library/Application Support/SkillYard/bundles/1/current/members/example",
+      warnings: ["包含可执行文件，请确认来源可信"],
+      willMount: false,
+      createdAt: 1,
+      expiresAt: 2,
+    });
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    expect(client.chooseFolderInstallPlan).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("heading", { name: "确认安装这个 Skill" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("安装影响预览")).toHaveTextContent(
+      "安装后不会自动挂载",
+    );
+    expect(screen.getByText(/安装开始后不能取消/)).toBeInTheDocument();
+    expect(screen.getByText("包含可执行文件，请确认来源可信")).toBeInTheDocument();
+    expect(client.confirmInstallPlan).not.toHaveBeenCalled();
+  });
+
+  it("确认期间禁止取消或重复提交，成功后显示受管 Bundle", async () => {
+    const user = userEvent.setup();
+    let finishInstall: ((outcome: UiOutcome) => void) | undefined;
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue({
+      id: "plan-1",
+      inputPath: "/tmp/example",
+      bundleDisplayName: "example",
+      skillName: "example",
+      targetDirectory: "/tmp/central/example",
+      warnings: [],
+      willMount: false,
+      createdAt: 1,
+      expiresAt: 2,
+    });
+    vi.mocked(client.confirmInstallPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishInstall = resolve;
+        }),
+    );
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(screen.getByRole("button", { name: "确认安装" }));
+
+    expect(client.confirmInstallPlan).toHaveBeenCalledWith("plan-1");
+    expect(screen.getByRole("button", { name: "正在安全安装…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "正在安全安装…" }));
+    expect(client.confirmInstallPlan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishInstall?.(
+        inventoryOutcome([
+          createEntry({
+            managementKind: "skillYardManaged",
+            bundleId: "bundle-1",
+            bundleDisplayName: "example",
+          }),
+        ]),
+      );
+    });
+    expect(screen.getByRole("region", { name: "example" })).toHaveTextContent(
+      "example: example",
+    );
+  });
+
+  it("确认失败后丢弃已消费 Plan 并重新读取最终状态", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([]);
+    const recovered = inventoryOutcome([
+      createEntry({
+        managementKind: "skillYardManaged",
+        bundleId: "bundle-1",
+        bundleDisplayName: "example",
+      }),
+    ]);
+    const client = createClient(initial);
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue({
+      id: "plan-1",
+      inputPath: "/tmp/example",
+      bundleDisplayName: "example",
+      skillName: "example",
+      targetDirectory: "/tmp/central/example",
+      warnings: [],
+      willMount: false,
+      createdAt: 1,
+      expiresAt: 2,
+    });
+    vi.mocked(client.confirmInstallPlan).mockRejectedValue({
+      code: "lifecycleError",
+      message: "安装中断，已自动恢复",
+    });
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(recovered);
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(screen.getByRole("button", { name: "确认安装" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "安装中断，已自动恢复",
+    );
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "确认安装" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "example" })).toBeInTheDocument();
+  });
+
+  it("取消原生选择器时保持当前清单", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createEntry({ skillName: "preserved" })]),
+    );
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(null);
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    expect(screen.getByText("preserved")).toBeInTheDocument();
+    expect(client.confirmInstallPlan).not.toHaveBeenCalled();
+  });
+
   it("空清单仍然是完成状态", async () => {
     const client = createClient(inventoryOutcome([]));
 
@@ -286,6 +419,26 @@ describe("本机清单", () => {
     );
     expect(screen.getByText("上次结果")).toBeInTheDocument();
   });
+
+  it("人工恢复只提示相关 Bundle，同时保留其他清单浏览", async () => {
+    const client = createClient({
+      ...inventoryOutcome([createEntry({ skillName: "still-readable" })]),
+      recoveryIssues: [
+        {
+          id: "transaction-1",
+          bundleDisplayName: "damaged-bundle",
+          message: "current 指向未知状态",
+        },
+      ],
+    });
+    render(<App client={client} />);
+
+    const recovery = await screen.findByRole("region", { name: "需要人工恢复" });
+    expect(recovery).toHaveTextContent("damaged-bundle");
+    expect(recovery).toHaveTextContent("只停止修改相关 Bundle");
+    expect(screen.getByText("still-readable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "安装 Skill" })).toBeEnabled();
+  });
 });
 
 describe("平台检查", () => {
@@ -316,6 +469,8 @@ function createClient(startup: UiOutcome): SkillYardClient {
     getStartupState: vi.fn().mockResolvedValue(startup),
     startInitialScan: vi.fn(),
     refreshLocalInventory: vi.fn(),
+    chooseFolderInstallPlan: vi.fn(),
+    confirmInstallPlan: vi.fn(),
   };
 }
 
@@ -330,6 +485,7 @@ function inventoryOutcome(
     supportedApps: [],
     lastLocalRefresh,
     scanIssues: [],
+    recoveryIssues: [],
   };
 }
 

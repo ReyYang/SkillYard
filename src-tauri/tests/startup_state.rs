@@ -850,7 +850,7 @@ fn version_one_database_migrates_without_losing_inventory() {
     };
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].skill_name, "old-skill");
-    assert_eq!(entries[0].root_key, ScanRootKey::CodexGlobal);
+    assert_eq!(entries[0].root_key, Some(ScanRootKey::CodexGlobal));
     assert_eq!(
         entries[0].management_kind,
         ManagementKind::TakeoverCandidate
@@ -865,7 +865,7 @@ fn version_one_database_migrates_without_losing_inventory() {
             |row| row.get(0),
         )
         .expect("应读取 migration 版本");
-    assert_eq!(versions, "1,2");
+    assert_eq!(versions, "1,2,3");
 }
 
 fn write_skill(root: &std::path::Path, name: &str, script_contents: &str) {

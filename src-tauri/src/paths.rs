@@ -31,6 +31,26 @@ impl ApplicationPaths {
         self.data_root.join("skillyard.sqlite3")
     }
 
+    pub(crate) fn bundles_root(&self) -> PathBuf {
+        self.data_root.join("bundles")
+    }
+
+    pub(crate) fn staging_root(&self) -> PathBuf {
+        self.data_root.join("staging")
+    }
+
+    pub(crate) fn journals_root(&self) -> PathBuf {
+        self.data_root.join("journals")
+    }
+
+    pub(crate) fn central_store_notice(&self) -> PathBuf {
+        self.data_root.join("SKILLYARD-INFO.md")
+    }
+
+    pub(crate) fn bundle_directory(&self, bundle_id: &str) -> PathBuf {
+        self.bundles_root().join(bundle_id)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn home(&self) -> &Path {
         &self.home

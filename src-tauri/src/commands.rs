@@ -1,7 +1,10 @@
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 
-use crate::{SkillYardApplication, UiIntent, UiOutcome, application::ApplicationError};
+use crate::{
+    FolderInstallPlan, SkillYardApplication, UiIntent, UiOutcome, application::ApplicationError,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,6 +17,7 @@ impl From<ApplicationError> for UiError {
     fn from(error: ApplicationError) -> Self {
         let code = match &error {
             ApplicationError::Storage(_) => "storageError",
+            ApplicationError::Lifecycle(_) => "lifecycleError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",
@@ -46,6 +50,50 @@ pub fn refresh_local_inventory(
     application: State<'_, SkillYardApplication>,
 ) -> Result<UiOutcome, UiError> {
     dispatch(&application, UiIntent::RefreshLocalInventory)
+}
+
+/// 文件夹路径只由 Rust 原生选择器取得，前端不能提交任意本机路径。
+#[tauri::command(async)]
+pub fn choose_folder_install_plan(
+    app: AppHandle,
+    application: State<'_, SkillYardApplication>,
+) -> Result<Option<FolderInstallPlan>, UiError> {
+    let Some(folder) = app
+        .dialog()
+        .file()
+        .set_title("选择包含 SKILL.md 的 Skill 文件夹")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let path = folder.into_path().map_err(|error| UiError {
+        code: "dialogError",
+        message: format!("无法读取所选文件夹：{error}"),
+    })?;
+    let input_path = path.to_str().ok_or_else(|| UiError {
+        code: "invalidPath",
+        message: "所选文件夹名称包含 SkillYard 1.0 无法保存的字符".to_owned(),
+    })?;
+    match dispatch(
+        &application,
+        UiIntent::CreateFolderInstallPlan {
+            input_path: input_path.to_owned(),
+        },
+    )? {
+        UiOutcome::FolderInstallPlan { plan } => Ok(Some(plan)),
+        _ => Err(UiError {
+            code: "invalidOutcome",
+            message: "SkillYard 没有生成安装确认信息".to_owned(),
+        }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn confirm_install_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(&application, UiIntent::ConfirmInstallPlan { plan_id })
 }
 
 fn dispatch(application: &SkillYardApplication, intent: UiIntent) -> Result<UiOutcome, UiError> {
@@ -111,5 +159,26 @@ mod tests {
             .expect_err("首次扫描前不能刷新本机");
 
         assert_eq!(error.code, "invalidState");
+    }
+
+    #[test]
+    fn ipc_dispatch_keeps_lifecycle_errors_typed() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let application = SkillYardApplication::new(
+            ApplicationPaths::for_home(sandbox.path().join("data"), sandbox.path().join("home")),
+            PlatformInfo::supported_for_test(),
+        );
+        dispatch(&application, UiIntent::StartInitialScan).expect("应完成首次扫描");
+
+        let error = dispatch(
+            &application,
+            UiIntent::ConfirmInstallPlan {
+                plan_id: "unknown".to_owned(),
+            },
+        )
+        .expect_err("未知 Plan 应保留生命周期错误类型");
+
+        assert_eq!(error.code, "lifecycleError");
+        assert!(error.message.contains("未签发"));
     }
 }

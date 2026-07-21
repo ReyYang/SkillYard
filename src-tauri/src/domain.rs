@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 /// UI 只能通过这个封闭枚举表达业务意图，不能传入任意文件操作。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum UiIntent {
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
+    CreateFolderInstallPlan { input_path: String },
+    ConfirmInstallPlan { plan_id: String },
 }
 
 /// 固定 Supported App 的稳定标识。
@@ -43,6 +45,42 @@ pub struct InventoryObservation {
     pub root_key: ScanRootKey,
     pub stale: bool,
     pub management_kind: ManagementKind,
+}
+
+/// 主界面读模型合并扫描事实和受管领域记录，但两者仍分别持久化。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InventoryItem {
+    pub id: String,
+    pub skill_name: String,
+    pub declared_name: Option<String>,
+    pub skill_root: String,
+    pub skill_file: String,
+    pub location_kind: InventoryLocationKind,
+    pub metadata_status: SkillMetadataStatus,
+    pub observed_by: Vec<SupportedAppId>,
+    pub observed_fingerprint: String,
+    pub root_key: Option<ScanRootKey>,
+    pub stale: bool,
+    pub management_kind: ManagementKind,
+    pub bundle_id: Option<String>,
+    pub bundle_display_name: Option<String>,
+    pub source_display_name: Option<String>,
+    pub project_display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderInstallPlan {
+    pub id: String,
+    pub input_path: String,
+    pub bundle_display_name: String,
+    pub skill_name: String,
+    pub target_directory: String,
+    pub warnings: Vec<String>,
+    pub will_mount: bool,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
@@ -153,11 +191,20 @@ pub struct LocalRefreshSummary {
     pub removed: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryIssue {
+    pub id: String,
+    pub bundle_display_name: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InventoryLocationKind {
     AppGlobal,
     SharedReadOnly,
+    ManagedStore,
 }
 
 impl InventoryLocationKind {
@@ -165,6 +212,7 @@ impl InventoryLocationKind {
         match self {
             Self::AppGlobal => "app_global",
             Self::SharedReadOnly => "shared_read_only",
+            Self::ManagedStore => "managed_store",
         }
     }
 
@@ -172,6 +220,7 @@ impl InventoryLocationKind {
         match value {
             "app_global" => Some(Self::AppGlobal),
             "shared_read_only" => Some(Self::SharedReadOnly),
+            "managed_store" => Some(Self::ManagedStore),
             _ => None,
         }
     }
@@ -206,7 +255,11 @@ impl SkillMetadataStatus {
 
 /// Rust Core 返回给界面的完整可观察状态。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum UiOutcome {
     UnsupportedPlatform {
         actual_os: String,
@@ -220,10 +273,14 @@ pub enum UiOutcome {
     },
     Inventory {
         scan_completed_at: i64,
-        entries: Vec<InventoryObservation>,
+        entries: Vec<InventoryItem>,
         supported_apps: Vec<SupportedAppSummary>,
         last_local_refresh: Option<LocalRefreshSummary>,
         scan_issues: Vec<ScanIssue>,
+        recovery_issues: Vec<RecoveryIssue>,
+    },
+    FolderInstallPlan {
+        plan: FolderInstallPlan,
     },
 }
 
@@ -317,5 +374,33 @@ impl PlatformInfo {
 
     pub(crate) fn is_supported(&self) -> bool {
         self.os == "macos" && self.architecture == "aarch64" && self.major_version >= 14
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_outcome_uses_the_frontend_camel_case_contract() {
+        let outcome = UiOutcome::Inventory {
+            scan_completed_at: 10,
+            entries: Vec::new(),
+            supported_apps: Vec::new(),
+            last_local_refresh: None,
+            scan_issues: Vec::new(),
+            recovery_issues: vec![RecoveryIssue {
+                id: "txn".to_owned(),
+                bundle_display_name: "example".to_owned(),
+                message: "需要人工恢复".to_owned(),
+            }],
+        };
+
+        let value = serde_json::to_value(outcome).expect("应序列化 UI 状态");
+        assert_eq!(value["type"], "inventory");
+        assert_eq!(value["scanCompletedAt"], 10);
+        assert_eq!(value["recoveryIssues"][0]["bundleDisplayName"], "example");
+        assert!(value.get("scan_completed_at").is_none());
+        assert!(value.get("recovery_issues").is_none());
     }
 }

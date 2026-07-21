@@ -12,7 +12,7 @@ export interface InventoryObservation {
   declaredName: string | null;
   skillRoot: string;
   skillFile: string;
-  locationKind: "appGlobal" | "sharedReadOnly";
+  locationKind: "appGlobal" | "sharedReadOnly" | "managedStore";
   metadataStatus: "valid" | "invalid" | "unreadable";
   observedBy: SupportedAppId[];
   observedFingerprint: string;
@@ -20,14 +20,15 @@ export interface InventoryObservation {
     | "codexGlobal"
     | "claudeCodeGlobal"
     | "gitHubCopilotGlobal"
-    | "sharedAgents";
+    | "sharedAgents"
+    | null;
   stale: boolean;
   managementKind:
     | "skillYardManaged"
     | "takeoverCandidate"
     | "agentManaged"
     | "projectManaged";
-  // 后续领域 Issue 接入真实值；当前本机扫描不会伪造 Bundle、Source 或 Project。
+  // 受管安装由 Rust 投影真实 Bundle；扫描观察保持这些关系为空。
   bundleId?: string | null;
   bundleDisplayName?: string | null;
   sourceDisplayName?: string | null;
@@ -52,6 +53,24 @@ export interface ScanIssue {
   message: string;
 }
 
+export interface RecoveryIssue {
+  id: string;
+  bundleDisplayName: string;
+  message: string;
+}
+
+export interface FolderInstallPlan {
+  id: string;
+  inputPath: string;
+  bundleDisplayName: string;
+  skillName: string;
+  targetDirectory: string;
+  warnings: string[];
+  willMount: boolean;
+  createdAt: number;
+  expiresAt: number;
+}
+
 export type UiOutcome =
   | {
       type: "unsupportedPlatform";
@@ -72,4 +91,9 @@ export type UiOutcome =
       supportedApps: SupportedAppSummary[];
       lastLocalRefresh: LocalRefreshSummary | null;
       scanIssues: ScanIssue[];
+      recoveryIssues: RecoveryIssue[];
+    }
+  | {
+      type: "folderInstallPlan";
+      plan: FolderInstallPlan;
     };

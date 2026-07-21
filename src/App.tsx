@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
 import { InventoryPage } from "./components/InventoryPage";
+import { InstallFolderPage } from "./components/InstallFolderPage";
 import { OnboardingPage } from "./components/OnboardingPage";
-import type { UiOutcome } from "./domain";
+import type { FolderInstallPlan, UiOutcome } from "./domain";
 import {
   tauriSkillYardClient,
   type SkillYardClient,
@@ -22,6 +23,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [isScanning, setIsScanning] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [isChoosingFolder, setIsChoosingFolder] = useState(false);
+  const [pendingInstallPlan, setPendingInstallPlan] =
+    useState<FolderInstallPlan | null>(null);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -66,6 +72,47 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
+  const chooseFolderInstallPlan = async () => {
+    if (isChoosingFolder) return;
+    setIsChoosingFolder(true);
+    setInstallError(null);
+    try {
+      const plan = await client.chooseFolderInstallPlan();
+      if (plan) setPendingInstallPlan(plan);
+    } catch (error) {
+      setInstallError(formatError(error));
+    } finally {
+      setIsChoosingFolder(false);
+    }
+  };
+
+  const confirmInstall = async () => {
+    if (!pendingInstallPlan || isInstalling) return;
+    setIsInstalling(true);
+    setInstallError(null);
+    try {
+      const outcome = await client.confirmInstallPlan(pendingInstallPlan.id);
+      setPendingInstallPlan(null);
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      const message = formatError(error);
+      // Plan 一旦确认就可能已消费；失败后重新读取后端最终状态，不能让用户重试旧 Plan。
+      setPendingInstallPlan(null);
+      try {
+        const outcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome });
+        setInstallError(message);
+      } catch (recoveryError) {
+        setViewState({
+          status: "error",
+          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+        });
+      }
+    } finally {
+      setIsInstalling(false);
+    }
+  };
+
   if (viewState.status === "loading") {
     return (
       <main className="state-page" aria-label="SkillYard 正在启动">
@@ -81,6 +128,20 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         <h1>暂时无法继续</h1>
         <p>{viewState.message}</p>
       </main>
+    );
+  }
+  if (pendingInstallPlan) {
+    return (
+      <InstallFolderPage
+        plan={pendingInstallPlan}
+        isInstalling={isInstalling}
+        error={installError}
+        onCancel={() => {
+          setInstallError(null);
+          setPendingInstallPlan(null);
+        }}
+        onConfirm={confirmInstall}
+      />
     );
   }
   if (viewState.outcome.type === "onboardingRequired") {
@@ -105,12 +166,24 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     );
   }
 
+  if (viewState.outcome.type !== "inventory") {
+    return (
+      <main className="state-page" role="alert">
+        <h1>暂时无法继续</h1>
+        <p>SkillYard 收到了无法显示的应用状态。</p>
+      </main>
+    );
+  }
+
   return (
     <InventoryPage
       outcome={viewState.outcome}
       isRefreshing={isRefreshing}
+      isChoosingFolder={isChoosingFolder}
       refreshError={refreshError}
+      installError={installError}
       onRefresh={refreshLocalInventory}
+      onInstall={chooseFolderInstallPlan}
     />
   );
 }

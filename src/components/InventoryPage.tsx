@@ -8,8 +8,11 @@ type ManagementFilter = "all" | "managed" | "takeover" | "other";
 interface InventoryPageProps {
   outcome: InventoryOutcome;
   isRefreshing: boolean;
+  isChoosingFolder: boolean;
   refreshError: string | null;
+  installError: string | null;
   onRefresh(): void;
+  onInstall(): void;
 }
 
 const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
@@ -22,8 +25,11 @@ const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
 export function InventoryPage({
   outcome,
   isRefreshing,
+  isChoosingFolder,
   refreshError,
+  installError,
   onRefresh,
+  onInstall,
 }: InventoryPageProps) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ManagementFilter>("all");
@@ -66,15 +72,45 @@ export function InventoryPage({
               : `本机已有 ${outcome.entries.length} 个 Skill`}
           </p>
         </div>
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isRefreshing}
-          onClick={onRefresh}
-        >
-          {isRefreshing ? "正在刷新本机…" : "刷新本机"}
-        </button>
+        <div className="inventory-actions">
+          <button
+            className="primary-action"
+            type="button"
+            disabled={isChoosingFolder}
+            onClick={onInstall}
+          >
+            {isChoosingFolder ? "正在选择…" : "安装 Skill"}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isRefreshing}
+            onClick={onRefresh}
+          >
+            {isRefreshing ? "正在刷新本机…" : "刷新本机"}
+          </button>
+        </div>
       </header>
+
+      {outcome.recoveryIssues.length > 0 ? (
+        <section className="recovery-warning" aria-label="需要人工恢复">
+          <p className="section-eyebrow">FILESYSTEM RECOVERY</p>
+          <h2>需要人工恢复</h2>
+          <p>
+            SkillYard 无法安全判断下面操作的最终状态，因此只停止修改相关 Bundle。其他
+            Skill 和只读清单仍可正常使用。
+          </p>
+          <ul>
+            {outcome.recoveryIssues.map((issue) => (
+              <li key={issue.id}>
+                <strong>{issue.bundleDisplayName}</strong>
+                <span>{issue.message}</span>
+              </li>
+            ))}
+          </ul>
+          <p>请保留 Central Store 中的现有内容，不要手动删除相关目录。</p>
+        </section>
+      ) : null}
 
       <section className="inventory-controls" aria-label="清单筛选">
         <label className="search-field">
@@ -105,6 +141,13 @@ export function InventoryPage({
         <div className="inline-error" role="alert">
           <strong>刷新未完成</strong>
           <span>{refreshError}</span>
+        </div>
+      ) : null}
+
+      {installError ? (
+        <div className="inline-error" role="alert">
+          <strong>无法准备安装</strong>
+          <span>{installError}</span>
         </div>
       ) : null}
 

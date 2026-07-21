@@ -33,6 +33,7 @@ button:focus-visible {
 
 .onboarding-shell,
 .inventory-shell,
+.install-shell,
 .state-page {
   min-height: 100vh;
 }
@@ -185,6 +186,7 @@ code {
 }
 
 .inventory-shell,
+.install-shell,
 .state-page {
   max-width: 980px;
   margin: 0 auto;
@@ -219,6 +221,76 @@ code {
   margin: 1rem 0 0;
   color: #69726a;
   font-size: 1rem;
+}
+
+.inventory-actions,
+.install-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.install-shell {
+  max-width: 860px;
+}
+
+.install-shell h1 {
+  font-size: clamp(2.7rem, 6vw, 4.5rem);
+}
+
+.install-plan {
+  display: grid;
+  gap: 0;
+  margin: 2.7rem 0 1.3rem;
+  overflow: hidden;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 18px;
+  background: rgb(255 255 251 / 78%);
+  box-shadow: 0 18px 48px rgb(34 57 41 / 8%);
+}
+
+.install-plan-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.25fr) minmax(0, 1fr);
+  gap: 1.2rem;
+  align-items: center;
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid rgb(50 70 56 / 8%);
+}
+
+.install-plan-row > span {
+  color: #748078;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.install-plan-row code {
+  display: block;
+}
+
+.install-mount-note {
+  display: grid;
+  gap: 0.3rem;
+  padding: 1rem 1.2rem;
+  color: #38533f;
+  background: #e4efd8;
+}
+
+.install-mount-note span,
+.install-warnings {
+  color: #657069;
+  font-size: 0.82rem;
+}
+
+.install-warnings {
+  margin: 0;
+  padding: 1rem 1.2rem 1rem 2.3rem;
+  background: #f2e8bd;
+}
+
+.install-actions {
+  justify-content: flex-end;
+  margin-top: 1.4rem;
 }
 
 .secondary-action {
@@ -293,7 +365,8 @@ code {
 }
 
 .inline-error,
-.scan-warning {
+.scan-warning,
+.recovery-warning {
   margin: 1rem 0;
   padding: 1rem 1.1rem;
   border-radius: 13px;
@@ -310,6 +383,43 @@ code {
 .scan-warning {
   color: #655424;
   background: #f2e8bd;
+}
+
+.recovery-warning {
+  margin-top: 2rem;
+  color: #6b342b;
+  background: #f4ddd6;
+  border: 1px solid rgb(121 53 42 / 12%);
+}
+
+.recovery-warning h2 {
+  margin: 0;
+  font-size: 1.45rem;
+}
+
+.recovery-warning > p {
+  margin: 0.55rem 0 0;
+  line-height: 1.55;
+}
+
+.recovery-warning ul {
+  display: grid;
+  gap: 0.55rem;
+  margin: 1rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recovery-warning li {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.8rem;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 45%);
+}
+
+.recovery-warning li span {
+  font-size: 0.82rem;
 }
 
 .scan-warning p {

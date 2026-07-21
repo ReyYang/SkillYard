@@ -28,6 +28,9 @@ describe("Tauri IPC contract", () => {
       scanCompletedAt: 1,
       entries: [],
       supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
     });
 
     await tauriSkillYardClient.startInitialScan();
@@ -43,10 +46,37 @@ describe("Tauri IPC contract", () => {
       supportedApps: [],
       lastLocalRefresh: null,
       scanIssues: [],
+      recoveryIssues: [],
     });
 
     await tauriSkillYardClient.refreshLocalInventory();
 
     expect(mocks.invoke).toHaveBeenCalledWith("refresh_local_inventory");
+  });
+
+  it("只通过 Rust 任务命令打开文件夹选择器", async () => {
+    mocks.invoke.mockResolvedValue(null);
+
+    await tauriSkillYardClient.chooseFolderInstallPlan();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("choose_folder_install_plan");
+  });
+
+  it("确认时只把 opaque Plan ID 交回 Rust", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+    });
+
+    await tauriSkillYardClient.confirmInstallPlan("plan-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("confirm_install_plan", {
+      planId: "plan-1",
+    });
   });
 });

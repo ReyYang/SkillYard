@@ -2,17 +2,20 @@
 
 mod application;
 mod commands;
+mod content;
 mod domain;
+mod lifecycle;
 mod paths;
 mod scanner;
 mod storage;
 
 pub use application::SkillYardApplication;
 pub use domain::{
-    InventoryLocationKind, InventoryObservation, LocalRefreshSummary, ManagementKind, PlatformInfo,
-    ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus, SupportedAppId, UiIntent,
-    UiOutcome,
+    FolderInstallPlan, InventoryItem, InventoryLocationKind, InventoryObservation,
+    LocalRefreshSummary, ManagementKind, PlatformInfo, RecoveryIssue, ScanIssue, ScanIssueCode,
+    ScanRootKey, SkillMetadataStatus, SupportedAppId, UiIntent, UiOutcome,
 };
+pub use lifecycle::LifecycleFailpoint;
 pub use paths::ApplicationPaths;
 
 /// 启动唯一的 SkillYard 桌面应用入口。
@@ -26,11 +29,14 @@ pub fn run() {
     );
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(application)
         .invoke_handler(tauri::generate_handler![
             commands::get_startup_state,
             commands::start_initial_scan,
-            commands::refresh_local_inventory
+            commands::refresh_local_inventory,
+            commands::choose_folder_install_plan,
+            commands::confirm_install_plan
         ])
         .run(tauri::generate_context!())
         .expect("SkillYard.app 运行失败");

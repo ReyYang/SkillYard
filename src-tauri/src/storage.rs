@@ -1,27 +1,40 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    io::ErrorKind,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use thiserror::Error;
 
 use crate::domain::{
-    InventoryLocationKind, InventoryObservation, LocalRefreshSummary, ManagementKind, ScanIssue,
-    ScanIssueCode, ScanRootKey, SkillMetadataStatus, SupportedAppId, SupportedAppSummary,
-    UiOutcome,
+    InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
+    ManagementKind, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
+    SupportedAppId, SupportedAppSummary, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (2, include_str!("../migrations/0002_local_inventory.sql")),
+    (3, include_str!("../migrations/0003_folder_install.sql")),
 ];
 
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("无法创建 SkillYard 数据目录：{0}")]
     CreateDataRoot(#[source] std::io::Error),
+    #[error("无法检查 SkillYard 数据目录：{0}")]
+    InspectDataRoot(#[source] std::io::Error),
+    #[error("SkillYard 数据目录不能是符号链接或其他文件类型：{0}")]
+    UnsafeDataRoot(PathBuf),
+    #[error("无法检查 SkillYard SQLite 路径：{0}")]
+    InspectDatabase(#[source] std::io::Error),
+    #[error("SkillYard SQLite 不能是符号链接或其他文件类型：{0}")]
+    UnsafeDatabase(PathBuf),
     #[error("无法打开 SkillYard SQLite：{0}")]
     OpenDatabase(#[source] rusqlite::Error),
     #[error("无法执行 SkillYard SQLite migration：{0}")]
@@ -46,23 +59,149 @@ pub enum StorageError {
     UnknownScanIssueCode(String),
     #[error("SQLite 中包含非法刷新统计值：{0}")]
     InvalidRefreshCount(i64),
+    #[error("安装 Plan 未签发或已经不存在")]
+    InstallPlanNotFound,
+    #[error("安装 Plan 已经使用，不能重复确认")]
+    InstallPlanConsumed,
+    #[error("安装 Plan 已过期，请重新选择文件夹")]
+    InstallPlanExpired,
+    #[error("已有一项生命周期写事务正在执行")]
+    ActiveLifecycleTransaction,
+    #[error("无法保存安装 Plan：{0}")]
+    SaveInstallPlan(#[source] rusqlite::Error),
+    #[error("无法读取安装 Plan：{0}")]
+    ReadInstallPlan(#[source] rusqlite::Error),
+    #[error("安装 Plan 中的风险提示损坏：{0}")]
+    InvalidPlanWarnings(#[source] serde_json::Error),
+    #[error("无法保存生命周期事务：{0}")]
+    SaveLifecycleTransaction(#[source] rusqlite::Error),
+    #[error("无法读取生命周期事务：{0}")]
+    ReadLifecycleTransaction(#[source] rusqlite::Error),
+    #[error("无法读取人工恢复状态：{0}")]
+    ReadRecoveryIssues(#[source] rusqlite::Error),
+    #[error("无法保存受管 Bundle：{0}")]
+    SaveManagedBundle(#[source] rusqlite::Error),
+    #[error("受管 Bundle 的持久化状态与事务计划不一致")]
+    ManagedStateConflict,
+    #[error("生命周期事务不存在或当前状态不允许该操作：{0}")]
+    LifecycleStateConflict(String),
+    #[error("SQLite 中包含未知生命周期阶段：{0}")]
+    InvalidLifecyclePhase(String),
+    #[error("受管内容路径不符合 Central Store 固定布局：{0}")]
+    UnsafeManagedPath(String),
 }
 
 pub struct Storage {
     connection: Connection,
+    data_root: PathBuf,
 }
 
 pub struct SavedLocalRefresh {
-    pub entries: Vec<InventoryObservation>,
+    pub entries: Vec<InventoryItem>,
     pub supported_apps: Vec<SupportedAppSummary>,
     pub summary: LocalRefreshSummary,
+    pub recovery_issues: Vec<RecoveryIssue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredInstallPlan {
+    pub id: String,
+    pub input_path: String,
+    pub input_device: u64,
+    pub input_inode: u64,
+    pub input_fingerprint: String,
+    pub bundle_id: String,
+    pub bundle_display_name: String,
+    pub member_id: String,
+    pub skill_name: String,
+    pub skill_description: String,
+    pub expires_at: i64,
+    pub status: String,
+}
+
+pub struct NewInstallPlan<'a> {
+    pub id: &'a str,
+    pub input_path: &'a str,
+    pub input_device: u64,
+    pub input_inode: u64,
+    pub input_fingerprint: &'a str,
+    pub bundle_id: &'a str,
+    pub bundle_display_name: &'a str,
+    pub member_id: &'a str,
+    pub skill_name: &'a str,
+    pub skill_description: &'a str,
+    pub warnings: &'a [String],
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredLifecycleTransaction {
+    pub id: String,
+    pub plan_id: String,
+    pub bundle_id: String,
+    pub member_id: String,
+    pub journal_path: String,
+    pub phase: String,
+    pub status: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecyclePhase {
+    JournalPending,
+    JournalReady,
+    CandidateReady,
+    Activated,
+    StateCommitted,
+}
+
+impl LifecyclePhase {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "journal_pending" => Some(Self::JournalPending),
+            "journal_ready" => Some(Self::JournalReady),
+            "candidate_ready" => Some(Self::CandidateReady),
+            "activated" => Some(Self::Activated),
+            "state_committed" => Some(Self::StateCommitted),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::JournalPending => "journal_pending",
+            Self::JournalReady => "journal_ready",
+            Self::CandidateReady => "candidate_ready",
+            Self::Activated => "activated",
+            Self::StateCommitted => "state_committed",
+        }
+    }
+
+    fn previous(self) -> Option<Self> {
+        match self {
+            Self::JournalPending => Some(Self::JournalPending),
+            Self::JournalReady => Some(Self::JournalPending),
+            Self::CandidateReady => Some(Self::JournalReady),
+            Self::Activated => Some(Self::CandidateReady),
+            Self::StateCommitted => None,
+        }
+    }
 }
 
 impl Storage {
     pub fn open(data_root: &Path, database: &Path) -> Result<Self, StorageError> {
-        fs::create_dir_all(data_root).map_err(StorageError::CreateDataRoot)?;
-        let connection = Connection::open(database).map_err(StorageError::OpenDatabase)?;
-        let mut storage = Self { connection };
+        ensure_safe_data_root(data_root)?;
+        let database_open_path = safe_database_open_path(data_root, database)?;
+        // SQLite 自己在最终打开点执行 no-follow，补上检查与 open 之间的竞态防线。
+        let connection = Connection::open_with_flags(
+            database_open_path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(StorageError::OpenDatabase)?;
+        let mut storage = Self {
+            connection,
+            data_root: data_root.to_owned(),
+        };
         storage.migrate()?;
         Ok(storage)
     }
@@ -72,6 +211,8 @@ impl Storage {
         self.connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
+                 PRAGMA synchronous = FULL;
+                 PRAGMA fullfsync = ON;
                  CREATE TABLE IF NOT EXISTS schema_migrations (
                     version INTEGER PRIMARY KEY,
                     applied_at INTEGER NOT NULL
@@ -128,8 +269,9 @@ impl Storage {
         };
 
         let supported_apps = self.read_supported_apps()?;
-        let entries = self.read_inventory_entries()?;
+        let entries = self.with_managed_entries(self.read_inventory_entries()?)?;
         let scan_issues = self.read_scan_issues()?;
+        let recovery_issues = self.read_recovery_issues()?;
         let last_local_refresh = refresh_at
             .map(|completed_at| {
                 Ok(LocalRefreshSummary {
@@ -147,6 +289,7 @@ impl Storage {
             supported_apps,
             last_local_refresh,
             scan_issues,
+            recovery_issues,
         }))
     }
 
@@ -223,10 +366,346 @@ impl Storage {
             .map_err(StorageError::SaveLocalRefresh)?;
 
         Ok(SavedLocalRefresh {
-            entries,
+            entries: self.with_managed_entries(entries)?,
             supported_apps,
             summary,
+            recovery_issues: self.read_recovery_issues()?,
         })
+    }
+
+    pub fn save_install_plan(&mut self, plan: NewInstallPlan<'_>) -> Result<(), StorageError> {
+        let warnings =
+            serde_json::to_string(plan.warnings).map_err(StorageError::InvalidPlanWarnings)?;
+        self.connection
+            .execute(
+                "INSERT INTO install_plans (id, kind, input_path, input_device, input_inode, input_fingerprint, bundle_id, bundle_display_name, member_id, skill_name, skill_description, warnings_json, created_at, expires_at, status)
+                 VALUES (?1, 'folder_snapshot', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending')",
+                params![
+                    plan.id,
+                    plan.input_path,
+                    plan.input_device as i64,
+                    plan.input_inode as i64,
+                    plan.input_fingerprint,
+                    plan.bundle_id,
+                    plan.bundle_display_name,
+                    plan.member_id,
+                    plan.skill_name,
+                    plan.skill_description,
+                    warnings,
+                    plan.created_at,
+                    plan.expires_at
+                ],
+            )
+            .map_err(StorageError::SaveInstallPlan)?;
+        Ok(())
+    }
+
+    pub fn read_install_plan(&self, plan_id: &str) -> Result<StoredInstallPlan, StorageError> {
+        read_install_plan_from(&self.connection, plan_id)?.ok_or(StorageError::InstallPlanNotFound)
+    }
+
+    pub fn begin_install_transaction(
+        &mut self,
+        plan_id: &str,
+        transaction_id: &str,
+        journal_path: &str,
+        now: i64,
+    ) -> Result<StoredInstallPlan, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        let plan = read_install_plan_from(&transaction, plan_id)?
+            .ok_or(StorageError::InstallPlanNotFound)?;
+        if plan.status != "pending" {
+            return Err(StorageError::InstallPlanConsumed);
+        }
+        if plan.expires_at <= now {
+            return Err(StorageError::InstallPlanExpired);
+        }
+        let inserted = transaction
+            .execute(
+                "INSERT INTO lifecycle_transactions (id, kind, plan_id, bundle_id, member_id, journal_path, phase, status, created_at, updated_at)
+                 VALUES (?1, 'install_folder', ?2, ?3, ?4, ?5, 'journal_pending', 'in_progress', ?6, ?6)",
+                params![
+                    transaction_id,
+                    plan.id,
+                    plan.bundle_id,
+                    plan.member_id,
+                    journal_path,
+                    now
+                ],
+            )
+            .map_err(map_lifecycle_insert_error)?;
+        ensure_one_lifecycle_row(inserted, transaction_id)?;
+        let consumed = transaction
+            .execute(
+                "UPDATE install_plans SET status = 'consumed' WHERE id = ?1 AND status = 'pending'",
+                [&plan.id],
+            )
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        ensure_one_lifecycle_row(consumed, transaction_id)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        Ok(plan)
+    }
+
+    pub fn update_lifecycle_phase(
+        &mut self,
+        transaction_id: &str,
+        phase: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let next = LifecyclePhase::from_str(phase)
+            .ok_or_else(|| StorageError::InvalidLifecyclePhase(phase.to_owned()))?;
+        let Some(previous) = next.previous() else {
+            return Err(StorageError::LifecycleStateConflict(
+                transaction_id.to_owned(),
+            ));
+        };
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE lifecycle_transactions
+                 SET phase = ?2, updated_at = ?4
+                 WHERE id = ?1
+                   AND status = 'in_progress'
+                   AND phase IN (?2, ?3)",
+                params![transaction_id, next.as_str(), previous.as_str(), now],
+            )
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        ensure_one_lifecycle_row(changed, transaction_id)
+    }
+
+    pub fn abort_lifecycle_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: Option<&str>,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE lifecycle_transactions
+                 SET status = 'aborted', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1
+                   AND status = 'in_progress'
+                   AND phase IN ('journal_pending', 'journal_ready', 'candidate_ready')",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        ensure_one_lifecycle_row(changed, transaction_id)
+    }
+
+    pub fn block_lifecycle_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE lifecycle_transactions SET status = 'blocked', error_message = ?2, updated_at = ?3 WHERE id = ?1 AND status IN ('in_progress', 'completed', 'aborted')",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        ensure_one_lifecycle_row(changed, transaction_id)
+    }
+
+    pub fn forget_terminal_transaction(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        let stored = transaction
+            .query_row(
+                "SELECT plan_id, status FROM lifecycle_transactions WHERE id = ?1",
+                [transaction_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveLifecycleTransaction)?;
+        if let Some((plan_id, status)) = stored {
+            if !matches!(status.as_str(), "completed" | "aborted") {
+                return Err(StorageError::LifecycleStateConflict(
+                    transaction_id.to_owned(),
+                ));
+            }
+            let deleted_transaction = transaction
+                .execute(
+                    "DELETE FROM lifecycle_transactions WHERE id = ?1 AND status IN ('completed', 'aborted')",
+                    [transaction_id],
+                )
+                .map_err(StorageError::SaveLifecycleTransaction)?;
+            ensure_one_lifecycle_row(deleted_transaction, transaction_id)?;
+            let deleted_plan = transaction
+                .execute("DELETE FROM install_plans WHERE id = ?1", [plan_id])
+                .map_err(StorageError::SaveLifecycleTransaction)?;
+            ensure_one_lifecycle_row(deleted_plan, transaction_id)?;
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveLifecycleTransaction)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_install(
+        &mut self,
+        transaction_id: &str,
+        plan: &StoredInstallPlan,
+        managed_directory: &str,
+        current_target: &str,
+        stable_relative_path: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        validate_managed_install_paths(
+            transaction_id,
+            plan,
+            managed_directory,
+            current_target,
+            stable_relative_path,
+        )?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveManagedBundle)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO bundles (id, display_name, managed_directory, current_target, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    plan.bundle_id,
+                    plan.bundle_display_name,
+                    managed_directory,
+                    current_target,
+                    now
+                ],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO skill_members (id, bundle_id, skill_name, description, stable_relative_path, content_fingerprint, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    plan.member_id,
+                    plan.bundle_id,
+                    plan.skill_name,
+                    plan.skill_description,
+                    stable_relative_path,
+                    plan.input_fingerprint,
+                    now
+                ],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO member_selections (bundle_id, member_id, selected_at) VALUES (?1, ?2, ?3)",
+                params![plan.bundle_id, plan.member_id, now],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        ensure_managed_state_matches(
+            &transaction,
+            plan,
+            managed_directory,
+            current_target,
+            stable_relative_path,
+        )?;
+        let changed = transaction
+            .execute(
+                "UPDATE lifecycle_transactions
+                 SET phase = 'state_committed', status = 'completed', updated_at = ?5
+                 WHERE id = ?1
+                   AND plan_id = ?2
+                   AND bundle_id = ?3
+                   AND member_id = ?4
+                   AND (
+                       (status = 'in_progress' AND phase IN ('candidate_ready', 'activated'))
+                       OR (status = 'completed' AND phase = 'state_committed')
+                   )",
+                params![transaction_id, plan.id, plan.bundle_id, plan.member_id, now],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        ensure_one_lifecycle_row(changed, transaction_id)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveManagedBundle)
+    }
+
+    pub fn recoverable_lifecycle_transactions(
+        &self,
+    ) -> Result<Vec<StoredLifecycleTransaction>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, plan_id, bundle_id, member_id, journal_path, phase, status FROM lifecycle_transactions WHERE status IN ('in_progress', 'completed', 'aborted', 'blocked') ORDER BY created_at",
+            )
+            .map_err(StorageError::ReadLifecycleTransaction)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(StoredLifecycleTransaction {
+                    id: row.get(0)?,
+                    plan_id: row.get(1)?,
+                    bundle_id: row.get(2)?,
+                    member_id: row.get(3)?,
+                    journal_path: row.get(4)?,
+                    phase: row.get(5)?,
+                    status: row.get(6)?,
+                })
+            })
+            .map_err(StorageError::ReadLifecycleTransaction)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadLifecycleTransaction)
+    }
+
+    pub fn managed_bundle_notice_rows(&self) -> Result<Vec<(String, String)>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, display_name, managed_directory, current_target FROM bundles ORDER BY display_name, id",
+            )
+            .map_err(StorageError::ReadInventory)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(StorageError::ReadInventory)?;
+        let mut safe_rows = Vec::new();
+        for row in rows {
+            let (bundle_id, display_name, managed_directory, current_target) =
+                row.map_err(StorageError::ReadInventory)?;
+            if !is_single_path_component(&bundle_id)
+                || managed_directory != format!("bundles/{bundle_id}")
+                || !is_safe_current_target(&current_target)
+            {
+                return Err(StorageError::UnsafeManagedPath(managed_directory));
+            }
+            safe_rows.push((display_name, managed_directory));
+        }
+        Ok(safe_rows)
+    }
+
+    fn with_managed_entries(
+        &self,
+        entries: Vec<InventoryObservation>,
+    ) -> Result<Vec<InventoryItem>, StorageError> {
+        let mut entries = entries
+            .into_iter()
+            .map(inventory_item_from_observation)
+            .collect::<Vec<_>>();
+        entries.extend(read_managed_entries_from(
+            &self.connection,
+            &self.data_root,
+        )?);
+        entries.sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
+        Ok(entries)
     }
 
     fn read_supported_apps(&self) -> Result<Vec<SupportedAppSummary>, StorageError> {
@@ -268,6 +747,150 @@ impl Storage {
         }
         Ok(issues)
     }
+
+    fn read_recovery_issues(&self) -> Result<Vec<RecoveryIssue>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT lifecycle.id, COALESCE(plan.bundle_display_name, lifecycle.bundle_id), COALESCE(lifecycle.error_message, '事务状态无法自动判断')
+                 FROM lifecycle_transactions AS lifecycle
+                 LEFT JOIN install_plans AS plan ON plan.id = lifecycle.plan_id
+                 WHERE lifecycle.status = 'blocked'
+                 ORDER BY lifecycle.created_at, lifecycle.id",
+            )
+            .map_err(StorageError::ReadRecoveryIssues)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(RecoveryIssue {
+                    id: row.get(0)?,
+                    bundle_display_name: row.get(1)?,
+                    message: row.get(2)?,
+                })
+            })
+            .map_err(StorageError::ReadRecoveryIssues)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadRecoveryIssues)
+    }
+}
+
+fn ensure_safe_data_root(data_root: &Path) -> Result<(), StorageError> {
+    match fs::symlink_metadata(data_root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(StorageError::UnsafeDataRoot(data_root.to_owned()));
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            fs::create_dir_all(data_root).map_err(StorageError::CreateDataRoot)?;
+        }
+        Err(error) => return Err(StorageError::InspectDataRoot(error)),
+    }
+
+    // 创建后再检查一次，避免把并发替换成符号链接的目录交给 SQLite。
+    let metadata = fs::symlink_metadata(data_root).map_err(StorageError::InspectDataRoot)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(StorageError::UnsafeDataRoot(data_root.to_owned()));
+    }
+    Ok(())
+}
+
+fn safe_database_open_path(data_root: &Path, database: &Path) -> Result<PathBuf, StorageError> {
+    if database.parent() != Some(data_root) {
+        return Err(StorageError::UnsafeDatabase(database.to_owned()));
+    }
+    match fs::symlink_metadata(database) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.nlink() != 1 {
+                return Err(StorageError::UnsafeDatabase(database.to_owned()));
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(StorageError::InspectDatabase(error)),
+    }
+    let file_name = database.file_name().ok_or_else(|| {
+        StorageError::InspectDatabase(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "SQLite 路径缺少文件名",
+        ))
+    })?;
+    if !is_single_path_component(file_name.to_string_lossy().as_ref()) {
+        return Err(StorageError::UnsafeDatabase(database.to_owned()));
+    }
+    // macOS 的 /var 本身是符号链接；只规范化已校验目录，最终数据库文件仍由 NOFOLLOW 保护。
+    let canonical_root = fs::canonicalize(data_root).map_err(StorageError::InspectDatabase)?;
+    Ok(canonical_root.join(file_name))
+}
+
+fn ensure_one_lifecycle_row(changed: usize, transaction_id: &str) -> Result<(), StorageError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::LifecycleStateConflict(
+            transaction_id.to_owned(),
+        ))
+    }
+}
+
+fn validate_managed_install_paths(
+    transaction_id: &str,
+    plan: &StoredInstallPlan,
+    managed_directory: &str,
+    current_target: &str,
+    stable_relative_path: &str,
+) -> Result<(), StorageError> {
+    if !is_single_path_component(transaction_id)
+        || !is_single_path_component(&plan.bundle_id)
+        || !is_single_path_component(&plan.skill_name)
+        || managed_directory != format!("bundles/{}", plan.bundle_id)
+        || current_target != format!("contents/{transaction_id}")
+        || stable_relative_path != format!("members/{}", plan.skill_name)
+    {
+        return Err(StorageError::UnsafeManagedPath(
+            managed_directory.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stored_managed_paths(
+    bundle_id: &str,
+    skill_name: &str,
+    managed_directory: &str,
+    current_target: &str,
+    stable_relative_path: &str,
+) -> Result<(), StorageError> {
+    if !is_single_path_component(bundle_id)
+        || !is_single_path_component(skill_name)
+        || managed_directory != format!("bundles/{bundle_id}")
+        || stable_relative_path != format!("members/{skill_name}")
+        || !is_safe_current_target(current_target)
+    {
+        return Err(StorageError::UnsafeManagedPath(
+            managed_directory.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_safe_current_target(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    let prefix_is_contents = matches!(
+        components.next(),
+        Some(std::path::Component::Normal(prefix))
+            if prefix == std::ffi::OsStr::new("contents")
+    );
+    let content_id_is_safe = matches!(
+        components.next(),
+        Some(std::path::Component::Normal(content_id))
+            if is_single_path_component(content_id.to_string_lossy().as_ref())
+    );
+    prefix_is_contents && content_id_is_safe && components.next().is_none()
+}
+
+fn is_single_path_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
 }
 
 fn read_supported_apps_from(
@@ -378,6 +1001,229 @@ fn read_inventory_entries_from(
         }
     }
     Ok(entries)
+}
+
+fn read_install_plan_from(
+    connection: &Connection,
+    plan_id: &str,
+) -> Result<Option<StoredInstallPlan>, StorageError> {
+    let row = connection
+        .query_row(
+            "SELECT id, input_path, input_device, input_inode, input_fingerprint, bundle_id, bundle_display_name, member_id, skill_name, skill_description, expires_at, status FROM install_plans WHERE id = ?1",
+            [plan_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, String>(11)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadInstallPlan)?;
+    let Some((
+        id,
+        input_path,
+        input_device,
+        input_inode,
+        input_fingerprint,
+        bundle_id,
+        bundle_display_name,
+        member_id,
+        skill_name,
+        skill_description,
+        expires_at,
+        status,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    Ok(Some(StoredInstallPlan {
+        id,
+        input_path,
+        input_device: input_device as u64,
+        input_inode: input_inode as u64,
+        input_fingerprint,
+        bundle_id,
+        bundle_display_name,
+        member_id,
+        skill_name,
+        skill_description,
+        expires_at,
+        status,
+    }))
+}
+
+fn inventory_item_from_observation(observation: InventoryObservation) -> InventoryItem {
+    InventoryItem {
+        id: observation.id,
+        skill_name: observation.skill_name,
+        declared_name: observation.declared_name,
+        skill_root: observation.skill_root,
+        skill_file: observation.skill_file,
+        location_kind: observation.location_kind,
+        metadata_status: observation.metadata_status,
+        observed_by: observation.observed_by,
+        observed_fingerprint: observation.observed_fingerprint,
+        root_key: Some(observation.root_key),
+        stale: observation.stale,
+        management_kind: observation.management_kind,
+        bundle_id: None,
+        bundle_display_name: None,
+        source_display_name: None,
+        project_display_name: None,
+    }
+}
+
+fn read_managed_entries_from(
+    connection: &Connection,
+    data_root: &Path,
+) -> Result<Vec<InventoryItem>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT member.id, member.skill_name, member.description, member.stable_relative_path, member.content_fingerprint, bundle.id, bundle.display_name, bundle.managed_directory, bundle.current_target
+             FROM skill_members member
+             JOIN member_selections selection ON selection.member_id = member.id AND selection.bundle_id = member.bundle_id
+             JOIN bundles bundle ON bundle.id = member.bundle_id
+             ORDER BY bundle.display_name, member.skill_name, member.id",
+        )
+        .map_err(StorageError::ReadInventory)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })
+        .map_err(StorageError::ReadInventory)?;
+    let mut entries = Vec::new();
+    for row in rows {
+        let (
+            member_id,
+            skill_name,
+            _description,
+            stable_relative_path,
+            content_fingerprint,
+            bundle_id,
+            bundle_display_name,
+            managed_directory,
+            current_target,
+        ) = row.map_err(StorageError::ReadInventory)?;
+        validate_stored_managed_paths(
+            &bundle_id,
+            &skill_name,
+            &managed_directory,
+            &current_target,
+            &stable_relative_path,
+        )?;
+        let skill_root = data_root
+            .join(&managed_directory)
+            .join("current")
+            .join(&stable_relative_path);
+        entries.push(InventoryItem {
+            id: format!("managed:{member_id}"),
+            declared_name: Some(skill_name.clone()),
+            skill_name,
+            skill_file: skill_root.join("SKILL.md").to_string_lossy().into_owned(),
+            skill_root: skill_root.to_string_lossy().into_owned(),
+            location_kind: InventoryLocationKind::ManagedStore,
+            metadata_status: SkillMetadataStatus::Valid,
+            observed_by: Vec::new(),
+            observed_fingerprint: content_fingerprint,
+            root_key: None,
+            stale: false,
+            management_kind: ManagementKind::SkillYardManaged,
+            bundle_id: Some(bundle_id),
+            bundle_display_name: Some(bundle_display_name),
+            source_display_name: None,
+            project_display_name: None,
+        });
+    }
+    Ok(entries)
+}
+
+fn map_lifecycle_insert_error(error: rusqlite::Error) -> StorageError {
+    if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error {
+        // 只有单写者 partial unique index 冲突才表示已有活跃事务；主键等约束必须保留原因。
+        if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            && message.contains("lifecycle_single_active")
+        {
+            return StorageError::ActiveLifecycleTransaction;
+        }
+    }
+    StorageError::SaveLifecycleTransaction(error)
+}
+
+fn ensure_managed_state_matches(
+    transaction: &Transaction<'_>,
+    plan: &StoredInstallPlan,
+    managed_directory: &str,
+    current_target: &str,
+    stable_relative_path: &str,
+) -> Result<(), StorageError> {
+    let bundle = transaction
+        .query_row(
+            "SELECT display_name, managed_directory, current_target FROM bundles WHERE id = ?1",
+            [&plan.bundle_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    let member = transaction
+        .query_row(
+            "SELECT bundle_id, skill_name, description, stable_relative_path, content_fingerprint FROM skill_members WHERE id = ?1",
+            [&plan.member_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    let bundle_matches = bundle
+        == (
+            plan.bundle_display_name.clone(),
+            managed_directory.to_owned(),
+            current_target.to_owned(),
+        );
+    let member_matches = member
+        == (
+            plan.bundle_id.clone(),
+            plan.skill_name.clone(),
+            plan.skill_description.clone(),
+            stable_relative_path.to_owned(),
+            plan.input_fingerprint.clone(),
+        );
+    if bundle_matches && member_matches {
+        Ok(())
+    } else {
+        Err(StorageError::ManagedStateConflict)
+    }
 }
 
 fn replace_inventory_rows(
@@ -549,11 +1395,591 @@ fn refresh_count(value: i64) -> Result<usize, StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        path::Path,
+        sync::{Arc, Barrier},
+    };
 
     use tempfile::tempdir;
 
     use super::*;
+
+    fn open_test_storage(root: &Path) -> Storage {
+        let data_root = root.join("data");
+        let database = data_root.join("skillyard.sqlite3");
+        Storage::open(&data_root, &database).expect("应打开隔离 SQLite")
+    }
+
+    fn save_test_plan(storage: &mut Storage, plan_id: &str, bundle_id: &str, member_id: &str) {
+        storage
+            .save_install_plan(NewInstallPlan {
+                id: plan_id,
+                input_path: "/tmp/example-skill",
+                input_device: 1,
+                input_inode: 2,
+                input_fingerprint: "sha256:test",
+                bundle_id,
+                bundle_display_name: bundle_id,
+                member_id,
+                skill_name: member_id,
+                skill_description: "测试 Skill",
+                warnings: &[],
+                created_at: 100,
+                expires_at: 1_000,
+            })
+            .expect("应保存安装 Plan");
+    }
+
+    fn advance_to_candidate_ready(storage: &mut Storage, transaction_id: &str) {
+        storage
+            .update_lifecycle_phase(transaction_id, "journal_ready", 201)
+            .expect("应记录 Journal 已就绪");
+        storage
+            .update_lifecycle_phase(transaction_id, "candidate_ready", 202)
+            .expect("应记录候选内容已就绪");
+    }
+
+    #[test]
+    fn open_rejects_a_data_root_symlink_or_file() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let actual = sandbox.path().join("actual");
+        fs::create_dir(&actual).expect("应创建符号链接目标目录");
+        let data_root = sandbox.path().join("data");
+        symlink(&actual, &data_root).expect("应创建数据目录符号链接");
+
+        let error = Storage::open(&data_root, &data_root.join("skillyard.sqlite3"))
+            .err()
+            .expect("数据根目录是符号链接时必须拒绝");
+
+        assert!(matches!(error, StorageError::UnsafeDataRoot(path) if path == data_root));
+        assert!(
+            !actual.join("skillyard.sqlite3").exists(),
+            "拒绝前不能在符号链接目标创建 SQLite"
+        );
+
+        fs::remove_file(&data_root).expect("应移除测试符号链接");
+        fs::write(&data_root, []).expect("应创建同名普通文件");
+        let file_error = Storage::open(&data_root, &data_root.join("skillyard.sqlite3"))
+            .err()
+            .expect("数据根目录是普通文件时必须拒绝");
+        assert!(matches!(
+            file_error,
+            StorageError::UnsafeDataRoot(path) if path == data_root
+        ));
+    }
+
+    #[test]
+    fn open_rejects_a_database_symlink_or_directory() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let target = data_root.join("actual.sqlite3");
+        fs::write(&target, []).expect("应创建符号链接目标文件");
+        let database = data_root.join("skillyard.sqlite3");
+        symlink(&target, &database).expect("应创建数据库符号链接");
+
+        let symlink_error = Storage::open(&data_root, &database)
+            .err()
+            .expect("数据库是符号链接时必须拒绝");
+        assert!(matches!(
+            symlink_error,
+            StorageError::UnsafeDatabase(path) if path == database
+        ));
+
+        fs::remove_file(&database).expect("应移除测试符号链接");
+        fs::create_dir(&database).expect("应创建同名目录");
+        let directory_error = Storage::open(&data_root, &database)
+            .err()
+            .expect("数据库路径是目录时必须拒绝");
+        assert!(matches!(
+            directory_error,
+            StorageError::UnsafeDatabase(path) if path == database
+        ));
+    }
+
+    #[test]
+    fn open_rejects_a_hard_linked_database() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let outside = sandbox.path().join("shared.sqlite3");
+        fs::write(&outside, []).expect("应创建外部文件");
+        let database = data_root.join("skillyard.sqlite3");
+        fs::hard_link(&outside, &database).expect("应创建数据库硬链接");
+
+        let error = Storage::open(&data_root, &database)
+            .err()
+            .expect("数据库硬链接必须被拒绝");
+
+        assert!(matches!(error, StorageError::UnsafeDatabase(path) if path == database));
+        assert!(fs::read(&outside).expect("外部文件应保持可读").is_empty());
+    }
+
+    #[test]
+    fn open_rejects_a_database_outside_the_data_root() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        let outside_database = sandbox.path().join("outside.sqlite3");
+
+        let error = Storage::open(&data_root, &outside_database)
+            .err()
+            .expect("SQLite 必须属于 Central Store 根目录");
+
+        assert!(matches!(
+            error,
+            StorageError::UnsafeDatabase(path) if path == outside_database
+        ));
+        assert!(!outside_database.exists(), "拒绝前不能创建外部 SQLite");
+    }
+
+    #[test]
+    fn aborted_and_completed_transactions_remain_recoverable_until_cleanup() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan-abort", "bundle-abort", "member-abort");
+        let aborted_plan = storage
+            .begin_install_transaction("plan-abort", "txn-abort", "journals/abort.json", 200)
+            .expect("应开始待中止事务");
+        storage
+            .abort_lifecycle_transaction("txn-abort", None, 201)
+            .expect("应持久化中止状态");
+
+        save_test_plan(
+            &mut storage,
+            "plan-complete",
+            "bundle-complete",
+            "member-complete",
+        );
+        let completed_plan = storage
+            .begin_install_transaction(
+                "plan-complete",
+                "txn-complete",
+                "journals/complete.json",
+                202,
+            )
+            .expect("应开始待完成事务");
+        advance_to_candidate_ready(&mut storage, "txn-complete");
+        storage
+            .finalize_install(
+                "txn-complete",
+                &completed_plan,
+                "bundles/bundle-complete",
+                "contents/txn-complete",
+                "members/member-complete",
+                203,
+            )
+            .expect("应提交受管状态");
+
+        let statuses = storage
+            .recoverable_lifecycle_transactions()
+            .expect("应读取可恢复事务")
+            .into_iter()
+            .map(|transaction| (transaction.id, transaction.status))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            statuses.get("txn-abort").map(String::as_str),
+            Some("aborted")
+        );
+        assert_eq!(
+            statuses.get("txn-complete").map(String::as_str),
+            Some("completed")
+        );
+        assert_eq!(aborted_plan.id, "plan-abort");
+    }
+
+    #[test]
+    fn lifecycle_state_changes_reject_unknown_or_invalid_transactions() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+
+        assert!(matches!(
+            storage.update_lifecycle_phase("missing", "journal_ready", 200),
+            Err(StorageError::LifecycleStateConflict(id)) if id == "missing"
+        ));
+        assert!(matches!(
+            storage.abort_lifecycle_transaction("missing", None, 200),
+            Err(StorageError::LifecycleStateConflict(id)) if id == "missing"
+        ));
+        assert!(matches!(
+            storage.block_lifecycle_transaction("missing", "测试", 200),
+            Err(StorageError::LifecycleStateConflict(id)) if id == "missing"
+        ));
+
+        save_test_plan(&mut storage, "plan", "bundle", "member");
+        storage
+            .begin_install_transaction("plan", "txn", "journals/txn.json", 201)
+            .expect("应开始事务");
+        assert!(matches!(
+            storage.update_lifecycle_phase("txn", "candidate_ready", 202),
+            Err(StorageError::LifecycleStateConflict(id)) if id == "txn"
+        ));
+        storage
+            .update_lifecycle_phase("txn", "journal_ready", 203)
+            .expect("应允许进入下一阶段");
+        assert!(matches!(
+            storage.update_lifecycle_phase("txn", "activated", 204),
+            Err(StorageError::LifecycleStateConflict(id)) if id == "txn"
+        ));
+        storage
+            .update_lifecycle_phase("txn", "candidate_ready", 205)
+            .expect("应允许进入候选阶段");
+        storage
+            .update_lifecycle_phase("txn", "activated", 206)
+            .expect("应允许进入生效阶段");
+        assert!(matches!(
+            storage.abort_lifecycle_transaction("txn", None, 207),
+            Err(StorageError::LifecycleStateConflict(id)) if id == "txn"
+        ));
+        assert!(matches!(
+            storage.update_lifecycle_phase("txn", "unknown", 208),
+            Err(StorageError::InvalidLifecyclePhase(phase)) if phase == "unknown"
+        ));
+    }
+
+    #[test]
+    fn a_completed_transaction_can_be_blocked_when_recovery_finds_damage() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan", "bundle", "member");
+        let plan = storage
+            .begin_install_transaction("plan", "txn", "journals/txn.json", 200)
+            .expect("应开始事务");
+        advance_to_candidate_ready(&mut storage, "txn");
+        storage
+            .finalize_install(
+                "txn",
+                &plan,
+                "bundles/bundle",
+                "contents/txn",
+                "members/member",
+                201,
+            )
+            .expect("应完成事务");
+
+        storage
+            .block_lifecycle_transaction("txn", "current 已损坏", 202)
+            .expect("完成后的清理恢复仍应允许阻塞异常状态");
+
+        let transaction = storage
+            .recoverable_lifecycle_transactions()
+            .expect("应读取阻塞事务")
+            .into_iter()
+            .find(|transaction| transaction.id == "txn")
+            .expect("阻塞事务应保留");
+        assert_eq!(transaction.status, "blocked");
+    }
+
+    #[test]
+    fn an_aborted_transaction_can_be_blocked_when_cleanup_finds_damage() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan", "bundle", "member");
+        storage
+            .begin_install_transaction("plan", "txn", "journals/txn.json", 200)
+            .expect("应开始事务");
+        storage
+            .abort_lifecycle_transaction("txn", None, 201)
+            .expect("应中止事务");
+
+        storage
+            .block_lifecycle_transaction("txn", "清理时发现外部内容", 202)
+            .expect("中止后的清理异常必须持久化为阻塞");
+
+        let transaction = storage
+            .recoverable_lifecycle_transactions()
+            .expect("应读取阻塞事务")
+            .into_iter()
+            .find(|transaction| transaction.id == "txn")
+            .expect("阻塞事务应保留");
+        assert_eq!(transaction.status, "blocked");
+    }
+
+    #[test]
+    fn blocked_transactions_are_visible_in_startup_and_refresh_inventory() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan", "bundle", "member");
+        storage
+            .begin_install_transaction("plan", "txn", "journals/txn.json", 200)
+            .expect("应开始事务");
+        storage
+            .block_lifecycle_transaction("txn", "current 状态无法判断", 201)
+            .expect("应保存阻塞恢复状态");
+        storage
+            .save_initial_scan(202, &[], &[])
+            .expect("应保存初始清单");
+
+        let Some(UiOutcome::Inventory {
+            recovery_issues, ..
+        }) = storage.read_initial_scan().expect("应读取启动清单")
+        else {
+            panic!("完成过扫描后应返回 Inventory");
+        };
+        assert_eq!(recovery_issues.len(), 1);
+        assert_eq!(recovery_issues[0].id, "txn");
+        assert_eq!(recovery_issues[0].bundle_display_name, "bundle");
+        assert_eq!(recovery_issues[0].message, "current 状态无法判断");
+
+        let refreshed = storage
+            .save_local_refresh(203, &[], &[], &[], &[])
+            .expect("刷新不应隐藏人工恢复状态");
+        assert_eq!(refreshed.recovery_issues, recovery_issues);
+    }
+
+    #[test]
+    fn blocked_transaction_remains_visible_when_its_plan_row_is_missing() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan", "bundle-fallback", "member");
+        storage
+            .begin_install_transaction("plan", "txn", "journals/txn.json", 200)
+            .expect("应开始事务");
+        storage
+            .block_lifecycle_transaction("txn", "Plan 已损坏", 201)
+            .expect("应保存阻塞状态");
+        storage
+            .connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF; DELETE FROM install_plans; PRAGMA foreign_keys = ON;",
+            )
+            .expect("应模拟损坏数据库中缺失 Plan");
+
+        let issues = storage.read_recovery_issues().expect("阻塞事务必须仍可见");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].bundle_display_name, "bundle-fallback");
+        assert_eq!(issues[0].message, "Plan 已损坏");
+    }
+
+    #[test]
+    fn unrelated_unique_constraint_is_not_reported_as_an_active_transaction() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan-one", "bundle-one", "member-one");
+        storage
+            .begin_install_transaction("plan-one", "same-id", "journals/one.json", 200)
+            .expect("应开始首个事务");
+        storage
+            .abort_lifecycle_transaction("same-id", None, 201)
+            .expect("应中止首个事务");
+        save_test_plan(&mut storage, "plan-two", "bundle-two", "member-two");
+
+        let error = storage
+            .begin_install_transaction("plan-two", "same-id", "journals/two.json", 202)
+            .expect_err("重复事务 ID 应被 SQLite 拒绝");
+
+        assert!(matches!(error, StorageError::SaveLifecycleTransaction(_)));
+        assert_eq!(
+            storage
+                .read_install_plan("plan-two")
+                .expect("失败事务不应消耗 Plan")
+                .status,
+            "pending"
+        );
+    }
+
+    #[test]
+    fn only_the_single_writer_index_is_reported_as_an_active_transaction() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan-one", "bundle-one", "member-one");
+        storage
+            .begin_install_transaction("plan-one", "txn-one", "journals/one.json", 200)
+            .expect("应开始首个事务");
+        save_test_plan(&mut storage, "plan-two", "bundle-two", "member-two");
+
+        let error = storage
+            .begin_install_transaction("plan-two", "txn-two", "journals/two.json", 201)
+            .expect_err("单写者索引应拒绝第二个活跃事务");
+
+        assert!(matches!(error, StorageError::ActiveLifecycleTransaction));
+        assert_eq!(
+            storage
+                .read_install_plan("plan-two")
+                .expect("失败事务不应消耗 Plan")
+                .status,
+            "pending"
+        );
+    }
+
+    #[test]
+    fn finalize_rejects_a_missing_transaction_and_rolls_back_managed_rows() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan", "bundle", "member");
+        let plan = storage.read_install_plan("plan").expect("应读取安装 Plan");
+
+        let error = storage
+            .finalize_install(
+                "missing",
+                &plan,
+                "bundles/bundle",
+                "contents/missing",
+                "members/member",
+                200,
+            )
+            .expect_err("缺少生命周期事务时不能提交受管状态");
+
+        assert!(matches!(
+            error,
+            StorageError::LifecycleStateConflict(id) if id == "missing"
+        ));
+        assert!(
+            storage
+                .managed_bundle_notice_rows()
+                .expect("应读取受管 Bundle")
+                .is_empty(),
+            "失败的 finalize 必须回滚已插入的 Bundle"
+        );
+    }
+
+    #[test]
+    fn finalize_requires_the_matching_plan_and_a_publishable_phase() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan-one", "bundle-one", "member-one");
+        let plan_one = storage
+            .begin_install_transaction("plan-one", "txn", "journals/txn.json", 200)
+            .expect("应开始事务");
+        save_test_plan(&mut storage, "plan-two", "bundle-two", "member-two");
+        let plan_two = storage
+            .read_install_plan("plan-two")
+            .expect("应读取另一份 Plan");
+
+        let early_error = storage
+            .finalize_install(
+                "txn",
+                &plan_one,
+                "bundles/bundle-one",
+                "contents/txn",
+                "members/member-one",
+                201,
+            )
+            .expect_err("尚未发布候选内容时不能 finalize");
+        assert!(matches!(
+            early_error,
+            StorageError::LifecycleStateConflict(id) if id == "txn"
+        ));
+
+        advance_to_candidate_ready(&mut storage, "txn");
+        let wrong_plan_error = storage
+            .finalize_install(
+                "txn",
+                &plan_two,
+                "bundles/bundle-two",
+                "contents/txn",
+                "members/member-two",
+                203,
+            )
+            .expect_err("事务不能提交另一份 Plan");
+        assert!(matches!(
+            wrong_plan_error,
+            StorageError::LifecycleStateConflict(id) if id == "txn"
+        ));
+        assert!(
+            storage
+                .managed_bundle_notice_rows()
+                .expect("应读取受管 Bundle")
+                .is_empty(),
+            "身份或阶段不匹配时必须回滚受管记录"
+        );
+    }
+
+    #[test]
+    fn finalize_rejects_paths_outside_the_fixed_bundle_layout() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan", "bundle", "member");
+        let plan = storage
+            .begin_install_transaction("plan", "txn", "journals/txn.json", 200)
+            .expect("应开始事务");
+        advance_to_candidate_ready(&mut storage, "txn");
+
+        for (managed_directory, current_target, stable_relative_path) in [
+            ("../bundle", "contents/txn", "members/member"),
+            ("bundles/bundle", "/tmp/txn", "members/member"),
+            ("bundles/bundle", "contents/txn", "members/../member"),
+        ] {
+            assert!(matches!(
+                storage.finalize_install(
+                    "txn",
+                    &plan,
+                    managed_directory,
+                    current_target,
+                    stable_relative_path,
+                    203,
+                ),
+                Err(StorageError::UnsafeManagedPath(_))
+            ));
+        }
+        assert!(
+            storage
+                .managed_bundle_notice_rows()
+                .expect("应读取受管 Bundle")
+                .is_empty(),
+            "非法路径不能留下受管记录"
+        );
+    }
+
+    #[test]
+    fn managed_inventory_rejects_paths_tampered_in_sqlite() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan", "bundle", "member");
+        let plan = storage
+            .begin_install_transaction("plan", "txn", "journals/txn.json", 200)
+            .expect("应开始事务");
+        advance_to_candidate_ready(&mut storage, "txn");
+        storage
+            .finalize_install(
+                "txn",
+                &plan,
+                "bundles/bundle",
+                "contents/txn",
+                "members/member",
+                203,
+            )
+            .expect("应完成事务");
+        storage
+            .save_initial_scan(204, &[], &[])
+            .expect("应建立可读取的清单状态");
+        storage
+            .connection
+            .execute(
+                "UPDATE bundles SET managed_directory = '../../outside' WHERE id = 'bundle'",
+                [],
+            )
+            .expect("应模拟 SQLite 被外部篡改");
+
+        assert!(matches!(
+            storage.read_initial_scan(),
+            Err(StorageError::UnsafeManagedPath(path)) if path == "../../outside"
+        ));
+        assert!(matches!(
+            storage.managed_bundle_notice_rows(),
+            Err(StorageError::UnsafeManagedPath(path)) if path == "../../outside"
+        ));
+    }
+
+    #[test]
+    fn cleanup_rejects_an_existing_non_terminal_transaction_but_is_idempotent_when_missing() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_plan(&mut storage, "plan", "bundle", "member");
+        storage
+            .begin_install_transaction("plan", "txn", "journals/txn.json", 200)
+            .expect("应开始事务");
+
+        assert!(matches!(
+            storage.forget_terminal_transaction("txn"),
+            Err(StorageError::LifecycleStateConflict(id)) if id == "txn"
+        ));
+        storage
+            .forget_terminal_transaction("missing")
+            .expect("已经清理的事务应保持幂等");
+    }
 
     #[test]
     fn concurrent_open_applies_each_migration_only_once() {
