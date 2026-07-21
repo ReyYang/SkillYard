@@ -9,6 +9,7 @@ use std::{
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::domain::{
@@ -16,7 +17,7 @@ use crate::domain::{
     LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
     MountOperation, MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue,
     ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SupportedAppId,
-    SupportedAppSummary, UiOutcome,
+    SupportedAppSummary, TakeoverPlan, TakeoverPlanPath, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -35,6 +36,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         9,
         include_str!("../migrations/0009_management_evidence.sql"),
     ),
+    (10, include_str!("../migrations/0010_takeover_plans.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -185,6 +187,16 @@ pub enum StorageError {
     InvalidBatchMountPhase(String),
     #[error("SQLite 中包含非法文件系统身份值：{0}")]
     InvalidFilesystemIdentity(i64),
+    #[error("Inventory observation 不存在：{0}")]
+    InventoryObservationNotFound(String),
+    #[error("无法保存 Takeover Plan：{0}")]
+    SaveTakeoverPlan(#[source] rusqlite::Error),
+    #[error("无法读取 Takeover Plan：{0}")]
+    ReadTakeoverPlan(#[source] rusqlite::Error),
+    #[error("Takeover Plan 未签发或已经不存在")]
+    TakeoverPlanNotFound,
+    #[error("Takeover Plan 的持久化快照无效或已经被修改")]
+    InvalidTakeoverPlan,
 }
 
 pub struct Storage {
@@ -450,6 +462,14 @@ pub(crate) struct StoredBatchMountTransaction {
     pub phase: String,
     pub status: String,
     pub selected_item_ids: Vec<String>,
+}
+
+/// Storage 同时保存 UI Plan 与完整 Inventory 快照，seal 会覆盖二者。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredTakeoverPlan {
+    pub plan: TakeoverPlan,
+    pub observation: InventoryObservation,
+    pub status: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -894,6 +914,166 @@ impl Storage {
             }
         }
         Ok(projects)
+    }
+
+    pub(crate) fn read_inventory_observation(
+        &self,
+        observation_id: &str,
+    ) -> Result<InventoryObservation, StorageError> {
+        read_inventory_entries_from(&self.connection)?
+            .into_iter()
+            .find(|entry| entry.id == observation_id)
+            .ok_or_else(|| StorageError::InventoryObservationNotFound(observation_id.to_owned()))
+    }
+
+    pub(crate) fn save_takeover_plan(
+        &mut self,
+        stored: &StoredTakeoverPlan,
+    ) -> Result<StoredTakeoverPlan, StorageError> {
+        validate_takeover_plan_storage_contract(&self.data_root, stored)?;
+        let observed_by = serde_json::to_string(
+            &stored
+                .observation
+                .observed_by
+                .iter()
+                .map(|app| app.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| StorageError::InvalidTakeoverPlan)?;
+        let warnings = serde_json::to_string(&stored.plan.warnings)
+            .map_err(|_| StorageError::InvalidTakeoverPlan)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveTakeoverPlan)?;
+        transaction
+            .execute(
+                "INSERT INTO takeover_plans (
+                    id, observation_id, bundle_id, content_id, member_id,
+                    bundle_display_name, source_display_name, source_notice,
+                    skill_name, skill_description, content_fingerprint, warnings_json,
+                    managed_directory, content_directory, expected_target,
+                    inventory_skill_name, inventory_declared_name, inventory_skill_root,
+                    inventory_skill_file, inventory_location_kind, inventory_metadata_status,
+                    inventory_observed_by_json, inventory_observed_fingerprint,
+                    inventory_root_key, inventory_project_id, inventory_stale,
+                    inventory_management_kind, inventory_management_evidence_empty,
+                    created_at, expires_at, status
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                    ?21, ?22, ?23, ?24, ?25, ?26, ?27, 1, ?28, ?29, ?30
+                 )",
+                params![
+                    stored.plan.id,
+                    stored.plan.observation_id,
+                    stored.plan.bundle_id,
+                    stored.plan.content_id,
+                    stored.plan.member_id,
+                    stored.plan.bundle_display_name,
+                    stored.plan.source_display_name,
+                    stored.plan.source_notice,
+                    stored.plan.skill_name,
+                    stored.plan.skill_description,
+                    stored.plan.content_fingerprint,
+                    warnings,
+                    stored.plan.managed_directory,
+                    stored.plan.content_directory,
+                    stored.plan.expected_target,
+                    stored.observation.skill_name,
+                    stored.observation.declared_name,
+                    stored.observation.skill_root,
+                    stored.observation.skill_file,
+                    stored.observation.location_kind.as_str(),
+                    stored.observation.metadata_status.as_str(),
+                    observed_by,
+                    stored.observation.observed_fingerprint,
+                    stored.observation.root_key.as_str(),
+                    stored.observation.project_id,
+                    stored.observation.stale,
+                    stored.observation.management_kind.as_str(),
+                    stored.plan.created_at,
+                    stored.plan.expires_at,
+                    stored.status,
+                ],
+            )
+            .map_err(StorageError::SaveTakeoverPlan)?;
+        for (index, path) in stored.plan.paths.iter().enumerate() {
+            transaction
+                .execute(
+                    "INSERT INTO takeover_plan_paths (
+                        plan_id, path_id, mount_id, original_path, app_id, scope,
+                        project_id, project_display_name, project_root_path,
+                        project_root_device, project_root_inode,
+                        parent_device, parent_inode, parent_mode,
+                        original_device, original_inode, original_mode,
+                        default_preserve_mount, sort_order
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+                     )",
+                    params![
+                        stored.plan.id,
+                        path.id,
+                        path.mount_id,
+                        path.original_path,
+                        path.app_id.as_str(),
+                        path.scope.as_str(),
+                        path.project_id,
+                        path.project_display_name,
+                        path.project_root_path,
+                        path.project_root_device
+                            .map(filesystem_identity_to_sql)
+                            .transpose()?,
+                        path.project_root_inode
+                            .map(filesystem_identity_to_sql)
+                            .transpose()?,
+                        filesystem_identity_to_sql(path.parent_device)?,
+                        filesystem_identity_to_sql(path.parent_inode)?,
+                        i64::from(path.parent_mode),
+                        filesystem_identity_to_sql(path.original_device)?,
+                        filesystem_identity_to_sql(path.original_inode)?,
+                        i64::from(path.original_mode),
+                        path.default_preserve_mount,
+                        i64::try_from(index).map_err(|_| StorageError::InvalidTakeoverPlan)?,
+                    ],
+                )
+                .map_err(StorageError::SaveTakeoverPlan)?;
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveTakeoverPlan)?;
+        self.read_takeover_plan(&stored.plan.id)
+    }
+
+    pub(crate) fn read_takeover_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<StoredTakeoverPlan, StorageError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT id, observation_id, bundle_id, content_id, member_id,
+                        bundle_display_name, source_display_name, source_notice,
+                        skill_name, skill_description, content_fingerprint, warnings_json,
+                        managed_directory, content_directory, expected_target,
+                        inventory_skill_name, inventory_declared_name, inventory_skill_root,
+                        inventory_skill_file, inventory_location_kind, inventory_metadata_status,
+                        inventory_observed_by_json, inventory_observed_fingerprint,
+                        inventory_root_key, inventory_project_id, inventory_stale,
+                        inventory_management_kind, inventory_management_evidence_empty,
+                        created_at, expires_at, status
+                 FROM takeover_plans WHERE id = ?1",
+                [plan_id],
+                raw_takeover_plan_from_row,
+            )
+            .optional()
+            .map_err(StorageError::ReadTakeoverPlan)?
+            .ok_or(StorageError::TakeoverPlanNotFound)?;
+        let paths = read_takeover_plan_paths_from(&self.connection, plan_id)?;
+        let stored = stored_takeover_plan_from_raw(row, paths)?;
+        validate_takeover_plan_storage_contract(&self.data_root, &stored)?;
+        Ok(stored)
     }
 
     pub(crate) fn read_managed_member(
@@ -2460,6 +2640,452 @@ fn is_normalized_relative_path(value: &str) -> bool {
             .components()
             .all(|component| matches!(component, std::path::Component::Normal(_)))
         && path.components().collect::<PathBuf>().to_str() == Some(value)
+}
+
+struct RawTakeoverPlanRow {
+    id: String,
+    observation_id: String,
+    bundle_id: String,
+    content_id: String,
+    member_id: String,
+    bundle_display_name: String,
+    source_display_name: Option<String>,
+    source_notice: String,
+    skill_name: String,
+    skill_description: String,
+    content_fingerprint: String,
+    warnings_json: String,
+    managed_directory: String,
+    content_directory: String,
+    expected_target: String,
+    inventory_skill_name: String,
+    inventory_declared_name: Option<String>,
+    inventory_skill_root: String,
+    inventory_skill_file: String,
+    inventory_location_kind: String,
+    inventory_metadata_status: String,
+    inventory_observed_by_json: String,
+    inventory_observed_fingerprint: String,
+    inventory_root_key: String,
+    inventory_project_id: Option<String>,
+    inventory_stale: bool,
+    inventory_management_kind: String,
+    inventory_management_evidence_empty: i64,
+    created_at: i64,
+    expires_at: i64,
+    status: String,
+}
+
+fn raw_takeover_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTakeoverPlanRow> {
+    Ok(RawTakeoverPlanRow {
+        id: row.get(0)?,
+        observation_id: row.get(1)?,
+        bundle_id: row.get(2)?,
+        content_id: row.get(3)?,
+        member_id: row.get(4)?,
+        bundle_display_name: row.get(5)?,
+        source_display_name: row.get(6)?,
+        source_notice: row.get(7)?,
+        skill_name: row.get(8)?,
+        skill_description: row.get(9)?,
+        content_fingerprint: row.get(10)?,
+        warnings_json: row.get(11)?,
+        managed_directory: row.get(12)?,
+        content_directory: row.get(13)?,
+        expected_target: row.get(14)?,
+        inventory_skill_name: row.get(15)?,
+        inventory_declared_name: row.get(16)?,
+        inventory_skill_root: row.get(17)?,
+        inventory_skill_file: row.get(18)?,
+        inventory_location_kind: row.get(19)?,
+        inventory_metadata_status: row.get(20)?,
+        inventory_observed_by_json: row.get(21)?,
+        inventory_observed_fingerprint: row.get(22)?,
+        inventory_root_key: row.get(23)?,
+        inventory_project_id: row.get(24)?,
+        inventory_stale: row.get(25)?,
+        inventory_management_kind: row.get(26)?,
+        inventory_management_evidence_empty: row.get(27)?,
+        created_at: row.get(28)?,
+        expires_at: row.get(29)?,
+        status: row.get(30)?,
+    })
+}
+
+fn read_takeover_plan_paths_from(
+    connection: &Connection,
+    plan_id: &str,
+) -> Result<Vec<TakeoverPlanPath>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT path_id, mount_id, original_path, app_id, scope,
+                    project_id, project_display_name, project_root_path,
+                    project_root_device, project_root_inode,
+                    parent_device, parent_inode, parent_mode,
+                    original_device, original_inode, original_mode,
+                    default_preserve_mount
+             FROM takeover_plan_paths WHERE plan_id = ?1 ORDER BY sort_order",
+        )
+        .map_err(StorageError::ReadTakeoverPlan)?;
+    let rows = statement
+        .query_map([plan_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, i64>(13)?,
+                row.get::<_, i64>(14)?,
+                row.get::<_, i64>(15)?,
+                row.get::<_, bool>(16)?,
+            ))
+        })
+        .map_err(StorageError::ReadTakeoverPlan)?;
+    let mut paths = Vec::new();
+    for row in rows {
+        let (
+            id,
+            mount_id,
+            original_path,
+            app_id,
+            scope,
+            project_id,
+            project_display_name,
+            project_root_path,
+            project_root_device,
+            project_root_inode,
+            parent_device,
+            parent_inode,
+            parent_mode,
+            original_device,
+            original_inode,
+            original_mode,
+            default_preserve_mount,
+        ) = row.map_err(StorageError::ReadTakeoverPlan)?;
+        paths.push(TakeoverPlanPath {
+            id,
+            mount_id,
+            original_path,
+            app_id: SupportedAppId::from_str(&app_id)
+                .ok_or_else(|| StorageError::UnknownSupportedApp(app_id.clone()))?,
+            scope: MountScope::from_str(&scope)
+                .ok_or_else(|| StorageError::UnknownMountScope(scope.clone()))?,
+            project_id,
+            project_display_name,
+            project_root_path,
+            project_root_device: project_root_device
+                .map(filesystem_identity_from_sql)
+                .transpose()?,
+            project_root_inode: project_root_inode
+                .map(filesystem_identity_from_sql)
+                .transpose()?,
+            parent_device: filesystem_identity_from_sql(parent_device)?,
+            parent_inode: filesystem_identity_from_sql(parent_inode)?,
+            parent_mode: u32::try_from(parent_mode)
+                .map_err(|_| StorageError::InvalidFilesystemIdentity(parent_mode))?,
+            original_device: filesystem_identity_from_sql(original_device)?,
+            original_inode: filesystem_identity_from_sql(original_inode)?,
+            original_mode: u32::try_from(original_mode)
+                .map_err(|_| StorageError::InvalidFilesystemIdentity(original_mode))?,
+            default_preserve_mount,
+        });
+    }
+    Ok(paths)
+}
+
+fn stored_takeover_plan_from_raw(
+    row: RawTakeoverPlanRow,
+    paths: Vec<TakeoverPlanPath>,
+) -> Result<StoredTakeoverPlan, StorageError> {
+    if row.inventory_management_evidence_empty != 1 {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    let observed_by_values = serde_json::from_str::<Vec<String>>(&row.inventory_observed_by_json)
+        .map_err(|_| StorageError::InvalidTakeoverPlan)?;
+    let warnings = serde_json::from_str::<Vec<String>>(&row.warnings_json)
+        .map_err(|_| StorageError::InvalidTakeoverPlan)?;
+    let mut observed_by = Vec::with_capacity(observed_by_values.len());
+    for app in observed_by_values {
+        observed_by.push(
+            SupportedAppId::from_str(&app)
+                .ok_or_else(|| StorageError::UnknownSupportedApp(app.clone()))?,
+        );
+    }
+    let location_kind =
+        InventoryLocationKind::from_str(&row.inventory_location_kind).ok_or_else(|| {
+            StorageError::UnknownInventoryLocation(row.inventory_location_kind.clone())
+        })?;
+    let metadata_status = SkillMetadataStatus::from_str(&row.inventory_metadata_status)
+        .ok_or_else(|| {
+            StorageError::UnknownMetadataStatus(row.inventory_metadata_status.clone())
+        })?;
+    let root_key = ScanRootKey::from_str(&row.inventory_root_key)
+        .ok_or_else(|| StorageError::UnknownScanRoot(row.inventory_root_key.clone()))?;
+    validate_scan_root_identity(root_key, row.inventory_project_id.as_deref())?;
+    let management_kind =
+        ManagementKind::from_str(&row.inventory_management_kind).ok_or_else(|| {
+            StorageError::UnknownManagementKind(row.inventory_management_kind.clone())
+        })?;
+    Ok(StoredTakeoverPlan {
+        plan: TakeoverPlan {
+            id: row.id,
+            observation_id: row.observation_id.clone(),
+            bundle_id: row.bundle_id,
+            content_id: row.content_id,
+            member_id: row.member_id,
+            bundle_display_name: row.bundle_display_name,
+            source_display_name: row.source_display_name,
+            source_notice: row.source_notice,
+            skill_name: row.skill_name,
+            skill_description: row.skill_description,
+            content_fingerprint: row.content_fingerprint,
+            warnings,
+            managed_directory: row.managed_directory,
+            content_directory: row.content_directory,
+            expected_target: row.expected_target,
+            paths,
+            created_at: row.created_at,
+            expires_at: row.expires_at,
+        },
+        observation: InventoryObservation {
+            id: row.observation_id,
+            skill_name: row.inventory_skill_name,
+            declared_name: row.inventory_declared_name,
+            skill_root: row.inventory_skill_root,
+            skill_file: row.inventory_skill_file,
+            location_kind,
+            metadata_status,
+            observed_by,
+            observed_fingerprint: row.inventory_observed_fingerprint,
+            root_key,
+            project_id: row.inventory_project_id,
+            stale: row.inventory_stale,
+            management_kind,
+            management_evidence: None,
+        },
+        status: row.status,
+    })
+}
+
+fn validate_takeover_plan_storage_contract(
+    data_root: &Path,
+    stored: &StoredTakeoverPlan,
+) -> Result<(), StorageError> {
+    let plan = &stored.plan;
+    let path = plan
+        .paths
+        .first()
+        .ok_or(StorageError::InvalidTakeoverPlan)?;
+    let expected_managed = data_root.join("bundles").join(&plan.bundle_id);
+    let expected_content = expected_managed.join("contents").join(&plan.content_id);
+    let expected_target = expected_managed
+        .join("current/members")
+        .join(&plan.skill_name);
+    let expected_location = takeover_root_contract(stored.observation.root_key)
+        .ok_or(StorageError::InvalidTakeoverPlan)?;
+    if !matches!(stored.status.as_str(), "pending" | "consumed")
+        || plan.observation_id != stored.observation.id
+        || stored.observation.management_evidence.is_some()
+        || plan.paths.len() != 1
+        || plan.source_display_name.is_some()
+        || plan.source_notice != "来源未知；没有更新来源"
+        || plan.bundle_display_name != plan.skill_name
+        || plan.skill_name != stored.observation.skill_name
+        || path.original_path != stored.observation.skill_root
+        || (path.app_id, path.scope) != expected_location
+        || path.project_id != stored.observation.project_id
+        || !path.default_preserve_mount
+        || Path::new(&plan.managed_directory) != expected_managed
+        || Path::new(&plan.content_directory) != expected_content
+        || Path::new(&plan.expected_target) != expected_target
+        || ![
+            &plan.bundle_id,
+            &plan.content_id,
+            &plan.member_id,
+            &path.id,
+            &path.mount_id,
+        ]
+        .iter()
+        .all(|value| uuid::Uuid::parse_str(value).is_ok())
+        || plan.content_fingerprint.len() != 64
+        || !plan
+            .content_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || plan.created_at >= plan.expires_at
+        || !takeover_plan_id_matches_seal(stored)
+    {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    Ok(())
+}
+
+fn takeover_root_contract(root_key: ScanRootKey) -> Option<(SupportedAppId, MountScope)> {
+    match root_key {
+        ScanRootKey::CodexGlobal => Some((SupportedAppId::Codex, MountScope::Global)),
+        ScanRootKey::ClaudeCodeGlobal => Some((SupportedAppId::ClaudeCode, MountScope::Global)),
+        ScanRootKey::GitHubCopilotGlobal => {
+            Some((SupportedAppId::GitHubCopilot, MountScope::Global))
+        }
+        ScanRootKey::CodexProject => Some((SupportedAppId::Codex, MountScope::Project)),
+        ScanRootKey::ClaudeCodeProject => Some((SupportedAppId::ClaudeCode, MountScope::Project)),
+        ScanRootKey::GitHubCopilotProject => {
+            Some((SupportedAppId::GitHubCopilot, MountScope::Project))
+        }
+        ScanRootKey::SharedAgents | ScanRootKey::SharedAgentsProject => None,
+    }
+}
+
+pub(crate) fn takeover_plan_seal(stored: &StoredTakeoverPlan) -> String {
+    let mut hasher = Sha256::new();
+    seal_frame(&mut hasher, b"skillyard-takeover-plan-v1");
+    let observation = &stored.observation;
+    for value in [
+        observation.id.as_str(),
+        observation.skill_name.as_str(),
+        observation.skill_root.as_str(),
+        observation.skill_file.as_str(),
+        observation.location_kind.as_str(),
+        observation.metadata_status.as_str(),
+        observation.observed_fingerprint.as_str(),
+        observation.root_key.as_str(),
+        observation.management_kind.as_str(),
+    ] {
+        seal_frame(&mut hasher, value.as_bytes());
+    }
+    seal_optional(&mut hasher, observation.declared_name.as_deref());
+    seal_optional(&mut hasher, observation.project_id.as_deref());
+    seal_frame(&mut hasher, &[u8::from(observation.stale)]);
+    seal_frame(
+        &mut hasher,
+        &[u8::from(observation.management_evidence.is_some())],
+    );
+    seal_frame(
+        &mut hasher,
+        &u64::try_from(observation.observed_by.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for app in &observation.observed_by {
+        seal_frame(&mut hasher, app.as_str().as_bytes());
+    }
+
+    let plan = &stored.plan;
+    for value in [
+        plan.observation_id.as_str(),
+        plan.bundle_id.as_str(),
+        plan.content_id.as_str(),
+        plan.member_id.as_str(),
+        plan.bundle_display_name.as_str(),
+        plan.source_notice.as_str(),
+        plan.skill_name.as_str(),
+        plan.skill_description.as_str(),
+        plan.content_fingerprint.as_str(),
+        plan.managed_directory.as_str(),
+        plan.content_directory.as_str(),
+        plan.expected_target.as_str(),
+    ] {
+        seal_frame(&mut hasher, value.as_bytes());
+    }
+    seal_optional(&mut hasher, plan.source_display_name.as_deref());
+    seal_frame(
+        &mut hasher,
+        &u64::try_from(plan.warnings.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for warning in &plan.warnings {
+        seal_frame(&mut hasher, warning.as_bytes());
+    }
+    seal_frame(&mut hasher, &plan.created_at.to_le_bytes());
+    seal_frame(&mut hasher, &plan.expires_at.to_le_bytes());
+    seal_frame(
+        &mut hasher,
+        &u64::try_from(plan.paths.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for path in &plan.paths {
+        for value in [
+            path.id.as_str(),
+            path.mount_id.as_str(),
+            path.original_path.as_str(),
+            path.app_id.as_str(),
+            path.scope.as_str(),
+        ] {
+            seal_frame(&mut hasher, value.as_bytes());
+        }
+        for value in [
+            path.project_id.as_deref(),
+            path.project_display_name.as_deref(),
+            path.project_root_path.as_deref(),
+        ] {
+            seal_optional(&mut hasher, value);
+        }
+        for value in [
+            path.project_root_device,
+            path.project_root_inode,
+            Some(path.parent_device),
+            Some(path.parent_inode),
+            Some(u64::from(path.parent_mode)),
+            Some(path.original_device),
+            Some(path.original_inode),
+            Some(u64::from(path.original_mode)),
+        ] {
+            match value {
+                Some(value) => {
+                    seal_frame(&mut hasher, &[1]);
+                    seal_frame(&mut hasher, &value.to_le_bytes());
+                }
+                None => seal_frame(&mut hasher, &[0]),
+            }
+        }
+        seal_frame(&mut hasher, &[u8::from(path.default_preserve_mount)]);
+    }
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(64);
+    use std::fmt::Write as _;
+    for byte in digest {
+        write!(&mut output, "{byte:02x}").expect("写入 String 不会失败");
+    }
+    output
+}
+
+fn takeover_plan_id_matches_seal(stored: &StoredTakeoverPlan) -> bool {
+    let Some((prefix, seal)) = stored.plan.id.rsplit_once('-') else {
+        return false;
+    };
+    let Some(uuid) = prefix.strip_prefix("takeover-") else {
+        return false;
+    };
+    uuid::Uuid::parse_str(uuid).is_ok()
+        && seal.len() == 64
+        && seal.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && seal == takeover_plan_seal(stored)
+}
+
+fn seal_frame(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn seal_optional(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            seal_frame(hasher, &[1]);
+            seal_frame(hasher, value.as_bytes());
+        }
+        None => seal_frame(hasher, &[0]),
+    }
 }
 
 fn stored_project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProject> {
@@ -4379,6 +5005,8 @@ fn replace_inventory_rows(
     supported_apps: &[SupportedAppSummary],
     scan_issues: &[ScanIssue],
 ) -> rusqlite::Result<()> {
+    // pending 只是预览，可随 Inventory 快照作废；consumed 必须留给后续崩溃恢复。
+    transaction.execute("DELETE FROM takeover_plans WHERE status = 'pending'", [])?;
     transaction.execute("DELETE FROM inventory_observation_apps", [])?;
     transaction.execute("DELETE FROM inventory_observations", [])?;
     transaction.execute("DELETE FROM supported_app_status", [])?;
@@ -4657,6 +5285,89 @@ mod tests {
             .expect("应记录候选内容已就绪");
     }
 
+    fn save_test_takeover_plan(storage: &mut Storage, suffix: &str) -> StoredTakeoverPlan {
+        let observation = InventoryObservation {
+            id: format!("observation-{suffix}"),
+            skill_name: "alpha".to_owned(),
+            declared_name: Some("alpha".to_owned()),
+            skill_root: "/tmp/home/.codex/skills/alpha".to_owned(),
+            skill_file: "/tmp/home/.codex/skills/alpha/SKILL.md".to_owned(),
+            location_kind: InventoryLocationKind::AppGlobal,
+            metadata_status: SkillMetadataStatus::Valid,
+            observed_by: vec![SupportedAppId::Codex],
+            observed_fingerprint: "inventory-snapshot".to_owned(),
+            root_key: ScanRootKey::CodexGlobal,
+            project_id: None,
+            stale: false,
+            management_kind: ManagementKind::TakeoverCandidate,
+            management_evidence: None,
+        };
+        storage
+            .save_initial_scan(100, std::slice::from_ref(&observation), &[])
+            .expect("应保存测试 Inventory");
+        let bundle_id = uuid::Uuid::new_v4().to_string();
+        let content_id = uuid::Uuid::new_v4().to_string();
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let managed_directory = storage.data_root.join("bundles").join(&bundle_id);
+        let mut stored = StoredTakeoverPlan {
+            plan: TakeoverPlan {
+                id: String::new(),
+                observation_id: observation.id.clone(),
+                bundle_id,
+                content_id: content_id.clone(),
+                member_id,
+                bundle_display_name: "alpha".to_owned(),
+                source_display_name: None,
+                source_notice: "来源未知；没有更新来源".to_owned(),
+                skill_name: "alpha".to_owned(),
+                skill_description: "alpha description".to_owned(),
+                content_fingerprint: "a".repeat(64),
+                warnings: Vec::new(),
+                managed_directory: managed_directory.to_string_lossy().into_owned(),
+                content_directory: managed_directory
+                    .join("contents")
+                    .join(content_id)
+                    .to_string_lossy()
+                    .into_owned(),
+                expected_target: managed_directory
+                    .join("current/members/alpha")
+                    .to_string_lossy()
+                    .into_owned(),
+                paths: vec![TakeoverPlanPath {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    mount_id: uuid::Uuid::new_v4().to_string(),
+                    original_path: observation.skill_root.clone(),
+                    app_id: SupportedAppId::Codex,
+                    scope: MountScope::Global,
+                    project_id: None,
+                    project_display_name: None,
+                    project_root_path: None,
+                    project_root_device: None,
+                    project_root_inode: None,
+                    parent_device: 1,
+                    parent_inode: 2,
+                    parent_mode: 0o040755,
+                    original_device: 1,
+                    original_inode: 3,
+                    original_mode: 0o040755,
+                    default_preserve_mount: true,
+                }],
+                created_at: 200,
+                expires_at: 2_000,
+            },
+            observation,
+            status: "pending".to_owned(),
+        };
+        stored.plan.id = format!(
+            "takeover-{}-{}",
+            uuid::Uuid::new_v4(),
+            takeover_plan_seal(&stored)
+        );
+        storage
+            .save_takeover_plan(&stored)
+            .expect("应保存测试 Takeover Plan")
+    }
+
     fn save_test_managed_member(storage: &mut Storage, suffix: &str) -> StoredManagedMember {
         let plan_id = format!("install-plan-{suffix}");
         let bundle_id = format!("bundle-{suffix}");
@@ -4859,7 +5570,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         for table in [
             "projects",
             "mount_plans",
@@ -4870,6 +5581,8 @@ mod tests {
             "batch_mount_transactions",
             "batch_mount_transaction_items",
             "inventory_management_evidence",
+            "takeover_plans",
+            "takeover_plan_paths",
         ] {
             let exists = storage
                 .connection
@@ -4889,6 +5602,129 @@ mod tests {
             .expect("应执行外键检查")
             .count();
         assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn takeover_plan_read_rejects_coordinated_sqlite_tampering() {
+        for (suffix, mutation) in [
+            (
+                "plan-fields",
+                "UPDATE takeover_plans SET expected_target = '/tmp/other', content_fingerprint = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', warnings_json = '[\"tampered\"]' WHERE id = ?1",
+            ),
+            (
+                "path-fields",
+                "UPDATE takeover_plan_paths SET original_path = '/tmp/other', parent_inode = parent_inode + 1, original_inode = original_inode + 1 WHERE plan_id = ?1",
+            ),
+        ] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let mut storage = open_test_storage(&sandbox.path().join(suffix));
+            let stored = save_test_takeover_plan(&mut storage, suffix);
+            storage
+                .connection
+                .execute(mutation, [&stored.plan.id])
+                .expect("应模拟协调篡改");
+            assert!(matches!(
+                storage.read_takeover_plan(&stored.plan.id),
+                Err(StorageError::InvalidTakeoverPlan)
+            ));
+        }
+
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let stored = save_test_takeover_plan(&mut storage, "app-project");
+        storage
+            .register_project(NewProject {
+                id: "other-project",
+                display_name: "Other Project",
+                root_path: "/tmp/other-project",
+                root_device: 7,
+                root_inode: 8,
+                created_at: 300,
+            })
+            .expect("应保存替代 Project");
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_plan_paths
+                 SET app_id = 'claude_code', scope = 'project',
+                     project_id = 'other-project', project_display_name = 'Other Project',
+                     project_root_path = '/tmp/other-project',
+                     project_root_device = 7, project_root_inode = 8,
+                     original_path = '/tmp/other-project/.claude/skills/alpha'
+                 WHERE plan_id = ?1",
+                [&stored.plan.id],
+            )
+            .expect("应模拟 app 与 Project 协调篡改");
+        assert!(matches!(
+            storage.read_takeover_plan(&stored.plan.id),
+            Err(StorageError::InvalidTakeoverPlan)
+        ));
+    }
+
+    #[test]
+    fn takeover_plan_round_trips_after_storage_reopen() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        let database = data_root.join("skillyard.sqlite3");
+        let mut storage = Storage::open(&data_root, &database).expect("应打开测试 SQLite");
+        let expected = save_test_takeover_plan(&mut storage, "reopen");
+        drop(storage);
+
+        let mut reopened = Storage::open(&data_root, &database).expect("应重新打开测试 SQLite");
+        assert_eq!(
+            reopened
+                .read_takeover_plan(&expected.plan.id)
+                .expect("重启后应读取并验证 Takeover Plan"),
+            expected
+        );
+        reopened
+            .connection
+            .execute(
+                "UPDATE takeover_plans SET status = 'consumed' WHERE id = ?1",
+                [&expected.plan.id],
+            )
+            .expect("确认入口未来应能消费 Plan");
+        let consumed = reopened
+            .read_takeover_plan(&expected.plan.id)
+            .expect("恢复器未来应能读回 consumed Plan");
+        assert_eq!(consumed.status, "consumed");
+        assert!(
+            reopened
+                .connection
+                .execute(
+                    "UPDATE takeover_plans SET expires_at = created_at WHERE id = ?1",
+                    [&expected.plan.id],
+                )
+                .is_err()
+        );
+        reopened
+            .save_initial_scan(400, std::slice::from_ref(&expected.observation), &[])
+            .expect("Inventory refresh 不得删除 consumed Plan");
+        drop(reopened);
+        let recovered = Storage::open(&data_root, &database).expect("应再次打开测试 SQLite");
+        assert_eq!(
+            recovered
+                .read_takeover_plan(&expected.plan.id)
+                .expect("刷新和重启后恢复器仍应读到 consumed Plan")
+                .status,
+            "consumed"
+        );
+    }
+
+    #[test]
+    fn inventory_replacement_invalidates_only_pending_takeover_plans() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let pending = save_test_takeover_plan(&mut storage, "pending-refresh");
+
+        storage
+            .save_initial_scan(300, std::slice::from_ref(&pending.observation), &[])
+            .expect("应替换 Inventory");
+
+        assert!(matches!(
+            storage.read_takeover_plan(&pending.plan.id),
+            Err(StorageError::TakeoverPlanNotFound)
+        ));
     }
 
     #[test]

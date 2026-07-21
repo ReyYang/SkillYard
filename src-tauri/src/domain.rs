@@ -17,6 +17,9 @@ pub enum UiIntent {
     RegisterProject {
         root_path: String,
     },
+    CreateTakeoverPlan {
+        observation_id: String,
+    },
     CreateMountPlan {
         member_id: String,
         app_id: SupportedAppId,
@@ -280,6 +283,53 @@ pub struct BatchMountPlan {
     pub bundle_id: String,
     pub bundle_display_name: String,
     pub items: Vec<BatchMountPlanItem>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+/// 接管计划中的路径保持为数组；1.0 首片只签发一个普通 Host 叶子。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverPlanPath {
+    pub id: String,
+    pub mount_id: String,
+    pub original_path: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub project_root_path: Option<String>,
+    pub project_root_device: Option<u64>,
+    pub project_root_inode: Option<u64>,
+    pub parent_device: u64,
+    pub parent_inode: u64,
+    pub parent_mode: u32,
+    pub original_device: u64,
+    pub original_inode: u64,
+    pub original_mode: u32,
+    pub default_preserve_mount: bool,
+}
+
+/// Plan 只描述将要接管的边界；生成它不会复制、移动或挂载任何内容。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverPlan {
+    pub id: String,
+    pub observation_id: String,
+    pub bundle_id: String,
+    pub content_id: String,
+    pub member_id: String,
+    pub bundle_display_name: String,
+    pub source_display_name: Option<String>,
+    pub source_notice: String,
+    pub skill_name: String,
+    pub skill_description: String,
+    pub content_fingerprint: String,
+    pub warnings: Vec<String>,
+    pub managed_directory: String,
+    pub content_directory: String,
+    pub expected_target: String,
+    pub paths: Vec<TakeoverPlanPath>,
     pub created_at: i64,
     pub expires_at: i64,
 }
@@ -658,6 +708,9 @@ pub enum UiOutcome {
     },
     BatchMountPlan {
         plan: BatchMountPlan,
+    },
+    TakeoverPlan {
+        plan: TakeoverPlan,
     },
 }
 

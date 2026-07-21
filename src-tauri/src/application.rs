@@ -18,6 +18,7 @@ use crate::{
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
     storage::{Storage, StorageError},
+    takeover_lifecycle::{TakeoverLifecycleError, create_takeover_plan},
 };
 
 #[derive(Debug, Error)]
@@ -28,6 +29,8 @@ pub enum ApplicationError {
     Lifecycle(#[from] LifecycleError),
     #[error(transparent)]
     MountLifecycle(#[from] MountLifecycleError),
+    #[error(transparent)]
+    TakeoverLifecycle(#[from] TakeoverLifecycleError),
     #[error("首次扫描未完整完成：{0}")]
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
@@ -96,6 +99,9 @@ impl SkillYardApplication {
             }),
             UiIntent::RegisterProject { root_path } => {
                 self.with_write_operation(|| self.register_project(root_path))
+            }
+            UiIntent::CreateTakeoverPlan { observation_id } => {
+                self.with_write_operation(|| self.create_takeover_plan(observation_id))
             }
             UiIntent::CreateMountPlan {
                 member_id,
@@ -303,6 +309,21 @@ impl SkillYardApplication {
         )?;
         lifecycle_lock.recheck(&self.paths)?;
         Ok(UiOutcome::MountPlan { plan })
+    }
+
+    fn create_takeover_plan(&self, observation_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_takeover_plan(
+            &self.paths,
+            &mut storage,
+            &observation_id,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::TakeoverPlan { plan })
     }
 
     fn create_remove_mount_plan(&self, mount_id: String) -> Result<UiOutcome, ApplicationError> {
