@@ -338,6 +338,182 @@ pub struct TakeoverPlan {
     pub expires_at: i64,
 }
 
+/// v2 只描述多个现有副本为何属于同一个 Skill Identity，不推断远端来源。
+// P4-02b 接入 v2 事务后移除此临时抑制；本片不提前扩大应用入口。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TakeoverIdentityBasis {
+    SingleOrigin,
+    UserConfirmed,
+}
+
+#[allow(dead_code)]
+impl TakeoverIdentityBasis {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleOrigin => "single_origin",
+            Self::UserConfirmed => "user_confirmed",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "single_origin" => Some(Self::SingleOrigin),
+            "user_confirmed" => Some(Self::UserConfirmed),
+            _ => None,
+        }
+    }
+}
+
+/// Origin 的终态只有保留为挂载或从原位置移除，不引入副本级版本概念。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TakeoverOriginDisposition {
+    Mount,
+    Remove,
+}
+
+#[allow(dead_code)]
+impl TakeoverOriginDisposition {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Mount => "mount",
+            Self::Remove => "remove",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "mount" => Some(Self::Mount),
+            "remove" => Some(Self::Remove),
+            _ => None,
+        }
+    }
+}
+
+/// Target 的初始状态只接受空位或由本 Plan 中某个 Origin 占用。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum TakeoverTargetInitialState {
+    Absent,
+    OccupiedByOrigin { origin_id: String },
+}
+
+/// v2 Origin 冻结扫描身份、强内容摘要和文件系统身份，执行阶段不能重新猜测。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverV2Origin {
+    pub id: String,
+    pub observation_id: String,
+    pub observation_skill_name: String,
+    pub observation_declared_name: Option<String>,
+    pub observation_skill_file: String,
+    pub observation_location_kind: InventoryLocationKind,
+    pub observation_metadata_status: SkillMetadataStatus,
+    pub observation_observed_by: Vec<SupportedAppId>,
+    pub observation_fingerprint: String,
+    pub root_key: ScanRootKey,
+    pub observation_stale: bool,
+    pub observation_management_kind: ManagementKind,
+    pub observation_management_evidence: Option<ManagementEvidence>,
+    /// Shared `.agents` Origin 不归属于单个应用，因此 app 与 scope 可以同时为空。
+    pub app_id: Option<SupportedAppId>,
+    pub scope: Option<MountScope>,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub project_root_path: Option<String>,
+    pub project_root_device: Option<u64>,
+    pub project_root_inode: Option<u64>,
+    pub original_path: String,
+    pub parent_device: u64,
+    pub parent_inode: u64,
+    pub parent_mode: u32,
+    pub original_device: u64,
+    pub original_inode: u64,
+    pub original_mode: u32,
+    pub content_fingerprint: String,
+    pub skill_description: String,
+    pub warnings: Vec<String>,
+    pub final_disposition: TakeoverOriginDisposition,
+}
+
+/// v2 Target 冻结最终 Mount 身份以及执行前看到的占用关系。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverV2Target {
+    pub id: String,
+    pub mount_id: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub project_root_path: Option<String>,
+    pub project_root_device: Option<u64>,
+    pub project_root_inode: Option<u64>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub parent_device: u64,
+    pub parent_inode: u64,
+    pub parent_mode: u32,
+    pub initial_state: TakeoverTargetInitialState,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TakeoverV2PlanStatus {
+    Pending,
+    Consumed,
+}
+
+#[allow(dead_code)]
+impl TakeoverV2PlanStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Consumed => "consumed",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "consumed" => Some(Self::Consumed),
+            _ => None,
+        }
+    }
+}
+
+/// v2 Plan 的多 Origin/Target 仍共同提交为一个 Skill Identity，不拆成协调子事务。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverV2Plan {
+    pub id: String,
+    pub identity_basis: TakeoverIdentityBasis,
+    pub selected_origin_id: String,
+    pub bundle_id: String,
+    pub member_id: String,
+    pub content_id: String,
+    pub bundle_display_name: String,
+    pub skill_name: String,
+    pub managed_directory: String,
+    pub content_directory: String,
+    pub expected_target: String,
+    pub origins: Vec<TakeoverV2Origin>,
+    pub targets: Vec<TakeoverV2Target>,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub status: TakeoverV2PlanStatus,
+    /// seal 覆盖全部不可变 Plan 载荷；生命周期 status 由 SQLite 状态迁移保护。
+    pub seal: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ManagementEvidenceKind {
