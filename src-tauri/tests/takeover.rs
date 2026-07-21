@@ -570,7 +570,10 @@ fn confirm_takeover_preserves_the_existing_host_path_as_a_managed_mount() {
 
     let outcome = harness
         .application
-        .confirm_takeover_plan(&plan.id, &[plan.paths[0].id.clone()])
+        .handle(UiIntent::ConfirmTakeoverPlan {
+            plan_id: plan.id.clone(),
+            preserved_path_ids: vec![plan.paths[0].id.clone()],
+        })
         .expect("确认后应完成接管");
 
     assert!(

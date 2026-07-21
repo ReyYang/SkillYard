@@ -181,6 +181,21 @@ pub fn create_takeover_plan(
 }
 
 #[tauri::command(async)]
+pub fn confirm_takeover_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+    preserved_path_ids: Vec<String>,
+) -> Result<UiOutcome, UiError> {
+    dispatch(
+        &application,
+        UiIntent::ConfirmTakeoverPlan {
+            plan_id,
+            preserved_path_ids,
+        },
+    )
+}
+
+#[tauri::command(async)]
 pub fn create_remove_mount_plan(
     application: State<'_, SkillYardApplication>,
     mount_id: String,

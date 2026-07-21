@@ -20,6 +20,10 @@ pub enum UiIntent {
     CreateTakeoverPlan {
         observation_id: String,
     },
+    ConfirmTakeoverPlan {
+        plan_id: String,
+        preserved_path_ids: Vec<String>,
+    },
     CreateMountPlan {
         member_id: String,
         app_id: SupportedAppId,
@@ -838,5 +842,20 @@ mod tests {
         let project_root =
             serde_json::to_value(ScanRootKey::GitHubCopilotProject).expect("应序列化扫描根");
         assert_eq!(project_root, "gitHubCopilotProject");
+    }
+
+    #[test]
+    fn takeover_confirmation_intent_uses_only_opaque_plan_and_path_ids() {
+        let intent = UiIntent::ConfirmTakeoverPlan {
+            plan_id: "takeover-plan".to_owned(),
+            preserved_path_ids: vec!["takeover-path".to_owned()],
+        };
+
+        let value = serde_json::to_value(intent).expect("应序列化接管确认意图");
+
+        assert_eq!(value["type"], "confirmTakeoverPlan");
+        assert_eq!(value["plan_id"], "takeover-plan");
+        assert_eq!(value["preserved_path_ids"][0], "takeover-path");
+        assert_eq!(value.as_object().expect("意图应为对象").len(), 3);
     }
 }

@@ -45,6 +45,7 @@ pub fn run() {
             commands::confirm_install_plan,
             commands::choose_and_register_project,
             commands::create_takeover_plan,
+            commands::confirm_takeover_plan,
             commands::create_mount_plan,
             commands::create_remove_mount_plan,
             commands::create_repair_mount_plan,

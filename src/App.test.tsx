@@ -9,6 +9,7 @@ import type {
   InventoryObservation,
   MountPlan,
   MountSummary,
+  TakeoverPlan,
   UiOutcome,
 } from "./domain";
 import type { SkillYardClient } from "./skillyardClient";
@@ -1133,6 +1134,184 @@ describe("本机清单", () => {
     ).toHaveTextContent("请在 SkillYard 中管理此 Skill");
   });
 
+  it("只有待接管条目显示接管入口，Plan 创建失败时保留清单", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({ id: "candidate", skillName: "local-copy" }),
+        createEntry({
+          id: "agent",
+          skillName: "plugin-copy",
+          managementKind: "agentManaged",
+        }),
+        createEntry({
+          id: "project",
+          skillName: "project-copy",
+          managementKind: "projectManaged",
+        }),
+        createManagedEntry({ id: "managed", skillName: "managed-copy" }),
+      ]),
+    );
+    vi.mocked(client.createTakeoverPlan).mockRejectedValue({
+      code: "takeoverError",
+      message: "原路径已经变化，请刷新后重试",
+    });
+    render(<App client={client} />);
+
+    const takeoverSection = await screen.findByRole("region", { name: "待接管" });
+    expect(within(takeoverSection).getByRole("button", { name: "接管" })).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: "接管" })).toHaveLength(1);
+
+    await user.click(within(takeoverSection).getByRole("button", { name: "接管" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith("candidate");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "原路径已经变化，请刷新后重试",
+    );
+    expect(screen.getByText("local-copy")).toBeInTheDocument();
+    expect(screen.getByText("plugin-copy")).toBeInTheDocument();
+    expect(client.confirmTakeoverPlan).not.toHaveBeenCalled();
+  });
+
+  it("接管预览展示完整影响，按默认值选择并只提交 opaque 路径 ID", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createEntry({ id: "candidate", skillName: "alpha" })]),
+    );
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(
+      createTakeoverPlan({
+        warnings: ["这个 Skill 包含可执行脚本，请确认来源可信"],
+      }),
+    );
+    vi.mocked(client.confirmTakeoverPlan).mockResolvedValue(
+      inventoryOutcome([
+        createManagedEntry({
+          skillName: "alpha",
+          bundleDisplayName: "alpha-bundle",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "接管" }));
+
+    const preview = screen.getByLabelText("接管影响预览");
+    expect(preview).toHaveTextContent("alpha-bundle");
+    expect(preview).toHaveTextContent("alpha");
+    expect(preview).toHaveTextContent("来源未知；没有更新来源");
+    expect(preview).toHaveTextContent("/tmp/.codex/skills/alpha");
+    expect(preview).toHaveTextContent("Codex · 全局");
+    expect(preview).toHaveTextContent("/tmp/central/bundles/bundle-alpha");
+    expect(preview).toHaveTextContent("这个 Skill 包含可执行脚本");
+    expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
+
+    const preserve = screen.getByRole("checkbox", { name: /Codex · 全局/ });
+    expect(preserve).toBeChecked();
+    await user.click(preserve);
+    expect(preserve).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(client.confirmTakeoverPlan).toHaveBeenCalledWith(
+      "takeover-plan-1",
+      [],
+    );
+    expect(
+      await screen.findByRole("region", { name: "alpha-bundle" }),
+    ).toHaveTextContent("alpha-bundle: alpha");
+  });
+
+  it("不修改默认选择时保留并提交已有使用位置", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createEntry({ id: "candidate", skillName: "alpha" })]),
+    );
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(createTakeoverPlan());
+    vi.mocked(client.confirmTakeoverPlan).mockResolvedValue(inventoryOutcome([]));
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "接管" }));
+    expect(screen.getByRole("checkbox", { name: /Codex · 全局/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(client.confirmTakeoverPlan).toHaveBeenCalledWith(
+      "takeover-plan-1",
+      ["takeover-path-1"],
+    );
+  });
+
+  it("接管确认开始后禁用返回、选择和重复提交", async () => {
+    const user = userEvent.setup();
+    let finishTakeover: ((outcome: UiOutcome) => void) | undefined;
+    const client = createClient(
+      inventoryOutcome([createEntry({ id: "candidate", skillName: "alpha" })]),
+    );
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(createTakeoverPlan());
+    vi.mocked(client.confirmTakeoverPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishTakeover = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(screen.getByRole("checkbox", { name: /Codex · 全局/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    const confirming = screen.getByRole("button", { name: "正在安全接管…" });
+    expect(confirming).toBeDisabled();
+    await user.click(confirming);
+    expect(client.confirmTakeoverPlan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishTakeover?.(inventoryOutcome([]));
+    });
+    expect(screen.getByRole("heading", { name: "未发现 Skill" })).toBeInTheDocument();
+  });
+
+  it("接管失败后丢弃旧 Plan，重读 blocked 状态并复用恢复提示", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([
+      createEntry({ id: "candidate", skillName: "alpha" }),
+    ]);
+    const blocked = inventoryOutcome(
+      [createEntry({ id: "candidate", skillName: "alpha" })],
+      null,
+      {
+        recoveryIssues: [
+          {
+            id: "takeover-transaction-1",
+            bundleDisplayName: "alpha-bundle",
+            message: "原路径被外部修改，需要人工恢复",
+          },
+        ],
+      },
+    );
+    const client = createClient(initial);
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(createTakeoverPlan());
+    vi.mocked(client.confirmTakeoverPlan).mockRejectedValue({
+      code: "takeoverError",
+      message: "接管中断，相关 Skill 已停止修改",
+    });
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(blocked);
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "接管中断，相关 Skill 已停止修改",
+    );
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "确认接管" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("需要人工恢复")).toHaveTextContent(
+      "原路径被外部修改，需要人工恢复",
+    );
+  });
+
   it("搜索和管理状态筛选只改变当前显示，不调用任何生命周期命令", async () => {
     const user = userEvent.setup();
     const client = createClient(
@@ -1374,12 +1553,61 @@ function createClient(startup: UiOutcome): SkillYardClient {
     chooseFolderInstallPlan: vi.fn(),
     confirmInstallPlan: vi.fn(),
     chooseAndRegisterProject: vi.fn(),
+    createTakeoverPlan: vi.fn(),
+    confirmTakeoverPlan: vi.fn(),
     createMountPlan: vi.fn(),
     createRemoveMountPlan: vi.fn(),
     createRepairMountPlan: vi.fn(),
     confirmMountPlan: vi.fn(),
     createBatchMountPlan: vi.fn(),
     confirmBatchMountPlan: vi.fn(),
+  };
+}
+
+function createTakeoverPlan(
+  overrides: Partial<TakeoverPlan> = {},
+): TakeoverPlan {
+  return {
+    id: "takeover-plan-1",
+    observationId: "candidate",
+    bundleId: "bundle-alpha",
+    contentId: "content-alpha",
+    memberId: "member-alpha",
+    bundleDisplayName: "alpha-bundle",
+    sourceDisplayName: null,
+    sourceNotice: "来源未知；没有更新来源",
+    skillName: "alpha",
+    skillDescription: "alpha description",
+    contentFingerprint: "fingerprint",
+    warnings: [],
+    managedDirectory: "/tmp/central/bundles/bundle-alpha",
+    contentDirectory: "/tmp/central/contents/content-alpha",
+    expectedTarget:
+      "/tmp/central/bundles/bundle-alpha/current/members/alpha",
+    paths: [
+      {
+        id: "takeover-path-1",
+        mountId: "mount-alpha",
+        originalPath: "/tmp/.codex/skills/alpha",
+        appId: "codex",
+        scope: "global",
+        projectId: null,
+        projectDisplayName: null,
+        projectRootPath: null,
+        projectRootDevice: null,
+        projectRootInode: null,
+        parentDevice: 1,
+        parentInode: 2,
+        parentMode: 16_877,
+        originalDevice: 1,
+        originalInode: 3,
+        originalMode: 16_877,
+        defaultPreserveMount: true,
+      },
+    ],
+    createdAt: 1,
+    expiresAt: 2,
+    ...overrides,
   };
 }
 

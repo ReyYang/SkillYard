@@ -106,6 +106,12 @@ impl SkillYardApplication {
             UiIntent::CreateTakeoverPlan { observation_id } => {
                 self.with_write_operation(|| self.create_takeover_plan(observation_id))
             }
+            UiIntent::ConfirmTakeoverPlan {
+                plan_id,
+                preserved_path_ids,
+            } => self.with_write_operation(|| {
+                self.confirm_takeover_plan_inner(plan_id, preserved_path_ids)
+            }),
             UiIntent::CreateMountPlan {
                 member_id,
                 app_id,
@@ -329,28 +335,37 @@ impl SkillYardApplication {
         Ok(UiOutcome::TakeoverPlan { plan })
     }
 
-    /// 后端接管 seam；1.0 UI command 会在独立切片中接入，避免文件事务与界面协议混改。
+    /// 测试与内部调用也经由 typed intent，确保接管确认只取得一次写操作门。
     #[doc(hidden)]
     pub fn confirm_takeover_plan(
         &self,
         plan_id: &str,
         preserved_path_ids: &[String],
     ) -> Result<UiOutcome, ApplicationError> {
-        self.with_write_operation(|| {
-            let mut storage = self.open_recovered_storage()?;
-            ensure_onboarding_completed(&storage)?;
-            confirm_takeover_plan(
-                &self.paths,
-                &mut storage,
-                plan_id,
-                preserved_path_ids,
-                unix_timestamp_millis(),
-                self.lifecycle_failpoint,
-            )?;
-            storage
-                .read_initial_scan()?
-                .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+        self.handle(UiIntent::ConfirmTakeoverPlan {
+            plan_id: plan_id.to_owned(),
+            preserved_path_ids: preserved_path_ids.to_vec(),
         })
+    }
+
+    fn confirm_takeover_plan_inner(
+        &self,
+        plan_id: String,
+        preserved_path_ids: Vec<String>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        confirm_takeover_plan(
+            &self.paths,
+            &mut storage,
+            &plan_id,
+            &preserved_path_ids,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
     }
 
     fn create_remove_mount_plan(&self, mount_id: String) -> Result<UiOutcome, ApplicationError> {
