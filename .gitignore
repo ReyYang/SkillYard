@@ -1,12 +1,6 @@
 outputs/
 work/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-*.egg-info/
+.codex/
 build/
 dist/
-state.sqlite3
 .DS_Store
