@@ -17,6 +17,9 @@ pub enum UiIntent {
     RegisterProject {
         root_path: String,
     },
+    CreateTakeoverPlan {
+        request: TakeoverPlanRequest,
+    },
     CreateMountPlan {
         member_id: String,
         app_id: SupportedAppId,
@@ -65,6 +68,90 @@ pub struct SupportedAppSummary {
 pub enum MountScope {
     Global,
     Project,
+}
+
+/// 创建 Plan 时一次冻结全部用户选择；确认阶段只再接收不透明 Plan ID。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverPlanRequest {
+    pub observation_ids: Vec<String>,
+    pub selected_observation_id: String,
+    pub preserved_observation_ids: Vec<String>,
+    pub shared_targets: Vec<TakeoverSharedTargetRequest>,
+}
+
+/// 共享目录不能继续作为 Mount，用户要明确选择应用专属目标。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverSharedTargetRequest {
+    pub shared_observation_id: String,
+    pub app_id: SupportedAppId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TakeoverIdentityBasis {
+    SingleOrigin,
+    UserConfirmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TakeoverOriginDisposition {
+    Mount,
+    Remove,
+}
+
+/// Origin 是用户确认属于同一个 Skill Identity 的一个现有本地副本。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverPlanOrigin {
+    pub observation_id: String,
+    pub original_path: String,
+    pub app_id: Option<SupportedAppId>,
+    pub scope: Option<MountScope>,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub content_fingerprint: String,
+    pub warnings: Vec<String>,
+    pub final_disposition: TakeoverOriginDisposition,
+}
+
+/// Target 是接管完成后必须存在并指向唯一受管内容的一个 Mount。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverPlanTarget {
+    pub mount_id: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub target_path: String,
+    pub expected_target: String,
+}
+
+/// 一套 Plan 同时覆盖单副本、重复副本、scope 冲突与共享目录输入。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverPlan {
+    pub id: String,
+    pub identity_basis: TakeoverIdentityBasis,
+    pub selected_observation_id: String,
+    pub bundle_id: String,
+    pub member_id: String,
+    pub content_id: String,
+    pub bundle_display_name: String,
+    pub skill_name: String,
+    pub skill_description: String,
+    pub source_display_name: Option<String>,
+    pub managed_directory: String,
+    pub content_directory: String,
+    pub expected_target: String,
+    pub origins: Vec<TakeoverPlanOrigin>,
+    pub targets: Vec<TakeoverPlanTarget>,
+    pub warnings: Vec<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 impl MountScope {
@@ -658,6 +745,9 @@ pub enum UiOutcome {
     },
     BatchMountPlan {
         plan: BatchMountPlan,
+    },
+    TakeoverPlan {
+        plan: TakeoverPlan,
     },
 }
 

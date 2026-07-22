@@ -3,7 +3,7 @@ use std::sync::{Mutex, TryLockError};
 use thiserror::Error;
 
 use crate::{
-    domain::{PlatformInfo, UiIntent, UiOutcome},
+    domain::{PlatformInfo, TakeoverPlanRequest, UiIntent, UiOutcome},
     lifecycle::{
         LifecycleError, LifecycleFailpoint, acquire_lifecycle_lock, confirm_folder_install,
         create_folder_install_plan, ensure_central_store_layout, recover_pending_transactions,
@@ -18,6 +18,7 @@ use crate::{
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
     storage::{Storage, StorageError},
+    takeover::{TakeoverError, create_takeover_plan},
 };
 
 #[derive(Debug, Error)]
@@ -28,6 +29,8 @@ pub enum ApplicationError {
     Lifecycle(#[from] LifecycleError),
     #[error(transparent)]
     MountLifecycle(#[from] MountLifecycleError),
+    #[error(transparent)]
+    Takeover(#[from] TakeoverError),
     #[error("首次扫描未完整完成：{0}")]
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
@@ -96,6 +99,9 @@ impl SkillYardApplication {
             }),
             UiIntent::RegisterProject { root_path } => {
                 self.with_write_operation(|| self.register_project(root_path))
+            }
+            UiIntent::CreateTakeoverPlan { request } => {
+                self.with_write_operation(|| self.create_takeover_plan(request))
             }
             UiIntent::CreateMountPlan {
                 member_id,
@@ -279,6 +285,20 @@ impl SkillYardApplication {
         storage
             .read_initial_scan()?
             .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn create_takeover_plan(
+        &self,
+        request: TakeoverPlanRequest,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan =
+            create_takeover_plan(&self.paths, &mut storage, request, unix_timestamp_millis())?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::TakeoverPlan { plan })
     }
 
     fn create_mount_plan(

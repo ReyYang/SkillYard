@@ -20,6 +20,7 @@ impl From<ApplicationError> for UiError {
             ApplicationError::Storage(_) => "storageError",
             ApplicationError::Lifecycle(_) => "lifecycleError",
             ApplicationError::MountLifecycle(_) => "mountError",
+            ApplicationError::Takeover(_) => "takeoverError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",

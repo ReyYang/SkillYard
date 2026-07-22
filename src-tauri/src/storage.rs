@@ -35,6 +35,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         9,
         include_str!("../migrations/0009_management_evidence.sql"),
     ),
+    (10, include_str!("../migrations/0010_takeover.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -185,11 +186,30 @@ pub enum StorageError {
     InvalidBatchMountPhase(String),
     #[error("SQLite 中包含非法文件系统身份值：{0}")]
     InvalidFilesystemIdentity(i64),
+    #[error("Takeover Plan 未签发或已经不存在")]
+    TakeoverPlanNotFound,
+    #[error("Takeover Plan 的不可变合同已经损坏")]
+    InvalidTakeoverPlan,
+    #[error("无法保存 Takeover Plan：{0}")]
+    SaveTakeoverPlan(#[source] rusqlite::Error),
+    #[error("无法读取 Takeover Plan：{0}")]
+    ReadTakeoverPlan(#[source] rusqlite::Error),
 }
 
 pub struct Storage {
     connection: Connection,
     data_root: PathBuf,
+}
+
+/// Storage 不解释 Plan 内容，只原样保存由 Takeover 模块签发的不可变合同。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredTakeoverPlanRow {
+    pub id: String,
+    pub payload_json: String,
+    pub payload_sha256: String,
+    pub status: String,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 pub struct SavedLocalRefresh {
@@ -636,6 +656,66 @@ impl Storage {
             transaction.commit().map_err(StorageError::Migration)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn save_takeover_plan(
+        &mut self,
+        plan: &StoredTakeoverPlanRow,
+    ) -> Result<(), StorageError> {
+        if plan.id.is_empty()
+            || plan.payload_json.is_empty()
+            || plan.payload_sha256.len() != 64
+            || !plan
+                .payload_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || plan.status != "pending"
+            || plan.created_at < 0
+            || plan.expires_at < plan.created_at
+        {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
+        self.connection
+            .execute(
+                "INSERT INTO takeover_plans (
+                    id, payload_json, payload_sha256, status, created_at, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    plan.id,
+                    plan.payload_json,
+                    plan.payload_sha256,
+                    plan.status,
+                    plan.created_at,
+                    plan.expires_at
+                ],
+            )
+            .map_err(StorageError::SaveTakeoverPlan)?;
+        Ok(())
+    }
+
+    pub(crate) fn read_takeover_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<StoredTakeoverPlanRow, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT id, payload_json, payload_sha256, status, created_at, expires_at
+                 FROM takeover_plans WHERE id = ?1",
+                [plan_id],
+                |row| {
+                    Ok(StoredTakeoverPlanRow {
+                        id: row.get(0)?,
+                        payload_json: row.get(1)?,
+                        payload_sha256: row.get(2)?,
+                        status: row.get(3)?,
+                        created_at: row.get(4)?,
+                        expires_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::ReadTakeoverPlan)?
+            .ok_or(StorageError::TakeoverPlanNotFound)
     }
 
     pub fn read_initial_scan(&self) -> Result<Option<UiOutcome>, StorageError> {

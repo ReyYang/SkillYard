@@ -10,6 +10,7 @@ mod mount_lifecycle;
 mod paths;
 mod scanner;
 mod storage;
+mod takeover;
 
 pub use application::SkillYardApplication;
 pub use domain::{
@@ -18,7 +19,9 @@ pub use domain::{
     LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
     MountOperation, MountPlan, MountPlanPurpose, MountScope, MountSummary, PlatformInfo,
     ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
-    SupportedAppId, UiIntent, UiOutcome,
+    SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
+    TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest,
+    UiIntent, UiOutcome,
 };
 pub use lifecycle::LifecycleFailpoint;
 pub use paths::ApplicationPaths;
