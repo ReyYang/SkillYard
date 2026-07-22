@@ -1697,7 +1697,7 @@ impl Storage {
                 "UPDATE takeover_v2_transactions
                  SET status = 'aborted', error_message = ?2, updated_at = ?3
                  WHERE id = ?1 AND status IN ('in_progress', 'aborted')
-                   AND phase IN ('journal_pending', 'preparing', 'prepared', 'effect_started')
+                   AND phase IN ('journal_pending', 'preparing', 'prepared')
                    AND updated_at <= ?3",
                 params![transaction_id, error_message, now],
             )
@@ -4842,7 +4842,7 @@ fn validate_stored_takeover_v2_transaction(
     let valid_status_phase = match transaction.status.as_str() {
         "in_progress" => phase != TakeoverV2TransactionPhase::CleanupCompleted,
         "completed" => phase == TakeoverV2TransactionPhase::CleanupCompleted,
-        "aborted" => phase.is_before_effect() || phase == TakeoverV2TransactionPhase::EffectStarted,
+        "aborted" => phase.is_before_effect(),
         "blocked" => true,
         _ => false,
     };
@@ -9610,7 +9610,6 @@ mod tests {
             ("preparing", 302),
             ("preparing", 303),
             ("prepared", 304),
-            ("effect_started", 305),
         ] {
             storage
                 .update_takeover_v2_transaction_phase(&transaction_id, phase, now)
@@ -9621,10 +9620,10 @@ mod tests {
             Err(StorageError::TakeoverV2StateConflict(_))
         ));
         storage
-            .abort_takeover_v2_transaction(&transaction_id, Some("已完整回退"), 306)
-            .expect("effect_started 完整回退后允许标记 aborted");
+            .abort_takeover_v2_transaction(&transaction_id, Some("执行前中止"), 306)
+            .expect("prepared 阶段允许标记 aborted");
         storage
-            .abort_takeover_v2_transaction(&transaction_id, Some("已完整回退"), 307)
+            .abort_takeover_v2_transaction(&transaction_id, Some("执行前中止"), 307)
             .expect("重复 abort 必须幂等");
         storage
             .forget_terminal_takeover_v2_transaction(&transaction_id)
@@ -9708,6 +9707,51 @@ mod tests {
         storage
             .forget_terminal_takeover_v2_transaction(&completed_id)
             .expect("completed 事务允许清理");
+    }
+
+    #[test]
+    fn takeover_v2_abort_rejects_effect_started_without_mutating_transaction() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        let (_, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+
+        assert!(matches!(
+            storage.abort_takeover_v2_transaction(&transaction_id, Some("不应中止"), 304),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+        let stored = storage
+            .recoverable_takeover_v2_transactions()
+            .expect("应读取未被修改的恢复事务");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].phase, "effect_started");
+        assert_eq!(stored[0].status, "in_progress");
+        assert_eq!(stored[0].error_message, None);
+        assert_eq!(stored[0].updated_at, 303);
+    }
+
+    #[test]
+    fn takeover_v2_recovery_rejects_stored_effect_started_aborted_transaction() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        let (_, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+        // 模拟旧版本留下的非法终态，确保恢复器不会将其当作已安全中止。
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_v2_transactions
+                 SET status = 'aborted', error_message = '非法终态', updated_at = 304
+                 WHERE id = ?1",
+                [&transaction_id],
+            )
+            .expect("应注入待校验的异常事务");
+
+        let stored = storage
+            .recoverable_takeover_v2_transactions()
+            .expect("单条异常事务不应阻断恢复列表");
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].recovery_validation_error.is_some());
     }
 
     #[test]
