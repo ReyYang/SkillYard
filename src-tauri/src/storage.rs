@@ -1765,6 +1765,156 @@ impl Storage {
             .map_err(StorageError::SaveTakeoverV2Transaction)
     }
 
+    /// 文件系统已经完成统一生效后，领域状态与事务阶段必须在同一 SQLite 事务中提交。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn finalize_takeover_v2(
+        &mut self,
+        transaction_id: &str,
+        plan: &TakeoverV2Plan,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        let stored_plan = read_takeover_v2_plan_from(&transaction, &self.data_root, &plan.id)?
+            .ok_or(StorageError::TakeoverV2PlanNotFound)?;
+        if &stored_plan != plan || plan.status != TakeoverV2PlanStatus::Consumed {
+            return Err(StorageError::InvalidTakeoverV2Plan);
+        }
+        let stored_transaction =
+            read_takeover_v2_transaction_from(&transaction, transaction_id)?
+                .ok_or_else(|| StorageError::TakeoverV2StateConflict(transaction_id.to_owned()))?;
+        validate_stored_takeover_v2_transaction(&stored_transaction)?;
+        validate_takeover_v2_transaction_matches_plan(&stored_transaction, plan)?;
+        if stored_transaction.status != "in_progress" || now < stored_transaction.updated_at {
+            return Err(StorageError::TakeoverV2StateConflict(
+                transaction_id.to_owned(),
+            ));
+        }
+        let selected_origin = plan
+            .origins
+            .iter()
+            .find(|origin| origin.id == plan.selected_origin_id)
+            .ok_or(StorageError::InvalidTakeoverV2Plan)?;
+        if stored_transaction.phase == "state_committed" {
+            ensure_takeover_v2_managed_state_matches(
+                &transaction,
+                plan,
+                selected_origin,
+                stored_transaction.updated_at,
+            )?;
+            return transaction
+                .commit()
+                .map_err(StorageError::SaveTakeoverV2Transaction);
+        }
+        if stored_transaction.phase != "effect_started" {
+            return Err(StorageError::TakeoverV2StateConflict(
+                transaction_id.to_owned(),
+            ));
+        }
+        validate_current_takeover_v2_snapshots(&transaction, plan)?;
+        let managed_directory = format!("bundles/{}", plan.bundle_id);
+        let current_target = format!("contents/{}", plan.content_id);
+        let stable_relative_path = format!("members/{}", plan.skill_name);
+
+        transaction
+            .execute(
+                "INSERT INTO bundles (
+                    id, display_name, managed_directory, current_target, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    plan.bundle_id,
+                    plan.bundle_display_name,
+                    managed_directory,
+                    current_target,
+                    now,
+                ],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        transaction
+            .execute(
+                "INSERT INTO skill_members (
+                    id, bundle_id, skill_name, description, stable_relative_path,
+                    content_fingerprint, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    plan.member_id,
+                    plan.bundle_id,
+                    plan.skill_name,
+                    selected_origin.skill_description,
+                    stable_relative_path,
+                    selected_origin.content_fingerprint,
+                    now,
+                ],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        transaction
+            .execute(
+                "INSERT INTO member_selections (bundle_id, member_id, selected_at)
+                 VALUES (?1, ?2, ?3)",
+                params![plan.bundle_id, plan.member_id, now],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        for target in &plan.targets {
+            transaction
+                .execute(
+                    "INSERT INTO mounts (
+                        id, member_id, app_id, scope, project_id, target_path,
+                        expected_target, health, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'healthy', ?8, ?8)",
+                    params![
+                        target.mount_id,
+                        plan.member_id,
+                        target.app_id.as_str(),
+                        target.scope.as_str(),
+                        target.project_id,
+                        target.target_path,
+                        target.expected_target,
+                        now,
+                    ],
+                )
+                .map_err(StorageError::SaveManagedBundle)?;
+        }
+        for origin in &plan.origins {
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM inventory_observations WHERE id = ?1",
+                    [&origin.observation_id],
+                )
+                .map_err(StorageError::SaveManagedBundle)?;
+            ensure_one_takeover_v2_row(deleted, transaction_id)?;
+        }
+        ensure_takeover_v2_managed_state_matches(&transaction, plan, selected_origin, now)?;
+
+        let committed = transaction
+            .execute(
+                "UPDATE takeover_v2_transactions
+                 SET phase = 'state_committed', updated_at = ?9
+                 WHERE id = ?1 AND plan_id = ?2 AND bundle_id = ?3
+                   AND member_id = ?4 AND content_id = ?5 AND selected_origin_id = ?6
+                   AND bundle_display_name = ?7 AND plan_seal = ?8
+                   AND phase = 'effect_started' AND status = 'in_progress'
+                   AND updated_at <= ?9",
+                params![
+                    transaction_id,
+                    plan.id,
+                    plan.bundle_id,
+                    plan.member_id,
+                    plan.content_id,
+                    plan.selected_origin_id,
+                    plan.bundle_display_name,
+                    plan.seal,
+                    now,
+                ],
+            )
+            .map_err(StorageError::SaveTakeoverV2Transaction)?;
+        ensure_one_takeover_v2_row(committed, transaction_id)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveTakeoverV2Transaction)
+    }
+
     pub(crate) fn begin_takeover_transaction_with_journal_contract(
         &mut self,
         plan_id: &str,
@@ -4594,6 +4744,23 @@ fn validate_takeover_transaction_matches_plan(
     Ok(())
 }
 
+fn read_takeover_v2_transaction_from(
+    connection: &Connection,
+    transaction_id: &str,
+) -> Result<Option<StoredTakeoverV2Transaction>, StorageError> {
+    connection
+        .query_row(
+            "SELECT id, plan_id, bundle_id, member_id, content_id, selected_origin_id,
+                    bundle_display_name, plan_seal, journal_path, journal_contract_sha256,
+                    phase, status, error_message, created_at, updated_at
+             FROM takeover_v2_transactions WHERE id = ?1",
+            [transaction_id],
+            stored_takeover_v2_transaction_from_row,
+        )
+        .optional()
+        .map_err(StorageError::ReadTakeoverV2Transaction)
+}
+
 fn stored_takeover_v2_transaction_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<StoredTakeoverV2Transaction> {
@@ -4730,6 +4897,160 @@ fn validate_current_takeover_v2_snapshots(
             || observation.management_evidence.is_some()
         {
             return Err(StorageError::InvalidTakeoverV2Plan);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_takeover_v2_managed_state_matches(
+    transaction: &Transaction<'_>,
+    plan: &TakeoverV2Plan,
+    selected_origin: &TakeoverV2Origin,
+    committed_at: i64,
+) -> Result<(), StorageError> {
+    let bundle = transaction
+        .query_row(
+            "SELECT display_name, managed_directory, current_target, created_at
+             FROM bundles WHERE id = ?1",
+            [&plan.bundle_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::SaveManagedBundle)?;
+    if bundle
+        != Some((
+            plan.bundle_display_name.clone(),
+            format!("bundles/{}", plan.bundle_id),
+            format!("contents/{}", plan.content_id),
+            committed_at,
+        ))
+    {
+        return Err(StorageError::ManagedStateConflict);
+    }
+
+    let member = transaction
+        .query_row(
+            "SELECT bundle_id, skill_name, description, stable_relative_path,
+                    content_fingerprint, created_at
+             FROM skill_members WHERE id = ?1",
+            [&plan.member_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::SaveManagedBundle)?;
+    if member
+        != Some((
+            plan.bundle_id.clone(),
+            plan.skill_name.clone(),
+            selected_origin.skill_description.clone(),
+            format!("members/{}", plan.skill_name),
+            selected_origin.content_fingerprint.clone(),
+            committed_at,
+        ))
+    {
+        return Err(StorageError::ManagedStateConflict);
+    }
+
+    let member_state = transaction
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM skill_members WHERE bundle_id = ?1),
+                (SELECT COUNT(*) FROM member_selections WHERE bundle_id = ?1),
+                (SELECT COUNT(*) FROM member_selections
+                 WHERE bundle_id = ?1 AND member_id = ?2),
+                (SELECT COUNT(*) FROM mounts WHERE member_id = ?2),
+                (SELECT selected_at FROM member_selections
+                 WHERE bundle_id = ?1 AND member_id = ?2)",
+            params![plan.bundle_id, plan.member_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    if member_state
+        != (
+            1,
+            1,
+            1,
+            i64::try_from(plan.targets.len()).map_err(|_| StorageError::ManagedStateConflict)?,
+            Some(committed_at),
+        )
+    {
+        return Err(StorageError::ManagedStateConflict);
+    }
+
+    for target in &plan.targets {
+        let mount = transaction
+            .query_row(
+                "SELECT member_id, app_id, scope, project_id, target_path,
+                        expected_target, health, created_at, updated_at
+                 FROM mounts WHERE id = ?1",
+                [&target.mount_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::SaveManagedBundle)?;
+        if mount
+            != Some((
+                plan.member_id.clone(),
+                target.app_id.as_str().to_owned(),
+                target.scope.as_str().to_owned(),
+                target.project_id.clone(),
+                target.target_path.clone(),
+                target.expected_target.clone(),
+                "healthy".to_owned(),
+                committed_at,
+                committed_at,
+            ))
+        {
+            return Err(StorageError::ManagedStateConflict);
+        }
+    }
+
+    for origin in &plan.origins {
+        let remains = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM inventory_observations WHERE id = ?1)",
+                [&origin.observation_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::ReadInventory)?;
+        if remains {
+            return Err(StorageError::ManagedStateConflict);
         }
     }
     Ok(())
@@ -8121,6 +8442,49 @@ mod tests {
         plan
     }
 
+    fn test_project_takeover_v2_plan(storage: &mut Storage) -> (TakeoverV2Plan, StoredProject) {
+        let project_id = uuid::Uuid::new_v4().to_string();
+        let project_root = format!("/tmp/takeover-v2-project-{project_id}");
+        let project = storage
+            .register_project(NewProject {
+                id: &project_id,
+                display_name: "接管项目",
+                root_path: &project_root,
+                root_device: 31,
+                root_inode: 32,
+                created_at: 100,
+            })
+            .expect("应登记 v2 测试 Project");
+        let mut plan = test_takeover_v2_plan(storage);
+        let original_path = format!("{project_root}/.claude/skills/alpha");
+        let origin = &mut plan.origins[0];
+        origin.observation_skill_file = format!("{original_path}/SKILL.md");
+        origin.observation_location_kind = InventoryLocationKind::AppProject;
+        origin.observation_observed_by =
+            vec![SupportedAppId::ClaudeCode, SupportedAppId::GitHubCopilot];
+        origin.root_key = ScanRootKey::ClaudeCodeProject;
+        origin.app_id = Some(SupportedAppId::ClaudeCode);
+        origin.scope = Some(MountScope::Project);
+        origin.project_id = Some(project.id.clone());
+        origin.project_display_name = Some(project.display_name.clone());
+        origin.project_root_path = Some(project.root_path.clone());
+        origin.project_root_device = Some(project.root_device);
+        origin.project_root_inode = Some(project.root_inode);
+        origin.original_path = original_path.clone();
+        let target = &mut plan.targets[0];
+        target.app_id = SupportedAppId::ClaudeCode;
+        target.scope = MountScope::Project;
+        target.project_id = Some(project.id.clone());
+        target.project_display_name = Some(project.display_name.clone());
+        target.project_root_path = Some(project.root_path.clone());
+        target.project_root_device = Some(project.root_device);
+        target.project_root_inode = Some(project.root_inode);
+        target.target_path = original_path;
+        canonicalize_takeover_v2_plan(&mut plan);
+        plan.seal = takeover_v2_plan_seal(&plan);
+        (plan, project)
+    }
+
     fn test_shared_takeover_v2_plan(storage: &Storage) -> TakeoverV2Plan {
         let mut plan = test_takeover_v2_plan(storage);
         let origin = &mut plan.origins[0];
@@ -8166,6 +8530,36 @@ mod tests {
         storage
             .save_initial_scan(250, &entries, &[])
             .expect("应保存 v2 当前 Inventory 快照");
+    }
+
+    fn begin_takeover_v2_at_effect_started(
+        storage: &mut Storage,
+        plan: &TakeoverV2Plan,
+    ) -> (TakeoverV2Plan, String) {
+        save_takeover_v2_inventory(storage, plan);
+        storage
+            .save_takeover_v2_plan(plan)
+            .expect("应保存 v2 接管 Plan");
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        let consumed = storage
+            .begin_takeover_v2_transaction(
+                &plan.id,
+                &transaction_id,
+                &format!("journals/takeover-v2-{transaction_id}.json"),
+                &"a".repeat(64),
+                300,
+            )
+            .expect("应启动 v2 接管事务");
+        for (phase, now) in [
+            ("preparing", 301),
+            ("prepared", 302),
+            ("effect_started", 303),
+        ] {
+            storage
+                .update_takeover_v2_transaction_phase(&transaction_id, phase, now)
+                .expect("应推进到 effect_started");
+        }
+        (consumed, transaction_id)
     }
 
     fn align_v2_origin_with_observation(
@@ -9037,6 +9431,965 @@ mod tests {
         storage
             .forget_terminal_takeover_v2_transaction(&completed_id)
             .expect("completed 事务允许清理");
+    }
+
+    #[test]
+    fn takeover_v2_finalize_commits_all_targets_and_selected_origin_content() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let mut plan = test_user_confirmed_takeover_v2_plan(&storage);
+        plan.selected_origin_id = plan.origins[1].id.clone();
+        canonicalize_takeover_v2_plan(&mut plan);
+        plan.seal = takeover_v2_plan_seal(&plan);
+        let selected = plan
+            .origins
+            .iter()
+            .find(|origin| origin.id == plan.selected_origin_id)
+            .expect("测试 Plan 必须包含 selected Origin")
+            .clone();
+        let (consumed, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+
+        storage
+            .finalize_takeover_v2(&transaction_id, &consumed, 400)
+            .expect("应原子提交 v2 领域状态");
+
+        let bundle = storage
+            .connection
+            .query_row(
+                "SELECT display_name, managed_directory, current_target
+                 FROM bundles WHERE id = ?1",
+                [&plan.bundle_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("应写入 Bundle");
+        assert_eq!(
+            bundle,
+            (
+                plan.bundle_display_name.clone(),
+                format!("bundles/{}", plan.bundle_id),
+                format!("contents/{}", plan.content_id),
+            )
+        );
+        let member = storage
+            .connection
+            .query_row(
+                "SELECT bundle_id, skill_name, description, stable_relative_path,
+                        content_fingerprint
+                 FROM skill_members WHERE id = ?1",
+                [&plan.member_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .expect("应写入 Skill Member");
+        assert_eq!(
+            member,
+            (
+                plan.bundle_id.clone(),
+                plan.skill_name.clone(),
+                selected.skill_description.clone(),
+                format!("members/{}", plan.skill_name),
+                selected.content_fingerprint.clone(),
+            )
+        );
+        let selection_count = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM member_selections
+                 WHERE bundle_id = ?1 AND member_id = ?2",
+                params![plan.bundle_id, plan.member_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应读取 Member Selection");
+        assert_eq!(selection_count, 1);
+        let mut stored_mounts = storage.read_mounts().expect("应读取所有 Mount");
+        stored_mounts.sort_by(|left, right| left.target_path.cmp(&right.target_path));
+        let mut expected_targets = plan.targets.clone();
+        expected_targets.sort_by(|left, right| left.target_path.cmp(&right.target_path));
+        assert_eq!(stored_mounts.len(), expected_targets.len());
+        for (mount, target) in stored_mounts.iter().zip(expected_targets) {
+            assert_eq!(mount.id, target.mount_id);
+            assert_eq!(mount.member_id, plan.member_id);
+            assert_eq!(mount.app_id, target.app_id);
+            assert_eq!(mount.scope, target.scope);
+            assert_eq!(mount.project_id, target.project_id);
+            assert_eq!(mount.target_path, target.target_path);
+            assert_eq!(mount.expected_target, target.expected_target);
+            assert_eq!(mount.health, MountHealth::Healthy);
+        }
+        let remaining_inventory = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM inventory_observations WHERE id IN (
+                    SELECT observation_id FROM takeover_v2_origins WHERE plan_id = ?1
+                 )",
+                [&plan.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应核对 Origin Inventory");
+        assert_eq!(remaining_inventory, 0);
+        let UiOutcome::Inventory {
+            entries, mounts, ..
+        } = storage
+            .read_initial_scan()
+            .expect("应读取公开 Inventory")
+            .expect("测试已完成首次扫描")
+        else {
+            panic!("接管后应返回 Inventory");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, format!("managed:{}", plan.member_id));
+        assert_eq!(entries[0].management_kind, ManagementKind::SkillYardManaged);
+        assert_eq!(
+            entries[0].observed_fingerprint,
+            selected.content_fingerprint
+        );
+        assert_eq!(mounts.len(), plan.targets.len());
+        let transaction_state = storage
+            .connection
+            .query_row(
+                "SELECT phase, status, updated_at
+                 FROM takeover_v2_transactions WHERE id = ?1",
+                [&transaction_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("应读取 v2 事务终态");
+        assert_eq!(
+            transaction_state,
+            ("state_committed".to_owned(), "in_progress".to_owned(), 400)
+        );
+    }
+
+    #[test]
+    fn takeover_v2_finalize_preserves_project_mount_snapshot_after_reopen() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        let database = data_root.join("skillyard.sqlite3");
+        let mut storage = Storage::open(&data_root, &database).expect("应打开隔离 SQLite");
+        let (plan, project) = test_project_takeover_v2_plan(&mut storage);
+        let (consumed, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+        storage
+            .finalize_takeover_v2(&transaction_id, &consumed, 400)
+            .expect("应提交 Project Target");
+        drop(storage);
+
+        let reopened = Storage::open(&data_root, &database).expect("应重新打开 SQLite");
+        let mount = reopened
+            .read_mount(&plan.targets[0].mount_id)
+            .expect("重启后应读取 Project Mount");
+        assert_eq!(mount.member_id, plan.member_id);
+        assert_eq!(mount.app_id, SupportedAppId::ClaudeCode);
+        assert_eq!(mount.scope, MountScope::Project);
+        assert_eq!(mount.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(
+            mount.project_display_name.as_deref(),
+            Some(project.display_name.as_str())
+        );
+        assert_eq!(
+            mount.project_root_path.as_deref(),
+            Some(project.root_path.as_str())
+        );
+        assert_eq!(mount.project_root_device, Some(project.root_device));
+        assert_eq!(mount.project_root_inode, Some(project.root_inode));
+        assert_eq!(mount.target_path, plan.targets[0].target_path);
+        assert_eq!(mount.expected_target, plan.expected_target);
+        assert_eq!(mount.health, MountHealth::Healthy);
+        assert_eq!(
+            reopened.read_mounts().expect("应读取唯一 Mount"),
+            vec![mount]
+        );
+
+        let outcome = reopened
+            .read_initial_scan()
+            .expect("应读取首次扫描结果")
+            .expect("测试已完成首次扫描");
+        let UiOutcome::Inventory {
+            entries,
+            projects,
+            mounts,
+            ..
+        } = outcome
+        else {
+            panic!("接管后应返回 Inventory");
+        };
+        assert_eq!(entries.len(), 1);
+        let managed = &entries[0];
+        assert_eq!(managed.id, format!("managed:{}", plan.member_id));
+        assert_eq!(managed.member_id.as_deref(), Some(plan.member_id.as_str()));
+        assert_eq!(managed.bundle_id.as_deref(), Some(plan.bundle_id.as_str()));
+        assert_eq!(
+            managed.observed_fingerprint,
+            plan.origins[0].content_fingerprint
+        );
+        assert_eq!(managed.management_kind, ManagementKind::SkillYardManaged);
+        assert_eq!(
+            projects,
+            vec![ProjectSummary {
+                id: project.id.clone(),
+                display_name: project.display_name.clone(),
+                root_path: project.root_path.clone(),
+            }]
+        );
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].id, plan.targets[0].mount_id);
+        assert_eq!(mounts[0].project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(
+            mounts[0].project_display_name.as_deref(),
+            Some(project.display_name.as_str())
+        );
+    }
+
+    #[test]
+    fn takeover_v2_finalize_accepts_an_empty_target_set() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_shared_takeover_v2_plan(&storage);
+        let (consumed, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+
+        storage
+            .finalize_takeover_v2(&transaction_id, &consumed, 400)
+            .expect("没有 Target 的接管也应提交受管内容");
+
+        let member = storage
+            .read_managed_member(&plan.member_id)
+            .expect("空 Target 仍应创建受管 Member");
+        assert_eq!(member.bundle_id, plan.bundle_id);
+        assert_eq!(
+            member.content_fingerprint,
+            plan.origins[0].content_fingerprint
+        );
+        assert!(
+            storage
+                .read_mounts()
+                .expect("应读取空 Mount 集合")
+                .is_empty()
+        );
+        let remaining_inventory = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM inventory_observations WHERE id = ?1",
+                [&plan.origins[0].observation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应核对 shared Origin Inventory");
+        assert_eq!(remaining_inventory, 0);
+        let UiOutcome::Inventory {
+            entries, mounts, ..
+        } = storage
+            .read_initial_scan()
+            .expect("应读取公开 Inventory")
+            .expect("测试已完成首次扫描")
+        else {
+            panic!("接管后应返回 Inventory");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, format!("managed:{}", plan.member_id));
+        assert_eq!(entries[0].management_kind, ManagementKind::SkillYardManaged);
+        assert!(mounts.is_empty());
+    }
+
+    #[test]
+    fn takeover_v2_finalize_revalidates_state_committed_idempotently() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        let (consumed, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+        storage
+            .finalize_takeover_v2(&transaction_id, &consumed, 400)
+            .expect("首次提交应成功");
+        let first_timestamps = storage
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT created_at FROM bundles WHERE id = ?1),
+                    (SELECT created_at FROM skill_members WHERE id = ?2),
+                    (SELECT selected_at FROM member_selections
+                     WHERE bundle_id = ?1 AND member_id = ?2),
+                    (SELECT created_at FROM mounts WHERE id = ?3),
+                    (SELECT updated_at FROM mounts WHERE id = ?3),
+                    (SELECT updated_at FROM takeover_v2_transactions WHERE id = ?4)",
+                params![
+                    plan.bundle_id,
+                    plan.member_id,
+                    plan.targets[0].mount_id,
+                    transaction_id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .expect("应读取首次提交时间");
+
+        storage
+            .finalize_takeover_v2(&transaction_id, &consumed, 401)
+            .expect("state_committed 应精确幂等重验");
+
+        let second_timestamps = storage
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT created_at FROM bundles WHERE id = ?1),
+                    (SELECT created_at FROM skill_members WHERE id = ?2),
+                    (SELECT selected_at FROM member_selections
+                     WHERE bundle_id = ?1 AND member_id = ?2),
+                    (SELECT created_at FROM mounts WHERE id = ?3),
+                    (SELECT updated_at FROM mounts WHERE id = ?3),
+                    (SELECT updated_at FROM takeover_v2_transactions WHERE id = ?4)",
+                params![
+                    plan.bundle_id,
+                    plan.member_id,
+                    plan.targets[0].mount_id,
+                    transaction_id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .expect("应读取幂等提交时间");
+        assert_eq!(second_timestamps, first_timestamps);
+    }
+
+    #[test]
+    fn takeover_v2_finalize_rejects_time_going_backwards_before_and_after_commit() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        let (consumed, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+
+        assert!(matches!(
+            storage.finalize_takeover_v2(&transaction_id, &consumed, 302),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+        let domain_count = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM bundles", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("倒退时间不得写入 Bundle");
+        assert_eq!(domain_count, 0);
+        let inventory_count = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM inventory_observations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("倒退时间不得删除 Inventory");
+        assert_eq!(inventory_count, plan.origins.len() as i64);
+
+        storage
+            .finalize_takeover_v2(&transaction_id, &consumed, 400)
+            .expect("合法时间应提交成功");
+        assert!(matches!(
+            storage.finalize_takeover_v2(&transaction_id, &consumed, 399),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+        let transaction_state = storage
+            .connection
+            .query_row(
+                "SELECT phase, status, updated_at
+                 FROM takeover_v2_transactions WHERE id = ?1",
+                [&transaction_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("应读取时间倒退后的事务");
+        assert_eq!(
+            transaction_state,
+            ("state_committed".to_owned(), "in_progress".to_owned(), 400)
+        );
+    }
+
+    #[test]
+    fn takeover_v2_finalize_rejects_the_prepared_phase_without_writes() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        save_takeover_v2_inventory(&mut storage, &plan);
+        storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存 prepared 测试 Plan");
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        let consumed = storage
+            .begin_takeover_v2_transaction(
+                &plan.id,
+                &transaction_id,
+                &format!("journals/takeover-v2-{transaction_id}.json"),
+                &"a".repeat(64),
+                300,
+            )
+            .expect("应启动 prepared 测试事务");
+        for (phase, now) in [("preparing", 301), ("prepared", 302)] {
+            storage
+                .update_takeover_v2_transaction_phase(&transaction_id, phase, now)
+                .expect("应推进到 prepared");
+        }
+
+        assert!(matches!(
+            storage.finalize_takeover_v2(&transaction_id, &consumed, 400),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+
+        for table in ["bundles", "skill_members", "member_selections", "mounts"] {
+            let count = storage
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("应核对无领域写入");
+            assert_eq!(count, 0, "prepared 不得写入 {table}");
+        }
+        let inventory_count = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM inventory_observations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("应核对 Inventory 未被删除");
+        assert_eq!(inventory_count, plan.origins.len() as i64);
+        let phase = storage
+            .connection
+            .query_row(
+                "SELECT phase FROM takeover_v2_transactions WHERE id = ?1",
+                [&transaction_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("应读取 prepared 事务");
+        assert_eq!(phase, "prepared");
+    }
+
+    #[test]
+    fn takeover_v2_finalize_rolls_back_every_sqlite_change_when_phase_commit_fails() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_user_confirmed_takeover_v2_plan(&storage);
+        let (consumed, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+        storage
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_takeover_v2_state_commit
+                 BEFORE UPDATE OF phase ON takeover_v2_transactions
+                 WHEN NEW.phase = 'state_committed'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'forced_takeover_v2_state_commit_failure');
+                 END;",
+            )
+            .expect("应安装仅测试用失败 Trigger");
+
+        assert!(matches!(
+            storage.finalize_takeover_v2(&transaction_id, &consumed, 400),
+            Err(StorageError::SaveTakeoverV2Transaction(_))
+        ));
+
+        for table in ["bundles", "skill_members", "member_selections", "mounts"] {
+            let count = storage
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("应核对领域写入已回滚");
+            assert_eq!(count, 0, "失败后 {table} 必须为空");
+        }
+        let remaining_inventory = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM inventory_observations WHERE id IN (
+                    SELECT observation_id FROM takeover_v2_origins WHERE plan_id = ?1
+                 )",
+                [&plan.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应核对 Origin Inventory 已回滚");
+        assert_eq!(remaining_inventory, plan.origins.len() as i64);
+        let transaction_state = storage
+            .connection
+            .query_row(
+                "SELECT phase, status, updated_at
+                 FROM takeover_v2_transactions WHERE id = ?1",
+                [&transaction_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("应读取失败后的 v2 事务");
+        assert_eq!(
+            transaction_state,
+            ("effect_started".to_owned(), "in_progress".to_owned(), 303)
+        );
+    }
+
+    #[test]
+    fn takeover_v2_finalize_rejects_tampered_plan_and_transaction_identity() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        let (consumed, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+        let mut tampered_plan = consumed.clone();
+        tampered_plan.bundle_display_name = "被篡改的 Bundle".to_owned();
+
+        assert!(matches!(
+            storage.finalize_takeover_v2(&transaction_id, &tampered_plan, 400),
+            Err(StorageError::InvalidTakeoverV2Plan)
+        ));
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_v2_transactions
+                 SET bundle_display_name = '被篡改的事务' WHERE id = ?1",
+                [&transaction_id],
+            )
+            .expect("应模拟事务冗余身份被篡改");
+        assert!(matches!(
+            storage.finalize_takeover_v2(&transaction_id, &consumed, 401),
+            Err(StorageError::TakeoverV2StateConflict(_))
+        ));
+
+        let domain_count = storage
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM bundles)
+                    + (SELECT COUNT(*) FROM skill_members)
+                    + (SELECT COUNT(*) FROM member_selections)
+                    + (SELECT COUNT(*) FROM mounts)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应核对篡改未产生领域写入");
+        assert_eq!(domain_count, 0);
+        let inventory_count = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM inventory_observations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("应核对篡改未删除 Inventory");
+        assert_eq!(inventory_count, plan.origins.len() as i64);
+    }
+
+    #[test]
+    fn takeover_v2_finalize_never_claims_preexisting_domain_rows() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = test_takeover_v2_plan(&storage);
+        let (consumed, transaction_id) = begin_takeover_v2_at_effect_started(&mut storage, &plan);
+        storage
+            .connection
+            .execute(
+                "INSERT INTO bundles (
+                    id, display_name, managed_directory, current_target, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, 400)",
+                params![
+                    plan.bundle_id,
+                    plan.bundle_display_name,
+                    format!("bundles/{}", plan.bundle_id),
+                    format!("contents/{}", plan.content_id),
+                ],
+            )
+            .expect("应模拟字段完全相同但不属于本事务的 Bundle");
+
+        assert!(matches!(
+            storage.finalize_takeover_v2(&transaction_id, &consumed, 400),
+            Err(StorageError::SaveManagedBundle(_))
+        ));
+
+        let member_count = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM skill_members", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("应核对没有继续写入 Member");
+        assert_eq!(member_count, 0);
+        let inventory_count = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM inventory_observations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("应核对冲突未删除 Inventory");
+        assert_eq!(inventory_count, plan.origins.len() as i64);
+        let phase = storage
+            .connection
+            .query_row(
+                "SELECT phase FROM takeover_v2_transactions WHERE id = ?1",
+                [&transaction_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("应读取冲突后的事务阶段");
+        assert_eq!(phase, "effect_started");
+    }
+
+    #[test]
+    fn takeover_v2_finalize_rolls_back_before_member_or_mount_conflicts() {
+        for conflict in ["member", "mount"] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let mut storage = open_test_storage(sandbox.path());
+            let plan = test_takeover_v2_plan(&storage);
+            let (consumed, transaction_id) =
+                begin_takeover_v2_at_effect_started(&mut storage, &plan);
+            let foreign_bundle_id = uuid::Uuid::new_v4().to_string();
+            let foreign_member_id = if conflict == "member" {
+                plan.member_id.clone()
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            };
+            storage
+                .connection
+                .execute(
+                    "INSERT INTO bundles (
+                        id, display_name, managed_directory, current_target, created_at
+                     ) VALUES (?1, 'foreign', ?2, ?3, 350)",
+                    params![
+                        foreign_bundle_id,
+                        format!("bundles/{foreign_bundle_id}"),
+                        format!("contents/{}", uuid::Uuid::new_v4()),
+                    ],
+                )
+                .expect("应创建外来 Bundle");
+            storage
+                .connection
+                .execute(
+                    "INSERT INTO skill_members (
+                        id, bundle_id, skill_name, description, stable_relative_path,
+                        content_fingerprint, created_at
+                     ) VALUES (?1, ?2, 'foreign', '外来 Member', 'members/foreign', ?3, 350)",
+                    params![foreign_member_id, foreign_bundle_id, "c".repeat(64)],
+                )
+                .expect("应创建外来 Member");
+            if conflict == "mount" {
+                storage
+                    .connection
+                    .execute(
+                        "INSERT INTO mounts (
+                            id, member_id, app_id, scope, project_id, target_path,
+                            expected_target, health, created_at, updated_at
+                         ) VALUES (?1, ?2, 'codex', 'global', NULL, ?3, ?4,
+                                   'healthy', 350, 350)",
+                        params![
+                            plan.targets[0].mount_id,
+                            foreign_member_id,
+                            plan.targets[0].target_path,
+                            plan.expected_target,
+                        ],
+                    )
+                    .expect("应创建占用 Mount 身份与目标路径的外来行");
+            }
+
+            assert!(matches!(
+                storage.finalize_takeover_v2(&transaction_id, &consumed, 400),
+                Err(StorageError::SaveManagedBundle(_))
+            ));
+            let planned_state = storage
+                .connection
+                .query_row(
+                    "SELECT
+                        (SELECT COUNT(*) FROM bundles WHERE id = ?1),
+                        (SELECT COUNT(*) FROM skill_members WHERE bundle_id = ?1),
+                        (SELECT COUNT(*) FROM member_selections WHERE bundle_id = ?1),
+                        (SELECT COUNT(*) FROM mounts WHERE member_id = ?2)",
+                    params![plan.bundle_id, plan.member_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .expect("应核对本事务的领域行全部回滚");
+            assert_eq!(planned_state, (0, 0, 0, 0), "冲突层：{conflict}");
+            let inventory_count = storage
+                .connection
+                .query_row("SELECT COUNT(*) FROM inventory_observations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("应核对冲突未删除 Inventory");
+            assert_eq!(inventory_count, plan.origins.len() as i64);
+            let phase = storage
+                .connection
+                .query_row(
+                    "SELECT phase FROM takeover_v2_transactions WHERE id = ?1",
+                    [&transaction_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("应读取冲突后的事务阶段");
+            assert_eq!(phase, "effect_started");
+        }
+    }
+
+    #[test]
+    fn takeover_v2_finalize_revalidates_effect_started_inventory_and_project_snapshots() {
+        for changed_snapshot in ["inventory", "project"] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let mut storage = open_test_storage(sandbox.path());
+            let (plan, project_id) = if changed_snapshot == "project" {
+                let (plan, project) = test_project_takeover_v2_plan(&mut storage);
+                (plan, Some(project.id))
+            } else {
+                (test_takeover_v2_plan(&storage), None)
+            };
+            let (consumed, transaction_id) =
+                begin_takeover_v2_at_effect_started(&mut storage, &plan);
+            if let Some(project_id) = project_id {
+                storage
+                    .connection
+                    .execute(
+                        "UPDATE projects SET display_name = '已变化的项目' WHERE id = ?1",
+                        [&project_id],
+                    )
+                    .expect("应模拟 effect_started 后 Project 快照变化");
+            } else {
+                storage
+                    .connection
+                    .execute(
+                        "UPDATE inventory_observations
+                         SET observed_fingerprint = 'changed-after-effect-started'
+                         WHERE id = ?1",
+                        [&plan.origins[0].observation_id],
+                    )
+                    .expect("应模拟 effect_started 后 Inventory 快照变化");
+            }
+
+            assert!(matches!(
+                storage.finalize_takeover_v2(&transaction_id, &consumed, 400),
+                Err(StorageError::InvalidTakeoverV2Plan)
+            ));
+            let domain_count = storage
+                .connection
+                .query_row(
+                    "SELECT
+                        (SELECT COUNT(*) FROM bundles)
+                        + (SELECT COUNT(*) FROM skill_members)
+                        + (SELECT COUNT(*) FROM member_selections)
+                        + (SELECT COUNT(*) FROM mounts)",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("应核对快照变化未产生领域写入");
+            assert_eq!(domain_count, 0, "变化快照：{changed_snapshot}");
+            let inventory_count = storage
+                .connection
+                .query_row("SELECT COUNT(*) FROM inventory_observations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("应核对快照变化未删除 Inventory");
+            assert_eq!(inventory_count, plan.origins.len() as i64);
+            let transaction_state = storage
+                .connection
+                .query_row(
+                    "SELECT phase, status, updated_at
+                     FROM takeover_v2_transactions WHERE id = ?1",
+                    [&transaction_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .expect("应读取拒绝后的事务状态");
+            assert_eq!(
+                transaction_state,
+                ("effect_started".to_owned(), "in_progress".to_owned(), 303),
+                "变化快照：{changed_snapshot}"
+            );
+        }
+    }
+
+    #[test]
+    fn takeover_v2_idempotent_finalize_rejects_every_non_exact_domain_state() {
+        for corruption in [
+            "bundle",
+            "member",
+            "extra_member",
+            "selection",
+            "extra_selection",
+            "mount",
+            "extra_mount",
+            "timestamps",
+            "inventory",
+        ] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let mut storage = open_test_storage(sandbox.path());
+            let plan = test_takeover_v2_plan(&storage);
+            let (consumed, transaction_id) =
+                begin_takeover_v2_at_effect_started(&mut storage, &plan);
+            storage
+                .finalize_takeover_v2(&transaction_id, &consumed, 400)
+                .expect("首次提交应成功");
+
+            match corruption {
+                "bundle" => {
+                    storage
+                        .connection
+                        .execute(
+                            "UPDATE bundles SET display_name = '冲突 Bundle' WHERE id = ?1",
+                            [&plan.bundle_id],
+                        )
+                        .expect("应模拟 Bundle 冲突");
+                }
+                "member" => {
+                    storage
+                        .connection
+                        .execute(
+                            "UPDATE skill_members SET description = '冲突描述' WHERE id = ?1",
+                            [&plan.member_id],
+                        )
+                        .expect("应模拟 Member 冲突");
+                }
+                "extra_member" => {
+                    storage
+                        .connection
+                        .execute(
+                            "INSERT INTO skill_members (
+                                id, bundle_id, skill_name, description, stable_relative_path,
+                                content_fingerprint, created_at
+                             ) VALUES (?1, ?2, 'beta', '额外 Member', 'members/beta', ?3, 400)",
+                            params![
+                                uuid::Uuid::new_v4().to_string(),
+                                plan.bundle_id,
+                                "c".repeat(64),
+                            ],
+                        )
+                        .expect("应模拟额外 Member");
+                }
+                "selection" => {
+                    storage
+                        .connection
+                        .execute(
+                            "DELETE FROM member_selections
+                             WHERE bundle_id = ?1 AND member_id = ?2",
+                            params![plan.bundle_id, plan.member_id],
+                        )
+                        .expect("应模拟 Selection 缺失");
+                }
+                "extra_selection" => {
+                    let member_id = uuid::Uuid::new_v4().to_string();
+                    storage
+                        .connection
+                        .execute(
+                            "INSERT INTO skill_members (
+                                id, bundle_id, skill_name, description, stable_relative_path,
+                                content_fingerprint, created_at
+                             ) VALUES (?1, ?2, 'beta', '额外 Member', 'members/beta', ?3, 400)",
+                            params![member_id, plan.bundle_id, "c".repeat(64)],
+                        )
+                        .expect("应创建额外 Selection 的 Member");
+                    storage
+                        .connection
+                        .execute(
+                            "INSERT INTO member_selections (bundle_id, member_id, selected_at)
+                             VALUES (?1, ?2, 400)",
+                            params![plan.bundle_id, member_id],
+                        )
+                        .expect("应模拟额外 Selection");
+                }
+                "mount" => {
+                    storage
+                        .connection
+                        .execute(
+                            "UPDATE mounts SET health = 'missing' WHERE id = ?1",
+                            [&plan.targets[0].mount_id],
+                        )
+                        .expect("应模拟 Mount 冲突");
+                }
+                "extra_mount" => {
+                    storage
+                        .connection
+                        .execute(
+                            "INSERT INTO mounts (
+                                id, member_id, app_id, scope, project_id, target_path,
+                                expected_target, health, created_at, updated_at
+                             ) VALUES (?1, ?2, 'claude_code', 'global', NULL, ?3, ?4,
+                                       'healthy', 400, 400)",
+                            params![
+                                uuid::Uuid::new_v4().to_string(),
+                                plan.member_id,
+                                "/tmp/home/.claude/skills/alpha-extra",
+                                plan.expected_target,
+                            ],
+                        )
+                        .expect("应模拟额外 Mount");
+                }
+                "timestamps" => {
+                    storage
+                        .connection
+                        .execute(
+                            "UPDATE bundles SET created_at = 399 WHERE id = ?1",
+                            [&plan.bundle_id],
+                        )
+                        .expect("应模拟领域提交时间被篡改");
+                }
+                "inventory" => save_takeover_v2_inventory(&mut storage, &plan),
+                _ => unreachable!(),
+            }
+
+            assert!(
+                matches!(
+                    storage.finalize_takeover_v2(&transaction_id, &consumed, 401),
+                    Err(StorageError::ManagedStateConflict)
+                ),
+                "幂等重验必须拒绝 {corruption} 冲突"
+            );
+            let transaction_state = storage
+                .connection
+                .query_row(
+                    "SELECT phase, status, updated_at
+                     FROM takeover_v2_transactions WHERE id = ?1",
+                    [&transaction_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .expect("应读取冲突后的事务状态");
+            assert_eq!(
+                transaction_state,
+                ("state_committed".to_owned(), "in_progress".to_owned(), 400),
+                "幂等重验失败不得改写事务状态：{corruption}"
+            );
+        }
     }
 
     #[test]
