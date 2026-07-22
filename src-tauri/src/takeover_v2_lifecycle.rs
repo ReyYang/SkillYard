@@ -5955,6 +5955,111 @@ pub(crate) fn apply_takeover_v2_host_effects(
     apply_takeover_v2_host_effects_inner(paths, storage, transaction_id, &mut |_| Ok(()))
 }
 
+/// Host effect 全部生效后，先推进 Journal，再原子提交 SQLite 领域状态。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn commit_takeover_v2_state(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+) -> Result<(), TakeoverV2LifecycleError> {
+    commit_takeover_v2_state_inner(paths, storage, transaction_id, now, &mut || Ok(()))
+}
+
+// 测试 seam 只模拟 Journal 已先行、SQLite 尚未提交的硬中断或外部漂移。
+#[cfg(test)]
+fn commit_takeover_v2_state_with_hook(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+    after_journal_committed: &mut dyn FnMut() -> Result<(), TakeoverV2LifecycleError>,
+) -> Result<(), TakeoverV2LifecycleError> {
+    commit_takeover_v2_state_inner(paths, storage, transaction_id, now, after_journal_committed)
+}
+
+fn commit_takeover_v2_state_inner(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+    after_journal_committed: &mut dyn FnMut() -> Result<(), TakeoverV2LifecycleError>,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let transaction = storage
+        .recoverable_takeover_v2_transactions()?
+        .into_iter()
+        .find(|transaction| transaction.id == transaction_id)
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::RecoveryBlocked("待提交状态的 v2 接管事务不存在".to_owned())
+        })?;
+    if transaction.status != "in_progress"
+        || !matches!(
+            transaction.phase.as_str(),
+            "effect_started" | "state_committed"
+        )
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "只有 in_progress/effect_started 或幂等的 state_committed 事务可以提交状态".to_owned(),
+        ));
+    }
+    if let Some(error) = &transaction.recovery_validation_error {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(error.clone()));
+    }
+    let plan = storage.read_takeover_v2_plan_for_transaction(&transaction)?;
+    let lifecycle_lock = acquire_lifecycle_lock(paths)?;
+    lifecycle_lock.recheck(paths)?;
+    let mut journal =
+        load_takeover_v2_state_commit_journal(paths, &lifecycle_lock, &transaction, &plan)?;
+    if journal.phase == TakeoverV2JournalPhase::EffectStarted {
+        if transaction.phase != "effect_started" {
+            return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                "SQLite state_committed 不允许 formal 停留在 EffectStarted".to_owned(),
+            ));
+        }
+        journal = persist_takeover_v2_state_committed_journal(
+            paths,
+            &lifecycle_lock,
+            &transaction,
+            &plan,
+            &journal,
+        )?;
+    }
+    let before = validate_takeover_v2_state_committed_formal(
+        paths,
+        &lifecycle_lock,
+        &transaction,
+        &plan,
+        &journal,
+    )?;
+    after_journal_committed()?;
+    let after_hook = validate_takeover_v2_state_committed_formal(
+        paths,
+        &lifecycle_lock,
+        &transaction,
+        &plan,
+        &journal,
+    )?;
+    if after_hook != before {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "提交 SQLite 领域状态前 formal StateCommitted 发生变化".to_owned(),
+        ));
+    }
+    storage.finalize_takeover_v2(transaction_id, &plan, now)?;
+    let after_commit = validate_takeover_v2_state_committed_formal(
+        paths,
+        &lifecycle_lock,
+        &transaction,
+        &plan,
+        &journal,
+    )?;
+    if after_commit != after_hook {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "提交 SQLite 领域状态期间 formal StateCommitted 发生变化".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 // 测试 seam 精确模拟 rename 已持久化、Journal 尚未推进的崩溃窗口。
 #[cfg(test)]
 fn apply_takeover_v2_host_effects_with_hook(
@@ -6597,6 +6702,465 @@ fn validate_takeover_v2_post_effect_filesystem(
     validate_takeover_v2_effect_state_prefix(journal, &after, allow_next_applied)?;
     lifecycle_lock.recheck(paths)?;
     Ok(after)
+}
+
+fn load_takeover_v2_state_commit_journal(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let (formal, formal_owned, formal_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+    validate_takeover_v2_journal_contract(&formal, transaction, plan)?;
+    validate_takeover_v2_state_commit_progress(&formal)?;
+    if formal_bytes != serde_json::to_vec_pretty(&formal)? {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "状态提交只接受 canonical pretty formal Journal".to_owned(),
+        ));
+    }
+    if inspect_takeover_v2_initial_temporary_journal(paths, &journals, transaction, plan)?.is_some()
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "状态提交前仍存在首次 formal 的随机临时文件".to_owned(),
+        ));
+    }
+    reconcile_takeover_v2_state_commit_phase_temp(
+        paths,
+        lifecycle_lock,
+        transaction,
+        plan,
+        &journals,
+        formal,
+        formal_owned,
+        formal_bytes,
+    )
+}
+
+fn validate_takeover_v2_state_commit_progress(
+    journal: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    if !matches!(
+        journal.phase,
+        TakeoverV2JournalPhase::EffectStarted | TakeoverV2JournalPhase::StateCommitted
+    ) || journal
+        .effect_items
+        .iter()
+        .any(|item| item.applied_observation.is_none() || item.cleanup_completed)
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "状态提交要求全部 Host effect 已 applied 且 cleanup 尚未开始".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_takeover_v2_state_committed_successor(
+    old: &TakeoverV2Journal,
+    new: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    validate_takeover_v2_state_commit_progress(old)?;
+    validate_takeover_v2_state_commit_progress(new)?;
+    let mut expected = old.clone();
+    expected.phase = TakeoverV2JournalPhase::StateCommitted;
+    if old.phase != TakeoverV2JournalPhase::EffectStarted
+        || new.phase != TakeoverV2JournalPhase::StateCommitted
+        || new != &expected
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted Journal 没有只推进 phase".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_takeover_v2_state_commit_phase_temp(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    journals: &File,
+    formal: TakeoverV2Journal,
+    formal_owned: OwnedJournalEntry,
+    formal_bytes: Vec<u8>,
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    if entry_metadata_at(journals, &temporary_name)
+        .map_err(|source| v2_io("检查 StateCommitted phase temp", &temporary_path, source))?
+        .is_none()
+    {
+        validate_takeover_v2_post_effect_filesystem(paths, lifecycle_lock, plan, &formal, false)?;
+        return Ok(formal);
+    }
+    if transaction.phase != "effect_started" {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "SQLite state_committed 不允许残留 phase temp".to_owned(),
+        ));
+    }
+    let (temporary_bytes, temporary_owned) =
+        read_owned_journal_bytes_at(journals, &temporary_name, &temporary_path)?;
+    match formal.phase {
+        TakeoverV2JournalPhase::EffectStarted => {
+            // Host effect 最后一次 progress swap 也使用同一 temp；完整 predecessor 可以先精确清理。
+            if let Ok(temporary) = serde_json::from_slice::<TakeoverV2Journal>(&temporary_bytes)
+                && temporary_bytes == serde_json::to_vec_pretty(&temporary)?
+                && validate_takeover_v2_journal_contract(&temporary, transaction, plan).is_ok()
+                && validate_takeover_v2_effect_progress_successor(&temporary, &formal).is_ok()
+            {
+                return remove_takeover_v2_effect_progress_temp_after_audit(
+                    paths,
+                    lifecycle_lock,
+                    transaction,
+                    plan,
+                    journals,
+                    &formal,
+                    &formal_owned,
+                    &formal_bytes,
+                    &temporary,
+                    &temporary_owned,
+                    &temporary_bytes,
+                );
+            }
+            let mut successor = formal.clone();
+            successor.phase = TakeoverV2JournalPhase::StateCommitted;
+            validate_takeover_v2_journal_contract(&successor, transaction, plan)?;
+            validate_takeover_v2_state_committed_successor(&formal, &successor)?;
+            let successor_bytes = serde_json::to_vec_pretty(&successor)?;
+            if !successor_bytes.starts_with(&temporary_bytes) {
+                return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                    "StateCommitted phase temp 不是 canonical successor prefix".to_owned(),
+                ));
+            }
+            finish_takeover_v2_state_committed_pre_swap(
+                paths,
+                lifecycle_lock,
+                transaction,
+                plan,
+                journals,
+                &formal,
+                &formal_owned,
+                &formal_bytes,
+                &successor,
+                &temporary_owned,
+                &temporary_bytes,
+            )
+        }
+        TakeoverV2JournalPhase::StateCommitted => {
+            let mut predecessor = formal.clone();
+            predecessor.phase = TakeoverV2JournalPhase::EffectStarted;
+            validate_takeover_v2_journal_contract(&predecessor, transaction, plan)?;
+            validate_takeover_v2_state_committed_successor(&predecessor, &formal)?;
+            if temporary_bytes != serde_json::to_vec_pretty(&predecessor)? {
+                return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                    "StateCommitted swap 后只允许完整 EffectStarted predecessor temp".to_owned(),
+                ));
+            }
+            remove_takeover_v2_state_commit_temp_after_audit(
+                paths,
+                lifecycle_lock,
+                transaction,
+                plan,
+                journals,
+                &formal,
+                &formal_owned,
+                &formal_bytes,
+                &predecessor,
+                &temporary_owned,
+                &temporary_bytes,
+            )
+        }
+        _ => Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "状态提交不接受当前 formal phase".to_owned(),
+        )),
+    }
+}
+
+fn persist_takeover_v2_state_committed_journal(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    old: &TakeoverV2Journal,
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    let mut new = old.clone();
+    new.phase = TakeoverV2JournalPhase::StateCommitted;
+    validate_takeover_v2_journal_contract(old, transaction, plan)?;
+    validate_takeover_v2_journal_contract(&new, transaction, plan)?;
+    validate_takeover_v2_state_committed_successor(old, &new)?;
+    validate_journal_size_for_all_phases(&new)?;
+    validate_takeover_v2_post_effect_filesystem(paths, lifecycle_lock, plan, old, false)?;
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    ensure_takeover_v2_phase_temp_absent(paths, &journals, &transaction.id)?;
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let (formal, formal_owned, formal_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+    if formal != *old || formal_bytes != serde_json::to_vec_pretty(old)? {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "写入 StateCommitted 前 formal EffectStarted 发生变化".to_owned(),
+        ));
+    }
+
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    let new_bytes = serde_json::to_vec_pretty(&new)?;
+    let mut temporary = create_new_file_at(&journals, &temporary_name, &temporary_path)?;
+    temporary
+        .write_all(&new_bytes)
+        .map_err(|source| v2_io("写入 StateCommitted 临时 Journal", &temporary_path, source))?;
+    temporary
+        .sync_all()
+        .map_err(|source| v2_io("同步 StateCommitted 临时 Journal", &temporary_path, source))?;
+    let temporary_snapshot =
+        journal_snapshot_from_metadata(&temporary.metadata().map_err(|source| {
+            v2_io("检查 StateCommitted 临时 Journal", &temporary_path, source)
+        })?);
+    journals.sync_all().map_err(|source| {
+        v2_io(
+            "同步 StateCommitted 临时 Journal 父目录",
+            &paths.journals_root(),
+            source,
+        )
+    })?;
+    drop(temporary);
+    let (temporary_bytes, temporary_owned) =
+        read_owned_journal_bytes_at(&journals, &temporary_name, &temporary_path)?;
+    if temporary_bytes != new_bytes || temporary_owned.snapshot != temporary_snapshot {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted 临时 Journal 在写入后发生变化".to_owned(),
+        ));
+    }
+    finish_takeover_v2_state_committed_pre_swap(
+        paths,
+        lifecycle_lock,
+        transaction,
+        plan,
+        &journals,
+        old,
+        &formal_owned,
+        &formal_bytes,
+        &new,
+        &temporary_owned,
+        &temporary_bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_takeover_v2_state_committed_pre_swap(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    journals: &File,
+    old: &TakeoverV2Journal,
+    old_owned: &OwnedJournalEntry,
+    old_bytes: &[u8],
+    new: &TakeoverV2Journal,
+    temporary_owned: &OwnedJournalEntry,
+    temporary_bytes: &[u8],
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    validate_takeover_v2_state_committed_successor(old, new)?;
+    let new_bytes = serde_json::to_vec_pretty(new)?;
+    if !new_bytes.starts_with(temporary_bytes) {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted phase temp 无法补全为 canonical successor".to_owned(),
+        ));
+    }
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let mut temporary = open_regular_file_at(journals, &temporary_name, &temporary_path, true)?;
+    let opened =
+        journal_snapshot_from_metadata(&temporary.metadata().map_err(|source| {
+            v2_io("检查待补全的 StateCommitted temp", &temporary_path, source)
+        })?);
+    if opened != temporary_owned.snapshot {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted phase temp 在补全前被替换".to_owned(),
+        ));
+    }
+    temporary
+        .seek(SeekFrom::Start(temporary_bytes.len() as u64))
+        .map_err(|source| v2_io("定位 StateCommitted phase temp", &temporary_path, source))?;
+    temporary
+        .write_all(&new_bytes[temporary_bytes.len()..])
+        .map_err(|source| v2_io("补全 StateCommitted phase temp", &temporary_path, source))?;
+    temporary
+        .sync_all()
+        .map_err(|source| v2_io("同步 StateCommitted phase temp", &temporary_path, source))?;
+    journals
+        .sync_all()
+        .map_err(|source| v2_io("同步 StateCommitted temp 父目录", &temporary_path, source))?;
+
+    let rebound = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        journals,
+        &paths.journals_root(),
+    )?;
+    let (formal_before, formal_before_owned, formal_before_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &formal_name, &formal_path)?;
+    let (temporary_before, temporary_before_owned, temporary_before_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &temporary_name, &temporary_path)?;
+    if formal_before != *old
+        || formal_before_owned != *old_owned
+        || formal_before_bytes != old_bytes
+        || temporary_before != *new
+        || temporary_before_bytes != new_bytes
+        || !same_journal_identity(temporary_before_owned.snapshot, opened)
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted Journal 在恢复交换前发生变化".to_owned(),
+        ));
+    }
+    validate_takeover_v2_post_effect_filesystem(paths, lifecycle_lock, plan, new, false)?;
+    rename_at_swap(&rebound, &temporary_name, &rebound, &formal_name)
+        .map_err(|source| v2_io("原子交换 StateCommitted Journal", &formal_path, source))?;
+    rebound
+        .sync_all()
+        .map_err(|source| v2_io("同步 StateCommitted Journal 交换", &formal_path, source))?;
+
+    let (formal_after, formal_after_owned, formal_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &formal_name, &formal_path)?;
+    let (temporary_after, temporary_after_owned, temporary_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &temporary_name, &temporary_path)?;
+    if formal_after != *new
+        || formal_after_bytes != new_bytes
+        || temporary_after != *old
+        || temporary_after_bytes != old_bytes
+        || !same_journal_identity(formal_after_owned.snapshot, temporary_before_owned.snapshot)
+        || !same_journal_identity(temporary_after_owned.snapshot, old_owned.snapshot)
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted Journal 交换后的身份或内容不一致".to_owned(),
+        ));
+    }
+    drop(temporary);
+    remove_owned_journal(paths, &rebound, &temporary_after_owned)?;
+    ensure_takeover_v2_phase_temp_absent(paths, &rebound, &transaction.id)?;
+    validate_takeover_v2_post_effect_filesystem(paths, lifecycle_lock, plan, new, false)?;
+    Ok(new.clone())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remove_takeover_v2_state_commit_temp_after_audit(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    journals: &File,
+    formal: &TakeoverV2Journal,
+    formal_owned: &OwnedJournalEntry,
+    formal_bytes: &[u8],
+    temporary: &TakeoverV2Journal,
+    temporary_owned: &OwnedJournalEntry,
+    temporary_bytes: &[u8],
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    validate_takeover_v2_state_committed_successor(temporary, formal)?;
+    let rebound = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        journals,
+        &paths.journals_root(),
+    )?;
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    let (formal_after, formal_after_owned, formal_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &formal_name, &formal_path)?;
+    let (temporary_after, temporary_after_owned, temporary_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &temporary_name, &temporary_path)?;
+    if formal_after != *formal
+        || formal_after_owned != *formal_owned
+        || formal_after_bytes != formal_bytes
+        || temporary_after != *temporary
+        || temporary_after_owned != *temporary_owned
+        || temporary_after_bytes != temporary_bytes
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted predecessor temp 在清理前发生变化".to_owned(),
+        ));
+    }
+    validate_takeover_v2_post_effect_filesystem(paths, lifecycle_lock, plan, formal, false)?;
+    remove_owned_journal(paths, &rebound, &temporary_after_owned)?;
+    ensure_takeover_v2_phase_temp_absent(paths, &rebound, &transaction.id)?;
+    validate_takeover_v2_post_effect_filesystem(paths, lifecycle_lock, plan, formal, false)?;
+    Ok(formal.clone())
+}
+
+fn validate_takeover_v2_state_committed_formal(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    expected: &TakeoverV2Journal,
+) -> Result<(OwnedJournalEntry, Vec<u8>, JournalEntrySnapshot), TakeoverV2LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    if inspect_takeover_v2_initial_temporary_journal(paths, &journals, transaction, plan)?.is_some()
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted 不允许残留首次 formal 临时文件".to_owned(),
+        ));
+    }
+    ensure_takeover_v2_phase_temp_absent(paths, &journals, &transaction.id)?;
+    let name = OsString::from(journal_file_name(&transaction.id));
+    let path = paths.journals_root().join(&name);
+    let (formal, owned, bytes) = read_takeover_v2_journal_with_bytes_at(&journals, &name, &path)?;
+    validate_takeover_v2_journal_contract(&formal, transaction, plan)?;
+    validate_takeover_v2_state_commit_progress(&formal)?;
+    if formal != *expected
+        || formal.phase != TakeoverV2JournalPhase::StateCommitted
+        || bytes != serde_json::to_vec_pretty(&formal)?
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "formal StateCommitted 与待提交状态不一致".to_owned(),
+        ));
+    }
+    let states_before =
+        validate_takeover_v2_post_effect_filesystem(paths, lifecycle_lock, plan, &formal, false)?;
+    let current_before = match inspect_takeover_v2_current(paths, lifecycle_lock, &formal)? {
+        TakeoverV2CurrentState::Expected(snapshot) => snapshot,
+        TakeoverV2CurrentState::Missing | TakeoverV2CurrentState::Other(_) => {
+            return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                "StateCommitted current 缺失或 target 不匹配".to_owned(),
+            ));
+        }
+    };
+    let states_after =
+        validate_takeover_v2_post_effect_filesystem(paths, lifecycle_lock, plan, &formal, false)?;
+    let current_after = match inspect_takeover_v2_current(paths, lifecycle_lock, &formal)? {
+        TakeoverV2CurrentState::Expected(snapshot) => snapshot,
+        TakeoverV2CurrentState::Missing | TakeoverV2CurrentState::Other(_) => {
+            return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                "StateCommitted current 在复核期间发生变化".to_owned(),
+            ));
+        }
+    };
+    if states_after != states_before || current_after != current_before {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "StateCommitted Host/current 在复核期间发生变化".to_owned(),
+        ));
+    }
+    ensure_takeover_v2_phase_temp_absent(paths, &journals, &transaction.id)?;
+    let (formal_after, owned_after, bytes_after) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &name, &path)?;
+    if formal_after != formal || owned_after != owned || bytes_after != bytes {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "formal StateCommitted 在文件系统复核期间发生变化".to_owned(),
+        ));
+    }
+    Ok((owned_after, bytes_after, current_after))
 }
 
 fn load_canonical_effect_started_journal(
@@ -8835,7 +9399,7 @@ mod tests {
         domain::{
             InventoryLocationKind, InventoryObservation, ManagementKind, MountScope, ScanRootKey,
             SkillMetadataStatus, SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition,
-            TakeoverTargetInitialState, TakeoverV2Target,
+            TakeoverTargetInitialState, TakeoverV2Target, UiOutcome,
         },
         lifecycle::{ensure_central_store_layout, write_new_atomic_at_test_hook},
         scanner::fingerprint_skill_root,
@@ -9218,6 +9782,25 @@ mod tests {
                 .expect("应读取 EffectStarted formal"),
             )
             .expect("EffectStarted formal 必须可解析");
+            (transaction_id, journal)
+        }
+
+        fn begin_with_applied_effects(
+            &mut self,
+            plan: &mut TakeoverV2Plan,
+        ) -> (String, TakeoverV2Journal) {
+            let (transaction_id, _) = self.begin_with_effect_started(plan);
+            apply_takeover_v2_host_effects(&self.paths, &mut self.storage, &transaction_id)
+                .expect("应完成全部 Host effect");
+            let journal = serde_json::from_slice(
+                &fs::read(
+                    self.paths
+                        .journals_root()
+                        .join(journal_file_name(&transaction_id)),
+                )
+                .expect("应读取已完成 effect 的 formal"),
+            )
+            .expect("effect formal 必须可解析");
             (transaction_id, journal)
         }
     }
@@ -13039,6 +13622,588 @@ mod tests {
             fs::read(formal_path).expect("formal 必须保留"),
             formal_bytes
         );
+    }
+
+    #[test]
+    fn state_commit_persists_domain_state_without_cleaning_filesystem_evidence() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_two_origin_plan("alpha");
+        add_absent_copilot_target(&harness, &mut plan);
+        reset_plan_storage_identity(&harness.paths, &mut plan);
+        let mut plan = harness
+            .storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存状态提交 Plan");
+        let (transaction_id, journal_before) = harness.begin_with_applied_effects(&mut plan);
+        let journal_path = harness
+            .paths
+            .journals_root()
+            .join(journal_file_name(&transaction_id));
+        let staging_path = harness.paths.staging_root().join(&transaction_id);
+        let staging_before = fs::symlink_metadata(&staging_path).expect("staging 必须保留");
+        let hidden_origins = journal_before
+            .effect_items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match &item.operation {
+                TakeoverV2EffectOperation::ReplaceOriginWithMount { origin_id, .. }
+                | TakeoverV2EffectOperation::RemoveOrigin { origin_id } => {
+                    let origin = plan
+                        .origins
+                        .iter()
+                        .find(|origin| origin.id == *origin_id)
+                        .expect("effect 必须引用 Origin");
+                    Some(
+                        Path::new(&origin.original_path)
+                            .parent()
+                            .expect("Origin 应有父目录")
+                            .join(takeover_v2_effect_hidden_name(&transaction_id, index)),
+                    )
+                }
+                TakeoverV2EffectOperation::CreateAbsentMount { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let hidden_before = hidden_origins
+            .iter()
+            .map(|path| fs::symlink_metadata(path).expect("hidden Origin 必须存在"))
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+            .collect::<Vec<_>>();
+
+        commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 400)
+            .expect("应先提交 Journal 再原子提交 SQLite 领域状态");
+
+        let transaction = harness.transaction(&transaction_id).expect("事务必须保留");
+        assert_eq!(transaction.phase, "state_committed");
+        assert_eq!(transaction.status, "in_progress");
+        let formal: TakeoverV2Journal = serde_json::from_slice(
+            &fs::read(&journal_path).expect("StateCommitted Journal 必须保留"),
+        )
+        .expect("StateCommitted Journal 必须可解析");
+        assert_eq!(formal.phase, TakeoverV2JournalPhase::StateCommitted);
+        assert!(
+            formal
+                .effect_items
+                .iter()
+                .all(|item| { item.applied_observation.is_some() && !item.cleanup_completed })
+        );
+        let member = harness
+            .storage
+            .read_managed_member(&plan.member_id)
+            .expect("应读取已选中的受管 Member");
+        assert_eq!(member.bundle_id, plan.bundle_id);
+        assert_eq!(
+            member.current_target,
+            format!("contents/{}", plan.content_id)
+        );
+        let mounts = harness.storage.read_mounts().expect("应读取受管 Mount");
+        assert_eq!(mounts.len(), plan.targets.len());
+        assert!(
+            mounts
+                .iter()
+                .all(|mount| mount.health.as_str() == "healthy")
+        );
+        for origin in &plan.origins {
+            assert!(
+                harness
+                    .storage
+                    .read_inventory_observation(&origin.observation_id)
+                    .is_err(),
+                "已接管 Origin 不应继续作为 Inventory observation"
+            );
+        }
+        let UiOutcome::Inventory { entries, .. } = harness
+            .storage
+            .read_initial_scan()
+            .expect("应读取提交后 Inventory")
+            .expect("应保留 Inventory 快照")
+        else {
+            panic!("状态提交后应返回 Inventory");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, format!("managed:{}", plan.member_id));
+        assert_eq!(entries[0].management_kind, ManagementKind::SkillYardManaged);
+
+        // State commit 只建立 SQLite 事实；后续 cleanup 仍需依赖这些 inode 证据。
+        let staging_after = fs::symlink_metadata(&staging_path).expect("staging 不得被清理");
+        assert_eq!(
+            (staging_after.dev(), staging_after.ino()),
+            (staging_before.dev(), staging_before.ino())
+        );
+        for (path, expected_identity) in hidden_origins.iter().zip(hidden_before) {
+            let actual = fs::symlink_metadata(path).expect("hidden Origin 不得被清理");
+            assert_eq!((actual.dev(), actual.ino()), expected_identity);
+        }
+    }
+
+    #[test]
+    fn state_commit_recovers_when_journal_precedes_sqlite() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_applied_effects(&mut plan);
+
+        commit_takeover_v2_state_with_hook(
+            &harness.paths,
+            &mut harness.storage,
+            &transaction_id,
+            400,
+            &mut || {
+                Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                    "测试模拟 Journal 后、SQLite 前中断".to_owned(),
+                ))
+            },
+        )
+        .expect_err("应停在 write-ahead Journal 已提交的窗口");
+
+        let transaction = harness.transaction(&transaction_id).expect("事务必须保留");
+        assert_eq!(transaction.phase, "effect_started");
+        let journal_path = harness
+            .paths
+            .journals_root()
+            .join(journal_file_name(&transaction_id));
+        let formal_before_retry = fs::read(&journal_path).expect("formal 必须保留");
+        let formal: TakeoverV2Journal =
+            serde_json::from_slice(&formal_before_retry).expect("formal 必须可解析");
+        assert_eq!(formal.phase, TakeoverV2JournalPhase::StateCommitted);
+        assert!(
+            harness
+                .storage
+                .read_managed_member(&plan.member_id)
+                .is_err(),
+            "Journal 先行时不得有部分领域状态"
+        );
+
+        commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 401)
+            .expect("重试应从 formal StateCommitted 继续提交 SQLite");
+
+        assert_eq!(
+            fs::read(journal_path).expect("formal 必须保留"),
+            formal_before_retry
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "state_committed"
+        );
+        harness
+            .storage
+            .read_managed_member(&plan.member_id)
+            .expect("重试应完整写入领域状态");
+    }
+
+    #[test]
+    fn state_commit_revalidates_sqlite_finalize_idempotently() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_applied_effects(&mut plan);
+        commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 400)
+            .expect("首次状态提交应成功");
+        let journal_path = harness
+            .paths
+            .journals_root()
+            .join(journal_file_name(&transaction_id));
+        let journal_before = fs::read(&journal_path).expect("formal 必须存在");
+        let journal_identity = fs::symlink_metadata(&journal_path).expect("应读取 formal 身份");
+        let transaction_before = harness.transaction(&transaction_id).expect("事务必须存在");
+
+        commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 401)
+            .expect("SQLite state_committed 应调用 finalize 做精确幂等重验");
+
+        let journal_after = fs::symlink_metadata(&journal_path).expect("formal 必须保留");
+        assert_eq!(
+            fs::read(journal_path).expect("应读取 formal"),
+            journal_before
+        );
+        assert_eq!(
+            (journal_after.dev(), journal_after.ino()),
+            (journal_identity.dev(), journal_identity.ino())
+        );
+        let transaction_after = harness.transaction(&transaction_id).expect("事务必须存在");
+        assert_eq!(transaction_after.phase, "state_committed");
+        assert_eq!(transaction_after.updated_at, transaction_before.updated_at);
+    }
+
+    #[test]
+    fn state_commit_recovers_zero_half_and_full_successor_phase_temps() {
+        for variant in ["zero", "half", "full"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, old) = harness.begin_with_applied_effects(&mut plan);
+            let mut successor = old.clone();
+            successor.phase = TakeoverV2JournalPhase::StateCommitted;
+            let successor_bytes =
+                serde_json::to_vec_pretty(&successor).expect("应序列化 successor");
+            let length = match variant {
+                "zero" => 0,
+                "half" => successor_bytes.len() / 2,
+                "full" => successor_bytes.len(),
+                _ => unreachable!(),
+            };
+            let phase_temp = harness
+                .paths
+                .journals_root()
+                .join(phase_temp_file_name(&transaction_id));
+            fs::write(&phase_temp, &successor_bytes[..length])
+                .expect("应模拟 StateCommitted temp 写入中断");
+
+            commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 400)
+                .expect("应补全 successor temp、交换 Journal 并提交 SQLite");
+
+            assert!(!phase_temp.exists(), "variant={variant}");
+            assert_eq!(
+                fs::read(
+                    harness
+                        .paths
+                        .journals_root()
+                        .join(journal_file_name(&transaction_id))
+                )
+                .expect("应读取 StateCommitted formal"),
+                successor_bytes,
+                "variant={variant}"
+            );
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("事务必须保留")
+                    .phase,
+                "state_committed",
+                "variant={variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_commit_removes_post_swap_effect_started_predecessor() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, old) = harness.begin_with_applied_effects(&mut plan);
+        let mut successor = old.clone();
+        successor.phase = TakeoverV2JournalPhase::StateCommitted;
+        let successor_bytes = serde_json::to_vec_pretty(&successor).expect("应序列化 successor");
+        let formal_name = OsString::from(journal_file_name(&transaction_id));
+        let formal_path = harness.paths.journals_root().join(&formal_name);
+        let temporary_name = OsString::from(phase_temp_file_name(&transaction_id));
+        let temporary_path = harness.paths.journals_root().join(&temporary_name);
+        fs::write(&temporary_path, &successor_bytes).expect("应写完整 successor temp");
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+        let journals = open_managed_directory_from_root(
+            &harness.paths,
+            lock.root(),
+            &harness.paths.journals_root(),
+        )
+        .expect("应打开 Journal 根");
+        rename_at_swap(&journals, &temporary_name, &journals, &formal_name)
+            .expect("应模拟 StateCommitted Journal 已交换");
+        journals.sync_all().expect("应同步 Journal 交换");
+        drop(lock);
+
+        commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 400)
+            .expect("应审计并删除 swap 后 predecessor temp");
+
+        assert!(!temporary_path.exists());
+        assert_eq!(
+            fs::read(formal_path).expect("formal 必须保留"),
+            successor_bytes
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "state_committed"
+        );
+    }
+
+    #[test]
+    fn state_commit_keeps_write_ahead_journal_when_sqlite_rolls_back_then_retries() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_two_origin_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_applied_effects(&mut plan);
+        let sqlite =
+            rusqlite::Connection::open(harness.paths.database()).expect("应打开测试 SQLite");
+        sqlite
+            .execute_batch(
+                "CREATE TRIGGER fail_lifecycle_takeover_v2_state_commit
+                 BEFORE UPDATE OF phase ON takeover_v2_transactions
+                 WHEN NEW.phase = 'state_committed'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'forced_lifecycle_takeover_v2_state_commit_failure');
+                 END;",
+            )
+            .expect("应安装仅测试用失败 Trigger");
+
+        let error =
+            commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 400)
+                .expect_err("SQLite 阶段提交失败必须整体回滚");
+
+        assert!(matches!(
+            error,
+            TakeoverV2LifecycleError::Storage(StorageError::SaveTakeoverV2Transaction(_))
+        ));
+        let formal_path = harness
+            .paths
+            .journals_root()
+            .join(journal_file_name(&transaction_id));
+        let formal_before_retry = fs::read(&formal_path).expect("write-ahead formal 必须保留");
+        let formal: TakeoverV2Journal =
+            serde_json::from_slice(&formal_before_retry).expect("formal 必须可解析");
+        assert_eq!(formal.phase, TakeoverV2JournalPhase::StateCommitted);
+        assert!(
+            formal
+                .effect_items
+                .iter()
+                .all(|item| { item.applied_observation.is_some() && !item.cleanup_completed })
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "effect_started"
+        );
+        assert!(
+            harness
+                .storage
+                .managed_bundle_notice_rows()
+                .expect("应读取 Bundle 领域状态")
+                .is_empty()
+        );
+        assert!(
+            harness
+                .storage
+                .read_managed_member(&plan.member_id)
+                .is_err()
+        );
+        assert!(
+            harness
+                .storage
+                .read_mounts()
+                .expect("应读取 Mount 领域状态")
+                .is_empty()
+        );
+        for origin in &plan.origins {
+            harness
+                .storage
+                .read_inventory_observation(&origin.observation_id)
+                .expect("SQLite 回滚必须恢复全部 Inventory observation");
+        }
+
+        sqlite
+            .execute_batch("DROP TRIGGER fail_lifecycle_takeover_v2_state_commit;")
+            .expect("应删除测试 Trigger");
+        commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 401)
+            .expect("失败原因消失后应从 StateCommitted Journal 重试成功");
+
+        assert_eq!(
+            fs::read(formal_path).expect("formal 必须保留"),
+            formal_before_retry
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "state_committed"
+        );
+        harness
+            .storage
+            .read_managed_member(&plan.member_id)
+            .expect("重试应写入完整 Member 状态");
+        assert_eq!(
+            harness
+                .storage
+                .read_mounts()
+                .expect("应读取全部 Mount")
+                .len(),
+            plan.targets.len()
+        );
+    }
+
+    #[test]
+    fn state_commit_blocks_formal_host_bundle_and_current_replacement_before_sqlite() {
+        for variant in ["formal", "host", "bundle", "current"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, _) = harness.begin_with_applied_effects(&mut plan);
+            let formal = harness
+                .paths
+                .journals_root()
+                .join(journal_file_name(&transaction_id));
+            let bundle = harness.paths.bundle_directory(&plan.bundle_id);
+
+            let result = commit_takeover_v2_state_with_hook(
+                &harness.paths,
+                &mut harness.storage,
+                &transaction_id,
+                400,
+                &mut || {
+                    match variant {
+                        "formal" => {
+                            let replacement = formal.with_extension("external");
+                            fs::write(&replacement, b"external formal replacement")
+                                .expect("应写外部 formal replacement");
+                            fs::rename(&replacement, &formal).expect("应原子替换 formal");
+                            File::open(harness.paths.journals_root())
+                                .expect("应打开 Journal 根")
+                                .sync_all()
+                                .expect("应同步 formal 替换");
+                        }
+                        "host" => {
+                            let target = &plan.targets[0];
+                            fs::remove_file(&target.target_path).expect("应移除受管 Mount");
+                            std::os::unix::fs::symlink(
+                                &target.expected_target,
+                                &target.target_path,
+                            )
+                            .expect("应建立同 target 但不同 inode 的 Mount");
+                            File::open(
+                                Path::new(&target.target_path)
+                                    .parent()
+                                    .expect("Target 应有父目录"),
+                            )
+                            .expect("应打开 Host 父目录")
+                            .sync_all()
+                            .expect("应同步 Host replacement");
+                        }
+                        "bundle" => {
+                            let backup = bundle.with_extension("external-backup");
+                            fs::rename(&bundle, &backup).expect("应保留原 Bundle");
+                            fs::create_dir(&bundle).expect("应建立外部 Bundle replacement");
+                            fs::set_permissions(&bundle, fs::Permissions::from_mode(0o700))
+                                .expect("外部 Bundle 应使用 production mode");
+                            File::open(harness.paths.bundles_root())
+                                .expect("应打开 Bundle 根")
+                                .sync_all()
+                                .expect("应同步 Bundle replacement");
+                        }
+                        "current" => {
+                            let current = bundle.join("current");
+                            fs::remove_file(&current).expect("应移除 current");
+                            std::os::unix::fs::symlink(
+                                format!("contents/{}", plan.content_id),
+                                &current,
+                            )
+                            .expect("应建立同 target 但不同 inode 的 current");
+                            File::open(&bundle)
+                                .expect("应打开 Bundle")
+                                .sync_all()
+                                .expect("应同步 current replacement");
+                        }
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                },
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(()) => panic!("SQLite 前受保护事实被替换必须阻塞：variant={variant}"),
+            };
+
+            assert!(matches!(
+                error,
+                TakeoverV2LifecycleError::InvalidJournal(_)
+                    | TakeoverV2LifecycleError::RecoveryBlocked(_)
+                    | TakeoverV2LifecycleError::Lifecycle(_)
+                    | TakeoverV2LifecycleError::Takeover(_)
+            ));
+            let transaction = harness.transaction(&transaction_id).expect("事务必须保留");
+            assert_eq!(transaction.phase, "effect_started", "variant={variant}");
+            assert!(
+                harness
+                    .storage
+                    .managed_bundle_notice_rows()
+                    .expect("应读取 Bundle 领域状态")
+                    .is_empty(),
+                "variant={variant}"
+            );
+            assert!(
+                harness
+                    .storage
+                    .read_managed_member(&plan.member_id)
+                    .is_err(),
+                "variant={variant}"
+            );
+            assert!(
+                harness
+                    .storage
+                    .read_mounts()
+                    .expect("应读取 Mount 领域状态")
+                    .is_empty(),
+                "variant={variant}"
+            );
+            harness
+                .storage
+                .read_inventory_observation(&plan.origins[0].observation_id)
+                .expect("SQLite 前阻塞不得删除 Inventory observation");
+        }
+    }
+
+    #[test]
+    fn state_commit_rejects_unapplied_effects_and_started_cleanup() {
+        for variant in ["unapplied", "cleanup_started"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, _) = match variant {
+                "unapplied" => harness.begin_with_effect_started(&mut plan),
+                "cleanup_started" => harness.begin_with_applied_effects(&mut plan),
+                _ => unreachable!(),
+            };
+            let formal_path = harness
+                .paths
+                .journals_root()
+                .join(journal_file_name(&transaction_id));
+            if variant == "cleanup_started" {
+                let mut formal: TakeoverV2Journal = serde_json::from_slice(
+                    &fs::read(&formal_path).expect("应读取 EffectStarted formal"),
+                )
+                .expect("formal 必须可解析");
+                formal.phase = TakeoverV2JournalPhase::StateCommitted;
+                formal.effect_items[0].cleanup_completed = true;
+                fs::write(
+                    &formal_path,
+                    serde_json::to_vec_pretty(&formal).expect("应序列化 cleanup 现场"),
+                )
+                .expect("应模拟 cleanup 已提前开始");
+                File::open(&formal_path)
+                    .expect("应打开 cleanup formal")
+                    .sync_all()
+                    .expect("应同步 cleanup formal");
+                File::open(harness.paths.journals_root())
+                    .expect("应打开 Journal 根")
+                    .sync_all()
+                    .expect("应同步 cleanup formal 父目录");
+            }
+            let formal_before = fs::read(&formal_path).expect("formal 必须存在");
+
+            commit_takeover_v2_state(&harness.paths, &mut harness.storage, &transaction_id, 400)
+                .expect_err("未全部 applied 或 cleanup 已开始时必须阻塞");
+
+            assert_eq!(
+                fs::read(formal_path).expect("失败不得修改 formal"),
+                formal_before,
+                "variant={variant}"
+            );
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("事务必须保留")
+                    .phase,
+                "effect_started",
+                "variant={variant}"
+            );
+            assert!(
+                harness
+                    .storage
+                    .read_managed_member(&plan.member_id)
+                    .is_err(),
+                "variant={variant}"
+            );
+            harness
+                .storage
+                .read_inventory_observation(&plan.origins[0].observation_id)
+                .expect("阻塞时不得删除 Inventory observation");
+        }
     }
 
     #[test]
