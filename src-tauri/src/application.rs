@@ -18,10 +18,6 @@ use crate::{
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
     storage::{Storage, StorageError},
-    takeover_lifecycle::{
-        TakeoverLifecycleError, confirm_takeover_plan, create_takeover_plan,
-        recover_pending_takeover_transactions,
-    },
 };
 
 #[derive(Debug, Error)]
@@ -32,8 +28,6 @@ pub enum ApplicationError {
     Lifecycle(#[from] LifecycleError),
     #[error(transparent)]
     MountLifecycle(#[from] MountLifecycleError),
-    #[error(transparent)]
-    TakeoverLifecycle(#[from] TakeoverLifecycleError),
     #[error("首次扫描未完整完成：{0}")]
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
@@ -103,15 +97,6 @@ impl SkillYardApplication {
             UiIntent::RegisterProject { root_path } => {
                 self.with_write_operation(|| self.register_project(root_path))
             }
-            UiIntent::CreateTakeoverPlan { observation_id } => {
-                self.with_write_operation(|| self.create_takeover_plan(observation_id))
-            }
-            UiIntent::ConfirmTakeoverPlan {
-                plan_id,
-                preserved_path_ids,
-            } => self.with_write_operation(|| {
-                self.confirm_takeover_plan_inner(plan_id, preserved_path_ids)
-            }),
             UiIntent::CreateMountPlan {
                 member_id,
                 app_id,
@@ -320,54 +305,6 @@ impl SkillYardApplication {
         Ok(UiOutcome::MountPlan { plan })
     }
 
-    fn create_takeover_plan(&self, observation_id: String) -> Result<UiOutcome, ApplicationError> {
-        let mut storage = self.open_recovered_storage()?;
-        ensure_onboarding_completed(&storage)?;
-        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
-        lifecycle_lock.recheck(&self.paths)?;
-        let plan = create_takeover_plan(
-            &self.paths,
-            &mut storage,
-            &observation_id,
-            unix_timestamp_millis(),
-        )?;
-        lifecycle_lock.recheck(&self.paths)?;
-        Ok(UiOutcome::TakeoverPlan { plan })
-    }
-
-    /// 测试与内部调用也经由 typed intent，确保接管确认只取得一次写操作门。
-    #[doc(hidden)]
-    pub fn confirm_takeover_plan(
-        &self,
-        plan_id: &str,
-        preserved_path_ids: &[String],
-    ) -> Result<UiOutcome, ApplicationError> {
-        self.handle(UiIntent::ConfirmTakeoverPlan {
-            plan_id: plan_id.to_owned(),
-            preserved_path_ids: preserved_path_ids.to_vec(),
-        })
-    }
-
-    fn confirm_takeover_plan_inner(
-        &self,
-        plan_id: String,
-        preserved_path_ids: Vec<String>,
-    ) -> Result<UiOutcome, ApplicationError> {
-        let mut storage = self.open_recovered_storage()?;
-        ensure_onboarding_completed(&storage)?;
-        confirm_takeover_plan(
-            &self.paths,
-            &mut storage,
-            &plan_id,
-            &preserved_path_ids,
-            unix_timestamp_millis(),
-            self.lifecycle_failpoint,
-        )?;
-        storage
-            .read_initial_scan()?
-            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
-    }
-
     fn create_remove_mount_plan(&self, mount_id: String) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_recovered_storage()?;
         ensure_onboarding_completed(&storage)?;
@@ -457,7 +394,6 @@ impl SkillYardApplication {
         let mut storage = Storage::open(self.paths.data_root(), &self.paths.database())?;
         ensure_central_store_layout(&self.paths)?;
         recover_pending_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
-        recover_pending_takeover_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
         recover_pending_mount_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
         recover_pending_batch_mount_transactions(
             &self.paths,

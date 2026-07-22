@@ -7,7 +7,6 @@ import { InstallFolderPage } from "./components/InstallFolderPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
-import { TakeoverPlanPage } from "./components/TakeoverPlanPage";
 import type {
   BatchMountPlan,
   BatchMountRequest,
@@ -15,7 +14,6 @@ import type {
   MountPlan,
   MountScope,
   SupportedAppId,
-  TakeoverPlan,
   UiOutcome,
 } from "./domain";
 import {
@@ -56,13 +54,6 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     useState<BatchMountPlan | null>(null);
   const [isPlanningBatchMount, setIsPlanningBatchMount] = useState(false);
   const [isConfirmingBatchMount, setIsConfirmingBatchMount] = useState(false);
-  const [planningTakeoverId, setPlanningTakeoverId] = useState<string | null>(
-    null,
-  );
-  const [pendingTakeoverPlan, setPendingTakeoverPlan] =
-    useState<TakeoverPlan | null>(null);
-  const [isConfirmingTakeover, setIsConfirmingTakeover] = useState(false);
-  const [takeoverError, setTakeoverError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -317,51 +308,6 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
-  const createTakeoverPlan = async (observationId: string) => {
-    if (planningTakeoverId) return;
-    setPlanningTakeoverId(observationId);
-    setTakeoverError(null);
-    try {
-      const plan = await client.createTakeoverPlan(observationId);
-      setPendingTakeoverPlan(plan);
-    } catch (error) {
-      // 创建 Plan 不改变文件；失败时保留当前清单，方便用户继续浏览或刷新。
-      setTakeoverError(formatError(error));
-    } finally {
-      setPlanningTakeoverId(null);
-    }
-  };
-
-  const confirmTakeover = async (preservedPathIds: string[]) => {
-    if (!pendingTakeoverPlan || isConfirmingTakeover) return;
-    setIsConfirmingTakeover(true);
-    setTakeoverError(null);
-    try {
-      const outcome = await client.confirmTakeoverPlan(
-        pendingTakeoverPlan.id,
-        preservedPathIds,
-      );
-      setPendingTakeoverPlan(null);
-      setViewState({ status: "ready", outcome });
-    } catch (error) {
-      const message = formatError(error);
-      // 接管确认可能已经消费 Plan；只信任后端恢复后的状态，旧 Plan 不能再次提交。
-      setPendingTakeoverPlan(null);
-      try {
-        const outcome = await client.getStartupState();
-        setViewState({ status: "ready", outcome });
-        setTakeoverError(message);
-      } catch (recoveryError) {
-        setViewState({
-          status: "error",
-          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
-        });
-      }
-    } finally {
-      setIsConfirmingTakeover(false);
-    }
-  };
-
   if (viewState.status === "loading") {
     return (
       <main className="state-page" aria-label="SkillYard 正在启动">
@@ -390,19 +336,6 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           setPendingInstallPlan(null);
         }}
         onConfirm={confirmInstall}
-      />
-    );
-  }
-  if (pendingTakeoverPlan) {
-    return (
-      <TakeoverPlanPage
-        plan={pendingTakeoverPlan}
-        isConfirming={isConfirmingTakeover}
-        onBack={() => {
-          setTakeoverError(null);
-          setPendingTakeoverPlan(null);
-        }}
-        onConfirm={confirmTakeover}
       />
     );
   }
@@ -530,18 +463,15 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       isRefreshing={isRefreshing}
       isChoosingFolder={isChoosingFolder}
       isAddingProject={isAddingProject}
-      planningTakeoverId={planningTakeoverId}
       refreshError={refreshError}
       installError={installError}
       projectError={projectError}
       mountError={mountError}
-      takeoverError={takeoverError}
       onRefresh={refreshLocalInventory}
       onInstall={chooseFolderInstallPlan}
       onAddProject={chooseAndRegisterProject}
       onManageMount={openMountManager}
       onBatchMount={openBatchMount}
-      onTakeover={createTakeoverPlan}
     />
   );
 }

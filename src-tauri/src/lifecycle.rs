@@ -67,18 +67,6 @@ pub enum LifecycleFailpoint {
     HardExitAfterFirstBatchMountRollbackBeforeProgress,
     HardExitAfterAllBatchMountTargetsAppliedBeforeState,
     HardExitAfterBatchMountStateCommittedBeforeJournal,
-    AfterTakeoverTransactionRecord,
-    AfterTakeoverCandidatePrepared,
-    AfterTakeoverReplacementStaged,
-    AfterTakeoverHostSwapped,
-    AfterTakeoverStateCommitted,
-    HardExitAfterTakeoverTransactionRecord,
-    HardExitAfterTakeoverJournalWrittenBeforePhase,
-    HardExitAfterTakeoverCandidatePublishedBeforePhase,
-    HardExitAfterTakeoverReplacementStaged,
-    HardExitAfterTakeoverHostSwappedBeforePhase,
-    HardExitAfterTakeoverStateCommittedBeforeJournal,
-    HardExitAfterTakeoverOriginalMovedBeforeDiscard,
 }
 
 #[derive(Debug, Error)]
@@ -1269,9 +1257,7 @@ fn read_entry_names_from_handle(directory: &File) -> Result<Vec<String>, Lifecyc
         .collect()
 }
 
-pub(crate) fn read_entry_names_os_from_handle(
-    directory: &File,
-) -> Result<Vec<OsString>, LifecycleError> {
+fn read_entry_names_os_from_handle(directory: &File) -> Result<Vec<OsString>, LifecycleError> {
     let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
     if duplicate < 0 {
         return Err(io_error(
@@ -2018,11 +2004,7 @@ pub(crate) fn open_regular_file_at(
     Ok(file)
 }
 
-pub(crate) fn create_new_file_at(
-    parent: &File,
-    name: &OsStr,
-    path: &Path,
-) -> Result<File, LifecycleError> {
+fn create_new_file_at(parent: &File, name: &OsStr, path: &Path) -> Result<File, LifecycleError> {
     let name = c_string(name).map_err(|source| io_error("解析受管文件名", path, source))?;
     let descriptor = unsafe {
         libc::openat(
@@ -2111,11 +2093,7 @@ fn remove_empty_directory_at(
         .map_err(|source| io_error("同步事务目录父级", path, source))
 }
 
-pub(crate) fn remove_owned_tree_at(
-    parent: &File,
-    name: &OsStr,
-    path: &Path,
-) -> Result<(), LifecycleError> {
+fn remove_owned_tree_at(parent: &File, name: &OsStr, path: &Path) -> Result<(), LifecycleError> {
     let child = open_directory_at(parent, name)
         .map_err(|source| io_error("安全打开事务清理目标", path, source))?;
     remove_owned_tree_contents(&child, path)?;
@@ -2199,131 +2177,6 @@ pub(crate) fn write_atomic_at(
         let _ = unlink_at(parent, &temporary_name, false);
     }
     result
-}
-
-/// 首次事务 Journal 只能占用空路径；并发插入的任何条目都必须原样保留。
-pub(crate) fn write_new_atomic_at(
-    parent: &File,
-    name: &OsStr,
-    path: &Path,
-    bytes: &[u8],
-) -> Result<(), LifecycleError> {
-    write_new_atomic_at_with_hook(parent, name, path, bytes, |_| {})
-}
-
-fn write_new_atomic_at_with_hook(
-    parent: &File,
-    name: &OsStr,
-    path: &Path,
-    bytes: &[u8],
-    before_rename: impl FnOnce(&OsStr),
-) -> Result<(), LifecycleError> {
-    let temporary_name = OsString::from(format!(
-        ".{}.tmp-{}",
-        name.to_string_lossy(),
-        Uuid::new_v4()
-    ));
-    let temporary_path = path.with_file_name(&temporary_name);
-    let mut owned_temporary = None;
-    let result = (|| {
-        let mut file = create_new_file_at(parent, &temporary_name, &temporary_path)?;
-        let metadata = file
-            .metadata()
-            .map_err(|source| io_error("检查首次事务临时文件", &temporary_path, source))?;
-        owned_temporary = Some((
-            metadata.dev(),
-            metadata.ino(),
-            metadata.mode(),
-            metadata.nlink(),
-        ));
-        file.write_all(bytes)
-            .map_err(|source| io_error("写入首次事务临时文件", &temporary_path, source))?;
-        file.sync_all()
-            .map_err(|source| io_error("同步首次事务临时文件", &temporary_path, source))?;
-        before_rename(&temporary_name);
-        let visible = entry_metadata_at(parent, &temporary_name)
-            .map_err(|source| io_error("重新检查首次事务临时文件", &temporary_path, source))?
-            .ok_or_else(|| {
-                LifecycleError::RecoveryBlocked(
-                    "首次事务临时文件已被外部移除，已保留现场".to_owned(),
-                )
-            })?;
-        if visible.st_mode & libc::S_IFMT != libc::S_IFREG
-            || visible.st_nlink != 1
-            || (
-                visible.st_dev as u64,
-                visible.st_ino,
-                u32::from(visible.st_mode),
-                visible.st_nlink as u64,
-            ) != owned_temporary.expect("临时文件身份已保存")
-        {
-            return Err(LifecycleError::RecoveryBlocked(
-                "首次事务临时文件已被外部替换，已保留现场".to_owned(),
-            ));
-        }
-        rename_at_no_replace(parent, &temporary_name, parent, name)
-            .map_err(|source| io_error("占用首次事务文件", path, source))?;
-        let published = entry_metadata_at(parent, name)
-            .map_err(|source| io_error("检查首次事务文件", path, source))?
-            .ok_or_else(|| {
-                LifecycleError::RecoveryBlocked("首次事务文件在发布后消失".to_owned())
-            })?;
-        if (
-            published.st_dev as u64,
-            published.st_ino,
-            u32::from(published.st_mode),
-            published.st_nlink as u64,
-        ) != owned_temporary.expect("临时文件身份已保存")
-        {
-            return Err(LifecycleError::RecoveryBlocked(
-                "首次事务文件在发布时被外部替换，已保留现场".to_owned(),
-            ));
-        }
-        parent
-            .sync_all()
-            .map_err(|source| io_error("同步首次事务文件父目录", path, source))
-    })();
-    if let Err(error) = result {
-        let visible = entry_metadata_at(parent, &temporary_name)
-            .map_err(|source| io_error("检查首次事务临时文件", &temporary_path, source))?;
-        match (visible, owned_temporary) {
-            (Some(visible), Some(expected))
-                if visible.st_mode & libc::S_IFMT == libc::S_IFREG
-                    && visible.st_nlink == 1
-                    && (
-                        visible.st_dev as u64,
-                        visible.st_ino,
-                        u32::from(visible.st_mode),
-                        visible.st_nlink as u64,
-                    ) == expected =>
-            {
-                unlink_at(parent, &temporary_name, false)
-                    .map_err(|source| io_error("清理首次事务临时文件", &temporary_path, source))?;
-                parent
-                    .sync_all()
-                    .map_err(|source| io_error("同步首次事务临时文件父目录", path, source))?;
-            }
-            (None, _) => {}
-            _ => {
-                return Err(LifecycleError::RecoveryBlocked(
-                    "首次事务临时文件已被外部替换，已保留现场".to_owned(),
-                ));
-            }
-        }
-        return Err(error);
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn write_new_atomic_at_test_hook(
-    parent: &File,
-    name: &OsStr,
-    path: &Path,
-    bytes: &[u8],
-    before_rename: impl FnOnce(&OsStr),
-) -> Result<(), LifecycleError> {
-    write_new_atomic_at_with_hook(parent, name, path, bytes, before_rename)
 }
 
 fn ensure_entry_absent_at(parent: &File, name: &OsStr) -> io::Result<()> {
@@ -2426,47 +2279,6 @@ pub(crate) fn rename_at_no_replace(
         Ok(())
     } else {
         Err(io::Error::last_os_error())
-    }
-}
-
-/// macOS 通过内核级 `RENAME_SWAP` 交换两个已存在目录项，不暴露中间缺口。
-pub(crate) fn rename_at_swap(
-    source_parent: &File,
-    source_name: &OsStr,
-    destination_parent: &File,
-    destination_name: &OsStr,
-) -> io::Result<()> {
-    let source_name = c_string(source_name)?;
-    let destination_name = c_string(destination_name)?;
-    #[cfg(target_os = "macos")]
-    {
-        let result = unsafe {
-            libc::renameatx_np(
-                source_parent.as_raw_fd(),
-                source_name.as_ptr(),
-                destination_parent.as_raw_fd(),
-                destination_name.as_ptr(),
-                libc::RENAME_SWAP,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (
-            source_parent,
-            source_name,
-            destination_parent,
-            destination_name,
-        );
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "atomic rename swap is only supported on macOS",
-        ))
     }
 }
 
@@ -2637,77 +2449,5 @@ mod tests {
             matches!(&result, Err(LifecycleError::PlanPreconditionChanged)),
             "候选变化应在发布前被拒绝：{result:?}"
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn rename_swap_atomically_exchanges_a_directory_and_symlink() {
-        let temp = tempdir().expect("应创建临时目录");
-        let parent = File::open(temp.path()).expect("应打开父目录");
-        fs::create_dir(temp.path().join("original")).expect("应创建原目录");
-        fs::write(temp.path().join("original/value.txt"), "original").expect("应写入原内容");
-        std::os::unix::fs::symlink("/tmp/managed-skill", temp.path().join("replacement"))
-            .expect("应创建替换链接");
-
-        rename_at_swap(
-            &parent,
-            OsStr::new("original"),
-            &parent,
-            OsStr::new("replacement"),
-        )
-        .expect("macOS 应原子交换两个现有目录项");
-
-        assert_eq!(
-            fs::read_link(temp.path().join("original")).expect("原路径应成为符号链接"),
-            PathBuf::from("/tmp/managed-skill")
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("replacement/value.txt"))
-                .expect("隐藏路径应保存原目录"),
-            "original"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn rename_swap_missing_side_preserves_the_other_entry() {
-        let temp = tempdir().expect("应创建临时目录");
-        let parent = File::open(temp.path()).expect("应打开父目录");
-        fs::create_dir(temp.path().join("original")).expect("应创建原目录");
-        fs::write(temp.path().join("original/value.txt"), "unchanged").expect("应写入原内容");
-
-        assert!(
-            rename_at_swap(
-                &parent,
-                OsStr::new("original"),
-                &parent,
-                OsStr::new("missing"),
-            )
-            .is_err()
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("original/value.txt"))
-                .expect("失败后原目录必须保留"),
-            "unchanged"
-        );
-        assert!(!temp.path().join("missing").exists());
-
-        std::os::unix::fs::symlink("/tmp/managed-skill", temp.path().join("replacement"))
-            .expect("应创建仍需保护的 destination");
-        assert!(
-            rename_at_swap(
-                &parent,
-                OsStr::new("missing-source"),
-                &parent,
-                OsStr::new("replacement"),
-            )
-            .is_err()
-        );
-        assert_eq!(
-            fs::read_link(temp.path().join("replacement"))
-                .expect("source 缺失时 destination 必须保留"),
-            PathBuf::from("/tmp/managed-skill")
-        );
-        assert!(!temp.path().join("missing-source").exists());
     }
 }

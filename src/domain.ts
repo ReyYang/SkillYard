@@ -188,47 +188,6 @@ export interface FolderInstallCandidate {
   defaultSelected: boolean;
 }
 
-export interface TakeoverPlanPath {
-  id: string;
-  mountId: string;
-  originalPath: string;
-  appId: SupportedAppId;
-  scope: MountScope;
-  projectId: string | null;
-  projectDisplayName: string | null;
-  projectRootPath: string | null;
-  projectRootDevice: number | null;
-  projectRootInode: number | null;
-  parentDevice: number;
-  parentInode: number;
-  parentMode: number;
-  originalDevice: number;
-  originalInode: number;
-  originalMode: number;
-  defaultPreserveMount: boolean;
-}
-
-export interface TakeoverPlan {
-  id: string;
-  observationId: string;
-  bundleId: string;
-  contentId: string;
-  memberId: string;
-  bundleDisplayName: string;
-  sourceDisplayName: string | null;
-  sourceNotice: string;
-  skillName: string;
-  skillDescription: string;
-  contentFingerprint: string;
-  warnings: string[];
-  managedDirectory: string;
-  contentDirectory: string;
-  expectedTarget: string;
-  paths: TakeoverPlanPath[];
-  createdAt: number;
-  expiresAt: number;
-}
-
 export type UiOutcome =
   | {
       type: "unsupportedPlatform";
@@ -264,8 +223,4 @@ export type UiOutcome =
   | {
       type: "batchMountPlan";
       plan: BatchMountPlan;
-    }
-  | {
-      type: "takeoverPlan";
-      plan: TakeoverPlan;
     };

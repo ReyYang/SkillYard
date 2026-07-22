@@ -405,8 +405,7 @@ fn project_observers(app_id: SupportedAppId) -> Vec<SupportedAppId> {
     }
 }
 
-/// 接管计划用同一算法确认 Inventory 快照之后内容没有被替换。
-pub(crate) fn fingerprint_skill_root(root: &Path) -> Result<String, ScanError> {
+fn fingerprint_skill_root(root: &Path) -> Result<String, ScanError> {
     let mut fingerprint = StableFingerprint::new();
     if fs::symlink_metadata(root)
         .map_err(|source| read_skill_content_error(root, source))?

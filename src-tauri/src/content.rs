@@ -478,37 +478,6 @@ pub fn copy_single_skill_tree_into_open_directory(
     copy_validated_tree(validated, destination_parent, || {}, || {})
 }
 
-/// v2 接管把失败现场交给持久化恢复器审计，因此这里绝不主动删除已创建的部分目标。
-pub fn copy_single_skill_tree_into_open_directory_preserving_partial(
-    source: &Path,
-    destination_parent: &File,
-    destination_parent_path: &Path,
-    destination_name: &OsStr,
-    expected_name: &str,
-    expected_fingerprint: &str,
-    budget: &mut BundleCopyBudget,
-) -> Result<(), ContentValidationError> {
-    let validated = validate_tree(source, ContentLimits::PRODUCTION)?;
-    if validated.skill.name != expected_name || validated.skill.fingerprint != expected_fingerprint
-    {
-        return Err(ContentValidationError::SourceChanged(display_path(source)));
-    }
-    budget.reserve(&validated)?;
-    let destination_parent = prepare_open_destination(
-        &validated.skill.canonical_root,
-        destination_parent,
-        destination_parent_path,
-        destination_name,
-    )?;
-    copy_validated_tree_with_failure_policy(
-        validated,
-        destination_parent,
-        || {},
-        || {},
-        FailureCleanup::PreservePartial,
-    )
-}
-
 #[cfg(test)]
 fn copy_single_skill_tree_with_hooks(
     source: &Path,
@@ -526,58 +495,14 @@ fn copy_single_skill_tree_with_hooks(
     )
 }
 
-#[cfg(test)]
-fn copy_single_skill_tree_preserving_partial_with_hooks(
-    source: &Path,
-    destination: &Path,
-    after_entries_copied: impl FnOnce(),
-) -> Result<(), ContentValidationError> {
-    let validated = validate_tree(source, ContentLimits::PRODUCTION)?;
-    let destination_parent = prepare_destination(&validated.skill.canonical_root, destination)?;
-    copy_validated_tree_with_failure_policy(
-        validated,
-        destination_parent,
-        || {},
-        after_entries_copied,
-        FailureCleanup::PreservePartial,
-    )
-}
-
 fn copy_validated_tree(
     validated: ValidatedTree,
     destination_parent: DestinationParent,
     after_parent_opened: impl FnOnce(),
     after_entries_copied: impl FnOnce(),
 ) -> Result<(), ContentValidationError> {
-    copy_validated_tree_with_failure_policy(
-        validated,
-        destination_parent,
-        after_parent_opened,
-        after_entries_copied,
-        FailureCleanup::RemoveCreated,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FailureCleanup {
-    RemoveCreated,
-    PreservePartial,
-}
-
-fn copy_validated_tree_with_failure_policy(
-    validated: ValidatedTree,
-    destination_parent: DestinationParent,
-    after_parent_opened: impl FnOnce(),
-    after_entries_copied: impl FnOnce(),
-    failure_cleanup: FailureCleanup,
-) -> Result<(), ContentValidationError> {
     after_parent_opened();
-    let mut created = match failure_cleanup {
-        FailureCleanup::RemoveCreated => create_destination_root(&destination_parent)?,
-        FailureCleanup::PreservePartial => {
-            create_destination_root_preserving_partial(&destination_parent)?
-        }
-    };
+    let mut created = create_destination_root(&destination_parent)?;
 
     let copy_result = (|| {
         copy_validated_entries(&validated, &destination_parent, &mut created)?;
@@ -605,9 +530,6 @@ fn copy_validated_tree_with_failure_policy(
     })();
 
     if let Err(original) = copy_result {
-        if failure_cleanup == FailureCleanup::PreservePartial {
-            return Err(original);
-        }
         if let Err(cleanup) =
             cleanup_created_destination(&destination_parent, &mut created, &validated.entries)
         {
@@ -1448,32 +1370,6 @@ fn create_destination_root(
     })
 }
 
-fn create_destination_root_preserving_partial(
-    destination: &DestinationParent,
-) -> Result<CreatedDestination, ContentValidationError> {
-    if let Err(source) = mkdir_at(&destination.handle, &destination.root_name, 0o700) {
-        return if source.kind() == std::io::ErrorKind::AlreadyExists {
-            Err(ContentValidationError::DestinationExists(display_path(
-                &destination.root_path,
-            )))
-        } else {
-            Err(io_error("创建复制目标", &destination.root_path, source))
-        };
-    }
-
-    // 任一步失败都保留已创建目录；只有跨重启的语义审计有权决定它是否可删。
-    let root_handle = open_directory_at(&destination.handle, &destination.root_name)?;
-    let root_clone = root_handle
-        .try_clone()
-        .map_err(|source| io_error("保留目标根目录句柄", &destination.root_path, source))?;
-    let mut directories = BTreeMap::new();
-    directories.insert(PathBuf::new(), root_clone);
-    Ok(CreatedDestination {
-        root_handle: Some(root_handle),
-        directories,
-    })
-}
-
 fn copy_validated_entries(
     validated: &ValidatedTree,
     destination_parent: &DestinationParent,
@@ -2220,28 +2116,6 @@ mod tests {
 
         assert!(matches!(error, ContentValidationError::SourceChanged(_)));
         assert!(!destination.exists());
-    }
-
-    #[test]
-    fn v2_copy_failure_preserves_partial_destination_for_persisted_recovery() {
-        let sandbox = tempdir().expect("应创建隔离测试目录");
-        let source = sandbox.path().join("example-skill");
-        write_valid_skill(&source);
-        let payload = source.join("payload.txt");
-        fs::write(&payload, "before").expect("应写入复制前内容");
-        let destination_parent = sandbox.path().join("copy");
-        fs::create_dir(&destination_parent).expect("应创建复制父目录");
-        let destination = destination_parent.join("example-skill");
-
-        let error =
-            copy_single_skill_tree_preserving_partial_with_hooks(&source, &destination, || {
-                fs::write(&payload, "after").expect("应模拟复制后来源变化")
-            })
-            .expect_err("来源变化必须使 v2 复制失败");
-
-        assert!(matches!(error, ContentValidationError::SourceChanged(_)));
-        assert!(destination.exists(), "v2 必须把失败现场留给持久化恢复器");
-        assert!(destination.join("SKILL.md").is_file());
     }
 
     #[test]

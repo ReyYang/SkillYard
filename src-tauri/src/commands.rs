@@ -4,8 +4,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     BatchMountPlan, BatchMountRequest, FolderInstallPlan, MountPlan, MountScope,
-    SkillYardApplication, SupportedAppId, TakeoverPlan, UiIntent, UiOutcome,
-    application::ApplicationError,
+    SkillYardApplication, SupportedAppId, UiIntent, UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -21,7 +20,6 @@ impl From<ApplicationError> for UiError {
             ApplicationError::Storage(_) => "storageError",
             ApplicationError::Lifecycle(_) => "lifecycleError",
             ApplicationError::MountLifecycle(_) => "mountError",
-            ApplicationError::TakeoverLifecycle(_) => "takeoverError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",
@@ -161,38 +159,6 @@ pub fn create_mount_plan(
             message: "SkillYard 没有生成 Mount 确认信息".to_owned(),
         }),
     }
-}
-
-#[tauri::command(async)]
-pub fn create_takeover_plan(
-    application: State<'_, SkillYardApplication>,
-    observation_id: String,
-) -> Result<TakeoverPlan, UiError> {
-    match dispatch(
-        &application,
-        UiIntent::CreateTakeoverPlan { observation_id },
-    )? {
-        UiOutcome::TakeoverPlan { plan } => Ok(plan),
-        _ => Err(UiError {
-            code: "invalidOutcome",
-            message: "SkillYard 没有生成接管确认信息".to_owned(),
-        }),
-    }
-}
-
-#[tauri::command(async)]
-pub fn confirm_takeover_plan(
-    application: State<'_, SkillYardApplication>,
-    plan_id: String,
-    preserved_path_ids: Vec<String>,
-) -> Result<UiOutcome, UiError> {
-    dispatch(
-        &application,
-        UiIntent::ConfirmTakeoverPlan {
-            plan_id,
-            preserved_path_ids,
-        },
-    )
 }
 
 #[tauri::command(async)]
