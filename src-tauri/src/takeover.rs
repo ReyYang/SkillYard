@@ -12,11 +12,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    content::{ContentValidationError, validate_single_skill_folder},
+    content::{ContentValidationError, ValidatedSingleSkill, validate_single_skill_folder},
     domain::{
-        InventoryItem, ManagementKind, MountScope, SkillMetadataStatus, TakeoverIdentityBasis,
-        TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin, TakeoverPlanRequest,
-        TakeoverPlanTarget, UiOutcome,
+        InventoryItem, ManagementKind, MountScope, SkillMetadataStatus, SupportedAppId,
+        TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin,
+        TakeoverPlanRequest, TakeoverPlanTarget, UiOutcome,
     },
     paths::ApplicationPaths,
     storage::{Storage, StorageError, StoredTakeoverPlanRow},
@@ -75,6 +75,15 @@ struct TakeoverTargetSnapshot {
     occupied_by_observation_id: Option<String>,
 }
 
+struct PreparedOrigin {
+    observation: InventoryItem,
+    app_id: SupportedAppId,
+    original_root: PathBuf,
+    validated: ValidatedSingleSkill,
+    root_metadata: fs::Metadata,
+    parent_metadata: fs::Metadata,
+}
+
 /// Plan 构建只读取已保存 Inventory 与真实文件系统，并把完整合同写入 SQLite。
 pub(crate) fn create_takeover_plan(
     paths: &ApplicationPaths,
@@ -82,33 +91,66 @@ pub(crate) fn create_takeover_plan(
     request: TakeoverPlanRequest,
     now: i64,
 ) -> Result<TakeoverPlan, TakeoverError> {
-    validate_single_origin_request(&request)?;
-    let observation = read_selected_observation(storage, &request.observation_ids[0])?;
-    validate_observation(&observation)?;
-    let root_key = observation
-        .root_key
-        .ok_or_else(|| TakeoverError::InvalidRequest("扫描观察缺少受支持路径信息".to_owned()))?;
-    let app = paths
-        .supported_apps()
-        .into_iter()
-        .find(|app| app.root_key == root_key)
-        .ok_or_else(|| {
-            TakeoverError::InvalidRequest("第一个切片只接受应用专属 global Skill".to_owned())
+    validate_plan_request(&request)?;
+    let observations = read_observations(storage, &request.observation_ids)?;
+    let app_configs = paths.supported_apps();
+    let mut prepared_origins = Vec::with_capacity(observations.len());
+    let mut original_paths = BTreeSet::new();
+    for observation in observations {
+        validate_observation(&observation)?;
+        let root_key = observation.root_key.ok_or_else(|| {
+            TakeoverError::InvalidRequest("扫描观察缺少受支持路径信息".to_owned())
         })?;
-    let original_root = PathBuf::from(&observation.skill_root);
-    let validated = validate_single_skill_folder(&original_root)?;
-    if validated.name != observation.skill_name {
+        let app = app_configs
+            .iter()
+            .find(|app| app.root_key == root_key)
+            .ok_or_else(|| {
+                TakeoverError::InvalidRequest("第一个切片只接受应用专属 global Skill".to_owned())
+            })?;
+        let original_root = PathBuf::from(&observation.skill_root);
+        if !original_paths.insert(original_root.clone()) {
+            return Err(TakeoverError::InvalidRequest(
+                "接管选择包含重复的原始路径".to_owned(),
+            ));
+        }
+        let validated = validate_single_skill_folder(&original_root)?;
+        if validated.name != observation.skill_name {
+            return Err(TakeoverError::InvalidRequest(
+                "扫描结果与当前 Skill 内容不一致，请刷新本机后重试".to_owned(),
+            ));
+        }
+        if app.global_root.join(&validated.name) != original_root {
+            return Err(TakeoverError::InvalidRequest(
+                "Skill 不位于受支持应用的固定 global 路径".to_owned(),
+            ));
+        }
+        let parent = original_root
+            .parent()
+            .ok_or_else(|| TakeoverError::InvalidRequest("Skill 根目录缺少父目录".to_owned()))?;
+        prepared_origins.push(PreparedOrigin {
+            root_metadata: metadata(&original_root, "读取原 Skill 身份")?,
+            parent_metadata: metadata(parent, "读取原 Skill 父目录身份")?,
+            observation,
+            app_id: app.id,
+            original_root,
+            validated,
+        });
+    }
+    let selected = prepared_origins
+        .iter()
+        .find(|origin| origin.observation.id == request.selected_observation_id)
+        .ok_or_else(|| TakeoverError::InvalidRequest("所选内容副本已经不存在".to_owned()))?;
+    let skill_name = selected.validated.name.clone();
+    let skill_description = selected.validated.description.clone();
+    let selected_warnings = selected.validated.warnings.clone();
+    if prepared_origins
+        .iter()
+        .any(|origin| origin.validated.name != skill_name)
+    {
         return Err(TakeoverError::InvalidRequest(
-            "扫描结果与当前 Skill 内容不一致，请刷新本机后重试".to_owned(),
+            "只有同名副本可以确认成同一个本地 Skill Identity".to_owned(),
         ));
     }
-    let expected_original = app.global_root.join(&validated.name);
-    if expected_original != original_root {
-        return Err(TakeoverError::InvalidRequest(
-            "Skill 不位于受支持应用的固定 global 路径".to_owned(),
-        ));
-    }
-    let preserve_mount = request.preserved_observation_ids.contains(&observation.id);
     let bundle_id = Uuid::new_v4().to_string();
     let member_id = Uuid::new_v4().to_string();
     let content_id = Uuid::new_v4().to_string();
@@ -119,123 +161,133 @@ pub(crate) fn create_takeover_plan(
     let expected_target = managed_directory
         .join("current")
         .join("members")
-        .join(&validated.name);
+        .join(&skill_name);
     let expected_target_text = path_text(&expected_target)?;
-    let original_path = path_text(&original_root)?;
-    let parent = original_root
-        .parent()
-        .ok_or_else(|| TakeoverError::InvalidRequest("Skill 根目录缺少父目录".to_owned()))?;
-    let root_metadata = metadata(&original_root, "读取原 Skill 身份")?;
-    let parent_metadata = metadata(parent, "读取原 Skill 父目录身份")?;
-    let origin_snapshot = TakeoverOriginSnapshot {
-        observation_id: observation.id.clone(),
-        root_device: root_metadata.dev(),
-        root_inode: root_metadata.ino(),
-        root_mode: root_metadata.mode(),
-        parent_device: parent_metadata.dev(),
-        parent_inode: parent_metadata.ino(),
-        parent_mode: parent_metadata.mode(),
-    };
-    let origin = TakeoverPlanOrigin {
-        observation_id: observation.id.clone(),
-        original_path: original_path.clone(),
-        app_id: Some(app.id),
-        scope: Some(MountScope::Global),
-        project_id: None,
-        project_display_name: None,
-        content_fingerprint: validated.fingerprint.clone(),
-        warnings: validated.warnings.clone(),
-        final_disposition: if preserve_mount {
-            TakeoverOriginDisposition::Mount
-        } else {
-            TakeoverOriginDisposition::Remove
-        },
-    };
-    let (targets, target_snapshots) = if preserve_mount {
-        (
-            vec![TakeoverPlanTarget {
+    let mut origins = Vec::with_capacity(prepared_origins.len());
+    let mut origin_snapshots = Vec::with_capacity(prepared_origins.len());
+    let mut targets = Vec::with_capacity(request.preserved_observation_ids.len());
+    let mut target_snapshots = Vec::with_capacity(request.preserved_observation_ids.len());
+    for prepared in prepared_origins {
+        let preserve_mount = request
+            .preserved_observation_ids
+            .contains(&prepared.observation.id);
+        let original_path = path_text(&prepared.original_root)?;
+        origin_snapshots.push(TakeoverOriginSnapshot {
+            observation_id: prepared.observation.id.clone(),
+            root_device: prepared.root_metadata.dev(),
+            root_inode: prepared.root_metadata.ino(),
+            root_mode: prepared.root_metadata.mode(),
+            parent_device: prepared.parent_metadata.dev(),
+            parent_inode: prepared.parent_metadata.ino(),
+            parent_mode: prepared.parent_metadata.mode(),
+        });
+        origins.push(TakeoverPlanOrigin {
+            observation_id: prepared.observation.id.clone(),
+            original_path: original_path.clone(),
+            app_id: Some(prepared.app_id),
+            scope: Some(MountScope::Global),
+            project_id: None,
+            project_display_name: None,
+            content_fingerprint: prepared.validated.fingerprint,
+            warnings: prepared.validated.warnings,
+            final_disposition: if preserve_mount {
+                TakeoverOriginDisposition::Mount
+            } else {
+                TakeoverOriginDisposition::Remove
+            },
+        });
+        if preserve_mount {
+            targets.push(TakeoverPlanTarget {
                 mount_id: Uuid::new_v4().to_string(),
-                app_id: app.id,
+                app_id: prepared.app_id,
                 scope: MountScope::Global,
                 project_id: None,
                 project_display_name: None,
                 target_path: original_path.clone(),
                 expected_target: expected_target_text.clone(),
-            }],
-            vec![TakeoverTargetSnapshot {
+            });
+            target_snapshots.push(TakeoverTargetSnapshot {
                 target_path: original_path,
-                parent_device: parent_metadata.dev(),
-                parent_inode: parent_metadata.ino(),
-                parent_mode: parent_metadata.mode(),
-                occupied_by_observation_id: Some(observation.id.clone()),
-            }],
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
+                parent_device: prepared.parent_metadata.dev(),
+                parent_inode: prepared.parent_metadata.ino(),
+                parent_mode: prepared.parent_metadata.mode(),
+                occupied_by_observation_id: Some(prepared.observation.id),
+            });
+        }
+    }
     let expires_at = now.saturating_add(TAKEOVER_PLAN_TTL_MILLIS);
     let plan = TakeoverPlan {
         id: plan_id.clone(),
-        identity_basis: TakeoverIdentityBasis::SingleOrigin,
-        selected_observation_id: observation.id,
+        identity_basis: if origins.len() == 1 {
+            TakeoverIdentityBasis::SingleOrigin
+        } else {
+            TakeoverIdentityBasis::UserConfirmed
+        },
+        selected_observation_id: request.selected_observation_id,
         bundle_id,
         member_id,
         content_id,
-        bundle_display_name: validated.name.clone(),
-        skill_name: validated.name,
-        skill_description: validated.description,
+        bundle_display_name: skill_name.clone(),
+        skill_name,
+        skill_description,
         source_display_name: None,
         managed_directory: path_text(&managed_directory)?,
         content_directory: path_text(&content_directory)?,
         expected_target: expected_target_text,
-        origins: vec![origin],
+        origins,
         targets,
-        warnings: validated.warnings,
+        warnings: selected_warnings,
         created_at: now,
         expires_at,
     };
     let contract = TakeoverPlanContract {
         plan: plan.clone(),
-        origin_snapshots: vec![origin_snapshot],
+        origin_snapshots,
         target_snapshots,
     };
     persist_and_reopen_contract(storage, &contract)?;
     Ok(plan)
 }
 
-fn validate_single_origin_request(request: &TakeoverPlanRequest) -> Result<(), TakeoverError> {
+fn validate_plan_request(request: &TakeoverPlanRequest) -> Result<(), TakeoverError> {
     let observation_ids = request.observation_ids.iter().collect::<BTreeSet<_>>();
     let preserved_ids = request
         .preserved_observation_ids
         .iter()
         .collect::<BTreeSet<_>>();
-    if request.observation_ids.len() != 1
+    if request.observation_ids.is_empty()
         || observation_ids.len() != request.observation_ids.len()
-        || request.selected_observation_id != request.observation_ids[0]
+        || !observation_ids.contains(&request.selected_observation_id)
         || preserved_ids.len() != request.preserved_observation_ids.len()
         || !preserved_ids.is_subset(&observation_ids)
         || !request.shared_targets.is_empty()
     {
         return Err(TakeoverError::InvalidRequest(
-            "第一个纵向切片只接受一个应用专属 Skill 副本".to_owned(),
+            "接管计划中的副本、内容选择或保留位置无效".to_owned(),
         ));
     }
     Ok(())
 }
 
-fn read_selected_observation(
+fn read_observations(
     storage: &Storage,
-    observation_id: &str,
-) -> Result<InventoryItem, TakeoverError> {
+    observation_ids: &[String],
+) -> Result<Vec<InventoryItem>, TakeoverError> {
     let Some(UiOutcome::Inventory { entries, .. }) = storage.read_initial_scan()? else {
         return Err(TakeoverError::InvalidRequest(
             "完成首次扫描后才能生成 Takeover Plan".to_owned(),
         ));
     };
-    entries
-        .into_iter()
-        .find(|entry| entry.id == observation_id)
-        .ok_or_else(|| TakeoverError::InvalidRequest("所选扫描观察已经不存在".to_owned()))
+    observation_ids
+        .iter()
+        .map(|observation_id| {
+            entries
+                .iter()
+                .find(|entry| entry.id == *observation_id)
+                .cloned()
+                .ok_or_else(|| TakeoverError::InvalidRequest("所选扫描观察已经不存在".to_owned()))
+        })
+        .collect()
 }
 
 fn validate_observation(observation: &InventoryItem) -> Result<(), TakeoverError> {
