@@ -21,8 +21,9 @@ use crate::{
         copy_single_skill_tree_into_open_directory_preserving_partial,
     },
     domain::{
-        MountScope, ScanRootKey, SupportedAppId, TakeoverTargetInitialState, TakeoverV2Origin,
-        TakeoverV2Plan, TakeoverV2PlanStatus, TakeoverV2Target,
+        MountScope, ScanRootKey, SupportedAppId, TakeoverOriginDisposition,
+        TakeoverTargetInitialState, TakeoverV2Origin, TakeoverV2Plan, TakeoverV2PlanStatus,
+        TakeoverV2Target,
     },
     lifecycle::{
         LifecycleError, LifecycleLock, acquire_lifecycle_lock, create_new_file_at,
@@ -38,9 +39,11 @@ use crate::{
     },
 };
 
-const TAKEOVER_V2_JOURNAL_VERSION: u32 = 1;
+const TAKEOVER_V2_JOURNAL_VERSION: u32 = 2;
 const TAKEOVER_V2_CANDIDATE_SHAPE_VERSION: u32 = 1;
 const MAX_TAKEOVER_V2_JOURNAL_BYTES: usize = 1024 * 1024;
+// 文件系统快照统一保存为 SHA-256 十六进制摘要，序列化长度因此固定且可预留。
+const TAKEOVER_V2_EFFECT_OBSERVATION_BYTES: usize = 64;
 
 #[derive(Debug, Error)]
 pub(crate) enum TakeoverV2LifecycleError {
@@ -88,7 +91,31 @@ struct TakeoverV2OriginManifest {
     entries: Vec<TakeoverOriginalEntry>,
 }
 
-/// Journal 只保存跨 SQLite 与文件系统边界恢复所需的不可变事实。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TakeoverV2EffectOperation {
+    CreateAbsentMount {
+        target_id: String,
+    },
+    ReplaceOriginWithMount {
+        target_id: String,
+        origin_id: String,
+    },
+    RemoveOrigin {
+        origin_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TakeoverV2EffectItem {
+    operation: TakeoverV2EffectOperation,
+    staged_observation: Option<String>,
+    applied_observation: Option<String>,
+    cleanup_completed: bool,
+}
+
+/// Journal 保存跨 SQLite 与文件系统边界恢复所需的合同与逐项进度。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TakeoverV2Journal {
@@ -111,6 +138,7 @@ struct TakeoverV2Journal {
     content_relative: String,
     current_target: String,
     origins: Vec<TakeoverV2OriginManifest>,
+    effect_items: Vec<TakeoverV2EffectItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2000,6 +2028,7 @@ fn build_takeover_v2_journal(
         .iter()
         .map(|origin| capture_origin_manifest(paths, origin))
         .collect::<Result<Vec<_>, _>>()?;
+    let effect_items = build_takeover_v2_effect_items(plan)?;
     let bundle_relative = format!("bundles/{}", plan.bundle_id);
     Ok(TakeoverV2Journal {
         version: TAKEOVER_V2_JOURNAL_VERSION,
@@ -2024,7 +2053,108 @@ fn build_takeover_v2_journal(
         content_relative: format!("{bundle_relative}/contents/{}", plan.content_id),
         current_target: format!("contents/{}", plan.content_id),
         origins,
+        effect_items,
     })
+}
+
+fn build_takeover_v2_effect_items(
+    plan: &TakeoverV2Plan,
+) -> Result<Vec<TakeoverV2EffectItem>, TakeoverV2LifecycleError> {
+    let origins_by_id = plan
+        .origins
+        .iter()
+        .map(|origin| (origin.id.as_str(), origin))
+        .collect::<BTreeMap<_, _>>();
+    let mut absent_targets = Vec::new();
+    let mut occupied_targets = Vec::new();
+    let mut occupied_origins = BTreeSet::new();
+    for target in &plan.targets {
+        match &target.initial_state {
+            TakeoverTargetInitialState::Absent => absent_targets.push(target),
+            TakeoverTargetInitialState::OccupiedByOrigin { origin_id } => {
+                let origin = origins_by_id.get(origin_id.as_str()).ok_or_else(|| {
+                    TakeoverV2LifecycleError::RecoveryBlocked(
+                        "Takeover v2 effect 缺少 Target 对应的 Origin".to_owned(),
+                    )
+                })?;
+                if origin.final_disposition != TakeoverOriginDisposition::Mount
+                    || origin.original_path != target.target_path
+                    || !occupied_origins.insert(origin_id.as_str())
+                {
+                    return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                        "Takeover v2 effect 的 Target 与 Mount Origin 不一致".to_owned(),
+                    ));
+                }
+                occupied_targets.push((target, *origin));
+            }
+        }
+    }
+    if plan.origins.iter().any(|origin| {
+        origin.final_disposition == TakeoverOriginDisposition::Mount
+            && !occupied_origins.contains(origin.id.as_str())
+    }) {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "Takeover v2 effect 缺少 Mount Origin 对应的 Target".to_owned(),
+        ));
+    }
+    absent_targets
+        .sort_by(|left, right| (&left.target_path, &left.id).cmp(&(&right.target_path, &right.id)));
+    occupied_targets.sort_by(|(left, _), (right, _)| {
+        (&left.target_path, &left.id).cmp(&(&right.target_path, &right.id))
+    });
+    let mut removed_origins = plan
+        .origins
+        .iter()
+        .filter(|origin| origin.final_disposition == TakeoverOriginDisposition::Remove)
+        .collect::<Vec<_>>();
+    removed_origins.sort_by(|left, right| {
+        (&left.original_path, &left.id).cmp(&(&right.original_path, &right.id))
+    });
+
+    let mut effect_items = Vec::with_capacity(plan.targets.len() + removed_origins.len());
+    effect_items.extend(
+        absent_targets
+            .into_iter()
+            .map(|target| TakeoverV2EffectItem {
+                operation: TakeoverV2EffectOperation::CreateAbsentMount {
+                    target_id: target.id.clone(),
+                },
+                staged_observation: None,
+                applied_observation: None,
+                cleanup_completed: false,
+            }),
+    );
+    effect_items.extend(occupied_targets.into_iter().map(|(target, origin)| {
+        TakeoverV2EffectItem {
+            operation: TakeoverV2EffectOperation::ReplaceOriginWithMount {
+                target_id: target.id.clone(),
+                origin_id: origin.id.clone(),
+            },
+            staged_observation: None,
+            applied_observation: None,
+            cleanup_completed: false,
+        }
+    }));
+    effect_items.extend(
+        removed_origins
+            .into_iter()
+            .map(|origin| TakeoverV2EffectItem {
+                operation: TakeoverV2EffectOperation::RemoveOrigin {
+                    origin_id: origin.id.clone(),
+                },
+                staged_observation: None,
+                applied_observation: None,
+                cleanup_completed: false,
+            }),
+    );
+
+    Ok(effect_items)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn takeover_v2_effect_hidden_name(transaction_id: &str, index: usize) -> String {
+    // 隐藏名只由已封印的事务与稳定排序位置决定，不重复写入 Journal 合同。
+    format!(".skillyard-takeover-v2-{transaction_id}-{index:04}")
 }
 
 fn capture_origin_manifest(
@@ -2409,12 +2539,17 @@ fn entry_identity(metadata: &libc::stat) -> (u64, u64, u32, u64) {
     )
 }
 
-/// phase 会持续变化，因此 contract hash 把它规范化后再覆盖其余全部字段。
+/// phase 与逐项进度会持续变化，合同哈希只覆盖恢复过程中不可变的事实。
 fn takeover_v2_journal_contract_sha256(
     journal: &TakeoverV2Journal,
 ) -> Result<String, TakeoverV2LifecycleError> {
     let mut contract = journal.clone();
     contract.phase = TakeoverV2JournalPhase::Preparing;
+    for item in &mut contract.effect_items {
+        item.staged_observation = None;
+        item.applied_observation = None;
+        item.cleanup_completed = false;
+    }
     let bytes = serde_json::to_vec(&contract)?;
     Ok(hex_sha256(&bytes))
 }
@@ -2425,7 +2560,85 @@ fn validate_takeover_v2_journal_contract(
     plan: &TakeoverV2Plan,
 ) -> Result<(), TakeoverV2LifecycleError> {
     validate_takeover_v2_journal_immutable_contract(journal, transaction, plan)?;
+    validate_takeover_v2_effect_progress(journal)?;
     validate_takeover_v2_journal_phase_pairing(journal.phase, &transaction.phase)
+}
+
+fn validate_takeover_v2_effect_progress(
+    journal: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let mut saw_unapplied = false;
+    for item in &journal.effect_items {
+        let staged = item.staged_observation.as_deref();
+        let applied = item.applied_observation.as_deref();
+        let item_progress_valid = staged.is_none_or(is_takeover_v2_effect_observation)
+            && applied.is_none_or(is_takeover_v2_effect_observation)
+            && match &item.operation {
+                TakeoverV2EffectOperation::CreateAbsentMount { .. }
+                | TakeoverV2EffectOperation::ReplaceOriginWithMount { .. } => {
+                    applied.is_none() || staged.is_some()
+                }
+                TakeoverV2EffectOperation::RemoveOrigin { .. } => staged.is_none(),
+            }
+            && (!item.cleanup_completed || applied.is_some());
+        if !item_progress_valid {
+            return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                "Takeover v2 Journal 包含不可能的 effect 进度".to_owned(),
+            ));
+        }
+        if applied.is_none() {
+            saw_unapplied = true;
+        } else if saw_unapplied {
+            // Remove 排在所有 Mount 之后；连续前缀保证共享入口不会先于新 Mount 消失。
+            return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                "Takeover v2 Journal 的 effect 生效进度不连续".to_owned(),
+            ));
+        }
+    }
+    let phase_progress_valid = match journal.phase {
+        TakeoverV2JournalPhase::Preparing => journal.effect_items.iter().all(|item| {
+            item.staged_observation.is_none()
+                && item.applied_observation.is_none()
+                && !item.cleanup_completed
+        }),
+        TakeoverV2JournalPhase::Prepared => journal.effect_items.iter().all(|item| {
+            item.applied_observation.is_none()
+                && !item.cleanup_completed
+                && match &item.operation {
+                    TakeoverV2EffectOperation::CreateAbsentMount { .. }
+                    | TakeoverV2EffectOperation::ReplaceOriginWithMount { .. } => true,
+                    TakeoverV2EffectOperation::RemoveOrigin { .. } => {
+                        item.staged_observation.is_none()
+                    }
+                }
+        }),
+        TakeoverV2JournalPhase::EffectStarted => journal
+            .effect_items
+            .iter()
+            .all(|item| !item.cleanup_completed),
+        TakeoverV2JournalPhase::StateCommitted => journal
+            .effect_items
+            .iter()
+            .all(|item| item.applied_observation.is_some()),
+        TakeoverV2JournalPhase::CleanupCompleted => journal
+            .effect_items
+            .iter()
+            .all(|item| item.applied_observation.is_some() && item.cleanup_completed),
+    };
+    if phase_progress_valid {
+        Ok(())
+    } else {
+        Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "Takeover v2 Journal phase 与 effect 进度不一致".to_owned(),
+        ))
+    }
+}
+
+fn is_takeover_v2_effect_observation(value: &str) -> bool {
+    value.len() == TAKEOVER_V2_EFFECT_OBSERVATION_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_takeover_v2_journal_immutable_contract(
@@ -2440,6 +2653,13 @@ fn validate_takeover_v2_journal_immutable_contract(
         .ok_or_else(|| {
             TakeoverV2LifecycleError::RecoveryBlocked("Plan 缺少 selected Origin".to_owned())
         })?;
+    let expected_effect_items = build_takeover_v2_effect_items(plan)?;
+    let mut normalized_effect_items = journal.effect_items.clone();
+    for item in &mut normalized_effect_items {
+        item.staged_observation = None;
+        item.applied_observation = None;
+        item.cleanup_completed = false;
+    }
     let bundle_relative = format!("bundles/{}", plan.bundle_id);
     let immutable_matches = journal.version == TAKEOVER_V2_JOURNAL_VERSION
         && journal.transaction_id == transaction.id
@@ -2463,7 +2683,8 @@ fn validate_takeover_v2_journal_immutable_contract(
         && journal.bundle_relative == bundle_relative
         && journal.content_relative
             == format!("bundles/{}/contents/{}", plan.bundle_id, plan.content_id)
-        && journal.current_target == format!("contents/{}", plan.content_id);
+        && journal.current_target == format!("contents/{}", plan.content_id)
+        && normalized_effect_items == expected_effect_items;
     if !immutable_matches
         || takeover_v2_journal_contract_sha256(journal)? != transaction.journal_contract_sha256
     {
@@ -2501,7 +2722,19 @@ fn validate_takeover_v2_journal_phase_pairing(
             journal_phase,
             TakeoverV2JournalPhase::Preparing | TakeoverV2JournalPhase::Prepared
         ),
-        "prepared" => journal_phase == TakeoverV2JournalPhase::Prepared,
+        "prepared" => matches!(
+            journal_phase,
+            TakeoverV2JournalPhase::Prepared | TakeoverV2JournalPhase::EffectStarted
+        ),
+        "effect_started" => matches!(
+            journal_phase,
+            TakeoverV2JournalPhase::EffectStarted | TakeoverV2JournalPhase::StateCommitted
+        ),
+        "state_committed" => matches!(
+            journal_phase,
+            TakeoverV2JournalPhase::StateCommitted | TakeoverV2JournalPhase::CleanupCompleted
+        ),
+        "cleanup_completed" => journal_phase == TakeoverV2JournalPhase::CleanupCompleted,
         _ => false,
     };
     if allowed {
@@ -3283,7 +3516,6 @@ fn write_takeover_v2_journal_with_hook(
 fn validate_journal_size_for_all_phases(
     journal: &TakeoverV2Journal,
 ) -> Result<(), TakeoverV2LifecycleError> {
-    let mut candidate = journal.clone();
     let mut maximum = 0;
     for phase in [
         TakeoverV2JournalPhase::Preparing,
@@ -3292,7 +3524,31 @@ fn validate_journal_size_for_all_phases(
         TakeoverV2JournalPhase::StateCommitted,
         TakeoverV2JournalPhase::CleanupCompleted,
     ] {
+        let mut candidate = journal.clone();
         candidate.phase = phase;
+        for item in &mut candidate.effect_items {
+            item.staged_observation = match (phase, &item.operation) {
+                (
+                    TakeoverV2JournalPhase::Prepared
+                    | TakeoverV2JournalPhase::EffectStarted
+                    | TakeoverV2JournalPhase::StateCommitted
+                    | TakeoverV2JournalPhase::CleanupCompleted,
+                    TakeoverV2EffectOperation::CreateAbsentMount { .. }
+                    | TakeoverV2EffectOperation::ReplaceOriginWithMount { .. },
+                ) => Some("f".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES)),
+                _ => None,
+            };
+            item.applied_observation = match phase {
+                TakeoverV2JournalPhase::EffectStarted
+                | TakeoverV2JournalPhase::StateCommitted
+                | TakeoverV2JournalPhase::CleanupCompleted => {
+                    Some("f".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES))
+                }
+                TakeoverV2JournalPhase::Preparing | TakeoverV2JournalPhase::Prepared => None,
+            };
+            // `false` 比 `true` 多一个 JSON 字节；StateCommitted 的合法最坏值必须预留 false。
+            item.cleanup_completed = phase == TakeoverV2JournalPhase::CleanupCompleted;
+        }
         maximum = maximum.max(serde_json::to_vec_pretty(&candidate)?.len());
     }
     if maximum > MAX_TAKEOVER_V2_JOURNAL_BYTES {
@@ -3953,6 +4209,33 @@ mod tests {
             journal.phase = TakeoverV2JournalPhase::Prepared;
             (transaction_id, journal)
         }
+    }
+
+    fn add_absent_copilot_target(harness: &Harness, plan: &mut TakeoverV2Plan) {
+        let parent_path = harness.paths.home().join(".copilot/skills");
+        fs::create_dir_all(&parent_path).expect("应创建 Copilot Skill 根");
+        let parent = fs::symlink_metadata(&parent_path).expect("应读取 Copilot Skill 根");
+        plan.targets.push(TakeoverV2Target {
+            id: Uuid::new_v4().to_string(),
+            mount_id: Uuid::new_v4().to_string(),
+            app_id: SupportedAppId::GitHubCopilot,
+            scope: MountScope::Global,
+            project_id: None,
+            project_display_name: None,
+            project_root_path: None,
+            project_root_device: None,
+            project_root_inode: None,
+            target_path: parent_path
+                .join(&plan.skill_name)
+                .to_string_lossy()
+                .into_owned(),
+            expected_target: plan.expected_target.clone(),
+            parent_device: parent.dev(),
+            parent_inode: parent.ino(),
+            parent_mode: parent.mode(),
+            initial_state: TakeoverTargetInitialState::Absent,
+        });
+        plan.seal = takeover_v2_plan_seal(plan);
     }
 
     #[test]
@@ -5476,22 +5759,325 @@ mod tests {
     }
 
     #[test]
-    fn contract_hash_ignores_only_mutable_phase() {
+    fn journal_effect_contract_orders_create_replace_then_remove() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_two_origin_plan("alpha");
+        add_absent_copilot_target(&harness, &mut plan);
+        let transaction_id = Uuid::new_v4().to_string();
+
+        let journal = build_takeover_v2_journal(&harness.paths, &transaction_id, &plan)
+            .expect("应建立 Journal");
+
+        let occupied_origin_id = match &plan.targets[0].initial_state {
+            TakeoverTargetInitialState::OccupiedByOrigin { origin_id } => origin_id,
+            TakeoverTargetInitialState::Absent => panic!("fixture 应由 Origin 占用"),
+        };
+        let removed_origin_id = &plan
+            .origins
+            .iter()
+            .find(|origin| origin.final_disposition == TakeoverOriginDisposition::Remove)
+            .expect("fixture 应有待移除 Origin")
+            .id;
+        assert!(matches!(
+            &journal.effect_items[0].operation,
+            TakeoverV2EffectOperation::CreateAbsentMount { target_id }
+                if target_id == &plan.targets[1].id
+        ));
+        assert!(matches!(
+            &journal.effect_items[1].operation,
+            TakeoverV2EffectOperation::ReplaceOriginWithMount {
+                target_id,
+                origin_id,
+            } if target_id == &plan.targets[0].id && origin_id == occupied_origin_id
+        ));
+        assert!(matches!(
+            &journal.effect_items[2].operation,
+            TakeoverV2EffectOperation::RemoveOrigin { origin_id }
+                if origin_id == removed_origin_id
+        ));
+        assert_eq!(
+            journal
+                .effect_items
+                .iter()
+                .enumerate()
+                .map(|(index, _)| takeover_v2_effect_hidden_name(&transaction_id, index))
+                .collect::<Vec<_>>(),
+            vec![
+                format!(".skillyard-takeover-v2-{transaction_id}-0000"),
+                format!(".skillyard-takeover-v2-{transaction_id}-0001"),
+                format!(".skillyard-takeover-v2-{transaction_id}-0002"),
+            ]
+        );
+    }
+
+    #[test]
+    fn contract_hash_ignores_phase_and_effect_progress_but_covers_effect_identity() {
         let mut harness = Harness::new();
         let plan = harness.save_single_plan("alpha");
         let journal = build_takeover_v2_journal(&harness.paths, &Uuid::new_v4().to_string(), &plan)
             .expect("应建立 Journal");
         let mut advanced = journal.clone();
         advanced.phase = TakeoverV2JournalPhase::Prepared;
+        advanced.effect_items[0].staged_observation =
+            Some("a".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+        advanced.effect_items[0].applied_observation =
+            Some("b".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+        advanced.effect_items[0].cleanup_completed = true;
         assert_eq!(
             takeover_v2_journal_contract_sha256(&journal).expect("应计算 seal"),
             takeover_v2_journal_contract_sha256(&advanced).expect("应计算 seal")
         );
-        advanced.skill_name = "changed".to_owned();
+        advanced.effect_items[0].operation = TakeoverV2EffectOperation::RemoveOrigin {
+            origin_id: plan.origins[0].id.clone(),
+        };
         assert_ne!(
             takeover_v2_journal_contract_sha256(&journal).expect("应计算 seal"),
             takeover_v2_journal_contract_sha256(&advanced).expect("应计算 seal")
         );
+    }
+
+    #[test]
+    fn immutable_validator_rebuilds_effect_identity_from_plan() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let (transaction_id, mut journal) = harness.begin_without_journal(&plan);
+        let mut transaction = harness.transaction(&transaction_id).expect("事务必须存在");
+        journal.effect_items[0].operation = TakeoverV2EffectOperation::RemoveOrigin {
+            origin_id: plan.origins[0].id.clone(),
+        };
+        transaction.journal_contract_sha256 =
+            takeover_v2_journal_contract_sha256(&journal).expect("应计算篡改后的合同 hash");
+
+        let error = validate_takeover_v2_journal_immutable_contract(&journal, &transaction, &plan)
+            .expect_err("即使协调篡改 SQLite hash，也必须按 Plan 拒绝 effect 身份");
+
+        assert!(matches!(
+            error,
+            TakeoverV2LifecycleError::RecoveryBlocked(_)
+        ));
+    }
+
+    #[test]
+    fn phase_pairing_accepts_only_adjacent_persistent_crash_windows() {
+        let allowed = [
+            ("journal_pending", TakeoverV2JournalPhase::Preparing),
+            ("preparing", TakeoverV2JournalPhase::Preparing),
+            ("preparing", TakeoverV2JournalPhase::Prepared),
+            ("prepared", TakeoverV2JournalPhase::Prepared),
+            ("prepared", TakeoverV2JournalPhase::EffectStarted),
+            ("effect_started", TakeoverV2JournalPhase::EffectStarted),
+            ("effect_started", TakeoverV2JournalPhase::StateCommitted),
+            ("state_committed", TakeoverV2JournalPhase::StateCommitted),
+            ("state_committed", TakeoverV2JournalPhase::CleanupCompleted),
+            (
+                "cleanup_completed",
+                TakeoverV2JournalPhase::CleanupCompleted,
+            ),
+        ];
+        for (sqlite_phase, journal_phase) in allowed {
+            validate_takeover_v2_journal_phase_pairing(journal_phase, sqlite_phase)
+                .unwrap_or_else(|error| panic!("{sqlite_phase}/{journal_phase:?} 应合法：{error}"));
+        }
+
+        for (sqlite_phase, journal_phase) in [
+            ("journal_pending", TakeoverV2JournalPhase::Prepared),
+            ("prepared", TakeoverV2JournalPhase::StateCommitted),
+            ("effect_started", TakeoverV2JournalPhase::Prepared),
+            ("cleanup_completed", TakeoverV2JournalPhase::StateCommitted),
+        ] {
+            assert!(
+                validate_takeover_v2_journal_phase_pairing(journal_phase, sqlite_phase).is_err(),
+                "{sqlite_phase}/{journal_phase:?} 不应跨越恢复边界"
+            );
+        }
+    }
+
+    #[test]
+    fn journal_contract_rejects_impossible_effect_progress() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let (transaction_id, mut journal) = harness.begin_without_journal(&plan);
+        let transaction = harness.transaction(&transaction_id).expect("事务必须存在");
+        journal.effect_items[0].applied_observation =
+            Some("b".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+
+        let error = validate_takeover_v2_journal_contract(&journal, &transaction, &plan)
+            .expect_err("尚未暂存的 Mount 不可能已经生效");
+
+        assert!(matches!(
+            error,
+            TakeoverV2LifecycleError::RecoveryBlocked(_)
+        ));
+    }
+
+    #[test]
+    fn effect_observation_accepts_only_fixed_lowercase_sha256() {
+        assert!(is_takeover_v2_effect_observation(
+            &"a".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES)
+        ));
+        assert!(!is_takeover_v2_effect_observation(
+            &"x".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES)
+        ));
+        assert!(!is_takeover_v2_effect_observation(
+            &"A".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES)
+        ));
+        assert!(!is_takeover_v2_effect_observation(
+            &"a".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES - 1)
+        ));
+    }
+
+    #[test]
+    fn prepared_progress_allows_mount_staging_but_not_visible_effects() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let mut journal =
+            build_takeover_v2_journal(&harness.paths, &Uuid::new_v4().to_string(), &plan)
+                .expect("应建立 Journal");
+        journal.phase = TakeoverV2JournalPhase::Prepared;
+        journal.effect_items[0].staged_observation =
+            Some("a".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+
+        validate_takeover_v2_effect_progress(&journal)
+            .expect("Prepared 可以预暂存尚未对 Host 可见的 Mount 链接");
+
+        journal.effect_items[0].applied_observation =
+            Some("b".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+        assert!(
+            validate_takeover_v2_effect_progress(&journal).is_err(),
+            "Prepared 不能包含已经生效的 Host 路径"
+        );
+    }
+
+    #[test]
+    fn effect_started_progress_cannot_cleanup_originals_before_state_commit() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let mut journal =
+            build_takeover_v2_journal(&harness.paths, &Uuid::new_v4().to_string(), &plan)
+                .expect("应建立 Journal");
+        journal.phase = TakeoverV2JournalPhase::EffectStarted;
+        journal.effect_items[0].staged_observation =
+            Some("a".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+        journal.effect_items[0].applied_observation =
+            Some("b".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+
+        validate_takeover_v2_effect_progress(&journal).expect("生效阶段可以记录 Host 进度");
+
+        journal.effect_items[0].cleanup_completed = true;
+        assert!(
+            validate_takeover_v2_effect_progress(&journal).is_err(),
+            "领域状态提交前不能清理用于恢复的原目录"
+        );
+    }
+
+    #[test]
+    fn effect_started_progress_must_follow_effect_order() {
+        let mut harness = Harness::new();
+        let plan = harness.save_two_origin_plan("alpha");
+        let mut journal =
+            build_takeover_v2_journal(&harness.paths, &Uuid::new_v4().to_string(), &plan)
+                .expect("应建立 Journal");
+        journal.phase = TakeoverV2JournalPhase::EffectStarted;
+        assert!(
+            matches!(
+                &journal.effect_items[1].operation,
+                TakeoverV2EffectOperation::RemoveOrigin { .. }
+            ),
+            "fixture 的移除操作应位于 Mount 替换之后"
+        );
+        journal.effect_items[1].applied_observation =
+            Some("c".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+
+        assert!(
+            validate_takeover_v2_effect_progress(&journal).is_err(),
+            "新 Mount 尚未生效时不能先移除后续 Origin"
+        );
+    }
+
+    #[test]
+    fn journal_size_preflight_reserves_all_effect_progress_fields() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let mut journal =
+            build_takeover_v2_journal(&harness.paths, &Uuid::new_v4().to_string(), &plan)
+                .expect("应建立 Journal");
+        let current_maximum = [
+            TakeoverV2JournalPhase::Preparing,
+            TakeoverV2JournalPhase::Prepared,
+            TakeoverV2JournalPhase::EffectStarted,
+            TakeoverV2JournalPhase::StateCommitted,
+            TakeoverV2JournalPhase::CleanupCompleted,
+        ]
+        .into_iter()
+        .map(|phase| {
+            let mut candidate = journal.clone();
+            candidate.phase = phase;
+            serde_json::to_vec_pretty(&candidate)
+                .expect("应序列化 Journal")
+                .len()
+        })
+        .max()
+        .expect("应有 phase");
+        journal
+            .plan_seal
+            .push_str(&"x".repeat(MAX_TAKEOVER_V2_JOURNAL_BYTES - current_maximum - 1));
+
+        assert!(matches!(
+            validate_journal_size_for_all_phases(&journal),
+            Err(TakeoverV2LifecycleError::JournalTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn journal_size_preflight_handles_state_committed_false_boundary() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_two_origin_plan("alpha");
+        add_absent_copilot_target(&harness, &mut plan);
+        let mut journal =
+            build_takeover_v2_journal(&harness.paths, &Uuid::new_v4().to_string(), &plan)
+                .expect("应建立三项 effect Journal");
+        journal.phase = TakeoverV2JournalPhase::StateCommitted;
+        for item in &mut journal.effect_items {
+            if !matches!(
+                &item.operation,
+                TakeoverV2EffectOperation::RemoveOrigin { .. }
+            ) {
+                item.staged_observation = Some("a".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+            }
+            item.applied_observation = Some("b".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+            item.cleanup_completed = false;
+        }
+        let state_size = serde_json::to_vec_pretty(&journal)
+            .expect("应序列化 StateCommitted Journal")
+            .len();
+        let mut cleanup = journal.clone();
+        cleanup.phase = TakeoverV2JournalPhase::CleanupCompleted;
+        for item in &mut cleanup.effect_items {
+            item.cleanup_completed = true;
+        }
+        let cleanup_size = serde_json::to_vec_pretty(&cleanup)
+            .expect("应序列化 CleanupCompleted Journal")
+            .len();
+        assert!(
+            state_size > cleanup_size,
+            "三个 false 必须覆盖更长 cleanup phase，才能复现精确边界"
+        );
+        journal
+            .plan_seal
+            .push_str(&"a".repeat(MAX_TAKEOVER_V2_JOURNAL_BYTES - state_size));
+        assert_eq!(
+            serde_json::to_vec_pretty(&journal)
+                .expect("应序列化边界 Journal")
+                .len(),
+            MAX_TAKEOVER_V2_JOURNAL_BYTES
+        );
+
+        validate_journal_size_for_all_phases(&journal).expect("精确边界必须可写");
+        journal.plan_seal.push('a');
+        assert!(matches!(
+            validate_journal_size_for_all_phases(&journal),
+            Err(TakeoverV2LifecycleError::JournalTooLarge { .. })
+        ));
     }
 
     #[test]
