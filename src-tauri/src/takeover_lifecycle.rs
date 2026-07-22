@@ -2442,29 +2442,46 @@ pub(crate) fn validate_original_manifest_at(
     }
 }
 
-fn remove_manifest_tree_at(
+pub(crate) fn remove_manifest_tree_at(
     parent: &File,
     name: &OsStr,
     path: &Path,
-    journal: &TakeoverJournal,
+    expected_root: (u64, u64, u32),
+    expected_entries: &[TakeoverOriginalEntry],
     allow_partial: bool,
 ) -> Result<(), TakeoverLifecycleError> {
+    let parent_device = parent
+        .metadata()
+        .map_err(|source| takeover_io("检查 manifest 清理父目录", path, source))?
+        .dev();
+    // 递归删除前一次性核对完整设备合同，避免遍历到后续异常条目时已删除先前内容。
+    if expected_root.0 != parent_device
+        || expected_entries
+            .iter()
+            .any(|entry| entry.device != parent_device)
+    {
+        return Err(TakeoverLifecycleError::CrossDevice);
+    }
     let root_metadata = entry_metadata_at(parent, name)
-        .map_err(|source| takeover_io("检查 Central discard", path, source))?
+        .map_err(|source| takeover_io("检查 manifest 清理根目录", path, source))?
         .ok_or_else(|| {
-            TakeoverLifecycleError::RecoveryBlocked("Central discard 已经缺失".to_owned())
+            TakeoverLifecycleError::RecoveryBlocked("manifest 清理根目录已经缺失".to_owned())
         })?;
+    if root_metadata.st_dev as u64 != parent_device {
+        return Err(TakeoverLifecycleError::CrossDevice);
+    }
     if root_metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
-        || root_metadata.st_dev as u64 != journal.original_device
-        || root_metadata.st_ino != journal.original_inode
-        || u32::from(root_metadata.st_mode) != journal.original_mode
+        || (
+            root_metadata.st_dev as u64,
+            root_metadata.st_ino,
+            u32::from(root_metadata.st_mode),
+        ) != expected_root
     {
         return Err(TakeoverLifecycleError::RecoveryBlocked(
-            "Central discard 根目录身份不一致".to_owned(),
+            "manifest 清理根目录身份不一致".to_owned(),
         ));
     }
-    let expected = journal
-        .original_entries
+    let expected = expected_entries
         .iter()
         .map(|entry| (entry.relative_path_hex.clone(), entry))
         .collect::<BTreeMap<_, _>>();
@@ -2481,7 +2498,7 @@ fn remove_manifest_tree_at(
             "打开的 Central discard 已被替换".to_owned(),
         ));
     }
-    validate_remaining_manifest_entries(&root, path, &journal.original_entries, allow_partial)?;
+    validate_remaining_manifest_entries(&root, path, expected_entries, allow_partial)?;
     drop(root);
     // readdir 使用 duplicate fd 并共享目录 offset；第二遍删除必须重新打开根目录。
     let root = open_directory_at(parent, name)
@@ -2861,7 +2878,12 @@ fn discard_original_after_commit(
         &staging,
         OsStr::new("discarding-original"),
         &discard_path,
-        journal,
+        (
+            journal.original_device,
+            journal.original_inode,
+            journal.original_mode,
+        ),
+        &journal.original_entries,
         true,
     )?;
     Ok(())
@@ -3194,7 +3216,12 @@ fn remove_takeover_discard(
         &staging,
         OsStr::new("discarding-original"),
         &staging_path.join("discarding-original"),
-        journal,
+        (
+            journal.original_device,
+            journal.original_inode,
+            journal.original_mode,
+        ),
+        &journal.original_entries,
         true,
     )
 }
@@ -3648,6 +3675,68 @@ mod tests {
         });
     }
 
+    #[test]
+    fn discard_cleanup_rejects_a_cross_device_manifest_before_any_deletion() {
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let discard = sandbox.path().join("discarding-original");
+        fs::create_dir(&discard).expect("应创建 discard");
+        fs::write(discard.join("keep.txt"), "must remain").expect("应写入删除保护哨兵");
+        let mut expected = collect_original_manifest_path(&discard).expect("应记录原目录 manifest");
+        let metadata = fs::symlink_metadata(&discard).expect("应读取 discard 身份");
+        // 即使被篡改的条目尚未遍历，设备预检也必须先于任何删除失败。
+        expected[0].device = metadata.dev().wrapping_add(1);
+        let parent = File::open(sandbox.path()).expect("应打开 discard 父目录");
+
+        assert!(matches!(
+            remove_manifest_tree_at(
+                &parent,
+                OsStr::new("discarding-original"),
+                &discard,
+                (metadata.dev(), metadata.ino(), metadata.mode()),
+                &expected,
+                true,
+            ),
+            Err(TakeoverLifecycleError::CrossDevice)
+        ));
+        assert_eq!(
+            fs::read_to_string(discard.join("keep.txt")).expect("哨兵条目不得被删除"),
+            "must remain"
+        );
+    }
+
+    #[test]
+    fn discard_cleanup_rejects_a_cross_device_root_before_any_deletion() {
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let discard = sandbox.path().join("discarding-original");
+        fs::create_dir(&discard).expect("应创建 discard");
+        fs::write(discard.join("keep.txt"), "must remain").expect("应写入删除保护哨兵");
+        let expected = collect_original_manifest_path(&discard).expect("应记录原目录 manifest");
+        let metadata = fs::symlink_metadata(&discard).expect("应读取 discard 身份");
+        // 模拟 root 合同被改到另一设备，应该优先返回设备边界错误。
+        let cross_device_root = (
+            metadata.dev().wrapping_add(1),
+            metadata.ino(),
+            metadata.mode(),
+        );
+        let parent = File::open(sandbox.path()).expect("应打开 discard 父目录");
+
+        assert!(matches!(
+            remove_manifest_tree_at(
+                &parent,
+                OsStr::new("discarding-original"),
+                &discard,
+                cross_device_root,
+                &expected,
+                true,
+            ),
+            Err(TakeoverLifecycleError::CrossDevice)
+        ));
+        assert_eq!(
+            fs::read_to_string(discard.join("keep.txt")).expect("哨兵条目不得被删除"),
+            "must remain"
+        );
+    }
+
     fn assert_discard_mutation_is_blocked(mutate: impl FnOnce(&Path, &Path)) {
         let sandbox = tempdir().expect("应创建隔离目录");
         let discard = sandbox.path().join("discarding-original");
@@ -3657,14 +3746,14 @@ mod tests {
         let expected = collect_original_manifest_path(&discard).expect("应记录原目录 manifest");
         let metadata = fs::symlink_metadata(&discard).expect("应读取 discard 身份");
         mutate(&discard, sandbox.path());
-        let journal = discard_test_journal(&metadata, expected);
         let parent = File::open(sandbox.path()).expect("应打开 discard 父目录");
 
         remove_manifest_tree_at(
             &parent,
             OsStr::new("discarding-original"),
             &discard,
-            &journal,
+            (metadata.dev(), metadata.ino(), metadata.mode()),
+            &expected,
             false,
         )
         .expect_err("完整快照变化必须阻塞清理");
@@ -3673,39 +3762,5 @@ mod tests {
             fs::read_to_string(discard.join("keep.txt")).expect("哨兵条目不得被删除"),
             "must remain"
         );
-    }
-
-    fn discard_test_journal(
-        metadata: &fs::Metadata,
-        original_entries: Vec<TakeoverOriginalEntry>,
-    ) -> TakeoverJournal {
-        TakeoverJournal {
-            version: TAKEOVER_JOURNAL_VERSION,
-            transaction_id: Uuid::new_v4().to_string(),
-            plan_id: "plan".to_owned(),
-            bundle_id: Uuid::new_v4().to_string(),
-            content_id: Uuid::new_v4().to_string(),
-            member_id: Uuid::new_v4().to_string(),
-            path_id: Uuid::new_v4().to_string(),
-            skill_name: "alpha".to_owned(),
-            content_fingerprint: "0".repeat(64),
-            preserve_mount: true,
-            phase: TakeoverJournalPhase::StateCommitted,
-            staging_relative: "staging/transaction".to_owned(),
-            bundle_relative: "bundles/bundle".to_owned(),
-            content_relative: "bundles/bundle/contents/content".to_owned(),
-            current_target: "contents/content".to_owned(),
-            host_parent: "/tmp".to_owned(),
-            host_name: "alpha".to_owned(),
-            hidden_name: ".hidden".to_owned(),
-            expected_target: "/tmp/expected".to_owned(),
-            parent_device: metadata.dev(),
-            parent_inode: metadata.ino(),
-            parent_mode: metadata.mode(),
-            original_device: metadata.dev(),
-            original_inode: metadata.ino(),
-            original_mode: metadata.mode(),
-            original_entries,
-        }
     }
 }
