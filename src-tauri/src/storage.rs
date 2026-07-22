@@ -240,6 +240,8 @@ pub enum StorageError {
     TakeoverV2PlanExpired,
     #[error("Takeover v2 Plan 的持久化快照无效或已经被修改")]
     InvalidTakeoverV2Plan,
+    #[error("存在等待人工恢复的 Takeover v2 事务，当前写操作与其资源重叠或无法安全判定")]
+    BlockedTakeoverV2Footprint,
     #[error("无法保存 Takeover v2 事务：{0}")]
     SaveTakeoverV2Transaction(#[source] rusqlite::Error),
     #[error("无法读取 Takeover v2 事务：{0}")]
@@ -1497,6 +1499,11 @@ impl Storage {
             return Err(StorageError::TakeoverV2PlanExpired);
         }
         validate_current_takeover_v2_snapshots(&transaction, &plan)?;
+        ensure_no_blocked_takeover_v2_conflict(
+            &transaction,
+            &self.data_root,
+            &HighAssuranceFootprint::from_takeover_v2(&plan),
+        )?;
 
         let inserted = transaction
             .execute(
@@ -1951,6 +1958,11 @@ impl Storage {
             [selected] if selected == &path.id => true,
             _ => return Err(StorageError::InvalidTakeoverSelection),
         };
+        ensure_no_blocked_takeover_v2_conflict(
+            &transaction,
+            &self.data_root,
+            &HighAssuranceFootprint::from_takeover_v1(&plan),
+        )?;
         let inserted = transaction
             .execute(
                 "INSERT INTO takeover_transactions (
@@ -2473,6 +2485,11 @@ impl Storage {
             return Err(StorageError::MountPlanExpired);
         }
         validate_stored_mount_plan_state(&transaction, &self.data_root, &plan)?;
+        ensure_no_blocked_takeover_v2_conflict(
+            &transaction,
+            &self.data_root,
+            &HighAssuranceFootprint::from_mount(&plan),
+        )?;
         transaction
             .execute(
                 "INSERT INTO mount_transactions (
@@ -2899,9 +2916,14 @@ impl Storage {
         if selected_items.len() != selected.len() {
             return Err(StorageError::InvalidBatchMountSelection);
         }
-        for item in selected_items {
+        for item in &selected_items {
             validate_batch_ready_item_state(&transaction, &self.data_root, item)?;
         }
+        ensure_no_blocked_takeover_v2_conflict(
+            &transaction,
+            &self.data_root,
+            &HighAssuranceFootprint::from_batch_mount(&plan, &selected_items),
+        )?;
         let inserted = transaction
             .execute(
                 "INSERT INTO batch_mount_transactions (
@@ -3330,6 +3352,11 @@ impl Storage {
         }) {
             return Err(StorageError::InvalidInstallSelection);
         }
+        ensure_no_blocked_takeover_v2_conflict(
+            &transaction,
+            &self.data_root,
+            &HighAssuranceFootprint::from_install(&plan, selected_candidate_ids, transaction_id),
+        )?;
         transaction
             .execute(
                 "UPDATE install_plan_candidates SET selected = 0 WHERE plan_id = ?1",
@@ -6271,6 +6298,222 @@ fn validate_stored_mount_plan_state(
     )
 }
 
+#[derive(Clone, Debug, Default)]
+struct HighAssuranceFootprint {
+    bundle_ids: BTreeSet<String>,
+    member_ids: BTreeSet<String>,
+    content_ids: BTreeSet<String>,
+    observation_ids: BTreeSet<String>,
+    original_identities: BTreeSet<(u64, u64)>,
+    paths: Vec<String>,
+    mount_ids: BTreeSet<String>,
+    mount_slots: BTreeSet<(String, String, String, Option<String>)>,
+}
+
+impl HighAssuranceFootprint {
+    fn from_install(
+        plan: &StoredInstallPlan,
+        selected_candidate_ids: &[String],
+        transaction_id: &str,
+    ) -> Self {
+        Self {
+            bundle_ids: BTreeSet::from([plan.bundle_id.clone()]),
+            member_ids: selected_candidate_ids.iter().cloned().collect(),
+            // 安装事务 ID 就是即将创建的不可变内容目录 ID。
+            content_ids: BTreeSet::from([transaction_id.to_owned()]),
+            original_identities: BTreeSet::from([(plan.input_device, plan.input_inode)]),
+            paths: vec![plan.input_path.clone()],
+            ..Self::default()
+        }
+    }
+
+    fn from_mount(plan: &StoredMountPlan) -> Self {
+        let mut footprint = Self {
+            bundle_ids: BTreeSet::from([plan.bundle_id.clone()]),
+            member_ids: BTreeSet::from([plan.member_id.clone()]),
+            ..Self::default()
+        };
+        footprint.add_mount(
+            &plan.mount_id,
+            &plan.member_id,
+            plan.app_id,
+            plan.scope,
+            plan.project_id.as_deref(),
+            &plan.target_path,
+        );
+        footprint
+    }
+
+    fn from_batch_mount(
+        plan: &StoredBatchMountPlan,
+        selected_items: &[&StoredBatchMountPlanItem],
+    ) -> Self {
+        let mut footprint = Self {
+            bundle_ids: BTreeSet::from([plan.bundle_id.clone()]),
+            ..Self::default()
+        };
+        for item in selected_items {
+            footprint.member_ids.insert(item.member_id.clone());
+            footprint.add_mount(
+                &item.mount_id,
+                &item.member_id,
+                item.app_id,
+                item.scope,
+                item.project_id.as_deref(),
+                &item.target_path,
+            );
+        }
+        footprint
+    }
+
+    fn from_takeover_v1(stored: &StoredTakeoverPlan) -> Self {
+        let plan = &stored.plan;
+        let mut footprint = Self {
+            bundle_ids: BTreeSet::from([plan.bundle_id.clone()]),
+            member_ids: BTreeSet::from([plan.member_id.clone()]),
+            content_ids: BTreeSet::from([plan.content_id.clone()]),
+            observation_ids: BTreeSet::from([stored.observation.id.clone()]),
+            ..Self::default()
+        };
+        for path in &plan.paths {
+            footprint
+                .original_identities
+                .insert((path.original_device, path.original_inode));
+            footprint.paths.push(path.original_path.clone());
+            footprint.add_mount(
+                &path.mount_id,
+                &plan.member_id,
+                path.app_id,
+                path.scope,
+                path.project_id.as_deref(),
+                &path.original_path,
+            );
+        }
+        footprint
+    }
+
+    fn from_takeover_v2(plan: &TakeoverV2Plan) -> Self {
+        let mut footprint = Self {
+            bundle_ids: BTreeSet::from([plan.bundle_id.clone()]),
+            member_ids: BTreeSet::from([plan.member_id.clone()]),
+            content_ids: BTreeSet::from([plan.content_id.clone()]),
+            ..Self::default()
+        };
+        for origin in &plan.origins {
+            footprint
+                .observation_ids
+                .insert(origin.observation_id.clone());
+            footprint
+                .original_identities
+                .insert((origin.original_device, origin.original_inode));
+            footprint.paths.push(origin.original_path.clone());
+        }
+        for target in &plan.targets {
+            footprint.add_mount(
+                &target.mount_id,
+                &plan.member_id,
+                target.app_id,
+                target.scope,
+                target.project_id.as_deref(),
+                &target.target_path,
+            );
+        }
+        footprint
+    }
+
+    fn add_mount(
+        &mut self,
+        mount_id: &str,
+        member_id: &str,
+        app_id: SupportedAppId,
+        scope: MountScope,
+        project_id: Option<&str>,
+        target_path: &str,
+    ) {
+        self.mount_ids.insert(mount_id.to_owned());
+        self.paths.push(target_path.to_owned());
+        self.mount_slots.insert((
+            member_id.to_owned(),
+            app_id.as_str().to_owned(),
+            scope.as_str().to_owned(),
+            project_id.map(str::to_owned),
+        ));
+    }
+
+    fn conflicts_with(&self, other: &Self) -> bool {
+        !self.bundle_ids.is_disjoint(&other.bundle_ids)
+            || !self.member_ids.is_disjoint(&other.member_ids)
+            || !self.content_ids.is_disjoint(&other.content_ids)
+            || !self.observation_ids.is_disjoint(&other.observation_ids)
+            || !self
+                .original_identities
+                .is_disjoint(&other.original_identities)
+            || !self.mount_ids.is_disjoint(&other.mount_ids)
+            || !self.mount_slots.is_disjoint(&other.mount_slots)
+            || self.paths.iter().any(|left| {
+                other
+                    .paths
+                    .iter()
+                    .any(|right| normalized_paths_overlap(left, right))
+            })
+    }
+}
+
+fn normalized_paths_overlap(left: &str, right: &str) -> bool {
+    let left = Path::new(left);
+    let right = Path::new(right);
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+/// blocked v2 的 Plan 是恢复事实的一部分；无法完整重建时必须停止新的高保证写入。
+fn ensure_no_blocked_takeover_v2_conflict(
+    connection: &Connection,
+    data_root: &Path,
+    candidate: &HighAssuranceFootprint,
+) -> Result<(), StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, plan_id, bundle_id, member_id, content_id, selected_origin_id,
+                    bundle_display_name, plan_seal, journal_path, journal_contract_sha256,
+                    phase, status, error_message, created_at, updated_at
+             FROM takeover_v2_transactions
+             WHERE status = 'blocked'
+             ORDER BY created_at, id",
+        )
+        .map_err(StorageError::ReadTakeoverV2Transaction)?;
+    let rows = statement
+        .query_map([], stored_takeover_v2_transaction_from_row)
+        .map_err(StorageError::ReadTakeoverV2Transaction)?;
+    let blocked = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::ReadTakeoverV2Transaction)?;
+    drop(statement);
+
+    for stored in blocked {
+        if validate_stored_takeover_v2_transaction(&stored).is_err() {
+            return Err(StorageError::BlockedTakeoverV2Footprint);
+        }
+        let plan = match read_takeover_v2_plan_from(connection, data_root, &stored.plan_id) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Err(StorageError::BlockedTakeoverV2Footprint),
+            Err(StorageError::ReadTakeoverV2Plan(error)) => {
+                return Err(StorageError::ReadTakeoverV2Plan(error));
+            }
+            Err(StorageError::ReadProject(error)) => {
+                return Err(StorageError::ReadProject(error));
+            }
+            Err(_) => return Err(StorageError::BlockedTakeoverV2Footprint),
+        };
+        if validate_takeover_v2_transaction_matches_plan(&stored, &plan).is_err() {
+            return Err(StorageError::BlockedTakeoverV2Footprint);
+        }
+        if candidate.conflicts_with(&HighAssuranceFootprint::from_takeover_v2(&plan)) {
+            return Err(StorageError::BlockedTakeoverV2Footprint);
+        }
+    }
+    Ok(())
+}
+
 fn batch_mount_object_is_blocked(
     connection: &Connection,
     member_id: &str,
@@ -8562,6 +8805,27 @@ mod tests {
         (consumed, transaction_id)
     }
 
+    fn block_takeover_v2_plan(storage: &mut Storage, plan: &TakeoverV2Plan) -> String {
+        save_takeover_v2_inventory(storage, plan);
+        storage
+            .save_takeover_v2_plan(plan)
+            .expect("应保存待阻塞的 v2 Plan");
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        storage
+            .begin_takeover_v2_transaction(
+                &plan.id,
+                &transaction_id,
+                &format!("journals/takeover-v2-{transaction_id}.json"),
+                &"d".repeat(64),
+                300,
+            )
+            .expect("应启动待阻塞的 v2 事务");
+        storage
+            .block_takeover_v2_transaction(&transaction_id, "测试人工恢复边界", 301)
+            .expect("应阻塞 v2 事务");
+        transaction_id
+    }
+
     fn align_v2_origin_with_observation(
         plan: &mut TakeoverV2Plan,
         observation: &InventoryObservation,
@@ -9399,7 +9663,20 @@ mod tests {
                 && issue.message == "需要人工恢复"
         }));
 
-        let completed_plan = test_takeover_v2_plan(&storage);
+        let mut completed_plan = test_takeover_v2_plan(&storage);
+        // blocked 事务保留后，后续状态机样本必须使用完全不相交的本机资源。
+        let completed_path = "/tmp/completed/.codex/skills/alpha".to_owned();
+        completed_plan.origins[0].original_path = completed_path.clone();
+        completed_plan.origins[0].observation_skill_file = format!("{completed_path}/SKILL.md");
+        completed_plan.origins[0].parent_device = 81;
+        completed_plan.origins[0].parent_inode = 82;
+        completed_plan.origins[0].original_device = 81;
+        completed_plan.origins[0].original_inode = 83;
+        completed_plan.targets[0].target_path = completed_path;
+        completed_plan.targets[0].parent_device = 81;
+        completed_plan.targets[0].parent_inode = 82;
+        canonicalize_takeover_v2_plan(&mut completed_plan);
+        completed_plan.seal = takeover_v2_plan_seal(&completed_plan);
         save_takeover_v2_inventory(&mut storage, &completed_plan);
         storage
             .save_takeover_v2_plan(&completed_plan)
@@ -10550,6 +10827,592 @@ mod tests {
                 .recovery_validation_error
                 .is_none()
         );
+    }
+
+    #[test]
+    fn blocked_takeover_v2_footprint_stops_all_five_high_assurance_begin_boundaries() {
+        for writer in ["install", "mount", "batch", "takeover-v1", "takeover-v2"] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let root = sandbox.path().join(writer);
+            let mut storage = open_test_storage(&root);
+
+            // 先准备会被 Mount/Batch 使用的受管成员，避免测试设置自身触发 guard。
+            let managed_member = matches!(writer, "mount" | "batch")
+                .then(|| save_test_managed_member(&mut storage, writer));
+            let blocked = test_takeover_v2_plan(&storage);
+            block_takeover_v2_plan(&mut storage, &blocked);
+
+            let (result, plan_table, plan_id, transaction_table, transaction_id) = match writer {
+                "install" => {
+                    let plan_id = "guard-install-plan";
+                    let transaction_id = "guard-install-transaction";
+                    save_test_plan(
+                        &mut storage,
+                        plan_id,
+                        &blocked.bundle_id,
+                        "guard-install-member",
+                    );
+                    (
+                        storage
+                            .begin_install_transaction(
+                                plan_id,
+                                transaction_id,
+                                "journals/guard-install-transaction.json",
+                                400,
+                            )
+                            .map(|_| ()),
+                        "install_plans",
+                        plan_id.to_owned(),
+                        "lifecycle_transactions",
+                        transaction_id.to_owned(),
+                    )
+                }
+                "mount" => {
+                    let member = managed_member.as_ref().expect("应准备 Mount 成员");
+                    let plan_id = "guard-mount-plan";
+                    let transaction_id = "guard-mount-transaction";
+                    let target = Path::new(&blocked.origins[0].original_path)
+                        .join("nested")
+                        .join(&member.skill_name);
+                    save_test_mount_plan(
+                        &mut storage,
+                        member,
+                        MountOperation::Create,
+                        "guard-mount-id",
+                        plan_id,
+                        MountScope::Global,
+                        None,
+                        &target,
+                    );
+                    (
+                        storage
+                            .begin_mount_transaction(
+                                plan_id,
+                                transaction_id,
+                                "journals/guard-mount-transaction.json",
+                                400,
+                            )
+                            .map(|_| ()),
+                        "mount_plans",
+                        plan_id.to_owned(),
+                        "mount_transactions",
+                        transaction_id.to_owned(),
+                    )
+                }
+                "batch" => {
+                    let member = managed_member.as_ref().expect("应准备 Batch 成员");
+                    let plan_id = "guard-batch-plan";
+                    let transaction_id = "guard-batch-transaction";
+                    let target = Path::new(&blocked.targets[0].target_path)
+                        .join("nested")
+                        .join(&member.skill_name);
+                    save_test_batch_plan(
+                        &mut storage,
+                        member,
+                        plan_id,
+                        "guard-batch-item",
+                        &target,
+                    );
+                    (
+                        storage
+                            .begin_batch_mount_transaction(
+                                plan_id,
+                                &["guard-batch-item".to_owned()],
+                                transaction_id,
+                                "journals/guard-batch-transaction.json",
+                                400,
+                            )
+                            .map(|_| ()),
+                        "batch_mount_plans",
+                        plan_id.to_owned(),
+                        "batch_mount_transactions",
+                        transaction_id.to_owned(),
+                    )
+                }
+                "takeover-v1" => {
+                    let mut plan = test_takeover_v1_plan(&storage, "guard-v1");
+                    let nested = Path::new(&blocked.origins[0].original_path)
+                        .join("nested")
+                        .join(&plan.plan.skill_name)
+                        .to_string_lossy()
+                        .into_owned();
+                    plan.observation.skill_root = nested.clone();
+                    plan.observation.skill_file = format!("{nested}/SKILL.md");
+                    plan.plan.paths[0].original_path = nested;
+                    plan.plan.id.clear();
+                    plan.plan.id = format!(
+                        "takeover-{}-{}",
+                        uuid::Uuid::new_v4(),
+                        takeover_plan_seal(&plan)
+                    );
+                    storage
+                        .save_initial_scan(350, std::slice::from_ref(&plan.observation), &[])
+                        .expect("应保存新 v1 Inventory");
+                    storage.save_takeover_plan(&plan).expect("应保存新 v1 Plan");
+                    let transaction_id = uuid::Uuid::new_v4().to_string();
+                    let plan_id = plan.plan.id.clone();
+                    (
+                        storage
+                            .begin_takeover_transaction(
+                                &plan_id,
+                                &[],
+                                &transaction_id,
+                                &format!("journals/{transaction_id}.json"),
+                                400,
+                            )
+                            .map(|_| ()),
+                        "takeover_plans",
+                        plan_id,
+                        "takeover_transactions",
+                        transaction_id,
+                    )
+                }
+                "takeover-v2" => {
+                    // 默认测试 Plan 使用同一合法 Host 路径，正好覆盖 v2 对 v2 的路径冲突。
+                    let plan = test_takeover_v2_plan(&storage);
+                    save_takeover_v2_inventory(&mut storage, &plan);
+                    storage
+                        .save_takeover_v2_plan(&plan)
+                        .expect("应保存新 v2 Plan");
+                    let transaction_id = uuid::Uuid::new_v4().to_string();
+                    let plan_id = plan.id.clone();
+                    (
+                        storage
+                            .begin_takeover_v2_transaction(
+                                &plan_id,
+                                &transaction_id,
+                                &format!("journals/takeover-v2-{transaction_id}.json"),
+                                &"e".repeat(64),
+                                400,
+                            )
+                            .map(|_| ()),
+                        "takeover_v2_plans",
+                        plan_id,
+                        "takeover_v2_transactions",
+                        transaction_id,
+                    )
+                }
+                _ => unreachable!(),
+            };
+
+            assert!(
+                matches!(result, Err(StorageError::BlockedTakeoverV2Footprint)),
+                "{writer} 必须由专用 blocked v2 guard 拦截"
+            );
+            let status = storage
+                .connection
+                .query_row(
+                    &format!("SELECT status FROM {plan_table} WHERE id = ?1"),
+                    [&plan_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("被拒绝的 Plan 必须仍存在");
+            assert_eq!(status, "pending", "{writer} Plan 不得被消费");
+            let created = storage
+                .connection
+                .query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM {transaction_table} WHERE id = ?1)"),
+                    [&transaction_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("应检查事务没有被创建");
+            assert!(!created, "{writer} 被拒绝后不得留下新事务");
+        }
+    }
+
+    #[test]
+    fn blocked_takeover_v2_guard_covers_every_persisted_footprint_dimension() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let blocked = test_takeover_v2_plan(&storage);
+        block_takeover_v2_plan(&mut storage, &blocked);
+        let blocked_footprint = HighAssuranceFootprint::from_takeover_v2(&blocked);
+        let unrelated = || HighAssuranceFootprint {
+            bundle_ids: BTreeSet::from(["other-bundle".to_owned()]),
+            member_ids: BTreeSet::from(["other-member".to_owned()]),
+            content_ids: BTreeSet::from(["other-content".to_owned()]),
+            observation_ids: BTreeSet::from(["other-observation".to_owned()]),
+            original_identities: BTreeSet::from([(91, 92)]),
+            paths: vec!["/tmp/unrelated/.codex/skills/beta".to_owned()],
+            mount_ids: BTreeSet::from(["other-mount".to_owned()]),
+            mount_slots: BTreeSet::from([(
+                "other-member".to_owned(),
+                SupportedAppId::ClaudeCode.as_str().to_owned(),
+                MountScope::Global.as_str().to_owned(),
+                None,
+            )]),
+        };
+        let mut cases = Vec::new();
+        for dimension in [
+            "bundle",
+            "member",
+            "content",
+            "observation",
+            "filesystem_identity",
+            "mount",
+            "mount_slot",
+            "equal_path",
+            "ancestor_path",
+            "descendant_path",
+        ] {
+            let mut candidate = unrelated();
+            match dimension {
+                "bundle" => candidate.bundle_ids = blocked_footprint.bundle_ids.clone(),
+                "member" => candidate.member_ids = blocked_footprint.member_ids.clone(),
+                "content" => candidate.content_ids = blocked_footprint.content_ids.clone(),
+                "observation" => {
+                    candidate.observation_ids = blocked_footprint.observation_ids.clone()
+                }
+                "filesystem_identity" => {
+                    candidate.original_identities = blocked_footprint.original_identities.clone()
+                }
+                "mount" => candidate.mount_ids = blocked_footprint.mount_ids.clone(),
+                "mount_slot" => candidate.mount_slots = blocked_footprint.mount_slots.clone(),
+                "equal_path" => candidate.paths = vec![blocked.origins[0].original_path.clone()],
+                "ancestor_path" => candidate.paths = vec!["/tmp/home/.codex/skills".to_owned()],
+                "descendant_path" => {
+                    candidate.paths = vec![format!("{}/nested", blocked.targets[0].target_path)]
+                }
+                _ => unreachable!(),
+            }
+            cases.push((dimension, candidate));
+        }
+
+        for (dimension, candidate) in cases {
+            assert!(
+                matches!(
+                    ensure_no_blocked_takeover_v2_conflict(
+                        &storage.connection,
+                        &storage.data_root,
+                        &candidate,
+                    ),
+                    Err(StorageError::BlockedTakeoverV2Footprint)
+                ),
+                "必须拦截 footprint 维度：{dimension}"
+            );
+        }
+        assert!(
+            ensure_no_blocked_takeover_v2_conflict(
+                &storage.connection,
+                &storage.data_root,
+                &unrelated(),
+            )
+            .is_ok(),
+            "完全不相交的 footprint 必须放行"
+        );
+        let mut same_app_project_but_other_member = unrelated();
+        same_app_project_but_other_member.mount_slots = BTreeSet::from([(
+            "another-member".to_owned(),
+            blocked.targets[0].app_id.as_str().to_owned(),
+            blocked.targets[0].scope.as_str().to_owned(),
+            blocked.targets[0].project_id.clone(),
+        )]);
+        assert!(
+            ensure_no_blocked_takeover_v2_conflict(
+                &storage.connection,
+                &storage.data_root,
+                &same_app_project_but_other_member,
+            )
+            .is_ok(),
+            "同一 App/Project 下的不同 Member 不是同一 Mount slot"
+        );
+    }
+
+    #[test]
+    fn blocked_takeover_v2_guard_allows_disjoint_writes_from_all_five_begin_boundaries() {
+        for writer in ["install", "mount", "batch", "takeover-v1", "takeover-v2"] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let root = sandbox.path().join(writer);
+            let mut storage = open_test_storage(&root);
+            let managed_member = matches!(writer, "mount" | "batch")
+                .then(|| save_test_managed_member(&mut storage, &format!("disjoint-{writer}")));
+            let blocked = test_takeover_v2_plan(&storage);
+            block_takeover_v2_plan(&mut storage, &blocked);
+
+            let result = match writer {
+                "install" => {
+                    save_test_plan(
+                        &mut storage,
+                        "disjoint-install-plan",
+                        "disjoint-install-bundle",
+                        "disjoint-install-member",
+                    );
+                    storage
+                        .begin_install_transaction(
+                            "disjoint-install-plan",
+                            "disjoint-install-content",
+                            "journals/disjoint-install-content.json",
+                            400,
+                        )
+                        .map(|_| ())
+                }
+                "mount" => {
+                    let member = managed_member.as_ref().expect("应准备 Mount 成员");
+                    save_test_mount_plan(
+                        &mut storage,
+                        member,
+                        MountOperation::Create,
+                        "disjoint-mount-id",
+                        "disjoint-mount-plan",
+                        MountScope::Global,
+                        None,
+                        &Path::new("/tmp/disjoint/.codex/skills").join(&member.skill_name),
+                    );
+                    storage
+                        .begin_mount_transaction(
+                            "disjoint-mount-plan",
+                            "disjoint-mount-transaction",
+                            "journals/disjoint-mount-transaction.json",
+                            400,
+                        )
+                        .map(|_| ())
+                }
+                "batch" => {
+                    let member = managed_member.as_ref().expect("应准备 Batch 成员");
+                    save_test_batch_plan(
+                        &mut storage,
+                        member,
+                        "disjoint-batch-plan",
+                        "disjoint-batch-item",
+                        &Path::new("/tmp/disjoint/.codex/skills").join(&member.skill_name),
+                    );
+                    storage
+                        .begin_batch_mount_transaction(
+                            "disjoint-batch-plan",
+                            &["disjoint-batch-item".to_owned()],
+                            "disjoint-batch-transaction",
+                            "journals/disjoint-batch-transaction.json",
+                            400,
+                        )
+                        .map(|_| ())
+                }
+                "takeover-v1" => {
+                    let mut plan = test_takeover_v1_plan(&storage, "disjoint-v1");
+                    let original = "/tmp/disjoint/.codex/skills/alpha".to_owned();
+                    plan.observation.skill_root = original.clone();
+                    plan.observation.skill_file = format!("{original}/SKILL.md");
+                    plan.plan.paths[0].original_path = original;
+                    plan.plan.paths[0].parent_device = 91;
+                    plan.plan.paths[0].parent_inode = 92;
+                    plan.plan.paths[0].original_device = 91;
+                    plan.plan.paths[0].original_inode = 93;
+                    plan.plan.id.clear();
+                    plan.plan.id = format!(
+                        "takeover-{}-{}",
+                        uuid::Uuid::new_v4(),
+                        takeover_plan_seal(&plan)
+                    );
+                    storage
+                        .save_initial_scan(350, std::slice::from_ref(&plan.observation), &[])
+                        .expect("应保存 disjoint v1 Inventory");
+                    storage
+                        .save_takeover_plan(&plan)
+                        .expect("应保存 disjoint v1 Plan");
+                    let transaction_id = uuid::Uuid::new_v4().to_string();
+                    storage
+                        .begin_takeover_transaction(
+                            &plan.plan.id,
+                            &[],
+                            &transaction_id,
+                            &format!("journals/{transaction_id}.json"),
+                            400,
+                        )
+                        .map(|_| ())
+                }
+                "takeover-v2" => {
+                    let mut plan = test_takeover_v2_plan(&storage);
+                    let original = "/tmp/disjoint/.codex/skills/alpha".to_owned();
+                    let origin = &mut plan.origins[0];
+                    origin.original_path = original.clone();
+                    origin.observation_skill_file = format!("{original}/SKILL.md");
+                    origin.parent_device = 91;
+                    origin.parent_inode = 92;
+                    origin.original_device = 91;
+                    origin.original_inode = 93;
+                    let target = &mut plan.targets[0];
+                    target.target_path = original;
+                    target.parent_device = 91;
+                    target.parent_inode = 92;
+                    canonicalize_takeover_v2_plan(&mut plan);
+                    plan.seal = takeover_v2_plan_seal(&plan);
+                    save_takeover_v2_inventory(&mut storage, &plan);
+                    storage
+                        .save_takeover_v2_plan(&plan)
+                        .expect("应保存 disjoint v2 Plan");
+                    let transaction_id = uuid::Uuid::new_v4().to_string();
+                    storage
+                        .begin_takeover_v2_transaction(
+                            &plan.id,
+                            &transaction_id,
+                            &format!("journals/takeover-v2-{transaction_id}.json"),
+                            &"f".repeat(64),
+                            400,
+                        )
+                        .map(|_| ())
+                }
+                _ => unreachable!(),
+            };
+            assert!(
+                result.is_ok(),
+                "{writer} 的 disjoint footprint 必须放行，实际为 {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_blocked_takeover_v2_footprint_fails_closed_without_blocking_reads() {
+        for corruption in ["missing_plan", "header", "origin", "target", "transaction"] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let mut storage = open_test_storage(&sandbox.path().join(corruption));
+            let blocked = test_takeover_v2_plan(&storage);
+            let blocked_id = block_takeover_v2_plan(&mut storage, &blocked);
+            save_test_plan(
+                &mut storage,
+                "unknown-guard-install-plan",
+                "unknown-guard-install-bundle",
+                "unknown-guard-install-member",
+            );
+
+            match corruption {
+                "missing_plan" => {
+                    storage
+                        .connection
+                        .execute_batch("PRAGMA foreign_keys = OFF;")
+                        .expect("应关闭测试连接外键");
+                    storage
+                        .connection
+                        .execute("DELETE FROM takeover_v2_plans WHERE id = ?1", [&blocked.id])
+                        .expect("应模拟 blocked Plan 缺失");
+                }
+                "header" => {
+                    storage
+                        .connection
+                        .execute(
+                            "UPDATE takeover_v2_plans
+                             SET bundle_display_name = 'tampered-header' WHERE id = ?1",
+                            [&blocked.id],
+                        )
+                        .expect("应模拟 blocked Plan header 篡改");
+                }
+                "origin" => {
+                    storage
+                        .connection
+                        .execute(
+                            "UPDATE takeover_v2_origins
+                             SET observation_fingerprint = 'tampered-origin' WHERE plan_id = ?1",
+                            [&blocked.id],
+                        )
+                        .expect("应模拟 blocked Origin 篡改");
+                }
+                "target" => {
+                    storage
+                        .connection
+                        .execute(
+                            "UPDATE takeover_v2_targets
+                             SET parent_inode = 999 WHERE plan_id = ?1",
+                            [&blocked.id],
+                        )
+                        .expect("应模拟 blocked Target 篡改");
+                }
+                "transaction" => {
+                    storage
+                        .connection
+                        .execute(
+                            "UPDATE takeover_v2_transactions
+                             SET journal_path = 'journals/tampered.json' WHERE id = ?1",
+                            [&blocked_id],
+                        )
+                        .expect("应模拟 blocked transaction 身份篡改");
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(
+                storage.read_initial_scan().is_ok(),
+                "{corruption} 不得阻止 Inventory 读取"
+            );
+            assert!(
+                storage.read_mounts().is_ok(),
+                "{corruption} 不得阻止 Mount 读取"
+            );
+            let issues = storage
+                .read_recovery_issues()
+                .expect("损坏 footprint 仍应显示 Recovery issue");
+            assert!(issues.iter().any(|issue| issue.id == blocked_id));
+
+            assert!(matches!(
+                storage.begin_install_transaction(
+                    "unknown-guard-install-plan",
+                    "unknown-guard-install-content",
+                    "journals/unknown-guard-install-content.json",
+                    400,
+                ),
+                Err(StorageError::BlockedTakeoverV2Footprint)
+            ));
+            let plan_status = storage
+                .connection
+                .query_row(
+                    "SELECT status FROM install_plans WHERE id = 'unknown-guard-install-plan'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("被拒绝的安装 Plan 必须保留");
+            assert_eq!(plan_status, "pending", "损坏类型：{corruption}");
+            let created = storage
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM lifecycle_transactions
+                        WHERE id = 'unknown-guard-install-content'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("应检查拒绝后没有事务");
+            assert!(!created, "损坏类型：{corruption}");
+        }
+    }
+
+    #[test]
+    fn blocked_takeover_v2_guard_preserves_real_sqlite_read_errors() {
+        for damaged_table in ["takeover_v2_origins", "projects"] {
+            let sandbox = tempdir().expect("应创建隔离测试目录");
+            let mut storage = open_test_storage(&sandbox.path().join(damaged_table));
+            let blocked = if damaged_table == "projects" {
+                test_project_takeover_v2_plan(&mut storage).0
+            } else {
+                test_takeover_v2_plan(&storage)
+            };
+            block_takeover_v2_plan(&mut storage, &blocked);
+            save_test_plan(
+                &mut storage,
+                "read-error-install-plan",
+                "read-error-install-bundle",
+                "read-error-install-member",
+            );
+            storage
+                .connection
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .expect("应关闭测试连接外键");
+            storage
+                .connection
+                .execute_batch(&format!("DROP TABLE {damaged_table};"))
+                .expect("应模拟真实 SQLite 读错误");
+
+            let result = storage.begin_install_transaction(
+                "read-error-install-plan",
+                "read-error-install-content",
+                "journals/read-error-install-content.json",
+                400,
+            );
+            match damaged_table {
+                "takeover_v2_origins" => {
+                    assert!(matches!(result, Err(StorageError::ReadTakeoverV2Plan(_))))
+                }
+                "projects" => assert!(matches!(result, Err(StorageError::ReadProject(_)))),
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]
