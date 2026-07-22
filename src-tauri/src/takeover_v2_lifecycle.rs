@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
         fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -1862,7 +1862,7 @@ fn recover_pre_effect_takeover_v2_transaction_with_hook(
             storage.forget_terminal_takeover_v2_transaction(&transaction.id)?;
         }
         Some(_) => {
-            let (journal, owned, journal_bytes) =
+            let (mut journal, mut owned, journal_bytes) =
                 read_takeover_v2_journal_with_bytes_at(&journals, &name, &path)?;
             validate_takeover_v2_journal_contract(&journal, transaction, &plan)?;
             if journal.phase == TakeoverV2JournalPhase::Prepared
@@ -1876,6 +1876,30 @@ fn recover_pre_effect_takeover_v2_transaction_with_hook(
                 return Err(TakeoverV2LifecycleError::RecoveryBlocked(
                     "formal Journal 已存在时不能认领首次 formal 的随机 temp".to_owned(),
                 ));
+            }
+            if transaction.phase == "prepared" && journal.phase == TakeoverV2JournalPhase::Prepared
+            {
+                let reconciled = reconcile_takeover_v2_prepared_progress_temp(
+                    paths,
+                    lifecycle_lock,
+                    transaction,
+                    &plan,
+                    &journals,
+                    journal,
+                    owned,
+                    journal_bytes,
+                )?;
+                let (reloaded, reloaded_owned, reloaded_bytes) =
+                    read_takeover_v2_journal_with_bytes_at(&journals, &name, &path)?;
+                if reloaded != reconciled || reloaded_bytes != serde_json::to_vec_pretty(&reloaded)?
+                {
+                    return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                        "启动恢复重读的 Host 暂存 progress 不一致".to_owned(),
+                    ));
+                }
+                journal = reloaded;
+                owned = reloaded_owned;
+                validate_takeover_v2_hidden_staging(paths, &plan, &journal)?;
             }
             let phase_temporary = inspect_takeover_v2_phase_temporary_journal(
                 paths,
@@ -3485,7 +3509,7 @@ fn load_canonical_prepared_journal(
         open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
     let formal_name = OsString::from(journal_file_name(&transaction.id));
     let formal_path = paths.journals_root().join(&formal_name);
-    let (journal, _, bytes) =
+    let (journal, owned, bytes) =
         read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
     validate_takeover_v2_journal_contract(&journal, transaction, plan)?;
     if journal.phase != TakeoverV2JournalPhase::Prepared
@@ -3501,8 +3525,332 @@ fn load_canonical_prepared_journal(
             "Host 暂存前仍存在首次 formal 的随机临时文件".to_owned(),
         ));
     }
-    ensure_takeover_v2_phase_temp_absent(paths, &journals, &transaction.id)?;
-    Ok(journal)
+    reconcile_takeover_v2_prepared_progress_temp(
+        paths,
+        lifecycle_lock,
+        transaction,
+        plan,
+        &journals,
+        journal,
+        owned,
+        bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_takeover_v2_prepared_progress_temp(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    journals: &File,
+    formal: TakeoverV2Journal,
+    formal_owned: OwnedJournalEntry,
+    formal_bytes: Vec<u8>,
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    if entry_metadata_at(journals, &temporary_name)
+        .map_err(|source| v2_io("检查 Host 暂存 phase temp", &temporary_path, source))?
+        .is_none()
+    {
+        return Ok(formal);
+    }
+    if transaction.status != "in_progress"
+        || transaction.phase != "prepared"
+        || formal.phase != TakeoverV2JournalPhase::Prepared
+        || formal_bytes != serde_json::to_vec_pretty(&formal)?
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "当前 SQLite/formal 配对不能恢复 Host 暂存 progress".to_owned(),
+        ));
+    }
+    let (temporary_bytes, temporary_owned) =
+        read_owned_journal_bytes_at(journals, &temporary_name, &temporary_path)?;
+
+    if let Ok(temporary) = serde_json::from_slice::<TakeoverV2Journal>(&temporary_bytes)
+        && temporary_bytes == serde_json::to_vec_pretty(&temporary)?
+        && validate_takeover_v2_journal_contract(&temporary, transaction, plan).is_ok()
+    {
+        if validate_takeover_v2_prepared_progress_successor(&formal, &temporary).is_ok() {
+            // 完整 successor 已持久化 inode 证据；对应路径缺失或变化必须保留现场。
+            validate_takeover_v2_hidden_staging(paths, plan, &temporary)?;
+            validate_prepared_bundle_filesystem(paths, lifecycle_lock, plan, &temporary)?;
+            return finish_takeover_v2_prepared_progress_pre_swap(
+                paths,
+                lifecycle_lock,
+                transaction,
+                plan,
+                journals,
+                &formal,
+                &formal_owned,
+                &formal_bytes,
+                &temporary,
+                &temporary_owned,
+                &temporary_bytes,
+            );
+        }
+        if validate_takeover_v2_prepared_progress_successor(&temporary, &formal).is_ok() {
+            validate_takeover_v2_hidden_staging(paths, plan, &formal)?;
+            validate_prepared_bundle_filesystem(paths, lifecycle_lock, plan, &formal)?;
+            return remove_takeover_v2_prepared_progress_temp_after_audit(
+                paths,
+                lifecycle_lock,
+                transaction,
+                plan,
+                journals,
+                &formal,
+                &formal_owned,
+                &formal_bytes,
+                &temporary,
+                &temporary_owned,
+                &temporary_bytes,
+            );
+        }
+    }
+
+    let next = takeover_v2_prepared_progress_successor_from_hidden(paths, plan, &formal)?;
+    let next_bytes = serde_json::to_vec_pretty(&next)?;
+    if !next_bytes.starts_with(&temporary_bytes) {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "Host 暂存 phase temp 不是下一个 progress 的 canonical prefix".to_owned(),
+        ));
+    }
+    validate_takeover_v2_hidden_staging(paths, plan, &next)?;
+    validate_prepared_bundle_filesystem(paths, lifecycle_lock, plan, &next)?;
+    finish_takeover_v2_prepared_progress_pre_swap(
+        paths,
+        lifecycle_lock,
+        transaction,
+        plan,
+        journals,
+        &formal,
+        &formal_owned,
+        &formal_bytes,
+        &next,
+        &temporary_owned,
+        &temporary_bytes,
+    )
+}
+
+fn takeover_v2_prepared_progress_successor_from_hidden(
+    paths: &ApplicationPaths,
+    plan: &TakeoverV2Plan,
+    formal: &TakeoverV2Journal,
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    let index = formal
+        .effect_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item.operation,
+                TakeoverV2EffectOperation::CreateAbsentMount { .. }
+                    | TakeoverV2EffectOperation::ReplaceOriginWithMount { .. }
+            ) && item.staged_observation.is_none()
+        })
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::RecoveryBlocked(
+                "Host 暂存 phase temp 没有唯一的下一项".to_owned(),
+            )
+        })?;
+    let target_id = match &formal.effect_items[index].operation {
+        TakeoverV2EffectOperation::CreateAbsentMount { target_id }
+        | TakeoverV2EffectOperation::ReplaceOriginWithMount { target_id, .. } => target_id,
+        TakeoverV2EffectOperation::RemoveOrigin { .. } => unreachable!(),
+    };
+    let target = plan
+        .targets
+        .iter()
+        .find(|target| target.id == *target_id)
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::RecoveryBlocked(
+                "Host 暂存 phase temp 缺少对应 Target".to_owned(),
+            )
+        })?;
+    let parent = open_verified_target_parent(paths, plan, target)?;
+    let hidden_name = OsString::from(takeover_v2_effect_hidden_name(
+        &formal.transaction_id,
+        index,
+    ));
+    let hidden_path = parent.visible_path.join(&hidden_name);
+    let observation = observe_takeover_v2_staged_link(
+        &parent,
+        &hidden_name,
+        &hidden_path,
+        &target.expected_target,
+    )?
+    .ok_or_else(|| {
+        TakeoverV2LifecycleError::RecoveryBlocked(
+            "Host 暂存 phase temp 对应的隐藏 Mount 缺失".to_owned(),
+        )
+    })?;
+    parent.recheck(
+        target.parent_device,
+        target.parent_inode,
+        target.parent_mode,
+    )?;
+    let mut next = formal.clone();
+    next.effect_items[index].staged_observation = Some(observation);
+    validate_takeover_v2_prepared_progress_successor(formal, &next)?;
+    Ok(next)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_takeover_v2_prepared_progress_pre_swap(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    journals: &File,
+    old: &TakeoverV2Journal,
+    old_owned: &OwnedJournalEntry,
+    old_bytes: &[u8],
+    new: &TakeoverV2Journal,
+    temporary_owned: &OwnedJournalEntry,
+    temporary_bytes: &[u8],
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    validate_takeover_v2_prepared_progress_successor(old, new)?;
+    let new_bytes = serde_json::to_vec_pretty(new)?;
+    if !new_bytes.starts_with(temporary_bytes) {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "Host 暂存 phase temp 不能补成完整 successor".to_owned(),
+        ));
+    }
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let mut temporary = open_regular_file_at(journals, &temporary_name, &temporary_path, true)?;
+    let opened =
+        journal_snapshot_from_metadata(&temporary.metadata().map_err(|source| {
+            v2_io("检查待补全的 Host 暂存 phase temp", &temporary_path, source)
+        })?);
+    if opened != temporary_owned.snapshot {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "Host 暂存 phase temp 在补全前被替换".to_owned(),
+        ));
+    }
+    temporary
+        .seek(SeekFrom::Start(temporary_bytes.len() as u64))
+        .map_err(|source| v2_io("定位 Host 暂存 phase temp", &temporary_path, source))?;
+    temporary
+        .write_all(&new_bytes[temporary_bytes.len()..])
+        .map_err(|source| v2_io("补全 Host 暂存 phase temp", &temporary_path, source))?;
+    temporary
+        .sync_all()
+        .map_err(|source| v2_io("同步 Host 暂存 phase temp", &temporary_path, source))?;
+    journals
+        .sync_all()
+        .map_err(|source| v2_io("同步 Host 暂存 phase temp 父目录", &temporary_path, source))?;
+
+    let pre_swap_journals = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        journals,
+        &paths.journals_root(),
+    )?;
+    let (formal_before, formal_before_owned, formal_before_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&pre_swap_journals, &formal_name, &formal_path)?;
+    let (temporary_before, temporary_before_owned, temporary_before_bytes) =
+        read_takeover_v2_journal_with_bytes_at(
+            &pre_swap_journals,
+            &temporary_name,
+            &temporary_path,
+        )?;
+    if formal_before != *old
+        || formal_before_owned != *old_owned
+        || formal_before_bytes != old_bytes
+        || temporary_before != *new
+        || temporary_before_bytes != new_bytes
+        || !same_journal_identity(temporary_before_owned.snapshot, opened)
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "Host 暂存 progress 在恢复交换前发生变化".to_owned(),
+        ));
+    }
+    validate_takeover_v2_hidden_staging(paths, plan, new)?;
+    validate_prepared_bundle_filesystem(paths, lifecycle_lock, plan, new)?;
+    rename_at_swap(
+        &pre_swap_journals,
+        &temporary_name,
+        &pre_swap_journals,
+        &formal_name,
+    )
+    .map_err(|source| v2_io("恢复交换 Host 暂存 progress", &formal_path, source))?;
+    pre_swap_journals
+        .sync_all()
+        .map_err(|source| v2_io("同步 Host 暂存 progress 恢复交换", &formal_path, source))?;
+
+    let (formal_after, formal_after_owned, formal_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&pre_swap_journals, &formal_name, &formal_path)?;
+    let (temporary_after, temporary_after_owned, temporary_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(
+            &pre_swap_journals,
+            &temporary_name,
+            &temporary_path,
+        )?;
+    if formal_after != *new
+        || formal_after_bytes != new_bytes
+        || temporary_after != *old
+        || temporary_after_bytes != old_bytes
+        || !same_journal_identity(formal_after_owned.snapshot, temporary_before_owned.snapshot)
+        || !same_journal_identity(temporary_after_owned.snapshot, old_owned.snapshot)
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "Host 暂存 progress 恢复交换后的身份或内容不一致".to_owned(),
+        ));
+    }
+    drop(temporary);
+    remove_owned_journal(paths, &pre_swap_journals, &temporary_after_owned)?;
+    validate_takeover_v2_hidden_staging(paths, plan, new)?;
+    validate_stable_prepared_state(paths, lifecycle_lock, transaction, plan, new)?;
+    Ok(new.clone())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remove_takeover_v2_prepared_progress_temp_after_audit(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    journals: &File,
+    formal: &TakeoverV2Journal,
+    formal_owned: &OwnedJournalEntry,
+    formal_bytes: &[u8],
+    temporary: &TakeoverV2Journal,
+    temporary_owned: &OwnedJournalEntry,
+    temporary_bytes: &[u8],
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    let rebound = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        journals,
+        &paths.journals_root(),
+    )?;
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    let (formal_after, formal_after_owned, formal_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &formal_name, &formal_path)?;
+    let (temporary_after, temporary_after_owned, temporary_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &temporary_name, &temporary_path)?;
+    if formal_after != *formal
+        || formal_after_owned != *formal_owned
+        || formal_after_bytes != formal_bytes
+        || temporary_after != *temporary
+        || temporary_after_owned != *temporary_owned
+        || temporary_after_bytes != temporary_bytes
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "Host 暂存 progress 临时 Journal 在清理前发生变化".to_owned(),
+        ));
+    }
+    validate_takeover_v2_hidden_staging(paths, plan, formal)?;
+    validate_prepared_bundle_filesystem(paths, lifecycle_lock, plan, formal)?;
+    remove_owned_journal(paths, &rebound, &temporary_after_owned)?;
+    validate_stable_prepared_state(paths, lifecycle_lock, transaction, plan, formal)?;
+    Ok(formal.clone())
 }
 
 fn observe_takeover_v2_staged_link(
@@ -4777,6 +5125,57 @@ mod tests {
             initial_state: TakeoverTargetInitialState::Absent,
         });
         plan.seal = takeover_v2_plan_seal(plan);
+    }
+
+    fn create_next_hidden_mount(
+        harness: &Harness,
+        plan: &TakeoverV2Plan,
+        journal: &TakeoverV2Journal,
+    ) -> (usize, PathBuf, String) {
+        let index = journal
+            .effect_items
+            .iter()
+            .position(|item| {
+                matches!(
+                    item.operation,
+                    TakeoverV2EffectOperation::CreateAbsentMount { .. }
+                        | TakeoverV2EffectOperation::ReplaceOriginWithMount { .. }
+                ) && item.staged_observation.is_none()
+            })
+            .expect("应存在尚未暂存的 Mount");
+        let target_id = match &journal.effect_items[index].operation {
+            TakeoverV2EffectOperation::CreateAbsentMount { target_id }
+            | TakeoverV2EffectOperation::ReplaceOriginWithMount { target_id, .. } => target_id,
+            TakeoverV2EffectOperation::RemoveOrigin { .. } => unreachable!(),
+        };
+        let target = plan
+            .targets
+            .iter()
+            .find(|target| target.id == *target_id)
+            .expect("effect 必须引用现有 Target");
+        let parent = open_verified_target_parent(&harness.paths, plan, target)
+            .expect("应打开已验证的 Target 父目录");
+        let hidden_name = OsString::from(takeover_v2_effect_hidden_name(
+            &journal.transaction_id,
+            index,
+        ));
+        let hidden_path = parent.visible_path.join(&hidden_name);
+        symlink_at(
+            Path::new(&target.expected_target),
+            &parent.handle,
+            &hidden_name,
+        )
+        .expect("应建立待恢复的隐藏 Mount");
+        parent.handle.sync_all().expect("应同步隐藏 Mount 父目录");
+        let observation = observe_takeover_v2_staged_link(
+            &parent,
+            &hidden_name,
+            &hidden_path,
+            &target.expected_target,
+        )
+        .expect("应观察隐藏 Mount")
+        .expect("隐藏 Mount 必须存在");
+        (index, hidden_path, observation)
     }
 
     #[test]
@@ -7107,6 +7506,483 @@ mod tests {
                 .bundle_directory(&plan.bundle_id)
                 .join("current")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn host_mount_staging_recovers_a_complete_pre_swap_progress_temp() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let (index, hidden, observation) = create_next_hidden_mount(&harness, &plan, &old);
+        let hidden_before = fs::symlink_metadata(&hidden).expect("应读取隐藏 Mount 身份");
+        let mut next = old.clone();
+        next.effect_items[index].staged_observation = Some(observation);
+        let phase_temp = harness
+            .paths
+            .journals_root()
+            .join(phase_temp_file_name(&transaction_id));
+        fs::write(
+            &phase_temp,
+            serde_json::to_vec_pretty(&next).expect("应序列化 successor"),
+        )
+        .expect("应模拟 swap 前完整 phase temp");
+
+        stage_takeover_v2_host_mounts(&harness.paths, &mut harness.storage, &transaction_id)
+            .expect("应完成 swap 前 progress 恢复");
+
+        let formal: TakeoverV2Journal = serde_json::from_slice(
+            &fs::read(
+                harness
+                    .paths
+                    .journals_root()
+                    .join(journal_file_name(&transaction_id)),
+            )
+            .expect("formal 必须存在"),
+        )
+        .expect("formal 必须可解析");
+        assert_eq!(formal, next);
+        assert!(!phase_temp.exists(), "恢复后必须清理旧 formal");
+        let hidden_after = fs::symlink_metadata(hidden).expect("隐藏 Mount 必须保留");
+        assert_eq!(
+            (hidden_after.dev(), hidden_after.ino()),
+            (hidden_before.dev(), hidden_before.ino()),
+            "恢复不能重建已经审计的隐藏 Mount"
+        );
+        assert!(Path::new(&plan.origins[0].original_path).is_dir());
+    }
+
+    #[test]
+    fn host_mount_staging_recovers_a_post_swap_progress_pair() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let (index, _, observation) = create_next_hidden_mount(&harness, &plan, &old);
+        let mut next = old.clone();
+        next.effect_items[index].staged_observation = Some(observation);
+        let formal_name = OsString::from(journal_file_name(&transaction_id));
+        let phase_temp_name = OsString::from(phase_temp_file_name(&transaction_id));
+        let phase_temp = harness.paths.journals_root().join(&phase_temp_name);
+        fs::write(
+            &phase_temp,
+            serde_json::to_vec_pretty(&next).expect("应序列化 successor"),
+        )
+        .expect("应建立完整 phase temp");
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+        let journals = open_managed_directory_from_root(
+            &harness.paths,
+            lock.root(),
+            &harness.paths.journals_root(),
+        )
+        .expect("应打开 Journal 根");
+        rename_at_swap(&journals, &phase_temp_name, &journals, &formal_name)
+            .expect("应模拟已完成的原子交换");
+        journals.sync_all().expect("应同步交换结果");
+        drop(lock);
+
+        stage_takeover_v2_host_mounts(&harness.paths, &mut harness.storage, &transaction_id)
+            .expect("应完成 swap 后 progress 恢复");
+
+        let formal: TakeoverV2Journal = serde_json::from_slice(
+            &fs::read(harness.paths.journals_root().join(&formal_name)).expect("formal 必须存在"),
+        )
+        .expect("formal 必须可解析");
+        assert_eq!(formal, next);
+        assert!(!phase_temp.exists(), "swap 后旧 formal 必须被清理");
+        assert!(Path::new(&plan.origins[0].original_path).is_dir());
+    }
+
+    #[test]
+    fn host_mount_staging_recovers_a_partial_pre_swap_progress_temp() {
+        for variant in ["zero", "half", "full_minus_one"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+            let (index, hidden, observation) = create_next_hidden_mount(&harness, &plan, &old);
+            let hidden_before = fs::symlink_metadata(&hidden).expect("应读取隐藏 Mount 身份");
+            let mut next = old.clone();
+            next.effect_items[index].staged_observation = Some(observation);
+            let next_bytes = serde_json::to_vec_pretty(&next).expect("应序列化 successor");
+            let length = match variant {
+                "zero" => 0,
+                "half" => next_bytes.len() / 2,
+                "full_minus_one" => next_bytes.len() - 1,
+                _ => unreachable!(),
+            };
+            let phase_temp = harness
+                .paths
+                .journals_root()
+                .join(phase_temp_file_name(&transaction_id));
+            fs::write(&phase_temp, &next_bytes[..length]).expect("应模拟写入中断的 phase temp");
+
+            stage_takeover_v2_host_mounts(&harness.paths, &mut harness.storage, &transaction_id)
+                .expect("canonical prefix 和隐藏 inode 应允许续写 progress");
+
+            assert!(!phase_temp.exists(), "variant={variant}");
+            let formal: TakeoverV2Journal = serde_json::from_slice(
+                &fs::read(
+                    harness
+                        .paths
+                        .journals_root()
+                        .join(journal_file_name(&transaction_id)),
+                )
+                .expect("formal 必须存在"),
+            )
+            .expect("formal 必须可解析");
+            assert_eq!(formal, next, "variant={variant}");
+            let hidden_after = fs::symlink_metadata(hidden).expect("隐藏 Mount 必须保留");
+            assert_eq!(
+                (hidden_after.dev(), hidden_after.ino()),
+                (hidden_before.dev(), hidden_before.ino()),
+                "variant={variant}"
+            );
+            assert!(Path::new(&plan.origins[0].original_path).is_dir());
+        }
+    }
+
+    #[test]
+    fn startup_recovery_reconciles_prepared_progress_before_general_phase_recovery() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let (index, _, observation) = create_next_hidden_mount(&harness, &plan, &old);
+        let mut next = old.clone();
+        next.effect_items[index].staged_observation = Some(observation);
+        let phase_temp = harness
+            .paths
+            .journals_root()
+            .join(phase_temp_file_name(&transaction_id));
+        fs::write(
+            &phase_temp,
+            serde_json::to_vec_pretty(&next).expect("应序列化 successor"),
+        )
+        .expect("应模拟 swap 前完整 phase temp");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("启动恢复应先处理 Prepared progress");
+
+        let transaction = harness
+            .transaction(&transaction_id)
+            .expect("事务必须继续存在");
+        assert_eq!(transaction.status, "in_progress");
+        assert_eq!(transaction.phase, "prepared");
+        assert!(!phase_temp.exists());
+        let formal: TakeoverV2Journal = serde_json::from_slice(
+            &fs::read(
+                harness
+                    .paths
+                    .journals_root()
+                    .join(journal_file_name(&transaction_id)),
+            )
+            .expect("formal 必须存在"),
+        )
+        .expect("formal 必须可解析");
+        assert_eq!(formal, next);
+    }
+
+    #[test]
+    fn startup_recovery_blocks_a_full_successor_when_its_hidden_mount_is_missing() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let mut next = old.clone();
+        next.effect_items[0].staged_observation =
+            Some("a".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+        let phase_temp = harness
+            .paths
+            .journals_root()
+            .join(phase_temp_file_name(&transaction_id));
+        fs::write(
+            &phase_temp,
+            serde_json::to_vec_pretty(&next).expect("应序列化 successor"),
+        )
+        .expect("应模拟 hidden 消失前已写完的 phase temp");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("路径缺失只应阻塞当前事务");
+
+        assert_eq!(
+            fs::read(&phase_temp).expect("phase temp 证据必须保留"),
+            serde_json::to_vec_pretty(&next).expect("应序列化 successor")
+        );
+        let formal: TakeoverV2Journal = serde_json::from_slice(
+            &fs::read(
+                harness
+                    .paths
+                    .journals_root()
+                    .join(journal_file_name(&transaction_id)),
+            )
+            .expect("formal 必须存在"),
+        )
+        .expect("formal 必须可解析");
+        assert_eq!(formal, old);
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("blocked 事务必须保留")
+                .status,
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn startup_recovery_blocks_recorded_hidden_mount_loss_without_a_phase_temp() {
+        for variant in ["missing", "replaced"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, _) = harness.begin_with_stable_prepared_bundle(&mut plan);
+            stage_takeover_v2_host_mounts(&harness.paths, &mut harness.storage, &transaction_id)
+                .expect("应先完成一项正常暂存");
+            let formal_path = harness
+                .paths
+                .journals_root()
+                .join(journal_file_name(&transaction_id));
+            let formal_bytes = fs::read(&formal_path).expect("应读取正式 progress");
+            let hidden = PathBuf::from(&plan.origins[0].original_path)
+                .parent()
+                .expect("Origin 应有父目录")
+                .join(takeover_v2_effect_hidden_name(&transaction_id, 0));
+            fs::remove_file(&hidden).expect("应移除已记录的 hidden");
+            if variant == "replaced" {
+                std::os::unix::fs::symlink(&plan.expected_target, &hidden)
+                    .expect("应放入相同 target 的外部 inode");
+            }
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("路径异常只应阻塞当前事务");
+
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("blocked 事务必须保留")
+                    .status,
+                "blocked",
+                "variant={variant}"
+            );
+            assert_eq!(
+                fs::read(formal_path).expect("formal 证据必须保留"),
+                formal_bytes,
+                "variant={variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_recovery_blocks_an_unrecorded_next_hidden_mount_without_a_phase_temp() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        add_absent_copilot_target(&harness, &mut plan);
+        reset_plan_storage_identity(&harness.paths, &mut plan);
+        let mut plan = harness
+            .storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存双 Target Plan");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let (first_index, _, first_observation) = create_next_hidden_mount(&harness, &plan, &old);
+        let mut first = old;
+        first.effect_items[first_index].staged_observation = Some(first_observation);
+        let formal_path = harness
+            .paths
+            .journals_root()
+            .join(journal_file_name(&transaction_id));
+        let formal_bytes = serde_json::to_vec_pretty(&first).expect("应序列化第一项 progress");
+        fs::write(&formal_path, &formal_bytes).expect("应建立只记录第一项的 formal");
+        let (_, second_hidden, _) = create_next_hidden_mount(&harness, &plan, &first);
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("未记录的后续 hidden 只应阻塞当前事务");
+
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("blocked 事务必须保留")
+                .status,
+            "blocked"
+        );
+        assert_eq!(
+            fs::read(formal_path).expect("formal 必须保留"),
+            formal_bytes
+        );
+        assert!(
+            fs::symlink_metadata(second_hidden).is_ok(),
+            "未知 hidden 必须原样保留"
+        );
+    }
+
+    #[test]
+    fn startup_recovery_blocks_a_partial_progress_temp_without_unique_hidden_evidence() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let mut next = old.clone();
+        next.effect_items[0].staged_observation =
+            Some("a".repeat(TAKEOVER_V2_EFFECT_OBSERVATION_BYTES));
+        let bytes = serde_json::to_vec_pretty(&next).expect("应序列化 successor");
+        let phase_temp = harness
+            .paths
+            .journals_root()
+            .join(phase_temp_file_name(&transaction_id));
+        let prefix = bytes[..bytes.len() / 2].to_vec();
+        fs::write(&phase_temp, &prefix).expect("应模拟不完整 phase temp");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("单个危险现场不能阻止恢复扫描");
+
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("blocked 事务必须保留")
+                .status,
+            "blocked"
+        );
+        assert_eq!(fs::read(&phase_temp).expect("证据必须保留"), prefix);
+        let formal: TakeoverV2Journal = serde_json::from_slice(
+            &fs::read(
+                harness
+                    .paths
+                    .journals_root()
+                    .join(journal_file_name(&transaction_id)),
+            )
+            .expect("formal 必须保留"),
+        )
+        .expect("formal 必须可解析");
+        assert_eq!(formal, old);
+    }
+
+    #[test]
+    fn startup_recovery_blocks_a_replaced_hidden_inode_and_preserves_all_evidence() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let (index, hidden, observation) = create_next_hidden_mount(&harness, &plan, &old);
+        let mut next = old.clone();
+        next.effect_items[index].staged_observation = Some(observation);
+        let phase_temp = harness
+            .paths
+            .journals_root()
+            .join(phase_temp_file_name(&transaction_id));
+        let temp_bytes = serde_json::to_vec_pretty(&next).expect("应序列化 successor");
+        fs::write(&phase_temp, &temp_bytes).expect("应建立完整 phase temp");
+        fs::remove_file(&hidden).expect("应移除原 hidden inode");
+        std::os::unix::fs::symlink(&plan.expected_target, &hidden)
+            .expect("应放入相同 target 的外部 inode");
+        let replacement = fs::symlink_metadata(&hidden).expect("应读取替换 inode");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("外部替换只应阻塞当前事务");
+
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("blocked 事务必须保留")
+                .status,
+            "blocked"
+        );
+        assert_eq!(
+            fs::read(&phase_temp).expect("phase temp 必须保留"),
+            temp_bytes
+        );
+        let after = fs::symlink_metadata(hidden).expect("外部 hidden 必须保留");
+        assert_eq!(
+            (after.dev(), after.ino()),
+            (replacement.dev(), replacement.ino())
+        );
+    }
+
+    #[test]
+    fn startup_recovery_rejects_a_progress_temp_that_skips_two_mounts() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        add_absent_copilot_target(&harness, &mut plan);
+        reset_plan_storage_identity(&harness.paths, &mut plan);
+        let mut plan = harness
+            .storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存双 Target Plan");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let (first_index, first_hidden, first_observation) =
+            create_next_hidden_mount(&harness, &plan, &old);
+        let mut first = old.clone();
+        first.effect_items[first_index].staged_observation = Some(first_observation);
+        let (second_index, second_hidden, second_observation) =
+            create_next_hidden_mount(&harness, &plan, &first);
+        let mut skipped = first;
+        skipped.effect_items[second_index].staged_observation = Some(second_observation);
+        let phase_temp = harness
+            .paths
+            .journals_root()
+            .join(phase_temp_file_name(&transaction_id));
+        let temp_bytes = serde_json::to_vec_pretty(&skipped).expect("应序列化跳步 progress");
+        fs::write(&phase_temp, &temp_bytes).expect("应建立跳过一项的 phase temp");
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+            .expect("跳步 progress 只应阻塞当前事务");
+
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("blocked 事务必须保留")
+                .status,
+            "blocked"
+        );
+        assert_eq!(
+            fs::read(&phase_temp).expect("phase temp 必须保留"),
+            temp_bytes
+        );
+        assert!(fs::symlink_metadata(first_hidden).is_ok());
+        assert!(fs::symlink_metadata(second_hidden).is_ok());
+    }
+
+    #[test]
+    fn host_mount_staging_recovers_partial_progress_for_the_second_mount() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        add_absent_copilot_target(&harness, &mut plan);
+        reset_plan_storage_identity(&harness.paths, &mut plan);
+        let mut plan = harness
+            .storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存双 Target Plan");
+        let (transaction_id, old) = harness.begin_with_stable_prepared_bundle(&mut plan);
+        let (first_index, _, first_observation) = create_next_hidden_mount(&harness, &plan, &old);
+        let mut first = old;
+        first.effect_items[first_index].staged_observation = Some(first_observation);
+        let formal_path = harness
+            .paths
+            .journals_root()
+            .join(journal_file_name(&transaction_id));
+        fs::write(
+            &formal_path,
+            serde_json::to_vec_pretty(&first).expect("应序列化第一项 progress"),
+        )
+        .expect("应建立已完成第一项的 formal");
+        let (second_index, second_hidden, second_observation) =
+            create_next_hidden_mount(&harness, &plan, &first);
+        let second_hidden_before =
+            fs::symlink_metadata(&second_hidden).expect("应读取第二个 hidden 身份");
+        let mut second = first;
+        second.effect_items[second_index].staged_observation = Some(second_observation);
+        let next_bytes = serde_json::to_vec_pretty(&second).expect("应序列化第二项 progress");
+        let phase_temp = harness
+            .paths
+            .journals_root()
+            .join(phase_temp_file_name(&transaction_id));
+        fs::write(&phase_temp, &next_bytes[..next_bytes.len() / 2])
+            .expect("应模拟第二项 progress 写入中断");
+
+        stage_takeover_v2_host_mounts(&harness.paths, &mut harness.storage, &transaction_id)
+            .expect("应从第二个 Mount 的连续前缀继续恢复");
+
+        let formal: TakeoverV2Journal =
+            serde_json::from_slice(&fs::read(formal_path).expect("formal 必须存在"))
+                .expect("formal 必须可解析");
+        assert_eq!(formal, second);
+        assert!(!phase_temp.exists());
+        let second_hidden_after =
+            fs::symlink_metadata(second_hidden).expect("第二个 hidden 必须保留");
+        assert_eq!(
+            (second_hidden_after.dev(), second_hidden_after.ino()),
+            (second_hidden_before.dev(), second_hidden_before.ino())
         );
     }
 
