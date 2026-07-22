@@ -35,7 +35,7 @@ use crate::{
     storage::{Storage, StorageError, StoredTakeoverV2Transaction},
     takeover_lifecycle::{
         TakeoverLifecycleError, TakeoverOriginalEntry, collect_original_manifest_at,
-        validate_original_manifest_at,
+        remove_manifest_tree_at, validate_original_manifest_at,
     },
 };
 
@@ -199,6 +199,12 @@ struct ActivatedBundleAudit {
 enum TakeoverV2HostEffectState {
     Pending,
     Applied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TakeoverV2CleanupCheckpoint {
+    SqliteCompleted,
+    FormalRemoved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -693,7 +699,7 @@ fn audit_candidate_container(
         &path,
         plan,
         manifest,
-        selected_root,
+        Some(selected_root),
         "v2 接管 candidate 包含未授权条目",
     )
 }
@@ -704,7 +710,7 @@ fn audit_member_content_container(
     path: &Path,
     plan: &TakeoverV2Plan,
     manifest: &TakeoverV2OriginManifest,
-    selected_root: &SelectedOriginRoot,
+    selected_root: Option<&SelectedOriginRoot>,
     invalid_entries_message: &'static str,
 ) -> Result<(CandidateDirectoryAudit, bool), TakeoverV2LifecycleError> {
     let (candidate, snapshot) = open_audited_candidate_directory(parent, name, path, &[0o700])?;
@@ -733,7 +739,7 @@ fn audit_candidate_members(
     candidate_path: &Path,
     plan: &TakeoverV2Plan,
     manifest: &TakeoverV2OriginManifest,
-    selected_root: &SelectedOriginRoot,
+    selected_root: Option<&SelectedOriginRoot>,
 ) -> Result<(CandidateDirectoryAudit, bool), TakeoverV2LifecycleError> {
     let name = OsStr::new("members");
     let path = candidate_path.join(name);
@@ -774,7 +780,8 @@ fn audit_complete_bundle_container(
         ));
     }
 
-    let contents = audit_complete_bundle_contents(&bundle, path, plan, manifest, selected_root)?;
+    let contents =
+        audit_complete_bundle_contents(&bundle, path, plan, manifest, Some(selected_root))?;
     finish_audited_candidate_directory(
         parent,
         name,
@@ -791,7 +798,7 @@ fn audit_complete_activated_bundle_container(
     path: &Path,
     plan: &TakeoverV2Plan,
     manifest: &TakeoverV2OriginManifest,
-    selected_root: &SelectedOriginRoot,
+    selected_root: Option<&SelectedOriginRoot>,
     current_target: &str,
 ) -> Result<ActivatedBundleAudit, TakeoverV2LifecycleError> {
     let (bundle, bundle_snapshot) = open_audited_candidate_directory(parent, name, path, &[0o700])?;
@@ -840,7 +847,7 @@ fn audit_complete_bundle_contents(
     bundle_path: &Path,
     plan: &TakeoverV2Plan,
     manifest: &TakeoverV2OriginManifest,
-    selected_root: &SelectedOriginRoot,
+    selected_root: Option<&SelectedOriginRoot>,
 ) -> Result<CandidateDirectoryAudit, TakeoverV2LifecycleError> {
     let contents_name = OsStr::new("contents");
     let contents_path = bundle_path.join(contents_name);
@@ -925,7 +932,7 @@ fn audit_candidate_skill(
     members_path: &Path,
     skill_name: &OsStr,
     manifest: &TakeoverV2OriginManifest,
-    selected_root: &SelectedOriginRoot,
+    selected_root: Option<&SelectedOriginRoot>,
 ) -> Result<(CandidateDirectoryAudit, bool), TakeoverV2LifecycleError> {
     let path = members_path.join(skill_name);
     let final_permissions = manifest.root_mode & 0o7777;
@@ -975,7 +982,7 @@ fn audit_candidate_skill_entries(
     visible_path: &Path,
     expected: &BTreeMap<String, &TakeoverOriginalEntry>,
     seen: &mut BTreeSet<String>,
-    selected_root: &SelectedOriginRoot,
+    selected_root: Option<&SelectedOriginRoot>,
 ) -> Result<(Vec<CandidateEntryAudit>, CandidateSkillAuditState), TakeoverV2LifecycleError> {
     let seen_before = seen.len();
     let expected_descendants = if prefix.is_empty() {
@@ -1078,7 +1085,7 @@ fn audit_candidate_file(
     path: &Path,
     relative: &[u8],
     expected: &TakeoverOriginalEntry,
-    selected_root: &SelectedOriginRoot,
+    selected_root: Option<&SelectedOriginRoot>,
     metadata: &libc::stat,
 ) -> Result<(CandidateEntryAudit, bool), TakeoverV2LifecycleError> {
     let final_permissions = expected.mode() & 0o7777;
@@ -1118,6 +1125,8 @@ fn audit_candidate_file(
             ));
         }
     } else {
+        let selected_root = selected_root
+            .ok_or_else(|| candidate_blocked("终态 Bundle 不允许出现部分写入的候选文件", path))?;
         compare_candidate_prefix_with_selected_origin(
             &mut candidate,
             actual_size,
@@ -6060,6 +6069,194 @@ fn commit_takeover_v2_state_inner(
     Ok(())
 }
 
+/// 领域状态提交后，幂等清理旧 Origin 与临时证据，并最终遗忘事务。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn cleanup_takeover_v2_transaction(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+) -> Result<(), TakeoverV2LifecycleError> {
+    cleanup_takeover_v2_transaction_inner(paths, storage, transaction_id, now, &mut |_| Ok(()))
+}
+
+// 测试 seam 只暴露三个 durable 边界，不把逐项清理变成 Journal 状态机。
+#[cfg(test)]
+fn cleanup_takeover_v2_transaction_with_hook(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+    checkpoint: &mut dyn FnMut(TakeoverV2CleanupCheckpoint) -> Result<(), TakeoverV2LifecycleError>,
+) -> Result<(), TakeoverV2LifecycleError> {
+    cleanup_takeover_v2_transaction_inner(paths, storage, transaction_id, now, checkpoint)
+}
+
+fn cleanup_takeover_v2_transaction_inner(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+    checkpoint: &mut dyn FnMut(TakeoverV2CleanupCheckpoint) -> Result<(), TakeoverV2LifecycleError>,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let Some(transaction) = storage
+        .recoverable_takeover_v2_transactions()?
+        .into_iter()
+        .find(|transaction| transaction.id == transaction_id)
+    else {
+        // forget 已成功后再次调用没有剩余事务可修改，属于合法幂等重试。
+        return Ok(());
+    };
+    if let Some(error) = &transaction.recovery_validation_error {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(error.clone()));
+    }
+    if !matches!(
+        (transaction.status.as_str(), transaction.phase.as_str()),
+        ("in_progress", "state_committed") | ("completed", "cleanup_completed")
+    ) {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(format!(
+            "cleanup 不接受当前 SQLite 状态：{}/{}",
+            transaction.status, transaction.phase
+        )));
+    }
+    let plan = storage.read_takeover_v2_plan_for_transaction(&transaction)?;
+    let lifecycle_lock = acquire_lifecycle_lock(paths)?;
+    lifecycle_lock.recheck(paths)?;
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    ensure_takeover_v2_terminal_journal_temps_absent(paths, &journals, transaction_id, true)?;
+    let formal_name = OsString::from(journal_file_name(transaction_id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    if entry_metadata_at(&journals, &formal_name)
+        .map_err(|source| v2_io("检查 cleanup formal", &formal_path, source))?
+        .is_none()
+    {
+        if transaction.status != "completed" {
+            return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                "SQLite state_committed 缺少 formal Journal".to_owned(),
+            ));
+        }
+        validate_takeover_v2_terminal_negative_evidence(
+            paths,
+            &lifecycle_lock,
+            &plan,
+            transaction_id,
+        )?;
+        storage.forget_terminal_takeover_v2_transaction(transaction_id)?;
+        return Ok(());
+    }
+
+    let (formal, _, formal_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+    validate_takeover_v2_journal_contract(&formal, &transaction, &plan)?;
+    if formal_bytes != serde_json::to_vec_pretty(&formal)? {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "cleanup 只接受 canonical pretty formal Journal".to_owned(),
+        ));
+    }
+
+    let completed = match formal.phase {
+        TakeoverV2JournalPhase::StateCommitted => {
+            validate_takeover_v2_cleanup_source(&formal)?;
+            reconcile_takeover_v2_staging(paths, &lifecycle_lock, transaction_id, true)?;
+            // 先证明 Central Store 主副本和所有可见挂载完整，再允许删除任何旧 Origin。
+            validate_takeover_v2_managed_copy_before_cleanup(
+                paths,
+                &lifecycle_lock,
+                &plan,
+                &formal,
+            )?;
+            cleanup_takeover_v2_host_evidence(paths, &plan, &formal, true)?;
+            validate_takeover_v2_terminal_filesystem(paths, &lifecycle_lock, &plan, &formal)?;
+            let reconciled = reconcile_takeover_v2_cleanup_phase_temp(
+                paths,
+                &lifecycle_lock,
+                &transaction,
+                &plan,
+                &formal,
+            )?;
+            if reconciled.phase == TakeoverV2JournalPhase::StateCommitted {
+                persist_takeover_v2_cleanup_completed_journal(
+                    paths,
+                    &lifecycle_lock,
+                    &transaction,
+                    &plan,
+                    &reconciled,
+                )?
+            } else {
+                reconciled
+            }
+        }
+        TakeoverV2JournalPhase::CleanupCompleted => {
+            validate_takeover_v2_terminal_filesystem(paths, &lifecycle_lock, &plan, &formal)?;
+            reconcile_takeover_v2_cleanup_phase_temp(
+                paths,
+                &lifecycle_lock,
+                &transaction,
+                &plan,
+                &formal,
+            )?
+        }
+        _ => {
+            return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                "cleanup formal 尚未进入 StateCommitted".to_owned(),
+            ));
+        }
+    };
+    let (formal_after, formal_owned, bytes_after) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+    validate_takeover_v2_journal_contract(&formal_after, &transaction, &plan)?;
+    if formal_after != completed
+        || formal_after.phase != TakeoverV2JournalPhase::CleanupCompleted
+        || bytes_after != serde_json::to_vec_pretty(&completed)?
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "CleanupCompleted formal 在 SQLite 提交前发生变化".to_owned(),
+        ));
+    }
+    ensure_takeover_v2_terminal_journal_temps_absent(paths, &journals, transaction_id, false)?;
+    validate_takeover_v2_terminal_filesystem(paths, &lifecycle_lock, &plan, &completed)?;
+
+    storage.complete_takeover_v2_cleanup(transaction_id, now)?;
+    checkpoint(TakeoverV2CleanupCheckpoint::SqliteCompleted)?;
+    let rebound = rebind_unchanged_managed_directory(
+        paths,
+        &lifecycle_lock,
+        &journals,
+        &paths.journals_root(),
+    )?;
+    let (rebound_formal, rebound_owned, rebound_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &formal_name, &formal_path)?;
+    if rebound_formal != formal_after
+        || rebound_owned != formal_owned
+        || rebound_bytes != bytes_after
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "SQLite cleanup 提交后 formal Journal 发生变化".to_owned(),
+        ));
+    }
+    remove_owned_journal(paths, &rebound, &rebound_owned)?;
+    checkpoint(TakeoverV2CleanupCheckpoint::FormalRemoved)?;
+    let rebound_after_remove = rebind_unchanged_managed_directory(
+        paths,
+        &lifecycle_lock,
+        &rebound,
+        &paths.journals_root(),
+    )?;
+    if entry_metadata_at(&rebound_after_remove, &formal_name)
+        .map_err(|source| v2_io("复核 cleanup formal 已移除", &formal_path, source))?
+        .is_some()
+    {
+        return Err(candidate_blocked(
+            "cleanup formal 移除后重新出现",
+            &formal_path,
+        ));
+    }
+    validate_takeover_v2_terminal_negative_evidence(paths, &lifecycle_lock, &plan, transaction_id)?;
+    storage.forget_terminal_takeover_v2_transaction(transaction_id)?;
+    Ok(())
+}
+
 // 测试 seam 精确模拟 rename 已持久化、Journal 尚未推进的崩溃窗口。
 #[cfg(test)]
 fn apply_takeover_v2_host_effects_with_hook(
@@ -6687,7 +6884,7 @@ fn validate_takeover_v2_post_effect_filesystem(
         &bundle_path,
         plan,
         manifest,
-        &selected_root,
+        Some(&selected_root),
         &journal.current_target,
     )?;
     validate_takeover_v2_bundle_root_observation(journal, audit.bundle.snapshot)?;
@@ -7161,6 +7358,796 @@ fn validate_takeover_v2_state_committed_formal(
         ));
     }
     Ok((owned_after, bytes_after, current_after))
+}
+
+fn validate_takeover_v2_cleanup_source(
+    journal: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    if journal.phase != TakeoverV2JournalPhase::StateCommitted
+        || journal
+            .effect_items
+            .iter()
+            .any(|item| item.applied_observation.is_none() || item.cleanup_completed)
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "cleanup 要求全部 effect 已 applied，且所有 cleanup bit 仍为 false".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn reconcile_takeover_v2_staging(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction_id: &str,
+    remove: bool,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    ensure_takeover_v2_staging_cleanup_alias_absent(paths, &staging_root, transaction_id)?;
+    let name = OsString::from(transaction_id);
+    let path = paths.staging_root().join(&name);
+    let Some(visible) = entry_metadata_at(&staging_root, &name)
+        .map_err(|source| v2_io("检查 cleanup staging", &path, source))?
+    else {
+        return Ok(());
+    };
+    if !remove {
+        return Err(candidate_blocked("终态不允许残留 staging", &path));
+    }
+    if visible.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || permission_bits(u32::from(visible.st_mode)) != 0o700
+    {
+        return Err(candidate_blocked("cleanup staging 不是受管私有目录", &path));
+    }
+    let snapshot = journal_snapshot_from_stat(&visible);
+    let directory = open_directory_at(&staging_root, &name)
+        .map_err(|source| v2_io("打开 cleanup staging", &path, source))?;
+    let opened = journal_snapshot_from_metadata(
+        &directory
+            .metadata()
+            .map_err(|source| v2_io("检查已打开 cleanup staging", &path, source))?,
+    );
+    if opened != snapshot || !read_entry_names_os_from_handle(&directory)?.is_empty() {
+        return Err(candidate_blocked(
+            "cleanup staging 非空或在打开期间被替换",
+            &path,
+        ));
+    }
+    directory
+        .sync_all()
+        .map_err(|source| v2_io("同步空 cleanup staging", &path, source))?;
+    let final_visible = entry_metadata_at(&staging_root, &name)
+        .map_err(|source| v2_io("复核 cleanup staging", &path, source))?
+        .ok_or_else(|| candidate_blocked("cleanup staging 在移除前消失", &path))?;
+    if journal_snapshot_from_stat(&final_visible) != snapshot
+        || journal_snapshot_from_metadata(
+            &directory
+                .metadata()
+                .map_err(|source| v2_io("复核已打开 cleanup staging", &path, source))?,
+        ) != snapshot
+        || !read_entry_names_os_from_handle(&directory)?.is_empty()
+    {
+        return Err(candidate_blocked(
+            "cleanup staging 在最终移除前发生变化",
+            &path,
+        ));
+    }
+    drop(directory);
+    unlink_at(&staging_root, &name, true)
+        .map_err(|source| v2_io("移除空 cleanup staging", &path, source))?;
+    staging_root
+        .sync_all()
+        .map_err(|source| v2_io("同步 cleanup staging 父目录", &path, source))?;
+    if entry_metadata_at(&staging_root, &name)
+        .map_err(|source| v2_io("确认 cleanup staging 已移除", &path, source))?
+        .is_some()
+    {
+        return Err(candidate_blocked("cleanup staging 移除后重新出现", &path));
+    }
+    Ok(())
+}
+
+fn ensure_takeover_v2_staging_cleanup_alias_absent(
+    paths: &ApplicationPaths,
+    staging_root: &File,
+    transaction_id: &str,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let prefix = takeover_v2_staging_cleanup_prefix(transaction_id);
+    if let Some(name) = read_entry_names_os_from_handle(staging_root)?
+        .into_iter()
+        .find(|name| name.as_bytes().starts_with(prefix.as_bytes()))
+    {
+        return Err(candidate_blocked(
+            "终态不允许残留 staging 私有清理区",
+            &paths.staging_root().join(name),
+        ));
+    }
+    Ok(())
+}
+
+fn cleanup_takeover_v2_host_evidence(
+    paths: &ApplicationPaths,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+    allow_cleanup: bool,
+) -> Result<(), TakeoverV2LifecycleError> {
+    for (index, item) in journal.effect_items.iter().enumerate() {
+        let hidden_name = OsString::from(takeover_v2_effect_hidden_name(
+            &journal.transaction_id,
+            index,
+        ));
+        let draft_name = OsString::from(takeover_v2_effect_draft_name(
+            &journal.transaction_id,
+            index,
+        ));
+        let cleanup_name = OsString::from(takeover_v2_effect_cleanup_name(
+            &journal.transaction_id,
+            index,
+        ));
+        match &item.operation {
+            TakeoverV2EffectOperation::CreateAbsentMount { target_id } => {
+                let target = takeover_v2_target(plan, target_id)?;
+                let parent = open_verified_target_parent(paths, plan, target)?;
+                validate_takeover_v2_visible_mount(&parent, target, item)?;
+                ensure_takeover_v2_host_entry_absent(
+                    &parent,
+                    &draft_name,
+                    "CreateAbsentMount draft",
+                )?;
+                ensure_takeover_v2_host_entry_absent(
+                    &parent,
+                    &hidden_name,
+                    "CreateAbsentMount hidden",
+                )?;
+                ensure_takeover_v2_host_entry_absent(
+                    &parent,
+                    &cleanup_name,
+                    "CreateAbsentMount cleanup",
+                )?;
+                parent.recheck(
+                    target.parent_device,
+                    target.parent_inode,
+                    target.parent_mode,
+                )?;
+            }
+            TakeoverV2EffectOperation::ReplaceOriginWithMount {
+                target_id,
+                origin_id,
+            } => {
+                let target = takeover_v2_target(plan, target_id)?;
+                let (origin, manifest) = takeover_v2_origin_contract(plan, journal, origin_id)?;
+                if target.target_path != origin.original_path
+                    || (
+                        target.parent_device,
+                        target.parent_inode,
+                        target.parent_mode,
+                    ) != (
+                        origin.parent_device,
+                        origin.parent_inode,
+                        origin.parent_mode,
+                    )
+                {
+                    return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                        "Replace cleanup 的 Target 与 Origin 父目录合同不一致".to_owned(),
+                    ));
+                }
+                let parent = open_verified_target_parent(paths, plan, target)?;
+                validate_takeover_v2_visible_mount(&parent, target, item)?;
+                ensure_takeover_v2_host_entry_absent(
+                    &parent,
+                    &draft_name,
+                    "ReplaceOriginWithMount draft",
+                )?;
+                if allow_cleanup {
+                    cleanup_takeover_v2_manifest_root(
+                        &parent,
+                        (
+                            target.parent_device,
+                            target.parent_inode,
+                            target.parent_mode,
+                        ),
+                        &hidden_name,
+                        &cleanup_name,
+                        manifest,
+                    )?;
+                } else {
+                    ensure_takeover_v2_host_entry_absent(&parent, &hidden_name, "终态残留 hidden")?;
+                    ensure_takeover_v2_host_entry_absent(
+                        &parent,
+                        &cleanup_name,
+                        "终态残留 cleanup",
+                    )?;
+                }
+                validate_takeover_v2_visible_mount(&parent, target, item)?;
+            }
+            TakeoverV2EffectOperation::RemoveOrigin { origin_id } => {
+                let (origin, manifest) = takeover_v2_origin_contract(plan, journal, origin_id)?;
+                let parent = open_verified_origin_parent(paths, origin)?;
+                let visible_path = PathBuf::from(&origin.original_path);
+                if entry_metadata_at(&parent.handle, &parent.leaf)
+                    .map_err(|source| v2_io("检查 RemoveOrigin 终态", &visible_path, source))?
+                    .is_some()
+                {
+                    return Err(candidate_blocked(
+                        "RemoveOrigin visible 必须保持缺失",
+                        &visible_path,
+                    ));
+                }
+                ensure_takeover_v2_host_entry_absent(&parent, &draft_name, "RemoveOrigin draft")?;
+                if allow_cleanup {
+                    cleanup_takeover_v2_manifest_root(
+                        &parent,
+                        (
+                            origin.parent_device,
+                            origin.parent_inode,
+                            origin.parent_mode,
+                        ),
+                        &hidden_name,
+                        &cleanup_name,
+                        manifest,
+                    )?;
+                } else {
+                    ensure_takeover_v2_host_entry_absent(&parent, &hidden_name, "终态残留 hidden")?;
+                    ensure_takeover_v2_host_entry_absent(
+                        &parent,
+                        &cleanup_name,
+                        "终态残留 cleanup",
+                    )?;
+                    parent.recheck(
+                        origin.parent_device,
+                        origin.parent_inode,
+                        origin.parent_mode,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_takeover_v2_visible_mount(
+    parent: &OpenVerifiedParent,
+    target: &TakeoverV2Target,
+    item: &TakeoverV2EffectItem,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let expected = item.applied_observation.as_deref().ok_or_else(|| {
+        TakeoverV2LifecycleError::RecoveryBlocked(
+            "终态 Mount effect 缺少 applied observation".to_owned(),
+        )
+    })?;
+    let path = PathBuf::from(&target.target_path);
+    if observe_takeover_v2_staged_link(parent, &parent.leaf, &path, &target.expected_target)?
+        .as_deref()
+        != Some(expected)
+    {
+        return Err(candidate_blocked(
+            "终态 Mount 不匹配封印的 inode 与 target",
+            &path,
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_takeover_v2_host_entry_absent(
+    parent: &OpenVerifiedParent,
+    name: &OsStr,
+    label: &'static str,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let path = parent.visible_path.join(name);
+    if entry_metadata_at(&parent.handle, name)
+        .map_err(|source| v2_io("检查 Host cleanup 负面证据", &path, source))?
+        .is_some()
+    {
+        return Err(candidate_blocked(label, &path));
+    }
+    Ok(())
+}
+
+fn cleanup_takeover_v2_manifest_root(
+    parent: &OpenVerifiedParent,
+    expected_parent: (u64, u64, u32),
+    hidden_name: &OsStr,
+    cleanup_name: &OsStr,
+    manifest: &TakeoverV2OriginManifest,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let hidden_path = parent.visible_path.join(hidden_name);
+    let cleanup_path = parent.visible_path.join(cleanup_name);
+    let hidden = entry_metadata_at(&parent.handle, hidden_name)
+        .map_err(|source| v2_io("检查待隔离 Origin", &hidden_path, source))?;
+    let cleanup = entry_metadata_at(&parent.handle, cleanup_name)
+        .map_err(|source| v2_io("检查 Origin cleanup 隔离项", &cleanup_path, source))?;
+    if hidden.is_some() && cleanup.is_some() {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(format!(
+            "Origin hidden 与 cleanup 不能共存：{}",
+            parent.visible_path.display()
+        )));
+    }
+    if hidden.is_some() {
+        validate_original_manifest_at(
+            &parent.handle,
+            hidden_name,
+            &hidden_path,
+            (
+                manifest.root_device,
+                manifest.root_inode,
+                manifest.root_mode,
+            ),
+            &manifest.entries,
+        )?;
+        parent.recheck(expected_parent.0, expected_parent.1, expected_parent.2)?;
+        if entry_metadata_at(&parent.handle, cleanup_name)
+            .map_err(|source| v2_io("复核 Origin cleanup 目标", &cleanup_path, source))?
+            .is_some()
+        {
+            return Err(candidate_blocked(
+                "Origin cleanup 目标在隔离前被占用",
+                &cleanup_path,
+            ));
+        }
+        rename_at_no_replace(&parent.handle, hidden_name, &parent.handle, cleanup_name)
+            .map_err(|source| v2_io("原子隔离待清理 Origin", &hidden_path, source))?;
+        parent
+            .handle
+            .sync_all()
+            .map_err(|source| v2_io("同步 Origin cleanup 隔离", &cleanup_path, source))?;
+    }
+    if entry_metadata_at(&parent.handle, hidden_name)
+        .map_err(|source| v2_io("复核 Origin hidden", &hidden_path, source))?
+        .is_some()
+    {
+        return Err(candidate_blocked(
+            "Origin hidden 在隔离后仍然存在",
+            &hidden_path,
+        ));
+    }
+    if entry_metadata_at(&parent.handle, cleanup_name)
+        .map_err(|source| v2_io("复核 Origin cleanup", &cleanup_path, source))?
+        .is_some()
+    {
+        parent.recheck(expected_parent.0, expected_parent.1, expected_parent.2)?;
+        remove_manifest_tree_at(
+            &parent.handle,
+            cleanup_name,
+            &cleanup_path,
+            (
+                manifest.root_device,
+                manifest.root_inode,
+                manifest.root_mode,
+            ),
+            &manifest.entries,
+            true,
+        )?;
+    }
+    ensure_takeover_v2_host_entry_absent(parent, hidden_name, "Origin hidden 清理未完成")?;
+    ensure_takeover_v2_host_entry_absent(parent, cleanup_name, "Origin cleanup 清理未完成")?;
+    parent.recheck(expected_parent.0, expected_parent.1, expected_parent.2)
+}
+
+fn validate_takeover_v2_managed_copy_before_cleanup(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    ensure_takeover_v2_bundle_cleanup_absent(paths, lifecycle_lock, &journal.transaction_id)?;
+    validate_takeover_v2_visible_host_effects(paths, plan, journal)?;
+
+    let bundles =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.bundles_root())?;
+    let bundle_name = OsString::from(&journal.bundle_id);
+    let bundle_path = paths.bundles_root().join(&bundle_name);
+    let (_, manifest) = selected_origin_contract(plan, journal)?;
+    // cleanup 可以从部分删除继续，因此这里必须只依赖已发布主副本，不再读取旧 Origin。
+    let audit = audit_complete_activated_bundle_container(
+        &bundles,
+        &bundle_name,
+        &bundle_path,
+        plan,
+        manifest,
+        None,
+        &journal.current_target,
+    )?;
+    validate_takeover_v2_bundle_root_observation(journal, audit.bundle.snapshot)?;
+    validate_takeover_v2_bundle_publish_observation(
+        journal,
+        &takeover_v2_bundle_publish_observation_from_bundle(&audit.bundle)?,
+    )?;
+
+    validate_takeover_v2_visible_host_effects(paths, plan, journal)?;
+    lifecycle_lock.recheck(paths)?;
+    Ok(())
+}
+
+fn validate_takeover_v2_visible_host_effects(
+    paths: &ApplicationPaths,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    for (index, item) in journal.effect_items.iter().enumerate() {
+        let draft_name = OsString::from(takeover_v2_effect_draft_name(
+            &journal.transaction_id,
+            index,
+        ));
+        match &item.operation {
+            TakeoverV2EffectOperation::CreateAbsentMount { target_id }
+            | TakeoverV2EffectOperation::ReplaceOriginWithMount { target_id, .. } => {
+                let target = takeover_v2_target(plan, target_id)?;
+                let parent = open_verified_target_parent(paths, plan, target)?;
+                validate_takeover_v2_visible_mount(&parent, target, item)?;
+                ensure_takeover_v2_host_entry_absent(
+                    &parent,
+                    &draft_name,
+                    "cleanup 前不允许残留 Host draft",
+                )?;
+                parent.recheck(
+                    target.parent_device,
+                    target.parent_inode,
+                    target.parent_mode,
+                )?;
+            }
+            TakeoverV2EffectOperation::RemoveOrigin { origin_id } => {
+                let origin = plan
+                    .origins
+                    .iter()
+                    .find(|origin| origin.id == *origin_id)
+                    .ok_or_else(|| {
+                        TakeoverV2LifecycleError::RecoveryBlocked(
+                            "cleanup 前缺少 Remove Origin".to_owned(),
+                        )
+                    })?;
+                let parent = open_verified_origin_parent(paths, origin)?;
+                let visible_path = PathBuf::from(&origin.original_path);
+                if entry_metadata_at(&parent.handle, &parent.leaf)
+                    .map_err(|source| v2_io("检查 cleanup 前 RemoveOrigin", &visible_path, source))?
+                    .is_some()
+                {
+                    return Err(candidate_blocked(
+                        "cleanup 前 RemoveOrigin visible 必须保持缺失",
+                        &visible_path,
+                    ));
+                }
+                ensure_takeover_v2_host_entry_absent(
+                    &parent,
+                    &draft_name,
+                    "cleanup 前不允许残留 RemoveOrigin draft",
+                )?;
+                parent.recheck(
+                    origin.parent_device,
+                    origin.parent_inode,
+                    origin.parent_mode,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_takeover_v2_terminal_filesystem(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    reconcile_takeover_v2_staging(paths, lifecycle_lock, &journal.transaction_id, false)?;
+    ensure_takeover_v2_bundle_cleanup_absent(paths, lifecycle_lock, &journal.transaction_id)?;
+    cleanup_takeover_v2_host_evidence(paths, plan, journal, false)?;
+
+    let bundles =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.bundles_root())?;
+    let bundle_name = OsString::from(&journal.bundle_id);
+    let bundle_path = paths.bundles_root().join(&bundle_name);
+    let (_, manifest) = selected_origin_contract(plan, journal)?;
+    // 物理清理后不再依赖 Origin；完整 Bundle 只按封印 manifest 与发布 inode 审计。
+    let audit = audit_complete_activated_bundle_container(
+        &bundles,
+        &bundle_name,
+        &bundle_path,
+        plan,
+        manifest,
+        None,
+        &journal.current_target,
+    )?;
+    validate_takeover_v2_bundle_root_observation(journal, audit.bundle.snapshot)?;
+    validate_takeover_v2_bundle_publish_observation(
+        journal,
+        &takeover_v2_bundle_publish_observation_from_bundle(&audit.bundle)?,
+    )?;
+
+    reconcile_takeover_v2_staging(paths, lifecycle_lock, &journal.transaction_id, false)?;
+    ensure_takeover_v2_bundle_cleanup_absent(paths, lifecycle_lock, &journal.transaction_id)?;
+    cleanup_takeover_v2_host_evidence(paths, plan, journal, false)?;
+    lifecycle_lock.recheck(paths)?;
+    Ok(())
+}
+
+fn ensure_takeover_v2_bundle_cleanup_absent(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction_id: &str,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let bundles =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.bundles_root())?;
+    let name = OsString::from(takeover_v2_bundle_cleanup_name(transaction_id));
+    let path = paths.bundles_root().join(&name);
+    if entry_metadata_at(&bundles, &name)
+        .map_err(|source| v2_io("检查终态 Bundle cleanup", &path, source))?
+        .is_some()
+    {
+        return Err(candidate_blocked("终态不允许残留 Bundle cleanup", &path));
+    }
+    Ok(())
+}
+
+fn validate_takeover_v2_terminal_negative_evidence(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    transaction_id: &str,
+) -> Result<(), TakeoverV2LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    ensure_takeover_v2_terminal_journal_temps_absent(paths, &journals, transaction_id, false)?;
+    let formal_name = OsString::from(journal_file_name(transaction_id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    if entry_metadata_at(&journals, &formal_name)
+        .map_err(|source| v2_io("检查终态 formal Journal", &formal_path, source))?
+        .is_some()
+    {
+        return Err(candidate_blocked(
+            "终态不允许残留 formal Journal",
+            &formal_path,
+        ));
+    }
+    reconcile_takeover_v2_staging(paths, lifecycle_lock, transaction_id, false)?;
+    ensure_takeover_v2_bundle_cleanup_absent(paths, lifecycle_lock, transaction_id)?;
+    for (index, item) in build_takeover_v2_effect_items(plan)?.iter().enumerate() {
+        let parent = match &item.operation {
+            TakeoverV2EffectOperation::CreateAbsentMount { target_id }
+            | TakeoverV2EffectOperation::ReplaceOriginWithMount { target_id, .. } => {
+                let target = takeover_v2_target(plan, target_id)?;
+                open_verified_target_parent(paths, plan, target)?
+            }
+            TakeoverV2EffectOperation::RemoveOrigin { origin_id } => {
+                let origin = plan
+                    .origins
+                    .iter()
+                    .find(|origin| origin.id == *origin_id)
+                    .ok_or_else(|| {
+                        TakeoverV2LifecycleError::RecoveryBlocked(
+                            "终态负面证据缺少 Origin".to_owned(),
+                        )
+                    })?;
+                open_verified_origin_parent(paths, origin)?
+            }
+        };
+        for name in [
+            takeover_v2_effect_draft_name(transaction_id, index),
+            takeover_v2_effect_hidden_name(transaction_id, index),
+            takeover_v2_effect_cleanup_name(transaction_id, index),
+        ] {
+            ensure_takeover_v2_host_entry_absent(
+                &parent,
+                OsStr::new(&name),
+                "终态残留 Host 临时证据",
+            )?;
+        }
+    }
+    lifecycle_lock.recheck(paths)?;
+    Ok(())
+}
+
+fn ensure_takeover_v2_terminal_journal_temps_absent(
+    paths: &ApplicationPaths,
+    journals: &File,
+    transaction_id: &str,
+    allow_phase_temp: bool,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let prefix = format!(".{}.tmp-", journal_file_name(transaction_id));
+    if let Some(name) = read_entry_names_os_from_handle(journals)?
+        .into_iter()
+        .find(|name| name.as_bytes().starts_with(prefix.as_bytes()))
+    {
+        return Err(candidate_blocked(
+            "终态不允许残留首次 formal 临时文件",
+            &paths.journals_root().join(name),
+        ));
+    }
+    if !allow_phase_temp {
+        ensure_takeover_v2_phase_temp_absent(paths, journals, transaction_id)?;
+    }
+    Ok(())
+}
+
+fn takeover_v2_cleanup_completed_successor(
+    old: &TakeoverV2Journal,
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    validate_takeover_v2_cleanup_source(old)?;
+    let mut next = old.clone();
+    next.phase = TakeoverV2JournalPhase::CleanupCompleted;
+    for item in &mut next.effect_items {
+        item.cleanup_completed = true;
+    }
+    validate_takeover_v2_effect_progress(&next)?;
+    Ok(next)
+}
+
+fn validate_takeover_v2_cleanup_completed_successor(
+    old: &TakeoverV2Journal,
+    new: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    if &takeover_v2_cleanup_completed_successor(old)? != new {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "CleanupCompleted Journal 没有一次性推进 phase 与全部 cleanup bit".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn reconcile_takeover_v2_cleanup_phase_temp(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    formal: &TakeoverV2Journal,
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    if entry_metadata_at(&journals, &temporary_name)
+        .map_err(|source| v2_io("检查 CleanupCompleted phase temp", &temporary_path, source))?
+        .is_none()
+    {
+        return Ok(formal.clone());
+    }
+    let (temporary_bytes, temporary_owned) =
+        read_owned_journal_bytes_at(&journals, &temporary_name, &temporary_path)?;
+    match formal.phase {
+        TakeoverV2JournalPhase::StateCommitted => {
+            let successor = takeover_v2_cleanup_completed_successor(formal)?;
+            let successor_bytes = serde_json::to_vec_pretty(&successor)?;
+            if !successor_bytes.starts_with(&temporary_bytes) {
+                return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                    "CleanupCompleted phase temp 不是 canonical successor prefix".to_owned(),
+                ));
+            }
+        }
+        TakeoverV2JournalPhase::CleanupCompleted => {
+            let mut predecessor = formal.clone();
+            predecessor.phase = TakeoverV2JournalPhase::StateCommitted;
+            for item in &mut predecessor.effect_items {
+                item.cleanup_completed = false;
+            }
+            validate_takeover_v2_cleanup_completed_successor(&predecessor, formal)?;
+            if temporary_bytes != serde_json::to_vec_pretty(&predecessor)? {
+                return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                    "CleanupCompleted swap 后只允许完整 StateCommitted predecessor temp".to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                "cleanup phase temp 不接受当前 formal phase".to_owned(),
+            ));
+        }
+    }
+    validate_takeover_v2_terminal_filesystem(paths, lifecycle_lock, plan, formal)?;
+    remove_owned_journal(paths, &journals, &temporary_owned)?;
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let (formal_after, _, bytes_after) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+    if formal_after != *formal || bytes_after != serde_json::to_vec_pretty(formal)? {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "清理 phase temp 期间 formal Journal 发生变化".to_owned(),
+        ));
+    }
+    validate_takeover_v2_terminal_filesystem(paths, lifecycle_lock, plan, &formal_after)?;
+    Ok(formal_after)
+}
+
+fn persist_takeover_v2_cleanup_completed_journal(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    old: &TakeoverV2Journal,
+) -> Result<TakeoverV2Journal, TakeoverV2LifecycleError> {
+    let new = takeover_v2_cleanup_completed_successor(old)?;
+    validate_takeover_v2_journal_contract(old, transaction, plan)?;
+    validate_takeover_v2_journal_contract(&new, transaction, plan)?;
+    validate_journal_size_for_all_phases(&new)?;
+    validate_takeover_v2_terminal_filesystem(paths, lifecycle_lock, plan, old)?;
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    ensure_takeover_v2_phase_temp_absent(paths, &journals, &transaction.id)?;
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let (formal, formal_owned, formal_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+    if formal != *old || formal_bytes != serde_json::to_vec_pretty(old)? {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "写入 CleanupCompleted 前 formal StateCommitted 发生变化".to_owned(),
+        ));
+    }
+
+    let temporary_name = OsString::from(phase_temp_file_name(&transaction.id));
+    let temporary_path = paths.journals_root().join(&temporary_name);
+    let new_bytes = serde_json::to_vec_pretty(&new)?;
+    let mut temporary = create_new_file_at(&journals, &temporary_name, &temporary_path)?;
+    temporary.write_all(&new_bytes).map_err(|source| {
+        v2_io(
+            "写入 CleanupCompleted 临时 Journal",
+            &temporary_path,
+            source,
+        )
+    })?;
+    temporary.sync_all().map_err(|source| {
+        v2_io(
+            "同步 CleanupCompleted 临时 Journal",
+            &temporary_path,
+            source,
+        )
+    })?;
+    journals.sync_all().map_err(|source| {
+        v2_io(
+            "同步 CleanupCompleted 临时 Journal 父目录",
+            &temporary_path,
+            source,
+        )
+    })?;
+    drop(temporary);
+
+    let rebound = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        &journals,
+        &paths.journals_root(),
+    )?;
+    let (formal_before, formal_before_owned, formal_before_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &formal_name, &formal_path)?;
+    let (temporary_before, temporary_before_owned, temporary_before_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &temporary_name, &temporary_path)?;
+    if formal_before != *old
+        || formal_before_owned != formal_owned
+        || formal_before_bytes != formal_bytes
+        || temporary_before != new
+        || temporary_before_bytes != new_bytes
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "CleanupCompleted Journal 在交换前发生变化".to_owned(),
+        ));
+    }
+    validate_takeover_v2_terminal_filesystem(paths, lifecycle_lock, plan, old)?;
+    rename_at_swap(&rebound, &temporary_name, &rebound, &formal_name)
+        .map_err(|source| v2_io("原子交换 CleanupCompleted Journal", &formal_path, source))?;
+    rebound
+        .sync_all()
+        .map_err(|source| v2_io("同步 CleanupCompleted Journal 交换", &formal_path, source))?;
+
+    let (formal_after, formal_after_owned, formal_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &formal_name, &formal_path)?;
+    let (temporary_after, temporary_after_owned, temporary_after_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&rebound, &temporary_name, &temporary_path)?;
+    if formal_after != new
+        || formal_after_bytes != new_bytes
+        || temporary_after != *old
+        || temporary_after_bytes != formal_bytes
+        || !same_journal_identity(formal_after_owned.snapshot, temporary_before_owned.snapshot)
+        || !same_journal_identity(temporary_after_owned.snapshot, formal_owned.snapshot)
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "CleanupCompleted Journal 交换后的身份或内容不一致".to_owned(),
+        ));
+    }
+    remove_owned_journal(paths, &rebound, &temporary_after_owned)?;
+    ensure_takeover_v2_phase_temp_absent(paths, &rebound, &transaction.id)?;
+    validate_takeover_v2_terminal_filesystem(paths, lifecycle_lock, plan, &formal_after)?;
+    Ok(formal_after)
 }
 
 fn load_canonical_effect_started_journal(
@@ -8767,7 +9754,7 @@ fn validate_takeover_v2_activated_filesystem(
         &bundle_path,
         plan,
         manifest,
-        &selected_root,
+        Some(&selected_root),
         &journal.current_target,
     )?;
     validate_takeover_v2_bundle_root_observation(journal, audit.bundle.snapshot)?;
@@ -9801,6 +10788,25 @@ mod tests {
                 .expect("应读取已完成 effect 的 formal"),
             )
             .expect("effect formal 必须可解析");
+            (transaction_id, journal)
+        }
+
+        fn begin_with_state_committed(
+            &mut self,
+            plan: &mut TakeoverV2Plan,
+        ) -> (String, TakeoverV2Journal) {
+            let (transaction_id, _) = self.begin_with_applied_effects(plan);
+            commit_takeover_v2_state(&self.paths, &mut self.storage, &transaction_id, 400)
+                .expect("应提交 v2 接管领域状态");
+            let journal = serde_json::from_slice(
+                &fs::read(
+                    self.paths
+                        .journals_root()
+                        .join(journal_file_name(&transaction_id)),
+                )
+                .expect("应读取 StateCommitted formal"),
+            )
+            .expect("StateCommitted formal 必须可解析");
             (transaction_id, journal)
         }
     }
@@ -14204,6 +15210,294 @@ mod tests {
                 .read_inventory_observation(&plan.origins[0].observation_id)
                 .expect("阻塞时不得删除 Inventory observation");
         }
+    }
+
+    #[test]
+    fn cleanup_completes_create_replace_and_remove_effects() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_two_origin_plan("alpha");
+        add_absent_copilot_target(&harness, &mut plan);
+        reset_plan_storage_identity(&harness.paths, &mut plan);
+        let mut plan = harness
+            .storage
+            .save_takeover_v2_plan(&plan)
+            .expect("应保存三种 effect 的 Plan");
+        let (transaction_id, journal) = harness.begin_with_state_committed(&mut plan);
+
+        cleanup_takeover_v2_transaction(&harness.paths, &mut harness.storage, &transaction_id, 500)
+            .expect("三种 effect 应完成物理清理和终态 forget");
+
+        assert!(harness.transaction(&transaction_id).is_none());
+        assert!(
+            !harness
+                .paths
+                .journals_root()
+                .join(journal_file_name(&transaction_id))
+                .exists()
+        );
+        assert!(!harness.paths.staging_root().join(&transaction_id).exists());
+        for (index, item) in journal.effect_items.iter().enumerate() {
+            let hidden = takeover_v2_effect_hidden_name(&transaction_id, index);
+            let cleanup = takeover_v2_effect_cleanup_name(&transaction_id, index);
+            let parent = match &item.operation {
+                TakeoverV2EffectOperation::CreateAbsentMount { target_id }
+                | TakeoverV2EffectOperation::ReplaceOriginWithMount { target_id, .. } => Path::new(
+                    &plan
+                        .targets
+                        .iter()
+                        .find(|target| target.id == *target_id)
+                        .expect("effect 应引用 Target")
+                        .target_path,
+                )
+                .parent()
+                .expect("Target 应有父目录")
+                .to_path_buf(),
+                TakeoverV2EffectOperation::RemoveOrigin { origin_id } => Path::new(
+                    &plan
+                        .origins
+                        .iter()
+                        .find(|origin| origin.id == *origin_id)
+                        .expect("effect 应引用 Origin")
+                        .original_path,
+                )
+                .parent()
+                .expect("Origin 应有父目录")
+                .to_path_buf(),
+            };
+            assert!(!parent.join(hidden).exists(), "index={index}");
+            assert!(!parent.join(cleanup).exists(), "index={index}");
+        }
+        for target in &plan.targets {
+            assert_eq!(
+                fs::read_link(&target.target_path).expect("最终 Mount 必须存在"),
+                PathBuf::from(&target.expected_target)
+            );
+        }
+        for origin in &plan.origins {
+            if origin.final_disposition == TakeoverOriginDisposition::Remove {
+                assert!(!Path::new(&origin.original_path).exists());
+            }
+        }
+        cleanup_takeover_v2_transaction(&harness.paths, &mut harness.storage, &transaction_id, 501)
+            .expect("forget 后再次 cleanup 应保持幂等");
+    }
+
+    #[test]
+    fn cleanup_preserves_origin_when_managed_copy_changed() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_state_committed(&mut plan);
+        let parent = Path::new(&plan.targets[0].target_path)
+            .parent()
+            .expect("Target 应有父目录");
+        let hidden = parent.join(takeover_v2_effect_hidden_name(&transaction_id, 0));
+        let managed_skill_file = Path::new(&plan.content_directory)
+            .join("members")
+            .join(&plan.skill_name)
+            .join("SKILL.md");
+        fs::write(&managed_skill_file, b"managed copy changed")
+            .expect("应模拟 Central Store 主副本被外部改写");
+
+        cleanup_takeover_v2_transaction(&harness.paths, &mut harness.storage, &transaction_id, 500)
+            .expect_err("主副本不完整时必须在删除旧 Origin 前阻塞");
+
+        assert!(hidden.exists(), "阻塞时必须保留唯一旧 Origin");
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("阻塞事务必须保留")
+                .phase,
+            "state_committed"
+        );
+    }
+
+    #[test]
+    fn cleanup_resumes_partial_manifest_and_preserves_unknown_entries() {
+        let mut resumed = Harness::new();
+        let mut resumed_plan = resumed.save_single_plan("alpha");
+        let (resumed_id, _) = resumed.begin_with_state_committed(&mut resumed_plan);
+        let resumed_parent = Path::new(&resumed_plan.targets[0].target_path)
+            .parent()
+            .expect("Target 应有父目录");
+        let resumed_hidden = resumed_parent.join(takeover_v2_effect_hidden_name(&resumed_id, 0));
+        let resumed_cleanup = resumed_parent.join(takeover_v2_effect_cleanup_name(&resumed_id, 0));
+        fs::rename(&resumed_hidden, &resumed_cleanup).expect("应隔离 Origin");
+        fs::remove_file(resumed_cleanup.join("SKILL.md")).expect("应模拟部分删除");
+        cleanup_takeover_v2_transaction(&resumed.paths, &mut resumed.storage, &resumed_id, 500)
+            .expect("partial manifest 应续删成功");
+        assert!(resumed.transaction(&resumed_id).is_none());
+
+        let mut blocked = Harness::new();
+        let mut blocked_plan = blocked.save_single_plan("alpha");
+        let (blocked_id, _) = blocked.begin_with_state_committed(&mut blocked_plan);
+        let blocked_parent = Path::new(&blocked_plan.targets[0].target_path)
+            .parent()
+            .expect("Target 应有父目录");
+        let blocked_hidden = blocked_parent.join(takeover_v2_effect_hidden_name(&blocked_id, 0));
+        let blocked_cleanup = blocked_parent.join(takeover_v2_effect_cleanup_name(&blocked_id, 0));
+        let known = fs::read(blocked_hidden.join("SKILL.md")).expect("应读取已知内容");
+        fs::rename(&blocked_hidden, &blocked_cleanup).expect("应隔离 Origin");
+        fs::write(blocked_cleanup.join("unknown.txt"), b"external").expect("应插入未知条目");
+        cleanup_takeover_v2_transaction(&blocked.paths, &mut blocked.storage, &blocked_id, 500)
+            .expect_err("未知条目必须阻塞");
+        assert_eq!(fs::read(blocked_cleanup.join("SKILL.md")).unwrap(), known);
+        assert!(blocked_cleanup.join("unknown.txt").exists());
+    }
+
+    #[test]
+    fn cleanup_recovers_phase_temp_and_terminal_boundaries() {
+        let mut prefix = Harness::new();
+        let mut prefix_plan = prefix.save_single_plan("alpha");
+        let (prefix_id, prefix_journal) = prefix.begin_with_state_committed(&mut prefix_plan);
+        fs::remove_dir(prefix.paths.staging_root().join(&prefix_id)).expect("应清理空 staging");
+        let prefix_parent = Path::new(&prefix_plan.targets[0].target_path)
+            .parent()
+            .expect("Target 应有父目录");
+        let prefix_hidden = prefix_parent.join(takeover_v2_effect_hidden_name(&prefix_id, 0));
+        let prefix_cleanup = prefix_parent.join(takeover_v2_effect_cleanup_name(&prefix_id, 0));
+        fs::rename(prefix_hidden, &prefix_cleanup).expect("应隔离 Origin");
+        fs::remove_dir_all(prefix_cleanup).expect("应模拟根已删除");
+        let prefix_successor = takeover_v2_cleanup_completed_successor(&prefix_journal).unwrap();
+        let prefix_bytes = serde_json::to_vec_pretty(&prefix_successor).unwrap();
+        fs::write(
+            prefix
+                .paths
+                .journals_root()
+                .join(phase_temp_file_name(&prefix_id)),
+            &prefix_bytes[..prefix_bytes.len() / 2],
+        )
+        .expect("应写 successor prefix");
+        cleanup_takeover_v2_transaction(&prefix.paths, &mut prefix.storage, &prefix_id, 500)
+            .expect("successor prefix 应重建并完成");
+
+        let mut boundary = Harness::new();
+        let mut boundary_plan = boundary.save_single_plan("alpha");
+        let (boundary_id, boundary_journal) =
+            boundary.begin_with_state_committed(&mut boundary_plan);
+        fs::remove_dir(boundary.paths.staging_root().join(&boundary_id)).expect("应清理空 staging");
+        let boundary_parent = Path::new(&boundary_plan.targets[0].target_path)
+            .parent()
+            .expect("Target 应有父目录");
+        let boundary_hidden = boundary_parent.join(takeover_v2_effect_hidden_name(&boundary_id, 0));
+        let boundary_cleanup =
+            boundary_parent.join(takeover_v2_effect_cleanup_name(&boundary_id, 0));
+        fs::rename(boundary_hidden, &boundary_cleanup).expect("应隔离 Origin");
+        fs::remove_dir_all(boundary_cleanup).expect("应完成物理删除");
+        let boundary_successor =
+            takeover_v2_cleanup_completed_successor(&boundary_journal).unwrap();
+        let formal_name = OsString::from(journal_file_name(&boundary_id));
+        let temp_name = OsString::from(phase_temp_file_name(&boundary_id));
+        fs::write(
+            boundary.paths.journals_root().join(&temp_name),
+            serde_json::to_vec_pretty(&boundary_successor).unwrap(),
+        )
+        .expect("应写完整 successor");
+        let lock = acquire_lifecycle_lock(&boundary.paths).expect("应取得生命周期锁");
+        let journals = open_managed_directory_from_root(
+            &boundary.paths,
+            lock.root(),
+            &boundary.paths.journals_root(),
+        )
+        .expect("应打开 Journal 根");
+        rename_at_swap(&journals, &temp_name, &journals, &formal_name)
+            .expect("应模拟 CleanupCompleted swap");
+        journals.sync_all().expect("应同步 Journal swap");
+        drop(lock);
+        let interrupted = RefCell::new(None);
+        cleanup_takeover_v2_transaction_with_hook(
+            &boundary.paths,
+            &mut boundary.storage,
+            &boundary_id,
+            500,
+            &mut |point| {
+                if point == TakeoverV2CleanupCheckpoint::SqliteCompleted {
+                    *interrupted.borrow_mut() = Some(point);
+                    return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                        "测试中断".to_owned(),
+                    ));
+                }
+                Ok(())
+            },
+        )
+        .expect_err("应在 SQLite completed 后中断");
+        assert_eq!(
+            *interrupted.borrow(),
+            Some(TakeoverV2CleanupCheckpoint::SqliteCompleted)
+        );
+        cleanup_takeover_v2_transaction_with_hook(
+            &boundary.paths,
+            &mut boundary.storage,
+            &boundary_id,
+            501,
+            &mut |point| {
+                if point == TakeoverV2CleanupCheckpoint::FormalRemoved {
+                    return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                        "测试中断".to_owned(),
+                    ));
+                }
+                Ok(())
+            },
+        )
+        .expect_err("应在 formal 删除后中断");
+        cleanup_takeover_v2_transaction(&boundary.paths, &mut boundary.storage, &boundary_id, 502)
+            .expect("completed + formal missing 应验证负面证据后 forget");
+        assert!(boundary.transaction(&boundary_id).is_none());
+    }
+
+    #[test]
+    fn cleanup_rejects_journal_root_replacement_and_reappearing_formal() {
+        let mut replaced = Harness::new();
+        let mut replaced_plan = replaced.save_single_plan("alpha");
+        let (replaced_id, _) = replaced.begin_with_state_committed(&mut replaced_plan);
+        let detached = replaced.paths.data_root().join("detached-journals");
+        cleanup_takeover_v2_transaction_with_hook(
+            &replaced.paths,
+            &mut replaced.storage,
+            &replaced_id,
+            500,
+            &mut |point| {
+                if point == TakeoverV2CleanupCheckpoint::SqliteCompleted {
+                    fs::rename(replaced.paths.journals_root(), &detached)
+                        .expect("应模拟 journals 根目录被替换");
+                    fs::create_dir(replaced.paths.journals_root())
+                        .expect("应创建同名替代 journals 根");
+                    fs::set_permissions(
+                        replaced.paths.journals_root(),
+                        fs::Permissions::from_mode(0o700),
+                    )
+                    .expect("替代 journals 根应使用受管权限");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("SQLite completed 后必须拒绝 journals 根 identity replacement");
+        assert!(
+            detached.join(journal_file_name(&replaced_id)).exists(),
+            "阻塞时不得从 detached 目录误删 formal"
+        );
+
+        let mut reappeared = Harness::new();
+        let mut reappeared_plan = reappeared.save_single_plan("alpha");
+        let (reappeared_id, _) = reappeared.begin_with_state_committed(&mut reappeared_plan);
+        let formal_path = reappeared
+            .paths
+            .journals_root()
+            .join(journal_file_name(&reappeared_id));
+        cleanup_takeover_v2_transaction_with_hook(
+            &reappeared.paths,
+            &mut reappeared.storage,
+            &reappeared_id,
+            500,
+            &mut |point| {
+                if point == TakeoverV2CleanupCheckpoint::FormalRemoved {
+                    fs::write(&formal_path, b"external orphan")
+                        .expect("应模拟 formal 删除后同名文件重新出现");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("formal 重新出现时不得 forget 事务");
+        assert!(formal_path.exists(), "重新出现的 formal 必须保留供人工处理");
     }
 
     #[test]
