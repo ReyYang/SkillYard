@@ -179,6 +179,38 @@
 
 把扫描发现的待接管 Skill 安全迁入 Central Store，同时保持用户已有使用关系。
 
+### 重做实施边界
+
+Stage 4 在提交 `9abc7d0` 后从 Stage 3 已验收基线重新实现。此前同一阶段内先建立单路径 Takeover、再并行增加 `v2` 多路径协议，造成两套 Plan、Transaction、Journal 和恢复入口；该实现已经完整撤销，不能作为新实现的兼容前提或代码基础。
+
+新实现必须遵守以下边界：
+
+- 只有一套不带版本后缀的 `TakeoverPlan`、`TakeoverTransaction`、Filesystem Transaction Journal 和生产确认入口。
+- 一个 Plan 表达一个待接管 Skill Identity、一个最终 Bundle Member、一个被用户选中的内容副本、多个原始位置和多个最终 Mount；单副本、重复副本、scope 冲突与共享目录都是同一模型的不同输入，不建立特殊的第二套事务。
+- 创建 Plan 时冻结全部用户选择和后端派生路径；确认接口只接收 opaque `plan_id`，不能在确认时再次提交路径、Mount 或内容选择。
+- Plan 和扫描完全只读。确认后才建立一个接管事务；SQLite 记录总体阶段，Journal 记录完整文件操作合同和逐路径进度。
+- 领域状态提交前发生正常失败或中断时，恢复原始位置并移除本次候选与新增 Mount；领域状态提交后只向前完成验证和清理。未知占用、路径身份变化或权限异常进入 blocked recovery，不能猜测。
+- 共享目录的应用专属 Mount 全部建立并验证后，才能最后移除共享入口；失败时撤销本次新增 Mount 并恢复共享入口。
+- 不保留旧 Takeover 生产入口，不迁移已撤销的开发期 Stage 4 schema，也不建立 Stage 5 Source 模型。
+
+公开验收 seam 固定为：
+
+1. `SkillYardApplication::handle`：扫描、创建 Plan、确认和重新启动后的 Inventory。
+2. 隔离的真实临时目录：原 Skill、Central Store `current` 和 Host Mount 的最终状态。
+3. typed Tauri command/client 与 `App`：用户选择、只读影响预览、不可取消确认和失败后重读。
+4. 独立子进程硬退出：确认各持久化阶段的重启恢复和幂等性。
+
+实现只允许按以下纵向切片推进，每片先出现公开 seam 的失败测试，再写最少实现，并独立提交、推送：
+
+1. 单一 Takeover Plan：单副本、多副本显式身份确认、唯一内容选择和零文件修改。
+2. 单副本确认：进入一个新 Bundle，并保留或排除已有 Mount。
+3. 多副本确认：所有位置统一使用唯一内容，未选内容不形成历史版本。
+4. scope 冲突与共享目录：形成用户选择的最终 Mount 拓扑。
+5. 硬中断恢复：生效前恢复、提交后向前完成、重复启动幂等和未知内容阻塞。
+6. UI 与 typed IPC：完整用户主流程和失败后持久状态重读。
+
+任何切片需要第二套模型、兼容层、带版本后缀的协议或超出本节范围时，必须停止并取得用户确认，不能自行继续。
+
 ### 范围
 
 - 从 Inventory 中选择 Takeover Candidate，并展示 Source 证据、Bundle 边界、成员、现有路径、Mount 和影响。
