@@ -27,8 +27,8 @@ use crate::{
     lifecycle::{
         LifecycleError, LifecycleLock, acquire_lifecycle_lock, create_new_file_at,
         entry_metadata_at, mkdir_at, open_directory_at, open_managed_directory_from_root,
-        open_regular_file_at, read_entry_names_os_from_handle, rename_at_swap, unlink_at,
-        write_new_atomic_at,
+        open_regular_file_at, read_entry_names_os_from_handle, rename_at_no_replace,
+        rename_at_swap, unlink_at, write_new_atomic_at,
     },
     paths::{ApplicationPaths, SupportedAppPathConfig},
     storage::{Storage, StorageError, StoredTakeoverV2Transaction},
@@ -154,6 +154,47 @@ enum CandidateEntryAudit {
 struct CandidateAudit {
     staging: Option<CandidateDirectoryAudit>,
     complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedStagingKind {
+    Missing,
+    Empty,
+    Candidate { complete: bool },
+    CandidateWithEmptyBundle,
+    CandidateWithContents,
+    StagedBundle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedStagingAudit {
+    kind: PreparedStagingKind,
+    staging: Option<CandidateDirectoryAudit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StablePreparedAudit {
+    formal: OwnedJournalEntry,
+    formal_bytes: Vec<u8>,
+    staging: PreparedStagingAudit,
+    final_bundle: CandidateDirectoryAudit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BundleSkeletonKind {
+    Empty,
+    Contents,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BundlePublishCheckpoint {
+    B,
+    C,
+    D,
+    BeforeAtomicPublish,
+    AfterFreshStagedAudit,
+    E,
+    BeforePreparedCommit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +456,161 @@ fn audit_takeover_v2_candidate(
     })
 }
 
+fn audit_takeover_v2_prepared_staging(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+) -> Result<PreparedStagingAudit, TakeoverV2LifecycleError> {
+    let (selected, manifest) = selected_origin_contract(plan, journal)?;
+    let selected_root = open_selected_origin_root(paths, selected, manifest)?;
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging_name = OsString::from(&journal.transaction_id);
+    let staging_path = paths.staging_root().join(&staging_name);
+    if entry_metadata_at(&staging_root, &staging_name)
+        .map_err(|source| v2_io("检查 prepared staging", &staging_path, source))?
+        .is_none()
+    {
+        return Ok(PreparedStagingAudit {
+            kind: PreparedStagingKind::Missing,
+            staging: None,
+        });
+    }
+
+    let (staging, staging_snapshot) =
+        open_audited_candidate_directory(&staging_root, &staging_name, &staging_path, &[0o700])?;
+    let names = read_entry_names_os_from_handle(&staging)?;
+    let mut children = Vec::new();
+    let kind = match names.as_slice() {
+        [] => PreparedStagingKind::Empty,
+        [candidate_name] if candidate_name == OsStr::new("candidate") => {
+            let (candidate, complete) =
+                audit_candidate_container(&staging, &staging_path, plan, manifest, &selected_root)?;
+            children.push(CandidateEntryAudit::Directory(candidate));
+            PreparedStagingKind::Candidate { complete }
+        }
+        [bundle_name, candidate_name]
+            if bundle_name == OsStr::new("bundle") && candidate_name == OsStr::new("candidate") =>
+        {
+            let (candidate, complete) =
+                audit_candidate_container(&staging, &staging_path, plan, manifest, &selected_root)?;
+            if !complete {
+                return Err(candidate_blocked(
+                    "B/C staging 中的 Candidate 必须完整",
+                    &staging_path,
+                ));
+            }
+            let (bundle, skeleton_kind) =
+                audit_bundle_skeleton(&staging, &staging_path.join("bundle"))?;
+            children.push(CandidateEntryAudit::Directory(bundle));
+            children.push(CandidateEntryAudit::Directory(candidate));
+            match skeleton_kind {
+                BundleSkeletonKind::Empty => PreparedStagingKind::CandidateWithEmptyBundle,
+                BundleSkeletonKind::Contents => PreparedStagingKind::CandidateWithContents,
+            }
+        }
+        [bundle_name] if bundle_name == OsStr::new("bundle") => {
+            let bundle = audit_complete_bundle_container(
+                &staging,
+                bundle_name,
+                &staging_path.join(bundle_name),
+                plan,
+                manifest,
+                &selected_root,
+            )?;
+            children.push(CandidateEntryAudit::Directory(bundle));
+            PreparedStagingKind::StagedBundle
+        }
+        _ => {
+            return Err(candidate_blocked(
+                "prepared staging 包含未知、共存或非法条目",
+                &staging_path,
+            ));
+        }
+    };
+    let staging = finish_audited_candidate_directory(
+        &staging_root,
+        &staging_name,
+        &staging_path,
+        &staging,
+        staging_snapshot,
+        children,
+    )?;
+    Ok(PreparedStagingAudit {
+        kind,
+        staging: Some(staging),
+    })
+}
+
+fn audit_takeover_v2_exact_staged_bundle(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+) -> Result<PreparedStagingAudit, TakeoverV2LifecycleError> {
+    let audit = audit_takeover_v2_prepared_staging(paths, lifecycle_lock, plan, journal)?;
+    if audit.kind != PreparedStagingKind::StagedBundle {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "原子发布只接受只含完整 Bundle 的 D shape staging".to_owned(),
+        ));
+    }
+    Ok(audit)
+}
+
+fn audit_bundle_skeleton(
+    staging: &File,
+    path: &Path,
+) -> Result<(CandidateDirectoryAudit, BundleSkeletonKind), TakeoverV2LifecycleError> {
+    let name = OsStr::new("bundle");
+    let (bundle, bundle_snapshot) =
+        open_audited_candidate_directory(staging, name, path, &[0o700])?;
+    let names = read_entry_names_os_from_handle(&bundle)?;
+    let (kind, children) = match names.as_slice() {
+        [] => (BundleSkeletonKind::Empty, Vec::new()),
+        [contents_name] if contents_name == OsStr::new("contents") => {
+            let contents_path = path.join(contents_name);
+            let (contents, contents_snapshot) =
+                open_audited_candidate_directory(&bundle, contents_name, &contents_path, &[0o700])?;
+            if !read_entry_names_os_from_handle(&contents)?.is_empty() {
+                return Err(candidate_blocked(
+                    "Candidate 与 staged Bundle 内容不能共存",
+                    &contents_path,
+                ));
+            }
+            let contents = finish_audited_candidate_directory(
+                &bundle,
+                contents_name,
+                &contents_path,
+                &contents,
+                contents_snapshot,
+                Vec::new(),
+            )?;
+            (
+                BundleSkeletonKind::Contents,
+                vec![CandidateEntryAudit::Directory(contents)],
+            )
+        }
+        _ => {
+            return Err(candidate_blocked(
+                "staged Bundle skeleton 包含未知条目",
+                path,
+            ));
+        }
+    };
+    Ok((
+        finish_audited_candidate_directory(
+            staging,
+            name,
+            path,
+            &bundle,
+            bundle_snapshot,
+            children,
+        )?,
+        kind,
+    ))
+}
+
 fn audit_candidate_container(
     staging: &File,
     staging_path: &Path,
@@ -424,23 +620,43 @@ fn audit_candidate_container(
 ) -> Result<(CandidateDirectoryAudit, bool), TakeoverV2LifecycleError> {
     let name = OsStr::new("candidate");
     let path = staging_path.join(name);
-    let (candidate, snapshot) = open_audited_candidate_directory(staging, name, &path, &[0o700])?;
+    audit_member_content_container(
+        staging,
+        name,
+        &path,
+        plan,
+        manifest,
+        selected_root,
+        "v2 接管 candidate 包含未授权条目",
+    )
+}
+
+fn audit_member_content_container(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    plan: &TakeoverV2Plan,
+    manifest: &TakeoverV2OriginManifest,
+    selected_root: &SelectedOriginRoot,
+    invalid_entries_message: &'static str,
+) -> Result<(CandidateDirectoryAudit, bool), TakeoverV2LifecycleError> {
+    let (candidate, snapshot) = open_audited_candidate_directory(parent, name, path, &[0o700])?;
     let names = read_entry_names_os_from_handle(&candidate)?;
     let mut children = Vec::new();
     let complete = match names.as_slice() {
         [] => false,
         [member_name] if member_name == OsStr::new("members") => {
             let (members, members_complete) =
-                audit_candidate_members(&candidate, &path, plan, manifest, selected_root)?;
+                audit_candidate_members(&candidate, path, plan, manifest, selected_root)?;
             children.push(CandidateEntryAudit::Directory(members));
             members_complete
         }
         _ => {
-            return Err(candidate_blocked("v2 接管 candidate 包含未授权条目", &path));
+            return Err(candidate_blocked(invalid_entries_message, path));
         }
     };
     Ok((
-        finish_audited_candidate_directory(staging, name, &path, &candidate, snapshot, children)?,
+        finish_audited_candidate_directory(parent, name, path, &candidate, snapshot, children)?,
         complete,
     ))
 }
@@ -473,6 +689,68 @@ fn audit_candidate_members(
         finish_audited_candidate_directory(candidate, name, &path, &members, snapshot, children)?,
         complete,
     ))
+}
+
+fn audit_complete_bundle_container(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    plan: &TakeoverV2Plan,
+    manifest: &TakeoverV2OriginManifest,
+    selected_root: &SelectedOriginRoot,
+) -> Result<CandidateDirectoryAudit, TakeoverV2LifecycleError> {
+    let (bundle, bundle_snapshot) = open_audited_candidate_directory(parent, name, path, &[0o700])?;
+    if read_entry_names_os_from_handle(&bundle)? != [OsString::from("contents")] {
+        return Err(candidate_blocked(
+            "v2 接管 Bundle 包含 current 或其他未授权条目",
+            path,
+        ));
+    }
+
+    let contents_name = OsStr::new("contents");
+    let contents_path = path.join(contents_name);
+    let (contents, contents_snapshot) =
+        open_audited_candidate_directory(&bundle, contents_name, &contents_path, &[0o700])?;
+    let content_name = OsStr::new(&plan.content_id);
+    if read_entry_names_os_from_handle(&contents)? != [content_name.to_os_string()] {
+        return Err(candidate_blocked(
+            "v2 接管 contents 不符合唯一 content_id 合同",
+            &contents_path,
+        ));
+    }
+
+    let content_path = contents_path.join(content_name);
+    let (content, complete) = audit_member_content_container(
+        &contents,
+        content_name,
+        &content_path,
+        plan,
+        manifest,
+        selected_root,
+        "v2 接管 content 包含未授权条目",
+    )?;
+    if !complete {
+        return Err(candidate_blocked(
+            "v2 接管 staged Bundle 不是完整合同内容",
+            &content_path,
+        ));
+    }
+    let contents = finish_audited_candidate_directory(
+        &bundle,
+        contents_name,
+        &contents_path,
+        &contents,
+        contents_snapshot,
+        vec![CandidateEntryAudit::Directory(content)],
+    )?;
+    finish_audited_candidate_directory(
+        parent,
+        name,
+        path,
+        &bundle,
+        bundle_snapshot,
+        vec![CandidateEntryAudit::Directory(contents)],
+    )
 }
 
 fn audit_candidate_skill(
@@ -1026,6 +1304,217 @@ fn remove_audited_takeover_v2_candidate_with_hook(
     Ok(())
 }
 
+fn cleanup_prepared_staging_before_publish(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    journal: &TakeoverV2Journal,
+) -> Result<(), TakeoverV2LifecycleError> {
+    loop {
+        let audit = audit_takeover_v2_prepared_staging(paths, lifecycle_lock, plan, journal)?;
+        match audit.kind {
+            PreparedStagingKind::Missing => return Ok(()),
+            PreparedStagingKind::Empty => {
+                remove_audited_takeover_v2_candidate(
+                    paths,
+                    lifecycle_lock,
+                    &CandidateAudit {
+                        staging: audit.staging,
+                        complete: false,
+                    },
+                )?;
+            }
+            PreparedStagingKind::Candidate { complete } => {
+                remove_audited_takeover_v2_candidate(
+                    paths,
+                    lifecycle_lock,
+                    &CandidateAudit {
+                        staging: audit.staging,
+                        complete,
+                    },
+                )?;
+            }
+            PreparedStagingKind::CandidateWithEmptyBundle => {
+                remove_prepared_empty_bundle(paths, lifecycle_lock, &audit)?;
+            }
+            PreparedStagingKind::CandidateWithContents => {
+                remove_prepared_empty_contents(paths, lifecycle_lock, &audit)?;
+            }
+            PreparedStagingKind::StagedBundle => {
+                restore_staged_content_to_candidate(paths, lifecycle_lock, plan, &audit)?;
+            }
+        }
+    }
+}
+
+fn restore_staged_content_to_candidate(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    plan: &TakeoverV2Plan,
+    audit: &PreparedStagingAudit,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let staging_audit = audit.staging.as_ref().ok_or_else(|| {
+        TakeoverV2LifecycleError::RecoveryBlocked("D shape 缺少 staging audit".to_owned())
+    })?;
+    let bundle_audit = audited_child_directory(staging_audit, OsStr::new("bundle"))?;
+    let contents_audit = audited_child_directory(bundle_audit, OsStr::new("contents"))?;
+    let content_audit = audited_child_directory(contents_audit, OsStr::new(&plan.content_id))?;
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging = open_matching_audited_directory(&staging_root, staging_audit)?;
+    let bundle = open_matching_audited_directory(&staging, bundle_audit)?;
+    let contents = open_matching_audited_directory(&bundle, contents_audit)?;
+    if entry_metadata_at(&staging, OsStr::new("candidate"))
+        .map_err(|source| v2_io("检查恢复 Candidate 目标", &staging_audit.path, source))?
+        .is_some()
+    {
+        return Err(candidate_blocked(
+            "D shape 恢复时 Candidate 目标已被占用",
+            &staging_audit.path,
+        ));
+    }
+    let visible_content = entry_metadata_at(&contents, &content_audit.name)
+        .map_err(|source| v2_io("复核 staged content", &content_audit.path, source))?
+        .ok_or_else(|| candidate_blocked("staged content 在恢复前消失", &content_audit.path))?;
+    if journal_snapshot_from_stat(&visible_content) != content_audit.snapshot {
+        return Err(candidate_blocked(
+            "staged content 在恢复前被替换",
+            &content_audit.path,
+        ));
+    }
+    rename_at_no_replace(
+        &contents,
+        &content_audit.name,
+        &staging,
+        OsStr::new("candidate"),
+    )
+    .map_err(|source| {
+        v2_io(
+            "把 staged content 恢复为 Candidate",
+            &content_audit.path,
+            source,
+        )
+    })?;
+    contents.sync_all().map_err(|source| {
+        v2_io(
+            "同步已移出 content 的 contents",
+            &contents_audit.path,
+            source,
+        )
+    })?;
+    bundle
+        .sync_all()
+        .map_err(|source| v2_io("同步回退中的 staged Bundle", &bundle_audit.path, source))?;
+    staging
+        .sync_all()
+        .map_err(|source| v2_io("同步恢复后的 Candidate", &staging_audit.path, source))?;
+    staging_root
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 staging 根", &paths.staging_root(), source))?;
+    Ok(())
+}
+
+fn remove_prepared_empty_contents(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    audit: &PreparedStagingAudit,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let staging_audit = audit.staging.as_ref().ok_or_else(|| {
+        TakeoverV2LifecycleError::RecoveryBlocked("C shape 缺少 staging audit".to_owned())
+    })?;
+    let bundle_audit = audited_child_directory(staging_audit, OsStr::new("bundle"))?;
+    let contents_audit = audited_child_directory(bundle_audit, OsStr::new("contents"))?;
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging = open_matching_audited_directory(&staging_root, staging_audit)?;
+    let bundle = open_matching_audited_directory(&staging, bundle_audit)?;
+    let contents = open_matching_audited_directory(&bundle, contents_audit)?;
+    if !read_entry_names_os_from_handle(&contents)?.is_empty() {
+        return Err(candidate_blocked(
+            "C shape 的 contents 在清理前不再为空",
+            &contents_audit.path,
+        ));
+    }
+    drop(contents);
+    unlink_at(&bundle, &contents_audit.name, true)
+        .map_err(|source| v2_io("清理空 staged contents", &contents_audit.path, source))?;
+    bundle
+        .sync_all()
+        .map_err(|source| v2_io("同步 staged Bundle", &bundle_audit.path, source))?;
+    staging
+        .sync_all()
+        .map_err(|source| v2_io("同步 C→B staging", &staging_audit.path, source))?;
+    staging_root
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 staging 根", &paths.staging_root(), source))?;
+    Ok(())
+}
+
+fn remove_prepared_empty_bundle(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    audit: &PreparedStagingAudit,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let staging_audit = audit.staging.as_ref().ok_or_else(|| {
+        TakeoverV2LifecycleError::RecoveryBlocked("B shape 缺少 staging audit".to_owned())
+    })?;
+    let bundle_audit = audited_child_directory(staging_audit, OsStr::new("bundle"))?;
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging = open_matching_audited_directory(&staging_root, staging_audit)?;
+    let bundle = open_matching_audited_directory(&staging, bundle_audit)?;
+    if !read_entry_names_os_from_handle(&bundle)?.is_empty() {
+        return Err(candidate_blocked(
+            "B shape 的 Bundle 在清理前不再为空",
+            &bundle_audit.path,
+        ));
+    }
+    drop(bundle);
+    unlink_at(&staging, &bundle_audit.name, true)
+        .map_err(|source| v2_io("清理空 staged Bundle", &bundle_audit.path, source))?;
+    staging
+        .sync_all()
+        .map_err(|source| v2_io("同步 B→A staging", &staging_audit.path, source))?;
+    staging_root
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 staging 根", &paths.staging_root(), source))?;
+    Ok(())
+}
+
+fn audited_child_directory<'a>(
+    parent: &'a CandidateDirectoryAudit,
+    name: &OsStr,
+) -> Result<&'a CandidateDirectoryAudit, TakeoverV2LifecycleError> {
+    parent
+        .children
+        .iter()
+        .find_map(|entry| match entry {
+            CandidateEntryAudit::Directory(directory) if directory.name == name => Some(directory),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            candidate_blocked(
+                "prepared staging audit 缺少预期目录",
+                &parent.path.join(name),
+            )
+        })
+}
+
+fn open_matching_audited_directory(
+    parent: &File,
+    audit: &CandidateDirectoryAudit,
+) -> Result<File, TakeoverV2LifecycleError> {
+    let (directory, snapshot) =
+        open_audited_candidate_directory(parent, &audit.name, &audit.path, &[0o700])?;
+    if snapshot != audit.snapshot {
+        return Err(candidate_blocked(
+            "prepared staging 在变更前发生变化",
+            &audit.path,
+        ));
+    }
+    Ok(directory)
+}
+
 fn remove_audited_candidate_directory(
     parent: &File,
     audit: &CandidateDirectoryAudit,
@@ -1258,14 +1747,16 @@ fn recover_pre_effect_takeover_v2_transaction(
     transaction: &StoredTakeoverV2Transaction,
     now: i64,
 ) -> Result<(), TakeoverV2LifecycleError> {
-    let mut no_hook = || Ok(());
+    let mut no_phase_temp_hook = || Ok(());
+    let mut no_prepared_hook = || Ok(());
     recover_pre_effect_takeover_v2_transaction_with_hook(
         paths,
         lifecycle_lock,
         storage,
         transaction,
         now,
-        &mut no_hook,
+        &mut no_phase_temp_hook,
+        &mut no_prepared_hook,
     )
 }
 
@@ -1276,12 +1767,16 @@ fn recover_pre_effect_takeover_v2_transaction_with_hook(
     transaction: &StoredTakeoverV2Transaction,
     now: i64,
     after_phase_temp_removed: &mut dyn FnMut() -> Result<(), TakeoverV2LifecycleError>,
+    before_prepared_commit: &mut dyn FnMut() -> Result<(), TakeoverV2LifecycleError>,
 ) -> Result<(), TakeoverV2LifecycleError> {
     if let Some(error) = &transaction.recovery_validation_error {
         return Err(TakeoverV2LifecycleError::RecoveryBlocked(error.clone()));
     }
     let plan = storage.read_takeover_v2_plan_for_transaction(transaction)?;
-    if !matches!(transaction.phase.as_str(), "journal_pending" | "preparing") {
+    if !matches!(
+        transaction.phase.as_str(),
+        "journal_pending" | "preparing" | "prepared"
+    ) {
         return Err(TakeoverV2LifecycleError::RecoveryBlocked(format!(
             "事务已进入本批不能恢复的阶段：{}",
             transaction.phase
@@ -1339,8 +1834,16 @@ fn recover_pre_effect_takeover_v2_transaction_with_hook(
             storage.forget_terminal_takeover_v2_transaction(&transaction.id)?;
         }
         Some(_) => {
-            let (journal, owned) = read_takeover_v2_journal_at(&journals, &name, &path)?;
+            let (journal, owned, journal_bytes) =
+                read_takeover_v2_journal_with_bytes_at(&journals, &name, &path)?;
             validate_takeover_v2_journal_contract(&journal, transaction, &plan)?;
+            if journal.phase == TakeoverV2JournalPhase::Prepared
+                && journal_bytes != serde_json::to_vec_pretty(&journal)?
+            {
+                return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                    "formal Prepared 不是 canonical pretty JSON".to_owned(),
+                ));
+            }
             if initial_temporary.is_some() {
                 return Err(TakeoverV2LifecycleError::RecoveryBlocked(
                     "formal Journal 已存在时不能认领首次 formal 的随机 temp".to_owned(),
@@ -1355,15 +1858,113 @@ fn recover_pre_effect_takeover_v2_transaction_with_hook(
             )?;
             validate_all_origin_manifests(paths, &plan, &journal.origins)?;
             validate_all_targets(paths, &plan)?;
-            let audit = audit_takeover_v2_candidate(paths, lifecycle_lock, &plan, &journal)?;
-            // 候选与外部输入必须通过同一轮交叉审计，避免用已变化的 Origin 授权删除。
-            validate_all_origin_manifests(paths, &plan, &journal.origins)?;
-            validate_all_targets(paths, &plan)?;
-            // 先把已验证的安全结论写入 SQLite；后续清理中断时 aborted 仍可幂等续做。
-            if transaction.status == "in_progress" {
-                storage.abort_takeover_v2_transaction(&transaction.id, None, now)?;
+            if journal.phase == TakeoverV2JournalPhase::Prepared {
+                let bundles_root = open_managed_directory_from_root(
+                    paths,
+                    lifecycle_lock.root(),
+                    &paths.bundles_root(),
+                )?;
+                let final_name = OsString::from(&journal.bundle_id);
+                let final_path = paths.bundles_root().join(&final_name);
+                let final_exists = entry_metadata_at(&bundles_root, &final_name)
+                    .map_err(|source| v2_io("检查恢复中的最终 Bundle", &final_path, source))?
+                    .is_some();
+                let audit =
+                    audit_takeover_v2_prepared_staging(paths, lifecycle_lock, &plan, &journal)?;
+                if final_exists {
+                    if phase_temporary.is_some() {
+                        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                            "最终 Bundle 与 phase temp 不能共存".to_owned(),
+                        ));
+                    }
+                    if !matches!(
+                        audit.kind,
+                        PreparedStagingKind::Missing | PreparedStagingKind::Empty
+                    ) {
+                        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                            "staged 内容与最终 Bundle 不能共存".to_owned(),
+                        ));
+                    }
+                    if transaction.status != "in_progress" {
+                        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                            "已 aborted 的事务不能认领最终 Bundle".to_owned(),
+                        ));
+                    }
+                    // E 是 atomic publish 后唯一合法形态；只前进 SQLite，不触碰 formal/final。
+                    let stable_before = validate_stable_prepared_state(
+                        paths,
+                        lifecycle_lock,
+                        transaction,
+                        &plan,
+                        &journal,
+                    )?;
+                    before_prepared_commit()?;
+                    let stable_after_hook = validate_stable_prepared_state(
+                        paths,
+                        lifecycle_lock,
+                        transaction,
+                        &plan,
+                        &journal,
+                    )?;
+                    if stable_after_hook != stable_before {
+                        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                            "恢复提交 prepared 前文件系统状态发生变化".to_owned(),
+                        ));
+                    }
+                    storage.update_takeover_v2_transaction_phase(
+                        &transaction.id,
+                        "prepared",
+                        now,
+                    )?;
+                    let stable_after_commit = validate_stable_prepared_state(
+                        paths,
+                        lifecycle_lock,
+                        transaction,
+                        &plan,
+                        &journal,
+                    )?;
+                    if stable_after_commit != stable_after_hook {
+                        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                            "恢复提交 prepared 期间文件系统状态发生变化".to_owned(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                if transaction.phase == "prepared" {
+                    return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                        "SQLite prepared 缺少完整最终 Bundle".to_owned(),
+                    ));
+                }
+                let valid_before_abort = matches!(
+                    audit.kind,
+                    PreparedStagingKind::Candidate { complete: true }
+                        | PreparedStagingKind::CandidateWithEmptyBundle
+                        | PreparedStagingKind::CandidateWithContents
+                        | PreparedStagingKind::StagedBundle
+                );
+                if transaction.status == "in_progress" && !valid_before_abort {
+                    return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                        "in_progress formal Prepared 缺少合法 A/B/C/D staging".to_owned(),
+                    ));
+                }
+                // A-D 尚未触及最终 Bundle；先持久化 aborted，再按 D→C→B→A 安全回退。
+                validate_all_origin_manifests(paths, &plan, &journal.origins)?;
+                validate_all_targets(paths, &plan)?;
+                if transaction.status == "in_progress" {
+                    storage.abort_takeover_v2_transaction(&transaction.id, None, now)?;
+                }
+                cleanup_prepared_staging_before_publish(paths, lifecycle_lock, &plan, &journal)?;
+            } else {
+                let audit = audit_takeover_v2_candidate(paths, lifecycle_lock, &plan, &journal)?;
+                // 候选与外部输入必须通过同一轮交叉审计，避免用已变化的 Origin 授权删除。
+                validate_all_origin_manifests(paths, &plan, &journal.origins)?;
+                validate_all_targets(paths, &plan)?;
+                // 先把已验证的安全结论写入 SQLite；后续清理中断时 aborted 仍可幂等续做。
+                if transaction.status == "in_progress" {
+                    storage.abort_takeover_v2_transaction(&transaction.id, None, now)?;
+                }
+                remove_audited_takeover_v2_candidate(paths, lifecycle_lock, &audit)?;
             }
-            remove_audited_takeover_v2_candidate(paths, lifecycle_lock, &audit)?;
             // phase temp 的 prefix 所有权依赖 formal；必须趁 formal 仍在时先删除并 fsync。
             if let Some(temporary) = phase_temporary.as_ref() {
                 remove_owned_journal(paths, &journals, temporary)?;
@@ -1900,6 +2501,7 @@ fn validate_takeover_v2_journal_phase_pairing(
             journal_phase,
             TakeoverV2JournalPhase::Preparing | TakeoverV2JournalPhase::Prepared
         ),
+        "prepared" => journal_phase == TakeoverV2JournalPhase::Prepared,
         _ => false,
     };
     if allowed {
@@ -1990,9 +2592,15 @@ fn update_takeover_v2_journal_to_prepared_with_hooks(
         .sync_all()
         .map_err(|source| v2_io("同步 Prepared 临时 Journal 父目录", &formal_path, source))?;
     before_swap(&formal_path, &temporary_path);
+    let pre_swap_journals = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        &journals,
+        &paths.journals_root(),
+    )?;
 
     let (preparing_rechecked, preparing_rechecked_owned, preparing_rechecked_bytes) =
-        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+        read_takeover_v2_journal_with_bytes_at(&pre_swap_journals, &formal_name, &formal_path)?;
     validate_takeover_v2_journal_immutable_contract(&preparing_rechecked, transaction, plan)?;
     if preparing_rechecked.phase != TakeoverV2JournalPhase::Preparing
         || preparing_rechecked_owned != preparing_owned
@@ -2003,7 +2611,11 @@ fn update_takeover_v2_journal_to_prepared_with_hooks(
         ));
     }
     let (prepared_rechecked, prepared_owned, prepared_rechecked_bytes) =
-        read_takeover_v2_journal_with_bytes_at(&journals, &temporary_name, &temporary_path)?;
+        read_takeover_v2_journal_with_bytes_at(
+            &pre_swap_journals,
+            &temporary_name,
+            &temporary_path,
+        )?;
     validate_takeover_v2_journal_immutable_contract(&prepared_rechecked, transaction, plan)?;
     if prepared_rechecked.phase != TakeoverV2JournalPhase::Prepared
         || prepared_owned.snapshot != temporary_snapshot
@@ -2015,18 +2627,27 @@ fn update_takeover_v2_journal_to_prepared_with_hooks(
     }
     validate_complete_candidate_for_phase_update(paths, lifecycle_lock, plan, &preparing)?;
 
-    rename_at_swap(&journals, &temporary_name, &journals, &formal_name)
-        .map_err(|source| v2_io("原子交换 v2 Journal phase", &formal_path, source))?;
-    journals
+    rename_at_swap(
+        &pre_swap_journals,
+        &temporary_name,
+        &pre_swap_journals,
+        &formal_name,
+    )
+    .map_err(|source| v2_io("原子交换 v2 Journal phase", &formal_path, source))?;
+    pre_swap_journals
         .sync_all()
         .map_err(|source| v2_io("同步 v2 Journal phase 交换", &formal_path, source))?;
 
     // 交换会合理改变 ctime；先捕获交换后的完整基线，再开放测试 hook 模拟后续竞态。
     let (formal_after_swap, formal_after_swap_owned, formal_after_swap_bytes) =
-        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+        read_takeover_v2_journal_with_bytes_at(&pre_swap_journals, &formal_name, &formal_path)?;
     validate_takeover_v2_journal_immutable_contract(&formal_after_swap, transaction, plan)?;
     let (temporary_after_swap, temporary_after_swap_owned, temporary_after_swap_bytes) =
-        read_takeover_v2_journal_with_bytes_at(&journals, &temporary_name, &temporary_path)?;
+        read_takeover_v2_journal_with_bytes_at(
+            &pre_swap_journals,
+            &temporary_name,
+            &temporary_path,
+        )?;
     validate_takeover_v2_journal_immutable_contract(&temporary_after_swap, transaction, plan)?;
     if formal_after_swap.phase != TakeoverV2JournalPhase::Prepared
         || temporary_after_swap.phase != TakeoverV2JournalPhase::Preparing
@@ -2043,12 +2664,22 @@ fn update_takeover_v2_journal_to_prepared_with_hooks(
         ));
     }
     after_swap(&formal_path, &temporary_path);
+    let post_swap_journals = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        &journals,
+        &paths.journals_root(),
+    )?;
 
     let (formal_after_hook, formal_after_hook_owned, formal_after_hook_bytes) =
-        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+        read_takeover_v2_journal_with_bytes_at(&post_swap_journals, &formal_name, &formal_path)?;
     validate_takeover_v2_journal_immutable_contract(&formal_after_hook, transaction, plan)?;
     let (temporary_after_hook, temporary_after_hook_owned, temporary_after_hook_bytes) =
-        read_takeover_v2_journal_with_bytes_at(&journals, &temporary_name, &temporary_path)?;
+        read_takeover_v2_journal_with_bytes_at(
+            &post_swap_journals,
+            &temporary_name,
+            &temporary_path,
+        )?;
     validate_takeover_v2_journal_immutable_contract(&temporary_after_hook, transaction, plan)?;
     if formal_after_hook.phase != TakeoverV2JournalPhase::Prepared
         || temporary_after_hook.phase != TakeoverV2JournalPhase::Preparing
@@ -2063,9 +2694,15 @@ fn update_takeover_v2_journal_to_prepared_with_hooks(
     }
     validate_complete_candidate_for_phase_update(paths, lifecycle_lock, plan, &formal_after_hook)?;
     drop(temporary);
-    remove_owned_journal(paths, &journals, &temporary_after_hook_owned)?;
+    remove_owned_journal(paths, &post_swap_journals, &temporary_after_hook_owned)?;
+    let final_journals = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        &journals,
+        &paths.journals_root(),
+    )?;
     let (formal_final, formal_final_owned, formal_final_bytes) =
-        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+        read_takeover_v2_journal_with_bytes_at(&final_journals, &formal_name, &formal_path)?;
     validate_takeover_v2_journal_immutable_contract(&formal_final, transaction, plan)?;
     if formal_final.phase != TakeoverV2JournalPhase::Prepared
         || formal_final_bytes != prepared_bytes
@@ -2076,6 +2713,415 @@ fn update_takeover_v2_journal_to_prepared_with_hooks(
         ));
     }
     lifecycle_lock.recheck(paths)?;
+    Ok(())
+}
+
+/// 把完整 Candidate 包装成完整 Bundle，一次发布到最终目录后才推进 SQLite prepared。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn publish_takeover_v2_prepared_bundle(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let mut no_hook = |_| Ok(());
+    publish_takeover_v2_prepared_bundle_with_hook(paths, storage, transaction_id, now, &mut no_hook)
+}
+
+fn publish_takeover_v2_prepared_bundle_with_hook(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+    after_checkpoint: &mut dyn FnMut(
+        BundlePublishCheckpoint,
+    ) -> Result<(), TakeoverV2LifecycleError>,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let mut no_rename_boundary_hook = || Ok(());
+    publish_takeover_v2_prepared_bundle_inner(
+        paths,
+        storage,
+        transaction_id,
+        now,
+        after_checkpoint,
+        &mut no_rename_boundary_hook,
+    )
+}
+
+// 这个额外 seam 只用于把竞态精确放在最终校验与 renameat2 之间。
+#[cfg(test)]
+fn publish_takeover_v2_prepared_bundle_with_rename_boundary_hook(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+    after_checkpoint: &mut dyn FnMut(
+        BundlePublishCheckpoint,
+    ) -> Result<(), TakeoverV2LifecycleError>,
+    at_rename_boundary: &mut dyn FnMut() -> Result<(), TakeoverV2LifecycleError>,
+) -> Result<(), TakeoverV2LifecycleError> {
+    publish_takeover_v2_prepared_bundle_inner(
+        paths,
+        storage,
+        transaction_id,
+        now,
+        after_checkpoint,
+        at_rename_boundary,
+    )
+}
+
+fn publish_takeover_v2_prepared_bundle_inner(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    transaction_id: &str,
+    now: i64,
+    after_checkpoint: &mut dyn FnMut(
+        BundlePublishCheckpoint,
+    ) -> Result<(), TakeoverV2LifecycleError>,
+    at_rename_boundary: &mut dyn FnMut() -> Result<(), TakeoverV2LifecycleError>,
+) -> Result<(), TakeoverV2LifecycleError> {
+    let transaction = storage
+        .recoverable_takeover_v2_transactions()?
+        .into_iter()
+        .find(|transaction| transaction.id == transaction_id)
+        .ok_or_else(|| {
+            TakeoverV2LifecycleError::RecoveryBlocked("待发布的 v2 接管事务不存在".to_owned())
+        })?;
+    if transaction.status != "in_progress" || transaction.phase != "preparing" {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "只有 in_progress/preparing 事务可以发布 v2 Bundle".to_owned(),
+        ));
+    }
+    if let Some(error) = &transaction.recovery_validation_error {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(error.clone()));
+    }
+    let plan = storage.read_takeover_v2_plan_for_transaction(&transaction)?;
+    let lifecycle_lock = acquire_lifecycle_lock(paths)?;
+    lifecycle_lock.recheck(paths)?;
+
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    let formal_name = OsString::from(journal_file_name(transaction_id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let (journal, formal_owned, formal_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+    validate_takeover_v2_journal_contract(&journal, &transaction, &plan)?;
+    if journal.phase != TakeoverV2JournalPhase::Prepared
+        || formal_bytes != serde_json::to_vec_pretty(&journal)?
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "发布 v2 Bundle 只接受 canonical formal Prepared".to_owned(),
+        ));
+    }
+    if inspect_takeover_v2_initial_temporary_journal(paths, &journals, &transaction, &plan)?
+        .is_some()
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "发布 v2 Bundle 前仍存在首次 formal 的随机临时文件".to_owned(),
+        ));
+    }
+    ensure_takeover_v2_phase_temp_absent(paths, &journals, transaction_id)?;
+    validate_complete_candidate_for_phase_update(paths, &lifecycle_lock, &plan, &journal)?;
+
+    let bundles_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.bundles_root())?;
+    let bundle_name = OsString::from(&plan.bundle_id);
+    let final_bundle_path = paths.bundles_root().join(&bundle_name);
+    if entry_metadata_at(&bundles_root, &bundle_name)
+        .map_err(|source| v2_io("检查 v2 最终 Bundle", &final_bundle_path, source))?
+        .is_some()
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 最终 Bundle 在发布前已经存在".to_owned(),
+        ));
+    }
+
+    let staging_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.staging_root())?;
+    let staging_name = OsString::from(transaction_id);
+    let staging_path = paths.staging_root().join(&staging_name);
+    let staging = open_directory_at(&staging_root, &staging_name)
+        .map_err(|source| v2_io("打开 v2 接管临时目录", &staging_path, source))?;
+    let staged_bundle_path = staging_path.join("bundle");
+    let staged_bundle = create_synced_candidate_directory(
+        &staging,
+        OsStr::new("bundle"),
+        &staged_bundle_path,
+        "创建 staged Bundle",
+    )?;
+    staged_bundle
+        .sync_all()
+        .map_err(|source| v2_io("同步空 staged Bundle", &staged_bundle_path, source))?;
+    after_checkpoint(BundlePublishCheckpoint::B)?;
+    let staged_contents_path = staged_bundle_path.join("contents");
+    let staged_contents = create_synced_candidate_directory(
+        &staged_bundle,
+        OsStr::new("contents"),
+        &staged_contents_path,
+        "创建 staged Bundle contents",
+    )?;
+    staged_contents
+        .sync_all()
+        .map_err(|source| v2_io("同步空 staged contents", &staged_contents_path, source))?;
+    after_checkpoint(BundlePublishCheckpoint::C)?;
+    rename_at_no_replace(
+        &staging,
+        OsStr::new("candidate"),
+        &staged_contents,
+        OsStr::new(&plan.content_id),
+    )
+    .map_err(|source| v2_io("组装 staged Bundle content", &staged_contents_path, source))?;
+    staging
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 Candidate 移出", &staging_path, source))?;
+    staged_contents
+        .sync_all()
+        .map_err(|source| v2_io("同步 staged Bundle content", &staged_contents_path, source))?;
+    staged_bundle
+        .sync_all()
+        .map_err(|source| v2_io("同步 staged Bundle", &staged_bundle_path, source))?;
+    staging_root
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 staging", &paths.staging_root(), source))?;
+    after_checkpoint(BundlePublishCheckpoint::D)?;
+    drop(staged_contents);
+    drop(staged_bundle);
+
+    let staged_before_publish =
+        audit_takeover_v2_exact_staged_bundle(paths, &lifecycle_lock, &plan, &journal)?;
+    validate_all_origin_manifests(paths, &plan, &journal.origins)?;
+    validate_all_targets(paths, &plan)?;
+    lifecycle_lock.recheck(paths)?;
+    if entry_metadata_at(&bundles_root, &bundle_name)
+        .map_err(|source| v2_io("重新检查 v2 最终 Bundle", &final_bundle_path, source))?
+        .is_some()
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 最终 Bundle 在原子发布前被外部插入".to_owned(),
+        ));
+    }
+    after_checkpoint(BundlePublishCheckpoint::BeforeAtomicPublish)?;
+
+    validate_takeover_v2_prepublish_invariants(
+        paths,
+        &lifecycle_lock,
+        &journals,
+        &transaction,
+        &plan,
+        &journal,
+        &formal_name,
+        &formal_path,
+        &formal_owned,
+        &formal_bytes,
+    )?;
+    rebind_unchanged_managed_directory(paths, &lifecycle_lock, &staging, &staging_path)?;
+    let staged_after_prepublish_hook =
+        audit_takeover_v2_exact_staged_bundle(paths, &lifecycle_lock, &plan, &journal)?;
+    if staged_after_prepublish_hook != staged_before_publish {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 staged Bundle 在原子发布前发生变化".to_owned(),
+        ));
+    }
+    rebind_unchanged_managed_directory(paths, &lifecycle_lock, &staging, &staging_path)?;
+    after_checkpoint(BundlePublishCheckpoint::AfterFreshStagedAudit)?;
+
+    rebind_unchanged_managed_directory(paths, &lifecycle_lock, &staging, &staging_path)?;
+    let staged_before_rename =
+        audit_takeover_v2_exact_staged_bundle(paths, &lifecycle_lock, &plan, &journal)?;
+    if staged_before_rename != staged_after_prepublish_hook {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 staged Bundle 在最终审计窗口发生变化".to_owned(),
+        ));
+    }
+    rebind_unchanged_managed_directory(paths, &lifecycle_lock, &staging, &staging_path)?;
+    validate_takeover_v2_prepublish_invariants(
+        paths,
+        &lifecycle_lock,
+        &journals,
+        &transaction,
+        &plan,
+        &journal,
+        &formal_name,
+        &formal_path,
+        &formal_owned,
+        &formal_bytes,
+    )?;
+    let publish_staging_root = rebind_unchanged_managed_directory(
+        paths,
+        &lifecycle_lock,
+        &staging_root,
+        &paths.staging_root(),
+    )?;
+    let publish_staging =
+        rebind_unchanged_managed_directory(paths, &lifecycle_lock, &staging, &staging_path)?;
+    let publish_bundles_root = rebind_unchanged_managed_directory(
+        paths,
+        &lifecycle_lock,
+        &bundles_root,
+        &paths.bundles_root(),
+    )?;
+    if entry_metadata_at(&publish_bundles_root, &bundle_name)
+        .map_err(|source| v2_io("最终确认 v2 Bundle 发布目标", &final_bundle_path, source))?
+        .is_some()
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 最终 Bundle 在完整复核期间被外部插入".to_owned(),
+        ));
+    }
+    at_rename_boundary()?;
+
+    rename_at_no_replace(
+        &publish_staging,
+        OsStr::new("bundle"),
+        &publish_bundles_root,
+        &bundle_name,
+    )
+    .map_err(|source| v2_io("原子发布完整 v2 Bundle", &final_bundle_path, source))?;
+    publish_staging
+        .sync_all()
+        .map_err(|source| v2_io("同步已发布的 v2 staging", &staging_path, source))?;
+    publish_staging_root
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 staging 根", &paths.staging_root(), source))?;
+    publish_bundles_root
+        .sync_all()
+        .map_err(|source| v2_io("同步 v2 Bundle 根", &paths.bundles_root(), source))?;
+    after_checkpoint(BundlePublishCheckpoint::E)?;
+
+    let stable_before =
+        validate_stable_prepared_state(paths, &lifecycle_lock, &transaction, &plan, &journal)?;
+    if stable_before.formal != formal_owned || stable_before.formal_bytes != formal_bytes {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 Bundle 发布期间 formal Prepared 发生变化".to_owned(),
+        ));
+    }
+    // rename 会改变根目录 ctime；其余身份字段必须证明 final 就是刚审计过的 staged source。
+    let staged_root = audited_child_directory(
+        staged_before_rename.staging.as_ref().ok_or_else(|| {
+            TakeoverV2LifecycleError::RecoveryBlocked(
+                "最终 D shape staging 缺少完整 audit".to_owned(),
+            )
+        })?,
+        OsStr::new("bundle"),
+    )?
+    .snapshot;
+    let final_root = stable_before.final_bundle.snapshot;
+    if (
+        final_root.device,
+        final_root.inode,
+        final_root.mode,
+        final_root.links,
+    ) != (
+        staged_root.device,
+        staged_root.inode,
+        staged_root.mode,
+        staged_root.links,
+    ) {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 最终 Bundle 不是已审计的 staged source".to_owned(),
+        ));
+    }
+    after_checkpoint(BundlePublishCheckpoint::BeforePreparedCommit)?;
+    let stable_after_hook =
+        validate_stable_prepared_state(paths, &lifecycle_lock, &transaction, &plan, &journal)?;
+    if stable_after_hook != stable_before {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "SQLite prepared 前的稳定文件系统状态发生变化".to_owned(),
+        ));
+    }
+    storage.update_takeover_v2_transaction_phase(transaction_id, "prepared", now)?;
+    let stable_after_commit =
+        validate_stable_prepared_state(paths, &lifecycle_lock, &transaction, &plan, &journal)?;
+    if stable_after_commit != stable_after_hook {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "SQLite prepared 提交期间文件系统状态发生变化".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+// hook 后必须从 lifecycle root 重新打开可见目录，并拒绝同名目录的 identity replacement。
+fn rebind_unchanged_managed_directory(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    expected: &File,
+    path: &Path,
+) -> Result<File, TakeoverV2LifecycleError> {
+    let fresh = open_managed_directory_from_root(paths, lifecycle_lock.root(), path)?;
+    let expected_metadata = expected
+        .metadata()
+        .map_err(|source| v2_io("检查 hook 前受管目录", path, source))?;
+    let fresh_metadata = fresh
+        .metadata()
+        .map_err(|source| v2_io("检查 fresh 受管目录", path, source))?;
+    if (
+        expected_metadata.dev(),
+        expected_metadata.ino(),
+        expected_metadata.mode(),
+        expected_metadata.nlink(),
+    ) != (
+        fresh_metadata.dev(),
+        fresh_metadata.ino(),
+        fresh_metadata.mode(),
+        fresh_metadata.nlink(),
+    ) {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(format!(
+            "v2 受管目录在发布窗口被替换：{}",
+            path.display()
+        )));
+    }
+    Ok(fresh)
+}
+
+// 两次复核必须使用同一组已封印对象，逐项传入可避免重新推导出不同合同。
+#[allow(clippy::too_many_arguments)]
+fn validate_takeover_v2_prepublish_invariants(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    expected_journals: &File,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    expected_journal: &TakeoverV2Journal,
+    formal_name: &OsStr,
+    formal_path: &Path,
+    expected_formal: &OwnedJournalEntry,
+    expected_formal_bytes: &[u8],
+) -> Result<(), TakeoverV2LifecycleError> {
+    let journals = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        expected_journals,
+        &paths.journals_root(),
+    )?;
+    let (fresh_journal, fresh_formal, fresh_formal_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&journals, formal_name, formal_path)?;
+    validate_takeover_v2_journal_contract(&fresh_journal, transaction, plan)?;
+    if fresh_journal.phase != TakeoverV2JournalPhase::Prepared
+        || fresh_formal_bytes != serde_json::to_vec_pretty(&fresh_journal)?
+        || &fresh_journal != expected_journal
+        || &fresh_formal != expected_formal
+        || fresh_formal_bytes != expected_formal_bytes
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "v2 formal Prepared 在原子发布前发生变化".to_owned(),
+        ));
+    }
+    if inspect_takeover_v2_initial_temporary_journal(paths, &journals, transaction, plan)?.is_some()
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "原子发布前仍存在首次 formal 的随机临时文件".to_owned(),
+        ));
+    }
+    ensure_takeover_v2_phase_temp_absent(paths, &journals, &transaction.id)?;
+    validate_all_origin_manifests(paths, plan, &expected_journal.origins)?;
+    validate_all_targets(paths, plan)?;
+    lifecycle_lock.recheck(paths)?;
+    rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        expected_journals,
+        &paths.journals_root(),
+    )?;
     Ok(())
 }
 
@@ -2099,6 +3145,74 @@ fn validate_complete_candidate_for_phase_update(
     validate_all_targets(paths, plan)?;
     lifecycle_lock.recheck(paths)?;
     Ok(())
+}
+
+fn validate_stable_prepared_state(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    transaction: &StoredTakeoverV2Transaction,
+    plan: &TakeoverV2Plan,
+    expected_journal: &TakeoverV2Journal,
+) -> Result<StablePreparedAudit, TakeoverV2LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let journals =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
+    let formal_name = OsString::from(journal_file_name(&transaction.id));
+    let formal_path = paths.journals_root().join(&formal_name);
+    let (formal, formal_owned, formal_bytes) =
+        read_takeover_v2_journal_with_bytes_at(&journals, &formal_name, &formal_path)?;
+    validate_takeover_v2_journal_contract(&formal, transaction, plan)?;
+    if formal != *expected_journal
+        || formal.phase != TakeoverV2JournalPhase::Prepared
+        || formal_bytes != serde_json::to_vec_pretty(&formal)?
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "稳定 prepared 的 formal Journal 不符合 canonical 合同".to_owned(),
+        ));
+    }
+    if inspect_takeover_v2_initial_temporary_journal(paths, &journals, transaction, plan)?.is_some()
+    {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "稳定 prepared 不能残留首次 formal 临时文件".to_owned(),
+        ));
+    }
+    ensure_takeover_v2_phase_temp_absent(paths, &journals, &transaction.id)?;
+
+    validate_all_origin_manifests(paths, plan, &formal.origins)?;
+    validate_all_targets(paths, plan)?;
+    let staging = audit_takeover_v2_prepared_staging(paths, lifecycle_lock, plan, &formal)?;
+    if !matches!(
+        staging.kind,
+        PreparedStagingKind::Missing | PreparedStagingKind::Empty
+    ) {
+        return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+            "稳定 prepared 不能同时保留 staged 内容".to_owned(),
+        ));
+    }
+    let bundles_root =
+        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.bundles_root())?;
+    let bundle_name = OsString::from(&formal.bundle_id);
+    let bundle_path = paths.bundles_root().join(&bundle_name);
+    let (selected, manifest) = selected_origin_contract(plan, &formal)?;
+    let selected_root = open_selected_origin_root(paths, selected, manifest)?;
+    let final_bundle = audit_complete_bundle_container(
+        &bundles_root,
+        &bundle_name,
+        &bundle_path,
+        plan,
+        manifest,
+        &selected_root,
+    )?;
+    // 完整树和外部输入审计都可能耗时，返回前必须再做一次交叉复核。
+    validate_all_origin_manifests(paths, plan, &formal.origins)?;
+    validate_all_targets(paths, plan)?;
+    lifecycle_lock.recheck(paths)?;
+    Ok(StablePreparedAudit {
+        formal: formal_owned,
+        formal_bytes,
+        staging,
+        final_bundle,
+    })
 }
 
 fn same_journal_identity(left: JournalEntrySnapshot, right: JournalEntrySnapshot) -> bool {
@@ -2134,11 +3248,28 @@ fn write_takeover_v2_journal_with_hook(
         ));
     }
     after_phase_temp_absence_checked(&phase_temp_path);
+    let fresh_journals = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        &journals,
+        &paths.journals_root(),
+    )?;
     let bytes = serde_json::to_vec_pretty(journal)?;
     let name = OsString::from(journal_file_name(&journal.transaction_id));
-    write_new_atomic_at(&journals, &name, &paths.journals_root().join(&name), &bytes)?;
+    write_new_atomic_at(
+        &fresh_journals,
+        &name,
+        &paths.journals_root().join(&name),
+        &bytes,
+    )?;
+    let published_journals = rebind_unchanged_managed_directory(
+        paths,
+        lifecycle_lock,
+        &journals,
+        &paths.journals_root(),
+    )?;
     // formal 发布是 phase temp 路径的所有权生效点；发布后复核可识别检查窗口内的外部插入。
-    if entry_metadata_at(&journals, &phase_temp_name)
+    if entry_metadata_at(&published_journals, &phase_temp_name)
         .map_err(|source| v2_io("复核预封印 phase temp", &phase_temp_path, source))?
         .is_some()
     {
@@ -2174,6 +3305,8 @@ fn validate_journal_size_for_all_phases(
     }
 }
 
+// 生产路径需要同时保留 canonical bytes；这个简化包装只供测试断言使用。
+#[cfg(test)]
 fn read_takeover_v2_journal_at(
     journals: &File,
     name: &OsStr,
@@ -2802,6 +3935,22 @@ mod tests {
             self.storage
                 .update_takeover_v2_transaction_phase(&transaction_id, "preparing", 201)
                 .expect("应推进 preparing");
+            (transaction_id, journal)
+        }
+
+        fn begin_with_prepared_candidate(
+            &mut self,
+            plan: &mut TakeoverV2Plan,
+        ) -> (String, TakeoverV2Journal) {
+            let (transaction_id, mut journal) = self.begin_preparing_with_journal(plan);
+            let transaction = self.transaction(&transaction_id).expect("事务必须存在");
+            let lock = acquire_lifecycle_lock(&self.paths).expect("应取得生命周期锁");
+            plan.status = TakeoverV2PlanStatus::Consumed;
+            prepare_takeover_v2_candidate(&self.paths, &lock, plan, &journal)
+                .expect("应准备完整 Candidate");
+            update_takeover_v2_journal_to_prepared(&self.paths, &lock, &transaction, plan)
+                .expect("应推进 formal Prepared");
+            journal.phase = TakeoverV2JournalPhase::Prepared;
             (transaction_id, journal)
         }
     }
@@ -3837,6 +4986,7 @@ mod tests {
                     "测试模拟 phase temp 删除后的硬中断".to_owned(),
                 ))
             },
+            &mut || Ok(()),
         )
         .expect_err("应模拟 formal 删除前中断");
 
@@ -3862,8 +5012,13 @@ mod tests {
     fn preparing_recovery_cleans_post_swap_and_stable_prepared_pairs() {
         for variant in ["post_swap", "stable_prepared"] {
             let mut harness = Harness::new();
-            let plan = harness.save_single_plan("alpha");
+            let mut plan = harness.save_single_plan("alpha");
             let (transaction_id, mut journal) = harness.begin_preparing_with_journal(&plan);
+            let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+            plan.status = TakeoverV2PlanStatus::Consumed;
+            prepare_takeover_v2_candidate(&harness.paths, &lock, &plan, &journal)
+                .expect("updater swap fixture 必须先有完整 Candidate");
+            drop(lock);
             journal.phase = TakeoverV2JournalPhase::Prepared;
             let prepared = serde_json::to_vec_pretty(&journal).expect("应序列化 Prepared");
             let formal_name = OsString::from(journal_file_name(&transaction_id));
@@ -4063,6 +5218,41 @@ mod tests {
         assert_eq!(
             fs::read(&phase_temp).expect("恢复不能认领外部 phase temp"),
             b"external"
+        );
+    }
+
+    #[test]
+    fn initial_formal_writer_rejects_a_replaced_journals_root() {
+        let mut harness = Harness::new();
+        let plan = harness.save_single_plan("alpha");
+        let (transaction_id, journal) = harness.begin_without_journal(&plan);
+        let journals_root = harness.paths.journals_root();
+        let journals_backup = harness._temp.path().join("initial-journals-backup");
+        let formal_name = journal_file_name(&transaction_id);
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+
+        write_takeover_v2_journal_with_hook(&harness.paths, &lock, &journal, |_| {
+            fs::rename(&journals_root, &journals_backup).expect("应保留 hook 前 journals 根");
+            fs::create_dir(&journals_root).expect("应重建可见 journals 根");
+            fs::set_permissions(&journals_root, fs::Permissions::from_mode(0o700))
+                .expect("可见 journals 根应使用受管权限");
+        })
+        .expect_err("journals 根被替换后不能继续发布 formal");
+
+        assert!(
+            !journals_root.join(&formal_name).exists(),
+            "canonical formal 必须保持缺失"
+        );
+        assert!(
+            !journals_backup.join(&formal_name).exists(),
+            "formal 不能发布到 detached journals 根"
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "journal_pending"
         );
     }
 
@@ -4343,6 +5533,868 @@ mod tests {
     }
 
     #[test]
+    fn bundle_publish_reaches_stable_prepared_without_activating_any_consumer() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let origin = PathBuf::from(&plan.origins[0].original_path);
+        let origin_before = fs::symlink_metadata(&origin).expect("应读取 Origin 身份");
+        let (transaction_id, journal) = harness.begin_preparing_with_journal(&plan);
+        let transaction = harness.transaction(&transaction_id).expect("事务必须存在");
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+        plan.status = TakeoverV2PlanStatus::Consumed;
+        prepare_takeover_v2_candidate(&harness.paths, &lock, &plan, &journal)
+            .expect("应准备完整 Candidate");
+        update_takeover_v2_journal_to_prepared(&harness.paths, &lock, &transaction, &plan)
+            .expect("应推进 formal Prepared");
+        drop(lock);
+
+        let staged_bundle = harness
+            .paths
+            .staging_root()
+            .join(&transaction_id)
+            .join("bundle");
+        let mut staged_root_identity = None;
+        publish_takeover_v2_prepared_bundle_with_hook(
+            &harness.paths,
+            &mut harness.storage,
+            &transaction_id,
+            202,
+            &mut |checkpoint| {
+                if checkpoint == BundlePublishCheckpoint::BeforeAtomicPublish {
+                    let metadata = fs::symlink_metadata(&staged_bundle)
+                        .expect("应读取发布前 staged root 身份");
+                    staged_root_identity = Some((
+                        metadata.dev(),
+                        metadata.ino(),
+                        metadata.mode(),
+                        metadata.nlink(),
+                    ));
+                }
+                Ok(())
+            },
+        )
+        .expect("应发布完整 Bundle 并推进 SQLite prepared");
+
+        let bundle = harness.paths.bundle_directory(&plan.bundle_id);
+        let final_metadata = fs::symlink_metadata(&bundle).expect("应读取 final root 身份");
+        assert_eq!(
+            (
+                final_metadata.dev(),
+                final_metadata.ino(),
+                final_metadata.mode(),
+                final_metadata.nlink(),
+            ),
+            staged_root_identity.expect("发布前必须记录 staged root 身份"),
+            "final root 必须是同一个 staged source"
+        );
+        let member = bundle
+            .join("contents")
+            .join(&plan.content_id)
+            .join("members/alpha");
+        assert!(member.join("SKILL.md").is_file());
+        assert!(member.join("helper.txt").is_file());
+        assert!(!bundle.join("current").exists(), "本阶段不能建立 current");
+        let staging = harness.paths.staging_root().join(&transaction_id);
+        assert!(
+            !staging.exists()
+                || fs::read_dir(&staging)
+                    .expect("应读取空 staging")
+                    .next()
+                    .is_none(),
+            "稳定 prepared 不能残留 staged Bundle"
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("prepared 事务必须保留")
+                .phase,
+            "prepared"
+        );
+        let formal: TakeoverV2Journal = serde_json::from_slice(
+            &fs::read(
+                harness
+                    .paths
+                    .journals_root()
+                    .join(journal_file_name(&transaction_id)),
+            )
+            .expect("formal 必须保留"),
+        )
+        .expect("formal 必须可解析");
+        assert_eq!(formal.phase, TakeoverV2JournalPhase::Prepared);
+        let origin_after = fs::symlink_metadata(&origin).expect("Origin 必须保持原状");
+        assert_eq!(
+            (origin_after.dev(), origin_after.ino(), origin_after.mode()),
+            (
+                origin_before.dev(),
+                origin_before.ino(),
+                origin_before.mode()
+            )
+        );
+        assert!(
+            harness
+                .storage
+                .read_mounts()
+                .expect("应读取 Mount")
+                .is_empty()
+        );
+        assert!(
+            harness
+                .storage
+                .managed_bundle_notice_rows()
+                .expect("应读取领域 Bundle")
+                .is_empty(),
+            "prepared 阶段不能提前写入领域 Bundle"
+        );
+    }
+
+    #[test]
+    fn prepublish_recovery_aborts_and_cleans_all_legal_staging_shapes() {
+        for shape in ["a", "b", "c", "d"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let origin = PathBuf::from(&plan.origins[0].original_path);
+            let origin_before = fs::symlink_metadata(&origin).expect("应读取 Origin 身份");
+            let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+            let staging = harness.paths.staging_root().join(&transaction_id);
+            let bundle = staging.join("bundle");
+            let contents = bundle.join("contents");
+            match shape {
+                "a" => {}
+                "b" => {
+                    fs::create_dir(&bundle).expect("应建立 B shape");
+                    fs::set_permissions(&bundle, fs::Permissions::from_mode(0o700))
+                        .expect("B shape 必须使用 production mode");
+                }
+                "c" => {
+                    fs::create_dir(&bundle).expect("应建立 B shape");
+                    fs::set_permissions(&bundle, fs::Permissions::from_mode(0o700))
+                        .expect("B shape 必须使用 production mode");
+                    fs::create_dir(&contents).expect("应建立 C shape");
+                    fs::set_permissions(&contents, fs::Permissions::from_mode(0o700))
+                        .expect("C shape 必须使用 production mode");
+                }
+                "d" => {
+                    fs::create_dir(&bundle).expect("应建立 B shape");
+                    fs::set_permissions(&bundle, fs::Permissions::from_mode(0o700))
+                        .expect("B shape 必须使用 production mode");
+                    fs::create_dir(&contents).expect("应建立 C shape");
+                    fs::set_permissions(&contents, fs::Permissions::from_mode(0o700))
+                        .expect("C shape 必须使用 production mode");
+                    fs::rename(staging.join("candidate"), contents.join(&plan.content_id))
+                        .expect("应建立 D shape");
+                }
+                _ => unreachable!(),
+            }
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("合法生效前 shape 应安全回退");
+
+            assert!(
+                harness.transaction(&transaction_id).is_none(),
+                "shape={shape}"
+            );
+            assert!(!staging.exists(), "shape={shape}");
+            assert!(
+                !harness
+                    .paths
+                    .journals_root()
+                    .join(journal_file_name(&transaction_id))
+                    .exists(),
+                "shape={shape}"
+            );
+            assert!(
+                !harness.paths.bundle_directory(&plan.bundle_id).exists(),
+                "shape={shape}"
+            );
+            let origin_after = fs::symlink_metadata(&origin).expect("Origin 必须保持原状");
+            assert_eq!(
+                (origin_after.dev(), origin_after.ino(), origin_after.mode()),
+                (
+                    origin_before.dev(),
+                    origin_before.ino(),
+                    origin_before.mode()
+                ),
+                "shape={shape}"
+            );
+        }
+    }
+
+    #[test]
+    fn postpublish_recovery_advances_e_shape_to_sqlite_prepared() {
+        for staging_state in ["empty", "absent"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+            let staging = harness.paths.staging_root().join(&transaction_id);
+            let bundle = staging.join("bundle");
+            let contents = bundle.join("contents");
+            fs::create_dir(&bundle).expect("应建立 B shape");
+            fs::set_permissions(&bundle, fs::Permissions::from_mode(0o700))
+                .expect("B shape 必须使用 production mode");
+            fs::create_dir(&contents).expect("应建立 C shape");
+            fs::set_permissions(&contents, fs::Permissions::from_mode(0o700))
+                .expect("C shape 必须使用 production mode");
+            fs::rename(staging.join("candidate"), contents.join(&plan.content_id))
+                .expect("应建立 D shape");
+            let final_bundle = harness.paths.bundle_directory(&plan.bundle_id);
+            fs::rename(&bundle, &final_bundle).expect("应模拟一次 atomic publish");
+            if staging_state == "absent" {
+                fs::remove_dir(&staging).expect("应模拟发布后清理空 staging");
+            }
+            let final_before = fs::symlink_metadata(&final_bundle).expect("应读取 final 身份");
+            let formal_path = harness
+                .paths
+                .journals_root()
+                .join(journal_file_name(&transaction_id));
+            let formal_before = fs::read(&formal_path).expect("应读取 formal");
+            let formal_identity_before =
+                fs::symlink_metadata(&formal_path).expect("应读取 formal 身份");
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("E shape 必须自动恢复到 prepared");
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 301)
+                .expect("prepared E shape 第二次恢复必须幂等");
+
+            let transaction = harness
+                .transaction(&transaction_id)
+                .expect("prepared 事务必须保留");
+            assert_eq!(transaction.status, "in_progress", "state={staging_state}");
+            assert_eq!(transaction.phase, "prepared", "state={staging_state}");
+            assert!(
+                final_bundle
+                    .join("contents")
+                    .join(&plan.content_id)
+                    .join("members/alpha/SKILL.md")
+                    .is_file(),
+                "state={staging_state}"
+            );
+            assert!(!final_bundle.join("current").exists());
+            let final_after = fs::symlink_metadata(&final_bundle).expect("final 必须保留");
+            assert_eq!(
+                (final_after.dev(), final_after.ino(), final_after.mode()),
+                (final_before.dev(), final_before.ino(), final_before.mode()),
+                "state={staging_state}"
+            );
+            assert_eq!(
+                fs::read(&formal_path).expect("formal 必须保留"),
+                formal_before,
+                "state={staging_state}"
+            );
+            let formal_identity_after =
+                fs::symlink_metadata(&formal_path).expect("formal 身份必须保留");
+            assert_eq!(
+                (
+                    formal_identity_after.dev(),
+                    formal_identity_after.ino(),
+                    formal_identity_after.mode()
+                ),
+                (
+                    formal_identity_before.dev(),
+                    formal_identity_before.ino(),
+                    formal_identity_before.mode()
+                ),
+                "state={staging_state}"
+            );
+            assert!(
+                !staging.exists()
+                    || fs::read_dir(&staging)
+                        .expect("应读取空 staging")
+                        .next()
+                        .is_none(),
+                "state={staging_state}"
+            );
+            assert!(
+                harness
+                    .storage
+                    .read_mounts()
+                    .expect("应读取 Mount")
+                    .is_empty()
+            );
+            assert!(
+                harness
+                    .storage
+                    .managed_bundle_notice_rows()
+                    .expect("应读取领域 Bundle")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn bundle_publish_checkpoint_interruptions_recover_by_atomic_publish_boundary() {
+        for interrupted_at in [
+            BundlePublishCheckpoint::B,
+            BundlePublishCheckpoint::C,
+            BundlePublishCheckpoint::D,
+            BundlePublishCheckpoint::E,
+        ] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+
+            publish_takeover_v2_prepared_bundle_with_hook(
+                &harness.paths,
+                &mut harness.storage,
+                &transaction_id,
+                202,
+                &mut |checkpoint| {
+                    if checkpoint == interrupted_at {
+                        return Err(TakeoverV2LifecycleError::RecoveryBlocked(format!(
+                            "测试模拟 {checkpoint:?} 持久化后的 hard exit"
+                        )));
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("checkpoint 必须在 SQLite prepared 前中断");
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("中断事务必须保留")
+                    .phase,
+                "preparing"
+            );
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("持久化 checkpoint 必须可恢复");
+
+            let final_bundle = harness.paths.bundle_directory(&plan.bundle_id);
+            if interrupted_at == BundlePublishCheckpoint::E {
+                let transaction = harness
+                    .transaction(&transaction_id)
+                    .expect("E 后必须前进到 prepared");
+                assert_eq!(transaction.status, "in_progress");
+                assert_eq!(transaction.phase, "prepared");
+                assert!(final_bundle.exists());
+                assert!(!final_bundle.join("current").exists());
+            } else {
+                assert!(harness.transaction(&transaction_id).is_none());
+                assert!(!final_bundle.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn bundle_publish_revalidates_stable_state_immediately_before_sqlite_prepared() {
+        for changed in ["formal", "phase_temp", "staging", "final"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+            let formal = harness
+                .paths
+                .journals_root()
+                .join(journal_file_name(&transaction_id));
+            let phase_temp = harness
+                .paths
+                .journals_root()
+                .join(phase_temp_file_name(&transaction_id));
+            let staging = harness.paths.staging_root().join(&transaction_id);
+            let final_extra = harness
+                .paths
+                .bundle_directory(&plan.bundle_id)
+                .join("external");
+
+            let result = publish_takeover_v2_prepared_bundle_with_hook(
+                &harness.paths,
+                &mut harness.storage,
+                &transaction_id,
+                202,
+                &mut |checkpoint| {
+                    if checkpoint != BundlePublishCheckpoint::BeforePreparedCommit {
+                        return Ok(());
+                    }
+                    match changed {
+                        "formal" => OpenOptions::new()
+                            .append(true)
+                            .open(&formal)
+                            .expect("应打开 formal")
+                            .write_all(b"\n")
+                            .expect("应修改 formal"),
+                        "phase_temp" => {
+                            fs::write(&phase_temp, b"external phase temp")
+                                .expect("应插入 phase temp");
+                        }
+                        "staging" => {
+                            fs::write(staging.join("external"), b"external staging")
+                                .expect("应插入 staging 条目");
+                        }
+                        "final" => {
+                            fs::write(&final_extra, b"external final")
+                                .expect("应修改 final Bundle");
+                        }
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                },
+            );
+
+            result.expect_err("DB prepared 前的外部变化必须阻止阶段推进");
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("受影响事务必须保留")
+                    .phase,
+                "preparing",
+                "changed={changed}"
+            );
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("异常 E shape 只应阻塞当前事务");
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("异常现场必须保留")
+                    .status,
+                "blocked",
+                "changed={changed}"
+            );
+            match changed {
+                "formal" => assert!(
+                    fs::read(&formal).expect("formal 必须保留").ends_with(b"\n"),
+                    "changed={changed}"
+                ),
+                "phase_temp" => assert_eq!(
+                    fs::read(&phase_temp).expect("phase temp 必须保留"),
+                    b"external phase temp",
+                    "changed={changed}"
+                ),
+                "staging" => assert_eq!(
+                    fs::read(staging.join("external")).expect("staging 条目必须保留"),
+                    b"external staging",
+                    "changed={changed}"
+                ),
+                "final" => assert_eq!(
+                    fs::read(&final_extra).expect("final 外部条目必须保留"),
+                    b"external final",
+                    "changed={changed}"
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn e_recovery_revalidates_final_immediately_before_sqlite_prepared() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+        publish_takeover_v2_prepared_bundle_with_hook(
+            &harness.paths,
+            &mut harness.storage,
+            &transaction_id,
+            202,
+            &mut |checkpoint| {
+                if checkpoint == BundlePublishCheckpoint::E {
+                    return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                        "测试停在 E".to_owned(),
+                    ));
+                }
+                Ok(())
+            },
+        )
+        .expect_err("应停在 DB prepared 之前");
+        let transaction = harness.transaction(&transaction_id).expect("事务必须存在");
+        let final_extra = harness
+            .paths
+            .bundle_directory(&plan.bundle_id)
+            .join("external-during-recovery");
+        let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+
+        recover_pre_effect_takeover_v2_transaction_with_hook(
+            &harness.paths,
+            &lock,
+            &mut harness.storage,
+            &transaction,
+            300,
+            &mut || Ok(()),
+            &mut || {
+                fs::write(&final_extra, b"external final").expect("应在恢复提交前修改 final");
+                Ok(())
+            },
+        )
+        .expect_err("E 恢复必须重新验证 final");
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "preparing"
+        );
+        assert_eq!(
+            fs::read(&final_extra).expect("外部 final 条目必须保留"),
+            b"external final"
+        );
+        drop(lock);
+
+        recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 301)
+            .expect("异常 E 只应阻塞当前事务");
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("异常 E 必须保留")
+                .status,
+            "blocked"
+        );
+        assert!(final_extra.exists());
+    }
+
+    #[test]
+    fn invalid_prepared_filesystem_states_block_and_preserve_every_entry() {
+        for variant in [
+            "final_with_staged",
+            "final_current",
+            "final_unknown",
+            "final_hardlink",
+            "prepared_missing_final",
+        ] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+            let final_bundle = harness.paths.bundle_directory(&plan.bundle_id);
+            let staging = harness.paths.staging_root().join(&transaction_id);
+            let preserved_path: PathBuf;
+            match variant {
+                "final_with_staged" => {
+                    fs::create_dir(&final_bundle).expect("应插入共存 final");
+                    fs::set_permissions(&final_bundle, fs::Permissions::from_mode(0o700))
+                        .expect("共存 final 应使用可审计 mode");
+                    fs::write(final_bundle.join("external"), b"external final")
+                        .expect("应写共存 final 内容");
+                    preserved_path = final_bundle.join("external");
+                }
+                "final_current" | "final_unknown" | "final_hardlink" => {
+                    publish_takeover_v2_prepared_bundle_with_hook(
+                        &harness.paths,
+                        &mut harness.storage,
+                        &transaction_id,
+                        202,
+                        &mut |checkpoint| {
+                            if checkpoint == BundlePublishCheckpoint::E {
+                                return Err(TakeoverV2LifecycleError::RecoveryBlocked(
+                                    "测试停在 E".to_owned(),
+                                ));
+                            }
+                            Ok(())
+                        },
+                    )
+                    .expect_err("应停在 DB prepared 之前");
+                    match variant {
+                        "final_current" => {
+                            preserved_path = final_bundle.join("current");
+                            std::os::unix::fs::symlink(
+                                format!("contents/{}", plan.content_id),
+                                &preserved_path,
+                            )
+                            .expect("应插入 current");
+                        }
+                        "final_unknown" => {
+                            preserved_path = final_bundle.join("unknown");
+                            fs::write(&preserved_path, b"unknown").expect("应插入未知 final 条目");
+                        }
+                        "final_hardlink" => {
+                            let member_file = final_bundle
+                                .join("contents")
+                                .join(&plan.content_id)
+                                .join("members/alpha/helper.txt");
+                            preserved_path = harness._temp.path().join("external-hardlink");
+                            fs::hard_link(&member_file, &preserved_path)
+                                .expect("应增加 final 文件链接数");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                "prepared_missing_final" => {
+                    publish_takeover_v2_prepared_bundle(
+                        &harness.paths,
+                        &mut harness.storage,
+                        &transaction_id,
+                        202,
+                    )
+                    .expect("应先进入稳定 prepared");
+                    preserved_path = harness._temp.path().join("removed-final-backup");
+                    fs::rename(&final_bundle, &preserved_path)
+                        .expect("应模拟 prepared final 被外部移走");
+                }
+                _ => unreachable!(),
+            }
+
+            recover_pre_effect_takeover_v2_transactions(&harness.paths, &mut harness.storage, 300)
+                .expect("非法 prepared 状态只应阻塞当前事务");
+
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("非法状态事务必须保留")
+                    .status,
+                "blocked",
+                "variant={variant}"
+            );
+            assert!(preserved_path.exists(), "variant={variant}");
+            assert!(
+                harness
+                    .paths
+                    .journals_root()
+                    .join(journal_file_name(&transaction_id))
+                    .exists(),
+                "variant={variant}"
+            );
+            if variant == "final_with_staged" {
+                assert!(staging.join("candidate").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn final_publish_no_replace_preserves_a_target_inserted_at_the_kernel_boundary() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+        let final_bundle = harness.paths.bundle_directory(&plan.bundle_id);
+
+        publish_takeover_v2_prepared_bundle_with_rename_boundary_hook(
+            &harness.paths,
+            &mut harness.storage,
+            &transaction_id,
+            202,
+            &mut |_| Ok(()),
+            &mut || {
+                fs::create_dir(&final_bundle).expect("应在最终检查后插入目标");
+                fs::write(final_bundle.join("external"), b"external final")
+                    .expect("应写外部 final");
+                Ok(())
+            },
+        )
+        .expect_err("atomic no-replace 不能覆盖竞态目标");
+
+        assert_eq!(
+            fs::read(final_bundle.join("external")).expect("外部 final 必须保留"),
+            b"external final"
+        );
+        assert!(
+            harness
+                .paths
+                .staging_root()
+                .join(&transaction_id)
+                .join("bundle/contents")
+                .join(&plan.content_id)
+                .join("members/alpha/SKILL.md")
+                .is_file(),
+            "发布失败时完整 D shape 必须保留"
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "preparing"
+        );
+    }
+
+    #[test]
+    fn final_publish_rejects_a_staged_source_replaced_after_fresh_audit() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+        let staging = harness.paths.staging_root().join(&transaction_id);
+        let staged_bundle = staging.join("bundle");
+        let preserved_bundle = harness._temp.path().join("preserved-staged-bundle");
+        let final_bundle = harness.paths.bundle_directory(&plan.bundle_id);
+
+        publish_takeover_v2_prepared_bundle_with_hook(
+            &harness.paths,
+            &mut harness.storage,
+            &transaction_id,
+            202,
+            &mut |checkpoint| {
+                if checkpoint == BundlePublishCheckpoint::AfterFreshStagedAudit {
+                    // 模拟同用户进程在 fresh audit 后替换 rename 的源目录。
+                    fs::rename(&staged_bundle, &preserved_bundle)
+                        .expect("应保留已审计通过的完整 D shape");
+                    fs::create_dir(&staged_bundle).expect("应插入非法 staged source");
+                    fs::write(staged_bundle.join("external"), b"external staged source")
+                        .expect("应写入非法 staged source");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("原子发布前必须拒绝被替换的 staged source");
+
+        assert!(
+            preserved_bundle
+                .join("contents")
+                .join(&plan.content_id)
+                .join("members/alpha/SKILL.md")
+                .is_file(),
+            "已审计通过的完整 D shape 必须原样保留"
+        );
+        assert!(
+            !final_bundle.exists(),
+            "非法 staged source 不能进入最终 Bundle"
+        );
+        assert_eq!(
+            fs::read(staged_bundle.join("external")).expect("非法 source 现场必须保留"),
+            b"external staged source"
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "preparing"
+        );
+    }
+
+    #[test]
+    fn final_publish_rejects_phase_temp_inserted_during_fresh_staged_audit() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+        let phase_temp = harness
+            .paths
+            .journals_root()
+            .join(phase_temp_file_name(&transaction_id));
+        let staged_bundle = harness
+            .paths
+            .staging_root()
+            .join(&transaction_id)
+            .join("bundle");
+        let final_bundle = harness.paths.bundle_directory(&plan.bundle_id);
+
+        publish_takeover_v2_prepared_bundle_with_hook(
+            &harness.paths,
+            &mut harness.storage,
+            &transaction_id,
+            202,
+            &mut |checkpoint| {
+                if checkpoint == BundlePublishCheckpoint::AfterFreshStagedAudit {
+                    fs::write(&phase_temp, b"external phase temp")
+                        .expect("应在 staged audit 期间插入 phase temp");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("staged audit 后的复核必须拒绝新插入的 phase temp");
+
+        assert_eq!(
+            fs::read(&phase_temp).expect("外部 phase temp 必须保留"),
+            b"external phase temp"
+        );
+        assert!(
+            !final_bundle.exists(),
+            "phase temp 未通过复核时不能发布 final"
+        );
+        assert!(
+            staged_bundle
+                .join("contents")
+                .join(&plan.content_id)
+                .join("members/alpha/SKILL.md")
+                .is_file(),
+            "完整 D shape 必须保留"
+        );
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "preparing"
+        );
+    }
+
+    #[test]
+    fn final_publish_rejects_an_unknown_staging_sibling_inserted_after_audit() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+        let staging = harness.paths.staging_root().join(&transaction_id);
+        let external = staging.join("external");
+        let staged_member = staging
+            .join("bundle/contents")
+            .join(&plan.content_id)
+            .join("members/alpha/SKILL.md");
+        let final_bundle = harness.paths.bundle_directory(&plan.bundle_id);
+
+        publish_takeover_v2_prepared_bundle_with_hook(
+            &harness.paths,
+            &mut harness.storage,
+            &transaction_id,
+            202,
+            &mut |checkpoint| {
+                if checkpoint == BundlePublishCheckpoint::AfterFreshStagedAudit {
+                    fs::write(&external, b"external staging sibling")
+                        .expect("应插入 staging 同级普通文件");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("完整 staging 审计必须拒绝未知同级条目");
+
+        assert!(
+            !final_bundle.exists(),
+            "未知 staging 条目存在时不能发布 final"
+        );
+        assert_eq!(
+            fs::read(&external).expect("外部 staging 条目必须保留"),
+            b"external staging sibling"
+        );
+        assert!(staged_member.is_file(), "合法 D source 必须原样保留");
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "preparing"
+        );
+    }
+
+    #[test]
+    fn final_publish_rebinds_visible_managed_roots_after_prepublish_hook() {
+        let mut harness = Harness::new();
+        let mut plan = harness.save_single_plan("alpha");
+        let (transaction_id, _) = harness.begin_with_prepared_candidate(&mut plan);
+        let bundles_root = harness.paths.bundles_root();
+        let bundles_backup = harness._temp.path().join("bundles-backup");
+        let staged_member = harness
+            .paths
+            .staging_root()
+            .join(&transaction_id)
+            .join("bundle/contents")
+            .join(&plan.content_id)
+            .join("members/alpha/SKILL.md");
+        let final_bundle = harness.paths.bundle_directory(&plan.bundle_id);
+
+        publish_takeover_v2_prepared_bundle_with_hook(
+            &harness.paths,
+            &mut harness.storage,
+            &transaction_id,
+            202,
+            &mut |checkpoint| {
+                if checkpoint == BundlePublishCheckpoint::BeforeAtomicPublish {
+                    // 模拟同用户进程把可见 bundles 根整体替换为新的空目录。
+                    fs::rename(&bundles_root, &bundles_backup).expect("应保留 hook 前 bundles 根");
+                    fs::create_dir(&bundles_root).expect("应重建可见 bundles 根");
+                    fs::set_permissions(&bundles_root, fs::Permissions::from_mode(0o700))
+                        .expect("可见 bundles 根应使用受管权限");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("根目录替换后必须拒绝发布");
+
+        assert!(!final_bundle.exists(), "canonical final 必须保持缺失");
+        assert!(
+            !bundles_backup.join(&plan.bundle_id).exists(),
+            "合法 D source 不能发布到 detached bundles 根"
+        );
+        assert!(staged_member.is_file(), "合法 D source 必须原样保留");
+        assert_eq!(
+            harness
+                .transaction(&transaction_id)
+                .expect("事务必须保留")
+                .phase,
+            "preparing"
+        );
+    }
+
+    #[test]
     fn journal_phase_updater_rejects_missing_candidate() {
         let mut harness = Harness::new();
         let plan = harness.save_single_plan("alpha");
@@ -4474,6 +6526,84 @@ mod tests {
                 assert_eq!(fs::read(&formal).expect("替换 formal 必须保留"), external);
                 assert!(phase_temp.exists());
             }
+        }
+    }
+
+    #[test]
+    fn journal_phase_updater_rejects_a_replaced_journals_root_at_each_hook() {
+        for point in ["before_swap", "after_swap"] {
+            let mut harness = Harness::new();
+            let mut plan = harness.save_single_plan("alpha");
+            let (transaction_id, journal) = harness.begin_preparing_with_journal(&plan);
+            let transaction = harness.transaction(&transaction_id).expect("事务必须存在");
+            let lock = acquire_lifecycle_lock(&harness.paths).expect("应取得生命周期锁");
+            plan.status = TakeoverV2PlanStatus::Consumed;
+            prepare_takeover_v2_candidate(&harness.paths, &lock, &plan, &journal)
+                .expect("应先准备完整 Candidate");
+            let journals_root = harness.paths.journals_root();
+            let journals_backup = harness
+                ._temp
+                .path()
+                .join(format!("phase-journals-backup-{point}"));
+
+            let result = update_takeover_v2_journal_to_prepared_with_hooks(
+                &harness.paths,
+                &lock,
+                &transaction,
+                &plan,
+                |_, _| {
+                    if point == "before_swap" {
+                        fs::rename(&journals_root, &journals_backup)
+                            .expect("应保留 swap 前 journals 根");
+                        fs::create_dir(&journals_root).expect("应重建可见 journals 根");
+                        fs::set_permissions(&journals_root, fs::Permissions::from_mode(0o700))
+                            .expect("可见 journals 根应使用受管权限");
+                    }
+                },
+                |_, _| {
+                    if point == "after_swap" {
+                        fs::rename(&journals_root, &journals_backup)
+                            .expect("应保留 swap 后 journals 根");
+                        fs::create_dir(&journals_root).expect("应重建可见 journals 根");
+                        fs::set_permissions(&journals_root, fs::Permissions::from_mode(0o700))
+                            .expect("可见 journals 根应使用受管权限");
+                    }
+                },
+            );
+
+            result.expect_err("任一 hook 替换 journals 根都必须阻塞 phase update");
+            assert!(
+                fs::read_dir(&journals_root)
+                    .expect("应读取 canonical journals 根")
+                    .next()
+                    .is_none(),
+                "canonical journals 必须保持空，point={point}"
+            );
+            let formal: TakeoverV2Journal = serde_json::from_slice(
+                &fs::read(journals_backup.join(journal_file_name(&transaction_id)))
+                    .expect("detached formal 必须保留"),
+            )
+            .expect("detached formal 必须可解析");
+            let temporary: TakeoverV2Journal = serde_json::from_slice(
+                &fs::read(journals_backup.join(phase_temp_file_name(&transaction_id)))
+                    .expect("detached phase temp 必须保留"),
+            )
+            .expect("detached phase temp 必须可解析");
+            if point == "before_swap" {
+                assert_eq!(formal.phase, TakeoverV2JournalPhase::Preparing);
+                assert_eq!(temporary.phase, TakeoverV2JournalPhase::Prepared);
+            } else {
+                assert_eq!(formal.phase, TakeoverV2JournalPhase::Prepared);
+                assert_eq!(temporary.phase, TakeoverV2JournalPhase::Preparing);
+            }
+            assert_eq!(
+                harness
+                    .transaction(&transaction_id)
+                    .expect("事务必须保留")
+                    .phase,
+                "preparing",
+                "point={point}"
+            );
         }
     }
 
