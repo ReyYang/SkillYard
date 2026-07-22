@@ -338,6 +338,26 @@ pub struct TakeoverPlan {
     pub expires_at: i64,
 }
 
+/// v2 Plan 在创建时一次性冻结全部 Origin、保留位置与共享投影选择。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverV2PlanRequest {
+    pub observation_ids: Vec<String>,
+    pub selected_observation_id: String,
+    pub preserved_observation_ids: Vec<String>,
+    pub shared_targets: Vec<TakeoverV2SharedTargetRequest>,
+}
+
+/// Shared Origin 的应用专属 Target 仍继承该 Origin 的 global 或 project 范围。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverV2SharedTargetRequest {
+    pub shared_observation_id: String,
+    pub app_id: SupportedAppId,
+}
+
 /// v2 只描述多个现有副本为何属于同一个 Skill Identity，不推断远端来源。
 // P4-02b 接入 v2 事务后移除此临时抑制；本片不提前扩大应用入口。
 #[allow(dead_code)]

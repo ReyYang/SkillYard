@@ -12,6 +12,7 @@ mod scanner;
 mod storage;
 mod takeover_lifecycle;
 mod takeover_v2_lifecycle;
+mod takeover_v2_plan;
 
 pub use application::SkillYardApplication;
 pub use domain::{
