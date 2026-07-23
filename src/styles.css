@@ -36,6 +36,7 @@ button:focus-visible {
 .install-shell,
 .mount-shell,
 .source-shell,
+.association-shell,
 .state-page {
   min-height: 100vh;
 }
@@ -191,6 +192,7 @@ code {
 .install-shell,
 .mount-shell,
 .source-shell,
+.association-shell,
 .state-page {
   max-width: 980px;
   margin: 0 auto;
@@ -323,6 +325,16 @@ code {
   background: #f0ddd3;
 }
 
+.source-update-status {
+  width: fit-content;
+  padding: 0.28rem 0.52rem;
+  border-radius: 999px;
+  color: #35603f;
+  background: #cfe9b7;
+  font-size: 0.67rem;
+  font-weight: 760;
+}
+
 .source-members {
   display: grid;
   gap: 0.55rem;
@@ -369,6 +381,159 @@ code {
 
 .source-reload-error {
   color: #8b4939;
+}
+
+.association-shell {
+  max-width: 900px;
+}
+
+.association-header {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.association-header h1 {
+  font-size: clamp(2.7rem, 6vw, 4.5rem);
+}
+
+.association-empty,
+.association-source-field,
+.association-mapping,
+.association-notice,
+.association-plan-section,
+.association-conflicts,
+.association-blocked {
+  margin-top: 2rem;
+  padding: 1.2rem;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 16px;
+  background: rgb(255 255 251 / 78%);
+}
+
+.association-empty h2,
+.association-mapping h2,
+.association-notice h2,
+.association-plan-section h2,
+.association-conflicts h2,
+.association-blocked h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.association-empty p,
+.association-mapping > p,
+.association-notice p {
+  color: #687269;
+  line-height: 1.55;
+}
+
+.association-source-field {
+  display: grid;
+  gap: 0.55rem;
+  color: #56645a;
+  font-size: 0.82rem;
+  font-weight: 680;
+}
+
+.association-source-field select,
+.association-mapping-list select {
+  width: 100%;
+  padding: 0.78rem 0.9rem;
+  border: 1px solid rgb(53 78 59 / 16%);
+  border-radius: 10px;
+  color: #213629;
+  background: #fff;
+  font: inherit;
+}
+
+.association-mapping > header {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.association-mapping > header > span {
+  color: #5d6b61;
+  font-size: 0.75rem;
+}
+
+.association-mapping-list {
+  display: grid;
+  gap: 0.65rem;
+  margin: 1rem 0;
+}
+
+.association-mapping-list label {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.4fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: center;
+  padding: 0.8rem;
+  border-radius: 11px;
+  background: #f3f5ee;
+}
+
+.association-mapping-list label > span {
+  font-weight: 690;
+}
+
+.association-plan-section ul,
+.association-blocked ul {
+  display: grid;
+  gap: 0.6rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.association-plan-section li {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem;
+  border-radius: 11px;
+  background: #f3f5ee;
+}
+
+.association-plan-section li > div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.association-plan-section li span {
+  color: #6b756d;
+  font-size: 0.78rem;
+}
+
+.association-conflicts fieldset {
+  display: grid;
+  gap: 0.55rem;
+  margin: 1rem 0 0;
+  padding: 0.9rem;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 12px;
+}
+
+.association-conflicts label {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.association-blocked {
+  color: #7a3529;
+  background: #f6ded6;
+}
+
+.plan-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  margin-top: 1.4rem;
 }
 
 .source-ref-shell {
@@ -1242,6 +1407,7 @@ code {
   .inventory-header,
   .inventory-controls,
   .source-header,
+  .association-header,
   .source-card > header {
     align-items: stretch;
     flex-direction: column;
@@ -1258,6 +1424,10 @@ code {
   }
 
   .inventory-section .inventory-list {
+    grid-template-columns: 1fr;
+  }
+
+  .association-mapping-list label {
     grid-template-columns: 1fr;
   }
 }

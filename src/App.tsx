@@ -7,6 +7,8 @@ import { InstallPlanPage } from "./components/InstallPlanPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
+import { SourceAssociationPlanPage } from "./components/SourceAssociationPlanPage";
+import { SourceAssociationSelectionPage } from "./components/SourceAssociationSelectionPage";
 import { SourceCatalogPage } from "./components/SourceCatalogPage";
 import { SourceRefChangePage } from "./components/SourceRefChangePage";
 import { TakeoverPlanPage } from "./components/TakeoverPlanPage";
@@ -17,6 +19,9 @@ import type {
   InstallPlan,
   MountPlan,
   MountScope,
+  SourceAssociationContentChoice,
+  SourceAssociationPlan,
+  SourceMemberMappingChoice,
   SourceRefChangePlan,
   SupportedAppId,
   TakeoverPlan,
@@ -67,6 +72,20 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [pendingSourceRefChange, setPendingSourceRefChange] =
     useState<SourceRefChangePlan | null>(null);
+  const [sourceAssociationBundleId, setSourceAssociationBundleId] = useState<
+    string | null
+  >(null);
+  const [pendingSourceAssociationPlan, setPendingSourceAssociationPlan] =
+    useState<SourceAssociationPlan | null>(null);
+  const [isPlanningSourceAssociation, setIsPlanningSourceAssociation] =
+    useState(false);
+  const [isConfirmingSourceAssociation, setIsConfirmingSourceAssociation] =
+    useState(false);
+  const [isDiscardingSourceAssociation, setIsDiscardingSourceAssociation] =
+    useState(false);
+  const [sourceAssociationError, setSourceAssociationError] = useState<
+    string | null
+  >(null);
   const [pendingInstallPlan, setPendingInstallPlan] =
     useState<InstallPlan | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
@@ -151,6 +170,117 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       setSourceError(formatError(error));
     } finally {
       setSourceOperation(null);
+    }
+  };
+
+  const openSourceAssociation = async (bundleId: string) => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "opening" });
+    setSourceAssociationBundleId(bundleId);
+    setSourceAssociationError(null);
+    setSourceError(null);
+    try {
+      setSourceDiscovery(await client.openSourceDiscovery());
+    } catch (error) {
+      // 来源页读取失败时留在清单，不让一个半打开的关联流程遮住现有 Bundle。
+      setSourceAssociationBundleId(null);
+      setSourceAssociationError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const createSourceAssociationPlan = async (
+    bundleId: string,
+    sourceId: string,
+    memberChoices: SourceMemberMappingChoice[],
+  ) => {
+    if (isPlanningSourceAssociation) return;
+    setIsPlanningSourceAssociation(true);
+    setSourceAssociationError(null);
+    try {
+      setPendingSourceAssociationPlan(
+        await client.createSourceAssociationPlan(
+          bundleId,
+          sourceId,
+          memberChoices,
+        ),
+      );
+    } catch (error) {
+      // 创建 Plan 尚未改变持久化关系，保留映射页供用户调整。
+      setSourceAssociationError(formatError(error));
+    } finally {
+      setIsPlanningSourceAssociation(false);
+    }
+  };
+
+  const discardSourceAssociationPlan = async () => {
+    if (
+      !pendingSourceAssociationPlan ||
+      isConfirmingSourceAssociation ||
+      isDiscardingSourceAssociation
+    ) {
+      return;
+    }
+    setIsDiscardingSourceAssociation(true);
+    setSourceAssociationError(null);
+    try {
+      await client.discardSourceAssociationPlan(
+        pendingSourceAssociationPlan.id,
+      );
+      setPendingSourceAssociationPlan(null);
+      setSourceAssociationBundleId(null);
+      setSourceDiscovery(null);
+    } catch (error) {
+      // 只有 Rust 确认丢弃成功后才离开 Plan，避免把失败伪装成取消。
+      setSourceAssociationError(formatError(error));
+    } finally {
+      setIsDiscardingSourceAssociation(false);
+    }
+  };
+
+  const confirmSourceAssociationPlan = async (
+    contentChoices: SourceAssociationContentChoice[],
+  ) => {
+    if (!pendingSourceAssociationPlan || isConfirmingSourceAssociation) return;
+    setIsConfirmingSourceAssociation(true);
+    setSourceAssociationError(null);
+    try {
+      const confirmedOutcome = await client.confirmSourceAssociationPlan(
+        pendingSourceAssociationPlan.id,
+        contentChoices,
+      );
+      try {
+        // 确认后以重新读取的持久化清单为准，不使用 Plan 页面推断成功状态。
+        const outcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome });
+      } catch (error) {
+        setViewState({ status: "ready", outcome: confirmedOutcome });
+        setSourceAssociationError(
+          `来源关系已处理，但重新读取清单失败：${formatError(error)}`,
+        );
+      }
+      setPendingSourceAssociationPlan(null);
+      setSourceAssociationBundleId(null);
+      setSourceDiscovery(null);
+    } catch (error) {
+      const message = formatError(error);
+      // 确认失败后旧 Plan 可能已经消费；离开确认页并读取唯一持久化结果。
+      setPendingSourceAssociationPlan(null);
+      setSourceAssociationBundleId(null);
+      setSourceDiscovery(null);
+      try {
+        const outcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome });
+        setSourceAssociationError(message);
+      } catch (recoveryError) {
+        setViewState({
+          status: "error",
+          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+        });
+      }
+    } finally {
+      setIsConfirmingSourceAssociation(false);
     }
   };
 
@@ -616,6 +746,18 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       </main>
     );
   }
+  if (pendingSourceAssociationPlan) {
+    return (
+      <SourceAssociationPlanPage
+        plan={pendingSourceAssociationPlan}
+        isConfirming={isConfirmingSourceAssociation}
+        isDiscarding={isDiscardingSourceAssociation}
+        error={sourceAssociationError}
+        onBack={discardSourceAssociationPlan}
+        onConfirm={confirmSourceAssociationPlan}
+      />
+    );
+  }
   if (pendingSourceRefChange) {
     return (
       <SourceRefChangePage
@@ -692,6 +834,43 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         </p>
       </main>
     );
+  }
+
+  if (
+    sourceAssociationBundleId &&
+    sourceDiscovery &&
+    viewState.outcome.type === "inventory"
+  ) {
+    const members = viewState.outcome.entries.filter(
+      (entry) =>
+        entry.managementKind === "skillYardManaged" &&
+        entry.bundleId === sourceAssociationBundleId,
+    );
+    const bundleDisplayName =
+      members[0]?.bundleDisplayName ?? "本地 Bundle";
+    if (members.length > 0) {
+      return (
+        <SourceAssociationSelectionPage
+          bundleId={sourceAssociationBundleId}
+          bundleDisplayName={bundleDisplayName}
+          members={members}
+          sources={sourceDiscovery.sources}
+          isPlanning={isPlanningSourceAssociation}
+          error={sourceAssociationError}
+          onBack={() => {
+            setSourceAssociationError(null);
+            setSourceAssociationBundleId(null);
+            setSourceDiscovery(null);
+          }}
+          onAddSource={() => {
+            // 添加 Source 继续复用现有 Source 页面，不另建安装入口。
+            setSourceAssociationError(null);
+            setSourceAssociationBundleId(null);
+          }}
+          onCreatePlan={createSourceAssociationPlan}
+        />
+      );
+    }
   }
 
   if (sourceDiscovery) {
@@ -837,9 +1016,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       projectError={projectError}
       mountError={mountError}
       takeoverError={takeoverError}
+      sourceAssociationError={sourceAssociationError}
       onRefresh={refreshLocalInventory}
       onInstall={openSourceDiscovery}
       onAddProject={chooseAndRegisterProject}
+      onAssociateSource={openSourceAssociation}
       onTakeover={openTakeover}
       onManageMount={openMountManager}
       onBatchMount={openBatchMount}

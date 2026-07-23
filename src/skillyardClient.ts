@@ -6,11 +6,16 @@ import type {
   InstallPlan,
   MountPlan,
   MountScope,
+  SourceAssociationContentChoice,
+  SourceAssociationPlan,
+  SourceMemberMappingChoice,
   SupportedAppId,
   TakeoverPlan,
   TakeoverPlanRequest,
   UiOutcome,
 } from "./domain";
+
+type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 
 export interface SkillYardClient {
   getStartupState(): Promise<UiOutcome>;
@@ -37,6 +42,16 @@ export interface SkillYardClient {
   confirmSourceRefChange(
     planId: string,
   ): Promise<Extract<UiOutcome, { type: "sourceDiscovery" }>>;
+  createSourceAssociationPlan(
+    bundleId: string,
+    sourceId: string,
+    memberChoices: SourceMemberMappingChoice[],
+  ): Promise<SourceAssociationPlan>;
+  confirmSourceAssociationPlan(
+    planId: string,
+    contentChoices: SourceAssociationContentChoice[],
+  ): Promise<InventoryOutcome>;
+  discardSourceAssociationPlan(planId: string): Promise<void>;
   createGithubInstallPlan(sourceId: string): Promise<InstallPlan>;
   createUrlInstallPlan(url: string): Promise<InstallPlan>;
   discardInstallPlan(planId: string): Promise<void>;
@@ -100,6 +115,19 @@ export const tauriSkillYardClient: SkillYardClient = {
       "confirm_source_ref_change",
       { planId },
     ),
+  createSourceAssociationPlan: (bundleId, sourceId, memberChoices) =>
+    invoke<SourceAssociationPlan>("create_source_association_plan", {
+      bundleId,
+      sourceId,
+      memberChoices,
+    }),
+  confirmSourceAssociationPlan: (planId, contentChoices) =>
+    invoke<InventoryOutcome>("confirm_source_association_plan", {
+      planId,
+      contentChoices,
+    }),
+  discardSourceAssociationPlan: (planId) =>
+    invoke<void>("discard_source_association_plan", { planId }),
   createGithubInstallPlan: (sourceId) =>
     invoke<InstallPlan>("create_github_install_plan", { sourceId }),
   createUrlInstallPlan: (url) =>

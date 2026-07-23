@@ -135,6 +135,80 @@ describe("Tauri IPC contract", () => {
     });
   });
 
+  it("补充来源只提交 Bundle、Source 和用户明确的成员对应关系", async () => {
+    mocks.invoke.mockResolvedValue({ id: "association-plan-1" });
+    const memberChoices = [
+      {
+        memberId: "member-1",
+        sourceRelativePath: "skills/example",
+      },
+      {
+        memberId: "member-local",
+        sourceRelativePath: null,
+      },
+    ];
+
+    await tauriSkillYardClient.createSourceAssociationPlan(
+      "bundle-1",
+      "source-1",
+      memberChoices,
+    );
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "create_source_association_plan",
+      {
+        bundleId: "bundle-1",
+        sourceId: "source-1",
+        memberChoices,
+      },
+    );
+  });
+
+  it("关联与归并使用同一个确认命令，并只提交 Plan 内的内容选择", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+    });
+    const contentChoices = [
+      { conflictId: "conflict-1", memberId: "member-2" },
+    ];
+
+    await tauriSkillYardClient.confirmSourceAssociationPlan(
+      "association-plan-1",
+      contentChoices,
+    );
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "confirm_source_association_plan",
+      {
+        planId: "association-plan-1",
+        contentChoices,
+      },
+    );
+  });
+
+  it("放弃关联 Plan 时只提交 opaque Plan ID", async () => {
+    mocks.invoke.mockResolvedValue(undefined);
+
+    await tauriSkillYardClient.discardSourceAssociationPlan(
+      "association-plan-1",
+    );
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "discard_source_association_plan",
+      {
+        planId: "association-plan-1",
+      },
+    );
+  });
+
   it("从 GitHub Source 创建通用安装 Plan 时只提交 sourceId", async () => {
     mocks.invoke.mockResolvedValue({ id: "install-plan-1" });
 

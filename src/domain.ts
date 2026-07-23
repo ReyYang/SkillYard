@@ -233,6 +233,57 @@ export interface SourceSummary {
   members: SourceCatalogMemberSummary[];
 }
 
+export type SourceAssociationMode = "link" | "merge";
+
+// null 是用户明确选择“不对应”，不能被前端改写为名称或路径猜测。
+export interface SourceMemberMappingChoice {
+  memberId: string;
+  sourceRelativePath: string | null;
+}
+
+export interface SourceAssociationMemberChoice
+  extends SourceMemberMappingChoice {
+  skillName: string;
+}
+
+export interface SourceAssociationContentChoice {
+  conflictId: string;
+  memberId: string;
+}
+
+export interface SourceAssociationPlanMember {
+  memberId: string;
+  bundleId: string;
+  bundleDisplayName: string;
+  skillName: string;
+  contentFingerprint: string;
+}
+
+export interface SourceAssociationConflict {
+  id: string;
+  label: string;
+  candidateMemberIds: string[];
+}
+
+// link 与 merge 共用同一份确认模型，避免前端产生第二套归并状态机。
+export interface SourceAssociationPlan {
+  id: string;
+  mode: SourceAssociationMode;
+  sourceId: string;
+  sourceDisplayName: string;
+  targetBundleId: string;
+  targetBundleDisplayName: string;
+  retiringBundleId: string | null;
+  retiringBundleDisplayName: string | null;
+  memberChoices: SourceAssociationMemberChoice[];
+  members: SourceAssociationPlanMember[];
+  mounts: MountSummary[];
+  conflicts: SourceAssociationConflict[];
+  blockingIssues: string[];
+  createdAt: number;
+  expiresAt: number;
+}
+
 // Tracked Ref 变更 Plan 只冻结确认信息，不代表安装或文件系统事务。
 export interface SourceRefChangePlan {
   id: string;
@@ -350,6 +401,13 @@ export type UiOutcome =
   | {
       type: "sourceRefChangePlan";
       plan: SourceRefChangePlan;
+    }
+  | {
+      type: "sourceAssociationPlan";
+      plan: SourceAssociationPlan;
+    }
+  | {
+      type: "sourceAssociationPlanDiscarded";
     }
   | {
       type: "skillsShSearch";

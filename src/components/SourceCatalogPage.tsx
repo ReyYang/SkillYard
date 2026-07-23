@@ -350,6 +350,9 @@ function SourceCard({
           <span className={`source-status is-${source.catalogStatus}`}>
             {statusLabel}
           </span>
+          {isGithub && source.bundleId && source.adoptedMarker === null ? (
+            <span className="source-update-status">可更新</span>
+          ) : null}
           <h2>{source.displayName}</h2>
           <code>{source.locator}</code>
           {source.trackedRef ? (

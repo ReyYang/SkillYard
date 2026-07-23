@@ -9,6 +9,7 @@ import type {
   InventoryObservation,
   MountPlan,
   MountSummary,
+  SourceAssociationPlan,
   SourceRefChangePlan,
   SourceSummary,
   TakeoverPlan,
@@ -2243,6 +2244,469 @@ describe("GitHub Source 安装", () => {
   });
 });
 
+describe("补充来源与 Bundle 归并", () => {
+  it("只给没有 Source 的受管 Bundle 提供补充来源入口", async () => {
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry(),
+        createManagedEntry({
+          id: "managed:linked",
+          memberId: "member-linked",
+          bundleId: "bundle-linked",
+          bundleDisplayName: "linked-bundle",
+          sourceDisplayName: "anthropics/skills",
+        }),
+      ]),
+    );
+
+    render(<App client={client} />);
+
+    const unlinked = await screen.findByRole("region", {
+      name: "example-bundle",
+    });
+    const linked = screen.getByRole("region", { name: "linked-bundle" });
+    expect(
+      within(unlinked).getByRole("button", { name: "补充来源" }),
+    ).toBeEnabled();
+    expect(
+      within(linked).queryByRole("button", { name: "补充来源" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("只列出 Fresh Source，并为每个本地 Skill 提交明确的对应或不对应", async () => {
+    const user = userEvent.setup();
+    const entries = [
+      createManagedEntry(),
+      createManagedEntry({
+        id: "managed:local",
+        memberId: "member-local",
+        skillName: "local-only",
+      }),
+    ];
+    const client = createClient(inventoryOutcome(entries));
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([
+        createSource({
+          members: [
+            createSourceMember(),
+            createSourceMember({
+              id: "catalog-member-other",
+              relativePath: "skills/other",
+              skillName: "other",
+            }),
+          ],
+        }),
+        createSource({
+          id: "source-stale",
+          displayName: "stale/source",
+          canonicalIdentity: "github:stale/source",
+          locator: "https://github.com/stale/source",
+          catalogStatus: "stale",
+        }),
+      ]),
+    );
+    vi.mocked(client.createSourceAssociationPlan).mockResolvedValue(
+      createSourceAssociationPlan(),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      within(
+        await screen.findByRole("region", { name: "example-bundle" }),
+      ).getByRole("button", { name: "补充来源" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "为 Bundle 补充来源" }),
+    ).toBeInTheDocument();
+    const sourceSelect = screen.getByRole("combobox", { name: "选择 Source" });
+    expect(
+      within(sourceSelect).getByRole("option", { name: "anthropics/skills" }),
+    ).toBeInTheDocument();
+    expect(
+      within(sourceSelect).queryByRole("option", { name: "stale/source" }),
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(sourceSelect, "source-1");
+    const exampleMapping = screen.getByRole("combobox", {
+      name: "example 的对应关系",
+    });
+    const localMapping = screen.getByRole("combobox", {
+      name: "local-only 的对应关系",
+    });
+    await user.selectOptions(exampleMapping, "skills/example");
+
+    expect(
+      within(localMapping).getByRole("option", { name: /example/ }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "生成关联计划" }));
+
+    expect(client.createSourceAssociationPlan).toHaveBeenCalledWith(
+      "bundle-1",
+      "source-1",
+      [
+        {
+          memberId: "member-1",
+          sourceRelativePath: "skills/example",
+        },
+        { memberId: "member-local", sourceRelativePath: null },
+      ],
+    );
+    expect(
+      screen.getByRole("heading", { name: "确认补充来源" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/只建立来源关系/)).toBeInTheDocument();
+    expect(screen.getByText(/不会修改当前内容或 Mount/)).toBeInTheDocument();
+  });
+
+  it("把 Source 根目录空路径与不对应区分提交", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry(),
+        createManagedEntry({
+          id: "managed:local",
+          memberId: "member-local",
+          skillName: "local-only",
+        }),
+      ]),
+    );
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([
+        createSource({
+          members: [
+            createSourceMember({
+              id: "catalog-member-root",
+              relativePath: "",
+              skillName: "root-skill",
+            }),
+          ],
+        }),
+      ]),
+    );
+    vi.mocked(client.createSourceAssociationPlan).mockResolvedValue(
+      createSourceAssociationPlan({
+        memberChoices: [
+          {
+            memberId: "member-1",
+            skillName: "example",
+            sourceRelativePath: "",
+          },
+          {
+            memberId: "member-local",
+            skillName: "local-only",
+            sourceRelativePath: null,
+          },
+        ],
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      within(
+        await screen.findByRole("region", { name: "example-bundle" }),
+      ).getByRole("button", { name: "补充来源" }),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "选择 Source" }),
+      "source-1",
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "example 的对应关系" }),
+      "",
+    );
+    await user.click(screen.getByRole("button", { name: "生成关联计划" }));
+
+    expect(client.createSourceAssociationPlan).toHaveBeenCalledWith(
+      "bundle-1",
+      "source-1",
+      [
+        { memberId: "member-1", sourceRelativePath: "" },
+        { memberId: "member-local", sourceRelativePath: null },
+      ],
+    );
+    expect(screen.getByText("对应 来源根目录")).toBeInTheDocument();
+  });
+
+  it("没有可用 Source 时可以前往现有 Source 页面添加", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([
+        createSource({ catalogStatus: "stale" }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      within(
+        await screen.findByRole("region", { name: "example-bundle" }),
+      ).getByRole("button", { name: "补充来源" }),
+    );
+
+    expect(await screen.findByText("没有可选择的 Source")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "前往 Source 页面添加" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "安装 Skill" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("添加 GitHub Source")).toBeInTheDocument();
+  });
+
+  it("放弃关联 Plan 后回到原 Bundle，不在前端伪装成功", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.createSourceAssociationPlan).mockResolvedValue(
+      createSourceAssociationPlan(),
+    );
+    vi.mocked(client.discardSourceAssociationPlan).mockResolvedValue(undefined);
+    render(<App client={client} />);
+
+    await openSourceAssociationPlan(user);
+    await user.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(client.discardSourceAssociationPlan).toHaveBeenCalledWith(
+      "association-plan-1",
+    );
+    expect(
+      await screen.findByRole("region", { name: "example-bundle" }),
+    ).toBeInTheDocument();
+  });
+
+  it("确认成功后重新读取 Inventory，再显示最终 Source 关系", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const refreshed = inventoryOutcome([
+      createManagedEntry({ sourceDisplayName: "anthropics/skills" }),
+    ]);
+    const client = createClient(initial);
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(refreshed);
+    vi.mocked(client.createSourceAssociationPlan).mockResolvedValue(
+      createSourceAssociationPlan(),
+    );
+    vi.mocked(client.confirmSourceAssociationPlan).mockResolvedValue(refreshed);
+    render(<App client={client} />);
+
+    await openSourceAssociationPlan(user);
+    await user.click(screen.getByRole("button", { name: "确认关联" }));
+
+    expect(client.confirmSourceAssociationPlan).toHaveBeenCalledWith(
+      "association-plan-1",
+      [],
+    );
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("anthropics/skills")).toBeInTheDocument();
+  });
+
+  it("确认失败后重新读取 Inventory，并显示真实持久状态", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const refreshed = inventoryOutcome([createManagedEntry()]);
+    const client = createClient(initial);
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(refreshed);
+    vi.mocked(client.createSourceAssociationPlan).mockResolvedValue(
+      createSourceAssociationPlan(),
+    );
+    vi.mocked(client.confirmSourceAssociationPlan).mockRejectedValue({
+      code: "sourceAssociationError",
+      message: "Source Catalog 已变化，请重新生成计划",
+    });
+    render(<App client={client} />);
+
+    await openSourceAssociationPlan(user);
+    await user.click(screen.getByRole("button", { name: "确认关联" }));
+
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(
+      await screen.findByRole("region", { name: "example-bundle" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Source Catalog 已变化，请重新生成计划",
+    );
+    expect(
+      screen.queryByRole("heading", { name: "确认补充来源" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("merge 复用同一确认页，并在全部内容冲突选择后才能确认", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    const mergePlan = createSourceAssociationPlan({
+      mode: "merge",
+      targetBundleId: "bundle-target",
+      targetBundleDisplayName: "source-bundle",
+      retiringBundleId: "bundle-1",
+      retiringBundleDisplayName: "example-bundle",
+      members: [
+        {
+          memberId: "member-target",
+          bundleId: "bundle-target",
+          bundleDisplayName: "same-bundle",
+          skillName: "example",
+          contentFingerprint: "11111111aaaaaaaa",
+        },
+        {
+          memberId: "member-1",
+          bundleId: "bundle-1",
+          bundleDisplayName: "same-bundle",
+          skillName: "example",
+          contentFingerprint: "22222222bbbbbbbb",
+        },
+      ],
+      mounts: [createMount()],
+      conflicts: [
+        {
+          id: "conflict-1",
+          label: "同一个 Source Member",
+          candidateMemberIds: ["member-target", "member-1"],
+        },
+      ],
+    });
+    vi.mocked(client.createSourceAssociationPlan).mockResolvedValue(mergePlan);
+    vi.mocked(client.confirmSourceAssociationPlan).mockResolvedValue(
+      inventoryOutcome([]),
+    );
+    render(<App client={client} />);
+
+    await openSourceAssociationPlan(user);
+
+    expect(
+      screen.getByRole("heading", { name: "确认归并 Bundle" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/source-bundle/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/example-bundle/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Codex · 全局/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认归并" })).toBeDisabled();
+    expect(
+      screen.getByRole("radio", {
+        name: /保留已关联 Bundle.*11111111/,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", {
+        name: /使用待归入 Bundle.*22222222/,
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("radio", {
+        name: /使用待归入 Bundle.*22222222/,
+      }),
+    );
+    expect(screen.getByRole("button", { name: "确认归并" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "确认归并" }));
+
+    expect(client.confirmSourceAssociationPlan).toHaveBeenCalledWith(
+      "association-plan-1",
+      [{ conflictId: "conflict-1", memberId: "member-1" }],
+    );
+  });
+
+  it("归并存在 blocker 时展示原因，并始终禁止确认", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.createSourceAssociationPlan).mockResolvedValue(
+      createSourceAssociationPlan({
+        mode: "merge",
+        targetBundleId: "bundle-target",
+        targetBundleDisplayName: "source-bundle",
+        retiringBundleId: "bundle-1",
+        retiringBundleDisplayName: "example-bundle",
+        members: [
+          {
+            memberId: "member-target",
+            bundleId: "bundle-target",
+            bundleDisplayName: "source-bundle",
+            skillName: "example",
+            contentFingerprint: "11111111aaaaaaaa",
+          },
+          {
+            memberId: "member-1",
+            bundleId: "bundle-1",
+            bundleDisplayName: "example-bundle",
+            skillName: "example",
+            contentFingerprint: "22222222bbbbbbbb",
+          },
+        ],
+        conflicts: [
+          {
+            id: "conflict-1",
+            label: "同名 Skill：example",
+            candidateMemberIds: ["member-target", "member-1"],
+          },
+        ],
+        blockingIssues: ["需要先移除冲突 Mount，再重新生成计划"],
+      }),
+    );
+    render(<App client={client} />);
+
+    await openSourceAssociationPlan(user);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "需要先移除冲突 Mount，再重新生成计划",
+    );
+    await user.click(
+      screen.getByRole("radio", {
+        name: /使用待归入 Bundle.*22222222/,
+      }),
+    );
+    expect(screen.getByRole("button", { name: "确认归并" })).toBeDisabled();
+    expect(client.confirmSourceAssociationPlan).not.toHaveBeenCalled();
+  });
+
+  it("创建 Plan 失败时保留映射页，并显示 Rust 错误", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.createSourceAssociationPlan).mockRejectedValue({
+      code: "sourceAssociationChanged",
+      message: "Source Catalog 已变化，请重新选择",
+    });
+    render(<App client={client} />);
+
+    await user.click(
+      within(
+        await screen.findByRole("region", { name: "example-bundle" }),
+      ).getByRole("button", { name: "补充来源" }),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "选择 Source" }),
+      "source-1",
+    );
+    await user.click(screen.getByRole("button", { name: "生成关联计划" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Source Catalog 已变化，请重新选择",
+    );
+    expect(
+      screen.getByRole("heading", { name: "为 Bundle 补充来源" }),
+    ).toBeInTheDocument();
+  });
+
+  it("GitHub 已关联但没有 adopted marker 时显示可更新", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([
+        createSource({ bundleId: "bundle-1", adoptedMarker: null }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    expect(
+      within(
+        screen.getByRole("article", { name: "anthropics/skills" }),
+      ).getByText("可更新"),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("平台检查", () => {
   it("在不支持的平台显示阻塞页", async () => {
     const client = createClient({
@@ -2273,6 +2737,58 @@ async function openLocalFolderPicker(
   await user.click(
     await screen.findByRole("button", { name: "从本地文件夹安装" }),
   );
+}
+
+async function openSourceAssociationPlan(
+  user: ReturnType<typeof userEvent.setup>,
+) {
+  await user.click(
+    within(
+      await screen.findByRole("region", { name: "example-bundle" }),
+    ).getByRole("button", { name: "补充来源" }),
+  );
+  await user.selectOptions(
+    await screen.findByRole("combobox", { name: "选择 Source" }),
+    "source-1",
+  );
+  await user.click(screen.getByRole("button", { name: "生成关联计划" }));
+}
+
+function createSourceAssociationPlan(
+  overrides: Partial<SourceAssociationPlan> = {},
+): SourceAssociationPlan {
+  return {
+    id: "association-plan-1",
+    mode: "link",
+    sourceId: "source-1",
+    sourceDisplayName: "anthropics/skills",
+    targetBundleId: "bundle-1",
+    targetBundleDisplayName: "example-bundle",
+    retiringBundleId: null,
+    retiringBundleDisplayName: null,
+    memberChoices: [
+      {
+        memberId: "member-1",
+        skillName: "example",
+        sourceRelativePath: null,
+      },
+    ],
+    members: [
+      {
+        memberId: "member-1",
+        bundleId: "bundle-1",
+        bundleDisplayName: "example-bundle",
+        skillName: "example",
+        contentFingerprint: "fingerprint-example",
+      },
+    ],
+    mounts: [],
+    conflicts: [],
+    blockingIssues: [],
+    createdAt: 1,
+    expiresAt: 2,
+    ...overrides,
+  };
 }
 
 function createInstallPlan(
@@ -2388,6 +2904,9 @@ function createClient(startup: UiOutcome): SkillYardClient {
     reloadGithubSource: vi.fn(),
     addGithubSource: vi.fn(),
     confirmSourceRefChange: vi.fn(),
+    createSourceAssociationPlan: vi.fn(),
+    confirmSourceAssociationPlan: vi.fn(),
+    discardSourceAssociationPlan: vi.fn(),
     createGithubInstallPlan: vi.fn(),
     createUrlInstallPlan: vi.fn(),
     discardInstallPlan: vi.fn().mockResolvedValue(undefined),

@@ -21,9 +21,11 @@ interface InventoryPageProps {
   projectError: string | null;
   mountError: string | null;
   takeoverError: string | null;
+  sourceAssociationError: string | null;
   onRefresh(): void;
   onInstall(): void;
   onAddProject(): void;
+  onAssociateSource(bundleId: string): void;
   onTakeover(observationId: string): void;
   onManageMount(memberId: string): void;
   onBatchMount(bundleId: string): void;
@@ -47,9 +49,11 @@ export function InventoryPage({
   projectError,
   mountError,
   takeoverError,
+  sourceAssociationError,
   onRefresh,
   onInstall,
   onAddProject,
+  onAssociateSource,
   onTakeover,
   onManageMount,
   onBatchMount,
@@ -203,6 +207,13 @@ export function InventoryPage({
         </div>
       ) : null}
 
+      {sourceAssociationError ? (
+        <div className="inline-error" role="alert">
+          <strong>来源操作未完成</strong>
+          <span>{sourceAssociationError}</span>
+        </div>
+      ) : null}
+
       {outcome.scanIssues.length > 0 ? (
         <section className="scan-warning" aria-label="刷新告警">
           <strong>部分目录暂时无法读取</strong>
@@ -240,6 +251,8 @@ export function InventoryPage({
             onManageMount={onManageMount}
             batchMountBundleId={group.bundleId}
             onBatchMount={onBatchMount}
+            canAssociateSource={!group.hasSource}
+            onAssociateSource={onAssociateSource}
           />
         ))}
         <InventorySection
@@ -285,6 +298,8 @@ function InventorySection({
   onManageMount,
   batchMountBundleId,
   onBatchMount,
+  canAssociateSource = false,
+  onAssociateSource,
   onTakeover,
 }: {
   title: string;
@@ -295,6 +310,8 @@ function InventorySection({
   onManageMount?(memberId: string): void;
   batchMountBundleId?: string | null;
   onBatchMount?(bundleId: string): void;
+  canAssociateSource?: boolean;
+  onAssociateSource?(bundleId: string): void;
   onTakeover?(observationId: string): void;
 }) {
   if (entries.length === 0) return null;
@@ -306,6 +323,16 @@ function InventorySection({
           <h2>{title}</h2>
         </div>
         <div className="inventory-section-actions">
+          {batchMountBundleId && canAssociateSource ? (
+            <button
+              className="compact-action"
+              type="button"
+              disabled={actionsDisabled}
+              onClick={() => onAssociateSource?.(batchMountBundleId)}
+            >
+              补充来源
+            </button>
+          ) : null}
           {batchMountBundleId ? (
             <button
               className="compact-action"
@@ -438,6 +465,7 @@ function groupManagedEntries(
   id: string;
   bundleId: string | null;
   title: string;
+  hasSource: boolean;
   entries: InventoryObservation[];
 }> {
   const groups = new Map<
@@ -446,6 +474,7 @@ function groupManagedEntries(
       id: string;
       bundleId: string | null;
       title: string;
+      hasSource: boolean;
       entries: InventoryObservation[];
     }
   >();
@@ -459,6 +488,8 @@ function groupManagedEntries(
       // fallback 分组仅用于显示，绝不能把合成 ID 交给生命周期命令。
       bundleId: entry.bundleId ?? null,
       title: entry.bundleDisplayName ?? "本地 Bundle",
+      hasSource:
+        (existing?.hasSource ?? false) || Boolean(entry.sourceDisplayName),
       entries: [...(existing?.entries ?? []), entry],
     });
   }
