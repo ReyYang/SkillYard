@@ -70,6 +70,7 @@ pub enum LifecycleFailpoint {
     AfterTakeoverOriginMovedBeforeProgress,
     AfterTakeoverMountStagedBeforeProgress,
     AfterFirstTakeoverOriginApplied,
+    AfterFirstTakeoverTargetApplied,
 }
 
 #[derive(Debug, Error)]

@@ -175,6 +175,13 @@ pub(crate) struct TargetSnapshot {
 }
 
 impl TargetSnapshot {
+    pub(crate) fn absent() -> Self {
+        Self {
+            kind: TargetKind::Absent,
+            observation: "absent".to_owned(),
+        }
+    }
+
     pub(crate) fn kind(&self) -> TargetKind {
         self.kind
     }
@@ -3139,6 +3146,25 @@ pub(crate) fn open_relative_parent(
 ) -> Result<ParentLookup, MountLifecycleError> {
     let base = open_real_directory(base_path)?;
     walk_relative_parent(base, base_path.to_path_buf(), relative, create_missing)
+}
+
+/// 共享 Project 路径也必须绑定已登记 Project 的 inode，不能只按可见绝对路径打开。
+pub(crate) fn open_project_relative_parent(
+    project: &StoredProject,
+    relative: &Path,
+    create_missing: bool,
+) -> Result<ParentLookup, MountLifecycleError> {
+    let base_path = PathBuf::from(&project.root_path);
+    let base = open_real_directory(&base_path)?;
+    let metadata = base
+        .metadata()
+        .map_err(|source| mount_io("检查 Project 句柄", &base_path, source))?;
+    if metadata.dev() != project.root_device || metadata.ino() != project.root_inode {
+        return Err(MountLifecycleError::ProjectChanged(
+            project.root_path.clone(),
+        ));
+    }
+    walk_relative_parent(base, base_path, relative, create_missing)
 }
 
 fn walk_relative_parent(

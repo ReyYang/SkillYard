@@ -18,9 +18,9 @@ use crate::{
         validate_single_skill_folder_as,
     },
     domain::{
-        InventoryItem, ManagementKind, MountScope, SkillMetadataStatus, SupportedAppId,
-        TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin,
-        TakeoverPlanRequest, TakeoverPlanTarget, UiOutcome,
+        InventoryItem, ManagementKind, MountScope, ScanRootKey, SkillMetadataStatus,
+        SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
+        TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget, UiOutcome,
     },
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
@@ -31,11 +31,12 @@ use crate::{
         write_notice_from_storage,
     },
     mount_lifecycle::{
-        MountLifecycleError, OpenMountParent, ParentLookup, TargetKind, open_mount_parent,
-        open_relative_parent, recheck_open_parent, snapshot_at,
+        MountLifecycleError, OpenMountParent, ParentLookup, TargetKind, TargetSnapshot,
+        open_mount_parent, open_project_relative_parent, open_relative_parent, recheck_open_parent,
+        snapshot_at,
     },
     paths::ApplicationPaths,
-    storage::{Storage, StorageError, StoredTakeoverPlanRow},
+    storage::{Storage, StorageError, StoredProject, StoredTakeoverPlanRow},
 };
 
 const TAKEOVER_PLAN_TTL_MILLIS: i64 = 15 * 60 * 1_000;
@@ -90,14 +91,27 @@ struct TakeoverOriginSnapshot {
     root_inode: u64,
     root_mode: u32,
     target_observation: String,
+    project: Option<TakeoverProjectSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TakeoverTargetSnapshot {
+    mount_id: String,
     target_path: String,
     target_observation: String,
     occupied_by_observation_id: Option<String>,
+    project: Option<TakeoverProjectSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TakeoverProjectSnapshot {
+    id: String,
+    display_name: String,
+    root_path: String,
+    root_device: u64,
+    root_inode: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -128,11 +142,20 @@ struct TakeoverJournalOrigin {
     observation_id: String,
     original_path: String,
     recovery_name: String,
-    mount_staging_name: String,
     expected_fingerprint: String,
-    expected_target: Option<String>,
     original_observation: String,
     recovery_observation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TakeoverJournalTarget {
+    mount_id: String,
+    target_path: String,
+    mount_staging_name: String,
+    expected_target: String,
+    target_observation: String,
+    occupied_by_observation_id: Option<String>,
     mount_observation: Option<String>,
 }
 
@@ -146,17 +169,26 @@ struct TakeoverJournal {
     content_id: String,
     selected_observation_id: String,
     origins: Vec<TakeoverJournalOrigin>,
+    targets: Vec<TakeoverJournalTarget>,
 }
 
 struct PreparedOrigin {
     observation: InventoryItem,
-    app_id: SupportedAppId,
+    app_id: Option<SupportedAppId>,
+    scope: Option<MountScope>,
+    project: Option<StoredProject>,
     original_root: PathBuf,
     validated: ValidatedSingleSkill,
     root_device: u64,
     root_inode: u64,
     root_mode: u32,
     target_observation: String,
+}
+
+struct ResolvedOriginLocation {
+    app_id: Option<SupportedAppId>,
+    scope: Option<MountScope>,
+    project: Option<StoredProject>,
 }
 
 /// Plan 构建只读取已保存 Inventory 与真实文件系统，并把完整合同写入 SQLite。
@@ -173,15 +205,7 @@ pub(crate) fn create_takeover_plan(
     let mut original_paths = BTreeSet::new();
     for observation in observations {
         validate_observation(&observation)?;
-        let root_key = observation.root_key.ok_or_else(|| {
-            TakeoverError::InvalidRequest("扫描观察缺少受支持路径信息".to_owned())
-        })?;
-        let app = app_configs
-            .iter()
-            .find(|app| app.root_key == root_key)
-            .ok_or_else(|| {
-                TakeoverError::InvalidRequest("第一个切片只接受应用专属 global Skill".to_owned())
-            })?;
+        let location = resolve_observation_location(storage, &app_configs, &observation)?;
         let original_root = PathBuf::from(&observation.skill_root);
         if !original_paths.insert(original_root.clone()) {
             return Err(TakeoverError::InvalidRequest(
@@ -194,19 +218,14 @@ pub(crate) fn create_takeover_plan(
                 "扫描结果与当前 Skill 内容不一致，请刷新本机后重试".to_owned(),
             ));
         }
-        if app.global_root.join(&validated.name) != original_root {
-            return Err(TakeoverError::InvalidRequest(
-                "Skill 不位于受支持应用的固定 global 路径".to_owned(),
-            ));
-        }
-        let ParentLookup::Open(parent) =
-            open_mount_parent(paths, app.id, MountScope::Global, None, false)?
-        else {
-            return Err(TakeoverError::InvalidRequest(
-                "扫描到的 Host Skill 父目录已经不存在".to_owned(),
-            ));
-        };
-        ensure_origin_parent_matches(&parent, &original_root, &validated.name)?;
+        let parent = open_resolved_origin_parent(
+            paths,
+            location.app_id,
+            location.scope,
+            location.project.as_ref(),
+            &original_root,
+            &validated.name,
+        )?;
         let leaf = OsStr::new(&validated.name);
         let root_metadata = entry_metadata_at(parent.directory(), leaf)
             .map_err(|source| takeover_io("检查原 Skill 身份", &original_root, source))?
@@ -222,7 +241,9 @@ pub(crate) fn create_takeover_plan(
         recheck_open_parent(&parent)?;
         prepared_origins.push(PreparedOrigin {
             observation,
-            app_id: app.id,
+            app_id: location.app_id,
+            scope: location.scope,
+            project: location.project,
             original_root,
             validated,
             root_device: root_metadata.st_dev as u64,
@@ -260,12 +281,18 @@ pub(crate) fn create_takeover_plan(
     let expected_target_text = path_text(&expected_target)?;
     let mut origins = Vec::with_capacity(prepared_origins.len());
     let mut origin_snapshots = Vec::with_capacity(prepared_origins.len());
-    let mut targets = Vec::with_capacity(request.preserved_observation_ids.len());
-    let mut target_snapshots = Vec::with_capacity(request.preserved_observation_ids.len());
-    for prepared in prepared_origins {
+    let mut targets =
+        Vec::with_capacity(request.preserved_observation_ids.len() + request.shared_targets.len());
+    let mut target_snapshots = Vec::with_capacity(targets.capacity());
+    for prepared in &prepared_origins {
         let preserve_mount = request
             .preserved_observation_ids
             .contains(&prepared.observation.id);
+        if preserve_mount && prepared.app_id.is_none() {
+            return Err(TakeoverError::InvalidRequest(
+                "共享目录不能继续作为 Mount，请选择应用专属目标".to_owned(),
+            ));
+        }
         let original_path = path_text(&prepared.original_root)?;
         origin_snapshots.push(TakeoverOriginSnapshot {
             observation_id: prepared.observation.id.clone(),
@@ -273,16 +300,20 @@ pub(crate) fn create_takeover_plan(
             root_inode: prepared.root_inode,
             root_mode: prepared.root_mode,
             target_observation: prepared.target_observation.clone(),
+            project: prepared.project.as_ref().map(project_snapshot),
         });
         origins.push(TakeoverPlanOrigin {
             observation_id: prepared.observation.id.clone(),
             original_path: original_path.clone(),
-            app_id: Some(prepared.app_id),
-            scope: Some(MountScope::Global),
-            project_id: None,
-            project_display_name: None,
-            content_fingerprint: prepared.validated.fingerprint,
-            warnings: prepared.validated.warnings,
+            app_id: prepared.app_id,
+            scope: prepared.scope,
+            project_id: prepared.project.as_ref().map(|project| project.id.clone()),
+            project_display_name: prepared
+                .project
+                .as_ref()
+                .map(|project| project.display_name.clone()),
+            content_fingerprint: prepared.validated.fingerprint.clone(),
+            warnings: prepared.validated.warnings.clone(),
             final_disposition: if preserve_mount {
                 TakeoverOriginDisposition::Mount
             } else {
@@ -290,22 +321,104 @@ pub(crate) fn create_takeover_plan(
             },
         });
         if preserve_mount {
+            let app_id = prepared.app_id.ok_or(TakeoverError::InvalidPlanContract)?;
+            let scope = prepared.scope.ok_or(TakeoverError::InvalidPlanContract)?;
+            let mount_id = Uuid::new_v4().to_string();
             targets.push(TakeoverPlanTarget {
-                mount_id: Uuid::new_v4().to_string(),
-                app_id: prepared.app_id,
-                scope: MountScope::Global,
-                project_id: None,
-                project_display_name: None,
+                mount_id: mount_id.clone(),
+                app_id,
+                scope,
+                project_id: prepared.project.as_ref().map(|project| project.id.clone()),
+                project_display_name: prepared
+                    .project
+                    .as_ref()
+                    .map(|project| project.display_name.clone()),
                 target_path: original_path.clone(),
                 expected_target: expected_target_text.clone(),
             });
             target_snapshots.push(TakeoverTargetSnapshot {
+                mount_id,
                 target_path: original_path,
-                target_observation: prepared.target_observation,
-                occupied_by_observation_id: Some(prepared.observation.id),
+                target_observation: prepared.target_observation.clone(),
+                occupied_by_observation_id: Some(prepared.observation.id.clone()),
+                project: prepared.project.as_ref().map(project_snapshot),
             });
         }
     }
+    for shared_target in &request.shared_targets {
+        let prepared = prepared_origins
+            .iter()
+            .find(|origin| origin.observation.id == shared_target.shared_observation_id)
+            .ok_or_else(|| {
+                TakeoverError::InvalidRequest("共享目标没有对应的接管副本".to_owned())
+            })?;
+        if prepared.app_id.is_some()
+            || prepared.scope.is_some()
+            || !prepared
+                .observation
+                .observed_by
+                .contains(&shared_target.app_id)
+        {
+            return Err(TakeoverError::InvalidRequest(
+                "共享目标与扫描到的兼容应用不一致".to_owned(),
+            ));
+        }
+        let (scope, project) = match prepared.project.as_ref() {
+            Some(project) => (MountScope::Project, Some(project)),
+            None => (MountScope::Global, None),
+        };
+        let app = app_configs
+            .iter()
+            .find(|app| app.id == shared_target.app_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let target_root = match project {
+            Some(project) => Path::new(&project.root_path).join(&app.project_relative_root),
+            None => app.global_root.clone(),
+        };
+        let target_path = target_root.join(&skill_name);
+        let target_path_text = path_text(&target_path)?;
+        if targets
+            .iter()
+            .any(|target| target.target_path == target_path_text)
+        {
+            return Err(TakeoverError::InvalidRequest(
+                "共享目标与已有最终 Mount 重复".to_owned(),
+            ));
+        }
+        let (target_kind, target_observation) = snapshot_new_target(
+            paths,
+            shared_target.app_id,
+            scope,
+            project,
+            &skill_name,
+            &target_path,
+            &expected_target_text,
+        )?;
+        if target_kind != TargetKind::Absent {
+            return Err(TakeoverError::InvalidRequest(format!(
+                "共享目标已被其他内容占用：{}",
+                target_path.display()
+            )));
+        }
+        let mount_id = Uuid::new_v4().to_string();
+        targets.push(TakeoverPlanTarget {
+            mount_id: mount_id.clone(),
+            app_id: shared_target.app_id,
+            scope,
+            project_id: project.map(|project| project.id.clone()),
+            project_display_name: project.map(|project| project.display_name.clone()),
+            target_path: target_path_text.clone(),
+            expected_target: expected_target_text.clone(),
+        });
+        target_snapshots.push(TakeoverTargetSnapshot {
+            mount_id,
+            target_path: target_path_text,
+            target_observation,
+            occupied_by_observation_id: None,
+            project: project.map(project_snapshot),
+        });
+    }
+    validate_scope_resolution(&origins, &targets)?;
     let expires_at = now.saturating_add(TAKEOVER_PLAN_TTL_MILLIS);
     let plan = TakeoverPlan {
         id: plan_id.clone(),
@@ -393,6 +506,17 @@ pub(crate) fn confirm_takeover_plan(
         );
     }
     lifecycle_lock.recheck(paths)?;
+    if let Err(error) = verify_takeover_targets(paths, storage, &contract, &journal) {
+        return handle_precommit_error(
+            paths,
+            lifecycle_lock.root(),
+            storage,
+            &contract,
+            &mut journal,
+            now,
+            error,
+        );
+    }
     if let Err(error) = storage.finalize_takeover(&transaction_id, &contract.plan, now) {
         return handle_precommit_error(
             paths,
@@ -503,6 +627,8 @@ fn validate_confirmation_contract(
         return Err(TakeoverError::InvalidPlanContract);
     }
     ensure_absent(&expected_managed)?;
+    validate_scope_resolution(&plan.origins, &plan.targets)
+        .map_err(|_| TakeoverError::InvalidPlanContract)?;
     for target in &plan.targets {
         Uuid::parse_str(&target.mount_id).map_err(|_| TakeoverError::InvalidPlanContract)?;
     }
@@ -510,6 +636,7 @@ fn validate_confirmation_contract(
         if snapshot.observation_id != origin.observation_id {
             return Err(TakeoverError::InvalidPlanContract);
         }
+        validate_origin_project_contract(storage, origin, snapshot.project.as_ref())?;
         let validated = validate_live_origin(paths, storage, origin, snapshot)?;
         if validated.name != plan.skill_name {
             return Err(TakeoverError::InvalidPlanContract);
@@ -519,39 +646,218 @@ fn validate_confirmation_contract(
             .iter()
             .filter(|target| target.target_path == origin.original_path)
             .collect::<Vec<_>>();
-        match (origin.final_disposition, matching_targets.as_slice()) {
-            (TakeoverOriginDisposition::Mount, [target])
+        match (
+            origin.app_id,
+            origin.scope,
+            origin.final_disposition,
+            matching_targets.as_slice(),
+        ) {
+            (Some(_), Some(_), TakeoverOriginDisposition::Mount, [target])
                 if target.expected_target == plan.expected_target
                     && Some(target.app_id) == origin.app_id
                     && Some(target.scope) == origin.scope
                     && target.project_id == origin.project_id
                     && target.project_display_name == origin.project_display_name => {}
-            (TakeoverOriginDisposition::Remove, []) => {}
+            (Some(_), Some(_), TakeoverOriginDisposition::Remove, []) => {}
+            (None, None, TakeoverOriginDisposition::Remove, []) => {}
             _ => return Err(TakeoverError::InvalidPlanContract),
         }
     }
     for (target, target_snapshot) in plan.targets.iter().zip(&contract.target_snapshots) {
-        let occupied_origin = target_snapshot
-            .occupied_by_observation_id
-            .as_deref()
-            .and_then(|observation_id| {
-                plan.origins
-                    .iter()
-                    .position(|origin| origin.observation_id == observation_id)
-            })
-            .ok_or(TakeoverError::InvalidPlanContract)?;
-        let origin = &plan.origins[occupied_origin];
-        let origin_snapshot = &contract.origin_snapshots[occupied_origin];
-        if target_snapshot.target_path != target.target_path
-            || target.target_path != origin.original_path
-            || origin.final_disposition != TakeoverOriginDisposition::Mount
-            || target_snapshot.target_observation != origin_snapshot.target_observation
+        if target_snapshot.mount_id != target.mount_id
+            || target_snapshot.target_path != target.target_path
             || target.expected_target != plan.expected_target
         {
             return Err(TakeoverError::InvalidPlanContract);
         }
+        validate_target_project_contract(storage, target, target_snapshot.project.as_ref())?;
+        let current = snapshot_plan_target(paths, storage, target)?;
+        if current.observation() != target_snapshot.target_observation {
+            return Err(TakeoverError::InvalidRequest(
+                "Plan 生成后最终 Mount 位置已经变化".to_owned(),
+            ));
+        }
+        match target_snapshot.occupied_by_observation_id.as_deref() {
+            Some(observation_id) => {
+                let occupied_origin = plan
+                    .origins
+                    .iter()
+                    .position(|origin| origin.observation_id == observation_id)
+                    .ok_or(TakeoverError::InvalidPlanContract)?;
+                let origin = &plan.origins[occupied_origin];
+                let origin_snapshot = &contract.origin_snapshots[occupied_origin];
+                if target.target_path != origin.original_path
+                    || origin.final_disposition != TakeoverOriginDisposition::Mount
+                    || target_snapshot.target_observation != origin_snapshot.target_observation
+                    || current.kind() != TargetKind::Other
+                {
+                    return Err(TakeoverError::InvalidPlanContract);
+                }
+            }
+            None if current.kind() == TargetKind::Absent => {}
+            None => return Err(TakeoverError::InvalidPlanContract),
+        }
     }
     Ok(())
+}
+
+fn validate_origin_project_contract(
+    storage: &Storage,
+    origin: &TakeoverPlanOrigin,
+    snapshot: Option<&TakeoverProjectSnapshot>,
+) -> Result<(), TakeoverError> {
+    match (
+        origin.app_id,
+        origin.scope,
+        origin.project_id.as_deref(),
+        snapshot,
+    ) {
+        (Some(_), Some(MountScope::Global), None, None)
+            if origin.project_display_name.is_none() =>
+        {
+            Ok(())
+        }
+        (Some(_), Some(MountScope::Project), Some(project_id), Some(snapshot))
+        | (None, None, Some(project_id), Some(snapshot))
+            if origin.project_display_name.as_deref() == Some(snapshot.display_name.as_str())
+                && project_id == snapshot.id =>
+        {
+            validate_project_snapshot(storage, snapshot)
+        }
+        (None, None, None, None) if origin.project_display_name.is_none() => Ok(()),
+        _ => Err(TakeoverError::InvalidPlanContract),
+    }
+}
+
+fn validate_target_project_contract(
+    storage: &Storage,
+    target: &TakeoverPlanTarget,
+    snapshot: Option<&TakeoverProjectSnapshot>,
+) -> Result<(), TakeoverError> {
+    match (target.scope, target.project_id.as_deref(), snapshot) {
+        (MountScope::Global, None, None) if target.project_display_name.is_none() => Ok(()),
+        (MountScope::Project, Some(project_id), Some(snapshot))
+            if target.project_display_name.as_deref() == Some(snapshot.display_name.as_str())
+                && project_id == snapshot.id =>
+        {
+            validate_project_snapshot(storage, snapshot)
+        }
+        _ => Err(TakeoverError::InvalidPlanContract),
+    }
+}
+
+fn validate_project_snapshot(
+    storage: &Storage,
+    snapshot: &TakeoverProjectSnapshot,
+) -> Result<(), TakeoverError> {
+    let current = storage.read_project(&snapshot.id)?;
+    if project_snapshot(&current) == *snapshot {
+        Ok(())
+    } else {
+        Err(TakeoverError::InvalidRequest(
+            "Plan 生成后 Project 登记身份已经变化".to_owned(),
+        ))
+    }
+}
+
+fn snapshot_plan_target(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    target: &TakeoverPlanTarget,
+) -> Result<TargetSnapshot, TakeoverError> {
+    match lookup_plan_target_parent(paths, storage, target, false)? {
+        ParentLookup::Missing => Ok(TargetSnapshot::absent()),
+        ParentLookup::Open(parent) => {
+            let snapshot = snapshot_at(
+                parent.directory(),
+                Path::new(&target.target_path)
+                    .file_name()
+                    .ok_or(TakeoverError::InvalidPlanContract)?,
+                &target.expected_target,
+            )?;
+            recheck_open_parent(&parent)?;
+            Ok(snapshot)
+        }
+    }
+}
+
+fn lookup_plan_target_parent(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    target: &TakeoverPlanTarget,
+    create_missing: bool,
+) -> Result<ParentLookup, TakeoverError> {
+    let project = target
+        .project_id
+        .as_deref()
+        .map(|project_id| storage.read_project(project_id))
+        .transpose()?;
+    let app = paths
+        .supported_apps()
+        .into_iter()
+        .find(|app| app.id == target.app_id)
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    let target_root = match (target.scope, project.as_ref()) {
+        (MountScope::Global, None) => app.global_root,
+        (MountScope::Project, Some(project)) => {
+            Path::new(&project.root_path).join(app.project_relative_root)
+        }
+        _ => return Err(TakeoverError::InvalidPlanContract),
+    };
+    let leaf = Path::new(&target.target_path)
+        .file_name()
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    if target_root.join(leaf) != Path::new(&target.target_path) {
+        return Err(TakeoverError::InvalidPlanContract);
+    }
+    let lookup = open_mount_parent(
+        paths,
+        target.app_id,
+        target.scope,
+        project.as_ref(),
+        create_missing,
+    )?;
+    if let ParentLookup::Open(parent) = &lookup
+        && parent.path().join(leaf) != Path::new(&target.target_path)
+    {
+        return Err(TakeoverError::InvalidPlanContract);
+    }
+    Ok(lookup)
+}
+
+fn open_plan_target_parent(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    target: &TakeoverPlanTarget,
+    create_missing: bool,
+) -> Result<OpenMountParent, TakeoverError> {
+    let ParentLookup::Open(parent) =
+        lookup_plan_target_parent(paths, storage, target, create_missing)?
+    else {
+        return Err(TakeoverError::InvalidRequest(
+            "最终 Mount 父目录尚不存在".to_owned(),
+        ));
+    };
+    let leaf = Path::new(&target.target_path)
+        .file_name()
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    if parent.path().join(leaf) != Path::new(&target.target_path) {
+        return Err(TakeoverError::InvalidPlanContract);
+    }
+    Ok(parent)
+}
+
+fn target_leaf(
+    target: &TakeoverPlanTarget,
+    expected_name: &str,
+) -> Result<OsString, TakeoverError> {
+    let leaf = Path::new(&target.target_path)
+        .file_name()
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    if leaf != OsStr::new(expected_name) {
+        return Err(TakeoverError::InvalidPlanContract);
+    }
+    Ok(leaf.to_owned())
 }
 
 fn build_journal(
@@ -568,20 +874,32 @@ fn build_journal(
                 .origin_snapshots
                 .get(index)
                 .ok_or(TakeoverError::InvalidPlanContract)?;
-            let expected_target = plan
-                .targets
-                .iter()
-                .find(|target| target.target_path == origin.original_path)
-                .map(|target| target.expected_target.clone());
             Ok(TakeoverJournalOrigin {
                 observation_id: origin.observation_id.clone(),
                 original_path: origin.original_path.clone(),
                 recovery_name: format!(".skillyard-takeover-{transaction_id}-{index}"),
-                mount_staging_name: format!(".skillyard-takeover-mount-{transaction_id}-{index}"),
                 expected_fingerprint: origin.content_fingerprint.clone(),
-                expected_target,
                 original_observation: snapshot.target_observation.clone(),
                 recovery_observation: None,
+            })
+        })
+        .collect::<Result<Vec<_>, TakeoverError>>()?;
+    let targets = plan
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            let snapshot = contract
+                .target_snapshots
+                .get(index)
+                .ok_or(TakeoverError::InvalidPlanContract)?;
+            Ok(TakeoverJournalTarget {
+                mount_id: target.mount_id.clone(),
+                target_path: target.target_path.clone(),
+                mount_staging_name: format!(".skillyard-takeover-mount-{transaction_id}-{index}"),
+                expected_target: target.expected_target.clone(),
+                target_observation: snapshot.target_observation.clone(),
+                occupied_by_observation_id: snapshot.occupied_by_observation_id.clone(),
                 mount_observation: None,
             })
         })
@@ -594,6 +912,7 @@ fn build_journal(
         content_id: plan.content_id.clone(),
         selected_observation_id: plan.selected_observation_id.clone(),
         origins,
+        targets,
     })
 }
 
@@ -696,101 +1015,65 @@ fn execute_before_domain_commit(
     journal.phase = TakeoverJournalPhase::CurrentActivated;
     persist_phase(paths, managed_root, storage, journal, now)?;
 
-    for (index, origin) in contract.plan.origins.iter().enumerate() {
-        let snapshot = &contract.origin_snapshots[index];
-        validate_live_origin(paths, storage, origin, snapshot)?;
-        let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
-        let leaf = origin_leaf(Path::new(&origin.original_path), &contract.plan.skill_name)?;
-        lifecycle_lock.recheck(paths)?;
-        let original = snapshot_at(parent.directory(), &leaf, "")?;
-        if original.observation() != journal.origins[index].original_observation {
-            return Err(TakeoverError::InvalidRequest(
-                "Plan 生成后原 Skill 身份已经变化".to_owned(),
-            ));
-        }
-        let recovery_name = OsString::from(&journal.origins[index].recovery_name);
-        if snapshot_at(parent.directory(), &recovery_name, "")?.kind() != TargetKind::Absent {
-            return Err(TakeoverError::RecoveryBlocked(format!(
-                "接管恢复位置已被占用：{}",
-                parent.path().join(&recovery_name).display()
-            )));
-        }
-        rename_at_no_replace(
-            parent.directory(),
-            &leaf,
-            parent.directory(),
-            &recovery_name,
-        )
-        .map_err(|source| takeover_io("隔离原 Skill", parent.path(), source))?;
-        if failpoint == LifecycleFailpoint::AfterTakeoverOriginMovedBeforeProgress {
-            return Err(LifecycleError::SimulatedInterruption(
-                "Takeover 原目录已移动但进度尚未记录",
+    // 应用专属原位置先腾空，全部最终 Mount 验证后才隔离共享入口。
+    for index in contract
+        .plan
+        .origins
+        .iter()
+        .enumerate()
+        .filter_map(|(index, origin)| origin.app_id.map(|_| index))
+    {
+        quarantine_takeover_origin(
+            paths,
+            lifecycle_lock,
+            storage,
+            contract,
+            journal,
+            index,
+            failpoint,
+        )?;
+    }
+    for index in 0..contract.plan.targets.len() {
+        apply_takeover_target(
+            paths,
+            lifecycle_lock,
+            storage,
+            contract,
+            journal,
+            index,
+            failpoint,
+        )?;
+        if index == 0
+            && matches!(
+                failpoint,
+                LifecycleFailpoint::AfterFirstTakeoverOriginApplied
+                    | LifecycleFailpoint::AfterFirstTakeoverTargetApplied
             )
-            .into());
-        }
-        sync(parent.directory(), "同步原 Skill 父目录", parent.path())?;
-        let recovery = snapshot_at(parent.directory(), &recovery_name, "")?;
-        if recovery.observation() != journal.origins[index].original_observation {
-            return Err(TakeoverError::RecoveryBlocked(
-                "隔离后的原 Skill 不再是 Plan 中的同一目录".to_owned(),
-            ));
-        }
-        journal.origins[index].recovery_observation = Some(recovery.observation().to_owned());
-        write_journal(paths, managed_root, journal)?;
-        if let Some(expected_target) = journal.origins[index].expected_target.clone() {
-            let staging_name = OsString::from(&journal.origins[index].mount_staging_name);
-            if snapshot_at(parent.directory(), &staging_name, &expected_target)?.kind()
-                != TargetKind::Absent
-            {
-                return Err(TakeoverError::RecoveryBlocked(
-                    "接管 Mount 暂存位置已被占用".to_owned(),
-                ));
-            }
-            symlink_at(
-                Path::new(&expected_target),
-                parent.directory(),
-                &staging_name,
-            )
-            .map_err(|source| takeover_io("创建接管 Mount 暂存链接", parent.path(), source))?;
-            let staged = snapshot_at(parent.directory(), &staging_name, &expected_target)?;
-            if staged.kind() != TargetKind::ExpectedLink {
-                return Err(TakeoverError::RecoveryBlocked(
-                    "新 Mount 暂存链接没有指向 Plan 固定的受管内容".to_owned(),
-                ));
-            }
-            // 先把精确 inode observation 写入内存，再进入任何可能失败的同步或测试窗口。
-            journal.origins[index].mount_observation = Some(staged.observation().to_owned());
-            if failpoint == LifecycleFailpoint::AfterTakeoverMountStagedBeforeProgress {
-                return Err(LifecycleError::SimulatedInterruption(
-                    "Takeover Mount 已暂存但进度尚未记录",
-                )
-                .into());
-            }
-            sync(parent.directory(), "同步接管 Mount 暂存链接", parent.path())?;
-            write_journal(paths, managed_root, journal)?;
-            rename_at_no_replace(parent.directory(), &staging_name, parent.directory(), &leaf)
-                .map_err(|source| takeover_io("发布接管 Mount", parent.path(), source))?;
-            sync(parent.directory(), "同步接管 Mount", parent.path())?;
-            let published = snapshot_at(parent.directory(), &leaf, &expected_target)?;
-            if published.observation() != staged.observation() {
-                return Err(TakeoverError::RecoveryBlocked(
-                    "发布后的 Mount 不再是本事务创建的链接".to_owned(),
-                ));
-            }
-        } else if snapshot_at(parent.directory(), &leaf, "")?.kind() != TargetKind::Absent {
-            return Err(TakeoverError::RecoveryBlocked(
-                "用户排除的 Host 位置仍被内容占用".to_owned(),
-            ));
-        }
-        recheck_open_parent(&parent)?;
-        lifecycle_lock.recheck(paths)?;
-        write_journal(paths, managed_root, journal)?;
-        if index == 0 && failpoint == LifecycleFailpoint::AfterFirstTakeoverOriginApplied {
+        {
             return Err(
-                LifecycleError::SimulatedInterruption("Takeover 第一个原位置已生效").into(),
+                LifecycleError::SimulatedInterruption("Takeover 第一个最终 Mount 已生效").into(),
             );
         }
     }
+    verify_takeover_targets(paths, storage, contract, journal)?;
+    for index in contract
+        .plan
+        .origins
+        .iter()
+        .enumerate()
+        .filter_map(|(index, origin)| origin.app_id.is_none().then_some(index))
+    {
+        quarantine_takeover_origin(
+            paths,
+            lifecycle_lock,
+            storage,
+            contract,
+            journal,
+            index,
+            failpoint,
+        )?;
+    }
+    verify_takeover_targets(paths, storage, contract, journal)?;
     lifecycle_lock.recheck(paths)?;
     journal.phase = TakeoverJournalPhase::OriginsApplied;
     persist_phase(paths, managed_root, storage, journal, now)?;
@@ -799,6 +1082,185 @@ fn execute_before_domain_commit(
         return Err(TakeoverError::RecoveryBlocked(
             "Bundle current 内容与用户选择不一致".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn quarantine_takeover_origin(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &Storage,
+    contract: &TakeoverPlanContract,
+    journal: &mut TakeoverJournal,
+    index: usize,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), TakeoverError> {
+    let origin = contract
+        .plan
+        .origins
+        .get(index)
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    let snapshot = contract
+        .origin_snapshots
+        .get(index)
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    validate_live_origin(paths, storage, origin, snapshot)?;
+    let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
+    let leaf = origin_leaf(Path::new(&origin.original_path), &contract.plan.skill_name)?;
+    lifecycle_lock.recheck(paths)?;
+    let original = snapshot_at(parent.directory(), &leaf, "")?;
+    if original.observation() != journal.origins[index].original_observation {
+        return Err(TakeoverError::InvalidRequest(
+            "Plan 生成后原 Skill 身份已经变化".to_owned(),
+        ));
+    }
+    let recovery_name = OsString::from(&journal.origins[index].recovery_name);
+    if snapshot_at(parent.directory(), &recovery_name, "")?.kind() != TargetKind::Absent {
+        return Err(TakeoverError::RecoveryBlocked(format!(
+            "接管恢复位置已被占用：{}",
+            parent.path().join(&recovery_name).display()
+        )));
+    }
+    rename_at_no_replace(
+        parent.directory(),
+        &leaf,
+        parent.directory(),
+        &recovery_name,
+    )
+    .map_err(|source| takeover_io("隔离原 Skill", parent.path(), source))?;
+    if failpoint == LifecycleFailpoint::AfterTakeoverOriginMovedBeforeProgress {
+        return Err(
+            LifecycleError::SimulatedInterruption("Takeover 原目录已移动但进度尚未记录").into(),
+        );
+    }
+    sync(parent.directory(), "同步原 Skill 父目录", parent.path())?;
+    let recovery = snapshot_at(parent.directory(), &recovery_name, "")?;
+    if recovery.observation() != journal.origins[index].original_observation {
+        return Err(TakeoverError::RecoveryBlocked(
+            "隔离后的原 Skill 不再是 Plan 中的同一目录".to_owned(),
+        ));
+    }
+    journal.origins[index].recovery_observation = Some(recovery.observation().to_owned());
+    recheck_open_parent(&parent)?;
+    lifecycle_lock.recheck(paths)?;
+    write_journal(paths, lifecycle_lock.root(), journal)
+}
+
+fn apply_takeover_target(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &Storage,
+    contract: &TakeoverPlanContract,
+    journal: &mut TakeoverJournal,
+    index: usize,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), TakeoverError> {
+    let target = contract
+        .plan
+        .targets
+        .get(index)
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    let progress = journal
+        .targets
+        .get(index)
+        .ok_or(TakeoverError::InvalidPlanContract)?
+        .clone();
+    if progress.mount_id != target.mount_id || progress.target_path != target.target_path {
+        return Err(TakeoverError::InvalidPlanContract);
+    }
+    if let Some(observation_id) = progress.occupied_by_observation_id.as_deref() {
+        let origin_index = contract
+            .plan
+            .origins
+            .iter()
+            .position(|origin| origin.observation_id == observation_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        if journal.origins[origin_index].recovery_observation.is_none() {
+            return Err(TakeoverError::RecoveryBlocked(
+                "最终 Mount 对应的原位置尚未安全隔离".to_owned(),
+            ));
+        }
+    }
+    let parent = open_plan_target_parent(paths, storage, target, true)?;
+    let leaf = target_leaf(target, &contract.plan.skill_name)?;
+    lifecycle_lock.recheck(paths)?;
+    if snapshot_at(parent.directory(), &leaf, &target.expected_target)?.kind() != TargetKind::Absent
+    {
+        return Err(TakeoverError::InvalidRequest(
+            "最终 Mount 位置在确认期间被其他内容占用".to_owned(),
+        ));
+    }
+    let staging_name = OsString::from(&progress.mount_staging_name);
+    if snapshot_at(parent.directory(), &staging_name, &target.expected_target)?.kind()
+        != TargetKind::Absent
+    {
+        return Err(TakeoverError::RecoveryBlocked(
+            "接管 Mount 暂存位置已被占用".to_owned(),
+        ));
+    }
+    symlink_at(
+        Path::new(&target.expected_target),
+        parent.directory(),
+        &staging_name,
+    )
+    .map_err(|source| takeover_io("创建接管 Mount 暂存链接", parent.path(), source))?;
+    let staged = snapshot_at(parent.directory(), &staging_name, &target.expected_target)?;
+    if staged.kind() != TargetKind::ExpectedLink {
+        return Err(TakeoverError::RecoveryBlocked(
+            "新 Mount 暂存链接没有指向 Plan 固定的受管内容".to_owned(),
+        ));
+    }
+    // 精确 observation 先进入内存，当前进程内的任何失败都只能撤销自己创建的链接。
+    journal.targets[index].mount_observation = Some(staged.observation().to_owned());
+    if failpoint == LifecycleFailpoint::AfterTakeoverMountStagedBeforeProgress {
+        return Err(
+            LifecycleError::SimulatedInterruption("Takeover Mount 已暂存但进度尚未记录").into(),
+        );
+    }
+    sync(parent.directory(), "同步接管 Mount 暂存链接", parent.path())?;
+    write_journal(paths, lifecycle_lock.root(), journal)?;
+    rename_at_no_replace(parent.directory(), &staging_name, parent.directory(), &leaf)
+        .map_err(|source| takeover_io("发布接管 Mount", parent.path(), source))?;
+    sync(parent.directory(), "同步接管 Mount", parent.path())?;
+    let published = snapshot_at(parent.directory(), &leaf, &target.expected_target)?;
+    if published.observation() != staged.observation() {
+        return Err(TakeoverError::RecoveryBlocked(
+            "发布后的 Mount 不再是本事务创建的链接".to_owned(),
+        ));
+    }
+    recheck_open_parent(&parent)?;
+    lifecycle_lock.recheck(paths)?;
+    write_journal(paths, lifecycle_lock.root(), journal)
+}
+
+fn verify_takeover_targets(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    contract: &TakeoverPlanContract,
+    journal: &TakeoverJournal,
+) -> Result<(), TakeoverError> {
+    for (index, target) in contract.plan.targets.iter().enumerate() {
+        let progress = journal
+            .targets
+            .get(index)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let applied = progress.mount_observation.as_deref().ok_or_else(|| {
+            TakeoverError::RecoveryBlocked("最终 Mount 缺少本事务的精确归属记录".to_owned())
+        })?;
+        let parent = open_plan_target_parent(paths, storage, target, false)?;
+        let leaf = target_leaf(target, &contract.plan.skill_name)?;
+        let current = snapshot_at(parent.directory(), &leaf, &target.expected_target)?;
+        let staged = snapshot_at(
+            parent.directory(),
+            OsStr::new(&progress.mount_staging_name),
+            &target.expected_target,
+        )?;
+        if current.observation() != applied || staged.kind() != TargetKind::Absent {
+            return Err(TakeoverError::RecoveryBlocked(
+                "最终 Mount 已被未知内容替换".to_owned(),
+            ));
+        }
+        recheck_open_parent(&parent)?;
     }
     Ok(())
 }
@@ -833,29 +1295,35 @@ fn rollback_before_commit(
     contract: &TakeoverPlanContract,
     journal: &mut TakeoverJournal,
 ) -> Result<(), TakeoverError> {
-    for (index, origin) in contract.plan.origins.iter().enumerate().rev() {
-        let progress = &mut journal.origins[index];
-        let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
-        let leaf = origin_leaf(Path::new(&origin.original_path), &contract.plan.skill_name)?;
-        if progress.mount_observation.is_none()
-            && let Some(expected) = progress.expected_target.as_deref()
-        {
-            let staging_name = OsString::from(&progress.mount_staging_name);
-            let staged = snapshot_at(parent.directory(), &staging_name, expected)?;
+    for index in (0..contract.plan.targets.len()).rev() {
+        let target = &contract.plan.targets[index];
+        let progress = journal
+            .targets
+            .get(index)
+            .ok_or(TakeoverError::InvalidPlanContract)?
+            .clone();
+        let parent = match lookup_plan_target_parent(paths, storage, target, false)? {
+            ParentLookup::Missing if progress.mount_observation.is_none() => continue,
+            ParentLookup::Missing => {
+                return Err(TakeoverError::RecoveryBlocked(
+                    "待撤销 Mount 的父目录已经消失".to_owned(),
+                ));
+            }
+            ParentLookup::Open(parent) => parent,
+        };
+        let leaf = target_leaf(target, &contract.plan.skill_name)?;
+        let staging_name = OsString::from(&progress.mount_staging_name);
+        if progress.mount_observation.is_none() {
+            let staged = snapshot_at(parent.directory(), &staging_name, &target.expected_target)?;
             if staged.kind() != TargetKind::Absent {
                 return Err(TakeoverError::RecoveryBlocked(
                     "Mount 暂存链接存在，但缺少可证明归属的精确 observation".to_owned(),
                 ));
             }
         }
-        if let Some(applied_observation) = progress.mount_observation.clone() {
-            let expected = progress
-                .expected_target
-                .as_deref()
-                .ok_or(TakeoverError::InvalidPlanContract)?;
-            let staging_name = OsString::from(&progress.mount_staging_name);
-            let current = snapshot_at(parent.directory(), &leaf, expected)?;
-            let staged = snapshot_at(parent.directory(), &staging_name, expected)?;
+        if let Some(applied_observation) = progress.mount_observation.as_deref() {
+            let current = snapshot_at(parent.directory(), &leaf, &target.expected_target)?;
+            let staged = snapshot_at(parent.directory(), &staging_name, &target.expected_target)?;
             let owned_name = if current.observation() == applied_observation
                 && staged.kind() == TargetKind::Absent
             {
@@ -881,7 +1349,8 @@ fn rollback_before_commit(
                     )
                     .map_err(|source| takeover_io("隔离待撤销 Mount", parent.path(), source))?;
                 }
-                let moved = snapshot_at(parent.directory(), &staging_name, expected)?;
+                let moved =
+                    snapshot_at(parent.directory(), &staging_name, &target.expected_target)?;
                 if moved.observation() != applied_observation {
                     return Err(TakeoverError::RecoveryBlocked(
                         "待撤销 Mount 在隔离时发生变化".to_owned(),
@@ -891,8 +1360,15 @@ fn rollback_before_commit(
                     .map_err(|source| takeover_io("撤销接管 Mount", parent.path(), source))?;
                 sync(parent.directory(), "同步 Mount 撤销", parent.path())?;
             }
-            progress.mount_observation = None;
+            journal.targets[index].mount_observation = None;
         }
+        recheck_open_parent(&parent)?;
+        write_journal(paths, managed_root, journal)?;
+    }
+    for (index, origin) in contract.plan.origins.iter().enumerate().rev() {
+        let progress = &mut journal.origins[index];
+        let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
+        let leaf = origin_leaf(Path::new(&origin.original_path), &contract.plan.skill_name)?;
         if progress.recovery_observation.is_none() {
             let recovery_name = OsString::from(&progress.recovery_name);
             let current = snapshot_at(parent.directory(), &leaf, "")?;
@@ -953,39 +1429,23 @@ fn cleanup_committed(
     contract: &TakeoverPlanContract,
     journal: &TakeoverJournal,
 ) -> Result<(), TakeoverError> {
+    verify_takeover_targets(paths, storage, contract, journal)?;
     for (index, origin) in contract.plan.origins.iter().enumerate() {
         let progress = &journal.origins[index];
         let original_path = Path::new(&origin.original_path);
         let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
         let leaf = origin_leaf(original_path, &contract.plan.skill_name)?;
-        match &progress.expected_target {
-            Some(expected) => {
-                let Some(applied_observation) = progress.mount_observation.as_deref() else {
-                    return Err(TakeoverError::RecoveryBlocked(
-                        "接管 Mount 缺少本事务的精确归属记录".to_owned(),
-                    ));
-                };
-                let current = snapshot_at(parent.directory(), &leaf, expected)?;
-                let staged = snapshot_at(
-                    parent.directory(),
-                    OsStr::new(&progress.mount_staging_name),
-                    expected,
-                )?;
-                if current.observation() != applied_observation
-                    || staged.kind() != TargetKind::Absent
-                {
-                    return Err(TakeoverError::RecoveryBlocked(
-                        "最终 Mount 已被未知内容替换".to_owned(),
-                    ));
-                }
-            }
-            None if progress.mount_observation.is_none()
-                && snapshot_at(parent.directory(), &leaf, "")?.kind() == TargetKind::Absent => {}
-            _ => {
-                return Err(TakeoverError::RecoveryBlocked(
-                    "最终 Host 位置与接管计划不一致".to_owned(),
-                ));
-            }
+        let has_final_target = contract
+            .plan
+            .targets
+            .iter()
+            .any(|target| target.target_path == origin.original_path);
+        if !has_final_target
+            && snapshot_at(parent.directory(), &leaf, "")?.kind() != TargetKind::Absent
+        {
+            return Err(TakeoverError::RecoveryBlocked(
+                "最终 Host 位置与接管计划不一致".to_owned(),
+            ));
         }
         let recovery_name = OsString::from(&progress.recovery_name);
         let recovery_snapshot = snapshot_at(parent.directory(), &recovery_name, "")?;
@@ -1062,34 +1522,19 @@ fn open_origin_parent(
     origin: &TakeoverPlanOrigin,
     skill_name: &str,
 ) -> Result<OpenMountParent, TakeoverError> {
-    let lookup = match (origin.app_id, origin.scope) {
-        (Some(app_id), Some(scope)) => {
-            let project = origin
-                .project_id
-                .as_deref()
-                .map(|project_id| storage.read_project(project_id))
-                .transpose()?;
-            open_mount_parent(paths, app_id, scope, project.as_ref(), false)?
-        }
-        (None, None)
-            if Path::new(&origin.original_path).parent()
-                == Some(&paths.shared_read_only_root()) =>
-        {
-            let shared_root = paths.shared_read_only_root();
-            let relative = shared_root
-                .strip_prefix(paths.home())
-                .map_err(|_| TakeoverError::InvalidPlanContract)?;
-            open_relative_parent(paths.home(), relative, false)?
-        }
-        _ => return Err(TakeoverError::InvalidPlanContract),
-    };
-    let ParentLookup::Open(parent) = lookup else {
-        return Err(TakeoverError::InvalidRequest(
-            "Plan 中的 Host Skill 父目录已经不存在".to_owned(),
-        ));
-    };
-    ensure_origin_parent_matches(&parent, Path::new(&origin.original_path), skill_name)?;
-    Ok(parent)
+    let project = origin
+        .project_id
+        .as_deref()
+        .map(|project_id| storage.read_project(project_id))
+        .transpose()?;
+    open_resolved_origin_parent(
+        paths,
+        origin.app_id,
+        origin.scope,
+        project.as_ref(),
+        Path::new(&origin.original_path),
+        skill_name,
+    )
 }
 
 fn ensure_origin_parent_matches(
@@ -1439,11 +1884,200 @@ fn validate_plan_request(request: &TakeoverPlanRequest) -> Result<(), TakeoverEr
         || !observation_ids.contains(&request.selected_observation_id)
         || preserved_ids.len() != request.preserved_observation_ids.len()
         || !preserved_ids.is_subset(&observation_ids)
-        || !request.shared_targets.is_empty()
+        || request
+            .shared_targets
+            .iter()
+            .any(|target| !observation_ids.contains(&target.shared_observation_id))
+        || request
+            .shared_targets
+            .iter()
+            .enumerate()
+            .any(|(index, target)| {
+                request.shared_targets[..index].iter().any(|existing| {
+                    existing.shared_observation_id == target.shared_observation_id
+                        && existing.app_id == target.app_id
+                })
+            })
     {
         return Err(TakeoverError::InvalidRequest(
             "接管计划中的副本、内容选择或保留位置无效".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn resolve_observation_location(
+    storage: &Storage,
+    app_configs: &[crate::paths::SupportedAppPathConfig],
+    observation: &InventoryItem,
+) -> Result<ResolvedOriginLocation, TakeoverError> {
+    let root_key = observation
+        .root_key
+        .ok_or_else(|| TakeoverError::InvalidRequest("扫描观察缺少受支持路径信息".to_owned()))?;
+    if let Some(app) = app_configs.iter().find(|app| app.root_key == root_key) {
+        if observation.project_id.is_some() {
+            return Err(TakeoverError::InvalidRequest(
+                "global 扫描观察不能绑定 Project".to_owned(),
+            ));
+        }
+        return Ok(ResolvedOriginLocation {
+            app_id: Some(app.id),
+            scope: Some(MountScope::Global),
+            project: None,
+        });
+    }
+    if let Some(app) = app_configs
+        .iter()
+        .find(|app| app.project_root_key == root_key)
+    {
+        let project = read_observation_project(storage, observation)?;
+        return Ok(ResolvedOriginLocation {
+            app_id: Some(app.id),
+            scope: Some(MountScope::Project),
+            project: Some(project),
+        });
+    }
+    match root_key {
+        ScanRootKey::SharedAgents if observation.project_id.is_none() => {
+            Ok(ResolvedOriginLocation {
+                app_id: None,
+                scope: None,
+                project: None,
+            })
+        }
+        ScanRootKey::SharedAgentsProject => Ok(ResolvedOriginLocation {
+            app_id: None,
+            scope: None,
+            project: Some(read_observation_project(storage, observation)?),
+        }),
+        _ => Err(TakeoverError::InvalidRequest(
+            "扫描观察不属于受支持的接管路径".to_owned(),
+        )),
+    }
+}
+
+fn read_observation_project(
+    storage: &Storage,
+    observation: &InventoryItem,
+) -> Result<StoredProject, TakeoverError> {
+    let project_id = observation
+        .project_id
+        .as_deref()
+        .ok_or_else(|| TakeoverError::InvalidRequest("Project 扫描观察缺少 Project".to_owned()))?;
+    let project = storage.read_project(project_id)?;
+    if observation.project_display_name.as_deref() != Some(project.display_name.as_str()) {
+        return Err(TakeoverError::InvalidRequest(
+            "扫描观察绑定的 Project 已经变化".to_owned(),
+        ));
+    }
+    Ok(project)
+}
+
+fn open_resolved_origin_parent(
+    paths: &ApplicationPaths,
+    app_id: Option<SupportedAppId>,
+    scope: Option<MountScope>,
+    project: Option<&StoredProject>,
+    original_root: &Path,
+    skill_name: &str,
+) -> Result<OpenMountParent, TakeoverError> {
+    let lookup = match (app_id, scope, project) {
+        (Some(app_id), Some(scope), project) => {
+            open_mount_parent(paths, app_id, scope, project, false)?
+        }
+        (None, None, Some(project)) => {
+            open_project_relative_parent(project, Path::new(".agents/skills"), false)?
+        }
+        (None, None, None) => {
+            open_relative_parent(paths.home(), Path::new(".agents/skills"), false)?
+        }
+        _ => return Err(TakeoverError::InvalidPlanContract),
+    };
+    let ParentLookup::Open(parent) = lookup else {
+        return Err(TakeoverError::InvalidRequest(
+            "扫描到的 Host Skill 父目录已经不存在".to_owned(),
+        ));
+    };
+    ensure_origin_parent_matches(&parent, original_root, skill_name)?;
+    Ok(parent)
+}
+
+fn snapshot_new_target(
+    paths: &ApplicationPaths,
+    app_id: SupportedAppId,
+    scope: MountScope,
+    project: Option<&StoredProject>,
+    skill_name: &str,
+    target_path: &Path,
+    expected_target: &str,
+) -> Result<(TargetKind, String), TakeoverError> {
+    match open_mount_parent(paths, app_id, scope, project, false)? {
+        ParentLookup::Missing => Ok((TargetKind::Absent, "absent".to_owned())),
+        ParentLookup::Open(parent) => {
+            if parent.path().join(skill_name) != target_path {
+                return Err(TakeoverError::InvalidPlanContract);
+            }
+            let snapshot =
+                snapshot_at(parent.directory(), OsStr::new(skill_name), expected_target)?;
+            recheck_open_parent(&parent)?;
+            Ok((snapshot.kind(), snapshot.observation().to_owned()))
+        }
+    }
+}
+
+fn project_snapshot(project: &StoredProject) -> TakeoverProjectSnapshot {
+    TakeoverProjectSnapshot {
+        id: project.id.clone(),
+        display_name: project.display_name.clone(),
+        root_path: project.root_path.clone(),
+        root_device: project.root_device,
+        root_inode: project.root_inode,
+    }
+}
+
+fn validate_scope_topology(targets: &[TakeoverPlanTarget]) -> Result<(), TakeoverError> {
+    for app_id in [
+        SupportedAppId::Codex,
+        SupportedAppId::ClaudeCode,
+        SupportedAppId::GitHubCopilot,
+    ] {
+        let has_global = targets
+            .iter()
+            .any(|target| target.app_id == app_id && target.scope == MountScope::Global);
+        let has_project = targets
+            .iter()
+            .any(|target| target.app_id == app_id && target.scope == MountScope::Project);
+        if has_global && has_project {
+            return Err(TakeoverError::InvalidRequest(
+                "同一 Skill 与 Supported App 不能同时保留 global 和 project Mount".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_scope_resolution(
+    origins: &[TakeoverPlanOrigin],
+    targets: &[TakeoverPlanTarget],
+) -> Result<(), TakeoverError> {
+    validate_scope_topology(targets)?;
+    for app_id in [
+        SupportedAppId::Codex,
+        SupportedAppId::ClaudeCode,
+        SupportedAppId::GitHubCopilot,
+    ] {
+        let has_global_origin = origins.iter().any(|origin| {
+            origin.app_id == Some(app_id) && origin.scope == Some(MountScope::Global)
+        });
+        let has_project_origin = origins.iter().any(|origin| {
+            origin.app_id == Some(app_id) && origin.scope == Some(MountScope::Project)
+        });
+        let keeps_scope = targets.iter().any(|target| target.app_id == app_id);
+        if has_global_origin && has_project_origin && !keeps_scope {
+            return Err(TakeoverError::InvalidRequest(
+                "同一应用存在 global/project 冲突时必须保留其中一种 scope".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
