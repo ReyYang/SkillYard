@@ -188,6 +188,65 @@ export interface FolderInstallCandidate {
   defaultSelected: boolean;
 }
 
+// Takeover 的全部选择在创建 Plan 时冻结；最终确认只再提交 Plan ID。
+export interface TakeoverPlanRequest {
+  observationIds: string[];
+  selectedObservationId: string;
+  preservedObservationIds: string[];
+  sharedTargets: TakeoverSharedTargetRequest[];
+}
+
+export interface TakeoverSharedTargetRequest {
+  sharedObservationId: string;
+  appId: SupportedAppId;
+}
+
+export type TakeoverIdentityBasis = "singleOrigin" | "userConfirmed";
+export type TakeoverOriginDisposition = "mount" | "remove";
+
+export interface TakeoverPlanOrigin {
+  observationId: string;
+  originalPath: string;
+  appId: SupportedAppId | null;
+  scope: MountScope | null;
+  projectId: string | null;
+  projectDisplayName: string | null;
+  contentFingerprint: string;
+  warnings: string[];
+  finalDisposition: TakeoverOriginDisposition;
+}
+
+export interface TakeoverPlanTarget {
+  mountId: string;
+  appId: SupportedAppId;
+  scope: MountScope;
+  projectId: string | null;
+  projectDisplayName: string | null;
+  targetPath: string;
+  expectedTarget: string;
+}
+
+export interface TakeoverPlan {
+  id: string;
+  identityBasis: TakeoverIdentityBasis;
+  selectedObservationId: string;
+  bundleId: string;
+  memberId: string;
+  contentId: string;
+  bundleDisplayName: string;
+  skillName: string;
+  skillDescription: string;
+  sourceDisplayName: string | null;
+  managedDirectory: string;
+  contentDirectory: string;
+  expectedTarget: string;
+  origins: TakeoverPlanOrigin[];
+  targets: TakeoverPlanTarget[];
+  warnings: string[];
+  createdAt: number;
+  expiresAt: number;
+}
+
 export type UiOutcome =
   | {
       type: "unsupportedPlatform";
@@ -223,4 +282,8 @@ export type UiOutcome =
   | {
       type: "batchMountPlan";
       plan: BatchMountPlan;
+    }
+  | {
+      type: "takeoverPlan";
+      plan: TakeoverPlan;
     };

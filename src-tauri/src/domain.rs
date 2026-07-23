@@ -21,6 +21,7 @@ pub enum UiIntent {
         request: TakeoverPlanRequest,
     },
     ConfirmTakeoverPlan {
+        #[serde(rename = "planId")]
         plan_id: String,
     },
     CreateMountPlan {
@@ -878,5 +879,55 @@ mod tests {
         let project_root =
             serde_json::to_value(ScanRootKey::GitHubCopilotProject).expect("应序列化扫描根");
         assert_eq!(project_root, "gitHubCopilotProject");
+    }
+
+    #[test]
+    fn takeover_plan_request_uses_the_frontend_camel_case_contract() {
+        let intent = UiIntent::CreateTakeoverPlan {
+            request: TakeoverPlanRequest {
+                observation_ids: vec!["observation-1".to_owned()],
+                selected_observation_id: "observation-1".to_owned(),
+                preserved_observation_ids: vec!["observation-1".to_owned()],
+                shared_targets: vec![TakeoverSharedTargetRequest {
+                    shared_observation_id: "shared-1".to_owned(),
+                    app_id: SupportedAppId::ClaudeCode,
+                }],
+            },
+        };
+
+        let value = serde_json::to_value(intent).expect("应序列化 Takeover Plan 请求");
+        assert_eq!(value["type"], "createTakeoverPlan");
+        assert_eq!(
+            value["request"]["observationIds"],
+            serde_json::json!(["observation-1"])
+        );
+        assert_eq!(value["request"]["selectedObservationId"], "observation-1");
+        assert_eq!(
+            value["request"]["preservedObservationIds"],
+            serde_json::json!(["observation-1"])
+        );
+        assert_eq!(
+            value["request"]["sharedTargets"][0],
+            serde_json::json!({
+                "sharedObservationId": "shared-1",
+                "appId": "claudeCode"
+            })
+        );
+    }
+
+    #[test]
+    fn takeover_confirmation_contract_contains_only_the_camel_case_plan_id() {
+        let value = serde_json::to_value(UiIntent::ConfirmTakeoverPlan {
+            plan_id: "takeover-plan-1".to_owned(),
+        })
+        .expect("应序列化 Takeover 确认请求");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "confirmTakeoverPlan",
+                "planId": "takeover-plan-1"
+            })
+        );
     }
 }

@@ -7,6 +7,8 @@ import { InstallFolderPage } from "./components/InstallFolderPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
+import { TakeoverPlanPage } from "./components/TakeoverPlanPage";
+import { TakeoverSelectionPage } from "./components/TakeoverSelectionPage";
 import type {
   BatchMountPlan,
   BatchMountRequest,
@@ -14,6 +16,8 @@ import type {
   MountPlan,
   MountScope,
   SupportedAppId,
+  TakeoverPlan,
+  TakeoverPlanRequest,
   UiOutcome,
 } from "./domain";
 import {
@@ -42,6 +46,14 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [installError, setInstallError] = useState<string | null>(null);
   const [isAddingProject, setIsAddingProject] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
+  const [takeoverObservationId, setTakeoverObservationId] = useState<
+    string | null
+  >(null);
+  const [pendingTakeoverPlan, setPendingTakeoverPlan] =
+    useState<TakeoverPlan | null>(null);
+  const [isPlanningTakeover, setIsPlanningTakeover] = useState(false);
+  const [isConfirmingTakeover, setIsConfirmingTakeover] = useState(false);
+  const [takeoverError, setTakeoverError] = useState<string | null>(null);
   const [managedMemberId, setManagedMemberId] = useState<string | null>(null);
   const [pendingMountPlan, setPendingMountPlan] = useState<MountPlan | null>(null);
   const [isPlanningMount, setIsPlanningMount] = useState(false);
@@ -154,6 +166,55 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       setProjectError(formatError(error));
     } finally {
       setIsAddingProject(false);
+    }
+  };
+
+  const openTakeover = (observationId: string) => {
+    setTakeoverError(null);
+    setTakeoverObservationId(observationId);
+  };
+
+  const createTakeoverPlan = async (request: TakeoverPlanRequest) => {
+    if (isPlanningTakeover) return;
+    setIsPlanningTakeover(true);
+    setTakeoverError(null);
+    try {
+      const plan = await client.createTakeoverPlan(request);
+      setPendingTakeoverPlan(plan);
+    } catch (error) {
+      // 创建 Plan 仍是只读操作，失败后保留用户选择供调整或返回。
+      setTakeoverError(formatError(error));
+    } finally {
+      setIsPlanningTakeover(false);
+    }
+  };
+
+  const confirmTakeover = async () => {
+    if (!pendingTakeoverPlan || isConfirmingTakeover) return;
+    setIsConfirmingTakeover(true);
+    setTakeoverError(null);
+    try {
+      const outcome = await client.confirmTakeoverPlan(pendingTakeoverPlan.id);
+      setPendingTakeoverPlan(null);
+      setTakeoverObservationId(null);
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      const message = formatError(error);
+      // 确认后的 Plan 不能重试；启动读取会先完成或回滚唯一接管事务。
+      setPendingTakeoverPlan(null);
+      setTakeoverObservationId(null);
+      try {
+        const outcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome });
+        setTakeoverError(message);
+      } catch (recoveryError) {
+        setViewState({
+          status: "error",
+          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+        });
+      }
+    } finally {
+      setIsConfirmingTakeover(false);
     }
   };
 
@@ -325,6 +386,16 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       </main>
     );
   }
+  if (pendingTakeoverPlan) {
+    return (
+      <TakeoverPlanPage
+        plan={pendingTakeoverPlan}
+        isConfirming={isConfirmingTakeover}
+        onBack={() => setPendingTakeoverPlan(null)}
+        onConfirm={confirmTakeover}
+      />
+    );
+  }
   if (pendingInstallPlan) {
     return (
       <InstallFolderPage
@@ -387,6 +458,33 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         <h1>暂时无法继续</h1>
         <p>SkillYard 收到了无法显示的应用状态。</p>
       </main>
+    );
+  }
+
+  const takeoverEntry = takeoverObservationId
+    ? viewState.outcome.entries.find(
+        (entry) =>
+          entry.id === takeoverObservationId &&
+          entry.managementKind === "takeoverCandidate",
+      )
+    : null;
+  if (takeoverEntry) {
+    return (
+      <TakeoverSelectionPage
+        initialObservationId={takeoverEntry.id}
+        candidates={viewState.outcome.entries.filter(
+          (entry) =>
+            entry.managementKind === "takeoverCandidate" &&
+            entry.skillName === takeoverEntry.skillName,
+        )}
+        isPlanning={isPlanningTakeover}
+        error={takeoverError}
+        onBack={() => {
+          setTakeoverError(null);
+          setTakeoverObservationId(null);
+        }}
+        onCreatePlan={createTakeoverPlan}
+      />
     );
   }
 
@@ -467,9 +565,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       installError={installError}
       projectError={projectError}
       mountError={mountError}
+      takeoverError={takeoverError}
       onRefresh={refreshLocalInventory}
       onInstall={chooseFolderInstallPlan}
       onAddProject={chooseAndRegisterProject}
+      onTakeover={openTakeover}
       onManageMount={openMountManager}
       onBatchMount={openBatchMount}
     />

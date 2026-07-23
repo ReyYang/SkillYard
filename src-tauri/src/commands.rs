@@ -4,7 +4,8 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     BatchMountPlan, BatchMountRequest, FolderInstallPlan, MountPlan, MountScope,
-    SkillYardApplication, SupportedAppId, UiIntent, UiOutcome, application::ApplicationError,
+    SkillYardApplication, SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome,
+    application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -137,6 +138,30 @@ pub fn choose_and_register_project(
     .map(Some)
 }
 
+/// 创建 command 只拆出已封存 Plan，不暴露 Takeover 内部文件步骤。
+#[tauri::command(async)]
+pub fn create_takeover_plan(
+    application: State<'_, SkillYardApplication>,
+    request: TakeoverPlanRequest,
+) -> Result<TakeoverPlan, UiError> {
+    match dispatch(&application, UiIntent::CreateTakeoverPlan { request })? {
+        UiOutcome::TakeoverPlan { plan } => Ok(plan),
+        _ => Err(UiError {
+            code: "invalidOutcome",
+            message: "SkillYard 没有生成 Takeover 确认信息".to_owned(),
+        }),
+    }
+}
+
+/// 确认阶段只接收不透明 Plan ID，全部路径和用户选择沿用已封存 Plan。
+#[tauri::command(async)]
+pub fn confirm_takeover_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(&application, UiIntent::ConfirmTakeoverPlan { plan_id })
+}
+
 #[tauri::command(async)]
 pub fn create_mount_plan(
     application: State<'_, SkillYardApplication>,
@@ -240,7 +265,7 @@ fn dispatch(application: &SkillYardApplication, intent: UiIntent) -> Result<UiOu
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use tempfile::tempdir;
 
@@ -319,5 +344,68 @@ mod tests {
 
         assert_eq!(error.code, "lifecycleError");
         assert!(error.message.contains("未签发"));
+    }
+
+    #[test]
+    fn ipc_dispatch_runs_the_takeover_plan_and_confirmation_against_real_state() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let home = sandbox.path().join("home");
+        let data_root = sandbox.path().join("data");
+        let skill_root = home.join(".codex/skills/alpha");
+        fs::create_dir_all(&skill_root).expect("应创建待接管 Skill");
+        fs::write(
+            skill_root.join("SKILL.md"),
+            "---\nname: alpha\ndescription: IPC 接管验收\n---\n",
+        )
+        .expect("应写入 Skill metadata");
+        let application = SkillYardApplication::new(
+            ApplicationPaths::for_home(data_root, home),
+            PlatformInfo::supported_for_test(),
+        );
+
+        let UiOutcome::Inventory { entries, .. } =
+            dispatch(&application, UiIntent::StartInitialScan).expect("IPC 应完成首次扫描")
+        else {
+            panic!("首次扫描应返回 Inventory");
+        };
+        let observation_id = entries
+            .into_iter()
+            .find(|entry| entry.skill_root == skill_root.to_string_lossy())
+            .expect("应发现待接管 Skill")
+            .id;
+        let UiOutcome::TakeoverPlan { plan } = dispatch(
+            &application,
+            UiIntent::CreateTakeoverPlan {
+                request: TakeoverPlanRequest {
+                    observation_ids: vec![observation_id.clone()],
+                    selected_observation_id: observation_id.clone(),
+                    preserved_observation_ids: vec![observation_id],
+                    shared_targets: Vec::new(),
+                },
+            },
+        )
+        .expect("IPC 应生成 Takeover Plan") else {
+            panic!("创建接管计划应返回 TakeoverPlan");
+        };
+
+        let UiOutcome::Inventory { entries, .. } = dispatch(
+            &application,
+            UiIntent::ConfirmTakeoverPlan {
+                plan_id: plan.id.clone(),
+            },
+        )
+        .expect("IPC 应确认接管") else {
+            panic!("确认接管应返回 Inventory");
+        };
+
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.bundle_id.as_deref() == Some(plan.bundle_id.as_str()))
+        );
+        assert_eq!(
+            fs::read_link(&skill_root).expect("原使用位置应成为 Mount"),
+            Path::new(&plan.expected_target)
+        );
     }
 }

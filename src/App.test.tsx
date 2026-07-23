@@ -9,6 +9,7 @@ import type {
   InventoryObservation,
   MountPlan,
   MountSummary,
+  TakeoverPlan,
   UiOutcome,
 } from "./domain";
 import type { SkillYardClient } from "./skillyardClient";
@@ -1309,6 +1310,297 @@ describe("本机清单", () => {
   });
 });
 
+describe("接管已有 Skill", () => {
+  it("从待接管卡片进入选择页，并且不会仅凭同名自动合并副本", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({ id: "origin-codex", skillRoot: "/tmp/codex/example" }),
+        createEntry({
+          id: "origin-claude",
+          skillRoot: "/tmp/claude/example",
+          observedBy: ["claudeCode"],
+          rootKey: "claudeCodeGlobal",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    const buttons = await screen.findAllByRole("button", {
+      name: "接管 example",
+    });
+    await user.click(buttons[0]);
+
+    expect(
+      screen.getByRole("heading", { name: "选择要接管的 example" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/codex/example",
+      }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/claude/example",
+      }),
+    ).not.toBeChecked();
+    expect(client.createTakeoverPlan).not.toHaveBeenCalled();
+  });
+
+  it("完整收集唯一内容、scope 取舍和共享目录目标后才生成 Plan", async () => {
+    const user = userEvent.setup();
+    const origins = [
+      createEntry({
+        id: "origin-global",
+        skillRoot: "/tmp/home/.codex/skills/example",
+        observedFingerprint: "global-content",
+      }),
+      createEntry({
+        id: "origin-project",
+        skillRoot: "/tmp/project/.codex/skills/example",
+        locationKind: "appProject",
+        observedFingerprint: "project-content",
+        rootKey: "codexProject",
+        projectId: "project-1",
+        projectDisplayName: "demo",
+      }),
+      createEntry({
+        id: "origin-shared",
+        skillRoot: "/tmp/home/.agents/skills/example",
+        locationKind: "sharedReadOnly",
+        observedBy: ["claudeCode"],
+        observedFingerprint: "project-content",
+        rootKey: "sharedAgents",
+      }),
+    ];
+    const client = createClient(inventoryOutcome(origins));
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(createTakeoverPlan());
+    render(<App client={client} />);
+
+    const buttons = await screen.findAllByRole("button", {
+      name: "接管 example",
+    });
+    await user.click(buttons[0]);
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/project/.codex/skills/example",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/home/.agents/skills/example",
+      }),
+    );
+
+    expect(screen.getByText(/请选择唯一一份内容/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成影响预览" })).toBeDisabled();
+    await user.click(
+      screen.getByRole("radio", {
+        name: "使用 /tmp/project/.codex/skills/example 作为主副本",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "保留使用位置：/tmp/home/.codex/skills/example",
+      }),
+    );
+    expect(screen.getByText(/共享目录必须选择至少一个应用/)).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "将 /tmp/home/.agents/skills/example 挂载到 Claude Code",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      observationIds: ["origin-global", "origin-project", "origin-shared"],
+      selectedObservationId: "origin-project",
+      preservedObservationIds: ["origin-project"],
+      sharedTargets: [
+        { sharedObservationId: "origin-shared", appId: "claudeCode" },
+      ],
+    });
+  });
+
+  it("共享目录选择已有应用位置时复用同一最终 Mount，不生成重复目标", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "origin-codex",
+          skillRoot: "/tmp/home/.codex/skills/example",
+        }),
+        createEntry({
+          id: "origin-shared",
+          skillRoot: "/tmp/home/.agents/skills/example",
+          locationKind: "sharedReadOnly",
+          rootKey: "sharedAgents",
+        }),
+      ]),
+    );
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(createTakeoverPlan());
+    render(<App client={client} />);
+
+    const buttons = await screen.findAllByRole("button", {
+      name: "接管 example",
+    });
+    await user.click(buttons[0]);
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/home/.agents/skills/example",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "将 /tmp/home/.agents/skills/example 挂载到 Codex",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      observationIds: ["origin-codex", "origin-shared"],
+      selectedObservationId: "origin-codex",
+      preservedObservationIds: ["origin-codex"],
+      sharedTargets: [],
+    });
+  });
+
+  it("移除已选主副本后，剩余内容仍不同时必须重新明确选择", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "origin-a",
+          skillRoot: "/tmp/a/example",
+          observedFingerprint: "content-a",
+        }),
+        createEntry({
+          id: "origin-b",
+          skillRoot: "/tmp/b/example",
+          observedFingerprint: "content-b",
+          observedBy: ["claudeCode"],
+          rootKey: "claudeCodeGlobal",
+        }),
+        createEntry({
+          id: "origin-c",
+          skillRoot: "/tmp/c/example",
+          observedFingerprint: "content-c",
+          observedBy: ["gitHubCopilot"],
+          rootKey: "gitHubCopilotGlobal",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    const buttons = await screen.findAllByRole("button", {
+      name: "接管 example",
+    });
+    await user.click(buttons[0]);
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/b/example",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/c/example",
+      }),
+    );
+    await user.click(
+      screen.getByRole("radio", {
+        name: "使用 /tmp/b/example 作为主副本",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/b/example",
+      }),
+    );
+
+    expect(screen.getByText(/请选择唯一一份内容/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成影响预览" })).toBeDisabled();
+    expect(client.createTakeoverPlan).not.toHaveBeenCalled();
+  });
+
+  it("展示后端封存的影响预览，确认期间不可取消，成功后进入受管 Bundle", async () => {
+    const user = userEvent.setup();
+    let finishTakeover: ((outcome: UiOutcome) => void) | undefined;
+    const initial = inventoryOutcome([createEntry({ id: "origin-1" })]);
+    const client = createClient(initial);
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(createTakeoverPlan());
+    vi.mocked(client.confirmTakeoverPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishTakeover = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "接管 example" }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    const preview = screen.getByRole("region", { name: "接管影响预览" });
+    expect(preview).toHaveTextContent("example-bundle");
+    expect(preview).toHaveTextContent("没有更新来源");
+    expect(preview).toHaveTextContent("/tmp/example");
+    expect(preview).toHaveTextContent("/tmp/.codex/skills/example");
+    expect(client.confirmTakeoverPlan).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+    expect(client.confirmTakeoverPlan).toHaveBeenCalledWith("takeover-plan-1");
+    expect(screen.getByRole("button", { name: "正在安全接管…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "正在安全接管…" }));
+    expect(client.confirmTakeoverPlan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishTakeover?.(
+        inventoryOutcome([
+          createManagedEntry({ bundleDisplayName: "example-bundle" }),
+        ]),
+      );
+    });
+    expect(
+      screen.getByRole("region", { name: "example-bundle" }),
+    ).toBeInTheDocument();
+  });
+
+  it("确认失败后丢弃旧 Plan，并从持久状态重新读取 Inventory", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createEntry({ id: "origin-1" })]);
+    const recovered = inventoryOutcome([createEntry({ id: "origin-1" })]);
+    const client = createClient(initial);
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(createTakeoverPlan());
+    vi.mocked(client.confirmTakeoverPlan).mockRejectedValue({
+      code: "takeoverError",
+      message: "接管中断，已恢复原安装",
+    });
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(recovered);
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "接管 example" }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "接管中断，已恢复原安装",
+    );
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(
+      screen.queryByRole("button", { name: "确认接管" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "接管 example" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("平台检查", () => {
   it("在不支持的平台显示阻塞页", async () => {
     const client = createClient({
@@ -1374,6 +1666,8 @@ function createClient(startup: UiOutcome): SkillYardClient {
     chooseFolderInstallPlan: vi.fn(),
     confirmInstallPlan: vi.fn(),
     chooseAndRegisterProject: vi.fn(),
+    createTakeoverPlan: vi.fn(),
+    confirmTakeoverPlan: vi.fn(),
     createMountPlan: vi.fn(),
     createRemoveMountPlan: vi.fn(),
     createRepairMountPlan: vi.fn(),
@@ -1488,6 +1782,57 @@ function createBatchPlanItem(
     defaultSelected: true,
     conflictReason: null,
     targetHealth: "missing",
+    ...overrides,
+  };
+}
+
+function createTakeoverPlan(
+  overrides: Partial<TakeoverPlan> = {},
+): TakeoverPlan {
+  return {
+    id: "takeover-plan-1",
+    identityBasis: "singleOrigin",
+    selectedObservationId: "origin-1",
+    bundleId: "bundle-takeover",
+    memberId: "member-takeover",
+    contentId: "content-takeover",
+    bundleDisplayName: "example-bundle",
+    skillName: "example",
+    skillDescription: "test skill",
+    sourceDisplayName: null,
+    managedDirectory: "/tmp/central/bundles/bundle-takeover",
+    contentDirectory:
+      "/tmp/central/bundles/bundle-takeover/contents/content-takeover",
+    expectedTarget:
+      "/tmp/central/bundles/bundle-takeover/current/members/example",
+    origins: [
+      {
+        observationId: "origin-1",
+        originalPath: "/tmp/example",
+        appId: "codex",
+        scope: "global",
+        projectId: null,
+        projectDisplayName: null,
+        contentFingerprint: "fingerprint",
+        warnings: [],
+        finalDisposition: "mount",
+      },
+    ],
+    targets: [
+      {
+        mountId: "mount-takeover",
+        appId: "codex",
+        scope: "global",
+        projectId: null,
+        projectDisplayName: null,
+        targetPath: "/tmp/.codex/skills/example",
+        expectedTarget:
+          "/tmp/central/bundles/bundle-takeover/current/members/example",
+      },
+    ],
+    warnings: ["包含脚本，SkillYard 不会执行它"],
+    createdAt: 1,
+    expiresAt: 2,
     ...overrides,
   };
 }

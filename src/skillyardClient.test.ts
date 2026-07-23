@@ -89,6 +89,44 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("choose_and_register_project");
   });
 
+  it("创建 Takeover Plan 时提交完整且明确的用户选择", async () => {
+    mocks.invoke.mockResolvedValue({ id: "takeover-plan-1" });
+    const request = {
+      observationIds: ["origin-1", "origin-2"],
+      selectedObservationId: "origin-2",
+      preservedObservationIds: ["origin-1"],
+      sharedTargets: [
+        { sharedObservationId: "origin-2", appId: "claudeCode" as const },
+      ],
+    };
+
+    await tauriSkillYardClient.createTakeoverPlan(request);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_takeover_plan", {
+      request,
+    });
+  });
+
+  it("确认 Takeover 时只提交 opaque Plan ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+    });
+
+    await tauriSkillYardClient.confirmTakeoverPlan("takeover-plan-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("confirm_takeover_plan", {
+      planId: "takeover-plan-1",
+    });
+  });
+
   it("创建 Mount Plan 时提交明确的 member、应用和 scope", async () => {
     mocks.invoke.mockResolvedValue({ id: "mount-plan-1" });
 

@@ -19,9 +19,11 @@ interface InventoryPageProps {
   installError: string | null;
   projectError: string | null;
   mountError: string | null;
+  takeoverError: string | null;
   onRefresh(): void;
   onInstall(): void;
   onAddProject(): void;
+  onTakeover(observationId: string): void;
   onManageMount(memberId: string): void;
   onBatchMount(bundleId: string): void;
 }
@@ -42,9 +44,11 @@ export function InventoryPage({
   installError,
   projectError,
   mountError,
+  takeoverError,
   onRefresh,
   onInstall,
   onAddProject,
+  onTakeover,
   onManageMount,
   onBatchMount,
 }: InventoryPageProps) {
@@ -190,6 +194,13 @@ export function InventoryPage({
         </div>
       ) : null}
 
+      {takeoverError ? (
+        <div className="inline-error" role="alert">
+          <strong>接管未完成</strong>
+          <span>{takeoverError}</span>
+        </div>
+      ) : null}
+
       {outcome.scanIssues.length > 0 ? (
         <section className="scan-warning" aria-label="刷新告警">
           <strong>部分目录暂时无法读取</strong>
@@ -232,6 +243,7 @@ export function InventoryPage({
           title="待接管"
           eyebrow="本机已有 · 只读"
           entries={takeoverEntries}
+          onTakeover={onTakeover}
         />
         <InventorySection
           title="Agent 应用管理"
@@ -266,6 +278,7 @@ function InventorySection({
   onManageMount,
   batchMountBundleId,
   onBatchMount,
+  onTakeover,
 }: {
   title: string;
   eyebrow: string;
@@ -274,6 +287,7 @@ function InventorySection({
   onManageMount?(memberId: string): void;
   batchMountBundleId?: string | null;
   onBatchMount?(bundleId: string): void;
+  onTakeover?(observationId: string): void;
 }) {
   if (entries.length === 0) return null;
   return (
@@ -305,6 +319,7 @@ function InventorySection({
               (mount) => mount.memberId === entry.memberId,
             )}
             onManageMount={onManageMount}
+            onTakeover={onTakeover}
           />
         ))}
       </ul>
@@ -316,10 +331,12 @@ function SkillCard({
   entry,
   mounts,
   onManageMount,
+  onTakeover,
 }: {
   entry: InventoryObservation;
   mounts: MountSummary[];
   onManageMount?(memberId: string): void;
+  onTakeover?(observationId: string): void;
 }) {
   return (
     <li className="skill-card">
@@ -366,6 +383,19 @@ function SkillCard({
             onClick={() => onManageMount?.(entry.memberId!)}
           >
             管理挂载
+          </button>
+        </div>
+      ) : null}
+      {entry.managementKind === "takeoverCandidate" ? (
+        <div className="mount-card-controls">
+          <span className="mount-empty">确认后才会移动或替换文件</span>
+          <button
+            className="compact-action"
+            type="button"
+            aria-label={`接管 ${presentationLabel(entry)}`}
+            onClick={() => onTakeover?.(entry.id)}
+          >
+            接管
           </button>
         </div>
       ) : null}

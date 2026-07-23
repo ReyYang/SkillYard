@@ -7,6 +7,8 @@ import type {
   MountPlan,
   MountScope,
   SupportedAppId,
+  TakeoverPlan,
+  TakeoverPlanRequest,
   UiOutcome,
 } from "./domain";
 
@@ -20,6 +22,8 @@ export interface SkillYardClient {
     selectedCandidateIds: string[],
   ): Promise<UiOutcome>;
   chooseAndRegisterProject(): Promise<UiOutcome | null>;
+  createTakeoverPlan(request: TakeoverPlanRequest): Promise<TakeoverPlan>;
+  confirmTakeoverPlan(planId: string): Promise<UiOutcome>;
   createMountPlan(
     memberId: string,
     appId: SupportedAppId,
@@ -53,6 +57,10 @@ export const tauriSkillYardClient: SkillYardClient = {
     }),
   chooseAndRegisterProject: () =>
     invoke<UiOutcome | null>("choose_and_register_project"),
+  createTakeoverPlan: (request) =>
+    invoke<TakeoverPlan>("create_takeover_plan", { request }),
+  confirmTakeoverPlan: (planId) =>
+    invoke<UiOutcome>("confirm_takeover_plan", { planId }),
   createMountPlan: (memberId, appId, scope, projectId) =>
     invoke<MountPlan>("create_mount_plan", {
       memberId,
