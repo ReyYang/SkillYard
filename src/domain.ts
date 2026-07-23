@@ -165,18 +165,20 @@ export interface BatchMountPlan {
   expiresAt: number;
 }
 
-export interface FolderInstallPlan {
+export interface InstallPlan {
   id: string;
+  inputKind: "localFolder" | "github";
+  mode: "create" | "supplement";
   inputPath: string;
   bundleDisplayName: string;
-  candidates: FolderInstallCandidate[];
+  candidates: InstallCandidate[];
   warnings: string[];
   willMount: boolean;
   createdAt: number;
   expiresAt: number;
 }
 
-export interface FolderInstallCandidate {
+export interface InstallCandidate {
   candidateId: string;
   sourceRelativePath: string;
   skillName: string | null;
@@ -186,6 +188,50 @@ export interface FolderInstallCandidate {
   validationErrors: string[];
   warnings: string[];
   defaultSelected: boolean;
+}
+
+export type SourceCatalogStatus = "unloaded" | "fresh" | "stale";
+
+export interface SourceCatalogMemberSummary {
+  id: string;
+  relativePath: string;
+  skillName: string | null;
+  description: string | null;
+  selectable: boolean;
+  validationErrors: string[];
+  warnings: string[];
+  // 只有已经安装的 Catalog Member 才关联稳定 Member ID。
+  installedMemberId: string | null;
+}
+
+export interface SourceSummary {
+  id: string;
+  canonicalIdentity: string;
+  displayName: string;
+  repositoryUrl: string;
+  trackedRef: string;
+  memberPathHint: string | null;
+  catalogStatus: SourceCatalogStatus;
+  catalogCommitSha: string | null;
+  catalogFetchedAt: number | null;
+  lastReloadAt: number | null;
+  lastReloadError: string | null;
+  bundleId: string | null;
+  adoptedCommitSha: string | null;
+  members: SourceCatalogMemberSummary[];
+}
+
+// Tracked Ref 变更 Plan 只冻结确认信息，不代表安装或文件系统事务。
+export interface SourceRefChangePlan {
+  id: string;
+  sourceId: string;
+  sourceDisplayName: string;
+  currentRef: string;
+  candidateRef: string;
+  candidateCommitSha: string;
+  memberPathHint: string | null;
+  createdAt: number;
+  expiresAt: number;
 }
 
 // Takeover 的全部选择在创建 Plan 时冻结；最终确认只再提交 Plan ID。
@@ -272,8 +318,21 @@ export type UiOutcome =
       mounts: MountSummary[];
     }
   | {
-      type: "folderInstallPlan";
-      plan: FolderInstallPlan;
+      type: "sourceDiscovery";
+      sources: SourceSummary[];
+      highlightedSourceId: string | null;
+      highlightedMemberPath: string | null;
+    }
+  | {
+      type: "sourceRefChangePlan";
+      plan: SourceRefChangePlan;
+    }
+  | {
+      type: "installPlan";
+      plan: InstallPlan;
+    }
+  | {
+      type: "installPlanDiscarded";
     }
   | {
       type: "mountPlan";

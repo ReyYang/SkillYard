@@ -13,8 +13,8 @@ use crate::{
     },
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock, confirm_install,
-        create_folder_install_plan, create_github_install_plan, ensure_central_store_layout,
-        recover_pending_transactions, write_notice_from_storage,
+        create_folder_install_plan, create_github_install_plan, discard_install_plan,
+        ensure_central_store_layout, recover_pending_transactions, write_notice_from_storage,
     },
     mount_lifecycle::{
         MountLifecycleError, confirm_batch_mount_plan, confirm_mount_plan, create_batch_mount_plan,
@@ -175,6 +175,9 @@ impl SkillYardApplication {
             } => self.with_write_operation(|| {
                 self.confirm_install_plan(plan_id, selected_candidate_ids)
             }),
+            UiIntent::DiscardInstallPlan { plan_id } => {
+                self.with_write_operation(|| self.discard_install_plan(plan_id))
+            }
             UiIntent::RegisterProject { root_path } => {
                 self.with_write_operation(|| self.register_project(root_path))
             }
@@ -528,7 +531,7 @@ impl SkillYardApplication {
             unix_timestamp_millis(),
         )?;
         lifecycle_lock.recheck(&self.paths)?;
-        Ok(UiOutcome::FolderInstallPlan { plan })
+        Ok(UiOutcome::InstallPlan { plan })
     }
 
     fn create_github_install_plan(&self, source_id: String) -> Result<UiOutcome, ApplicationError> {
@@ -549,7 +552,7 @@ impl SkillYardApplication {
             unix_timestamp_millis(),
         )?;
         lifecycle_lock.recheck(&self.paths)?;
-        Ok(UiOutcome::FolderInstallPlan { plan })
+        Ok(UiOutcome::InstallPlan { plan })
     }
 
     fn confirm_install_plan(
@@ -570,6 +573,18 @@ impl SkillYardApplication {
         storage
             .read_initial_scan()?
             .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn discard_install_plan(&self, plan_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_storage()?;
+        let confirmation_started = storage.install_plan_confirmation_has_started(&plan_id)?;
+        self.recover_storage(&mut storage)?;
+        ensure_onboarding_completed(&storage)?;
+        if confirmation_started {
+            return Err(StorageError::InstallPlanConsumed.into());
+        }
+        discard_install_plan(&self.paths, &mut storage, &plan_id)?;
+        Ok(UiOutcome::InstallPlanDiscarded)
     }
 
     fn register_project(&self, root_path: String) -> Result<UiOutcome, ApplicationError> {
@@ -736,22 +751,28 @@ impl SkillYardApplication {
     }
 
     fn open_recovered_storage(&self) -> Result<Storage, ApplicationError> {
-        let mut storage = Storage::open(self.paths.data_root(), &self.paths.database())?;
+        let mut storage = self.open_storage()?;
+        self.recover_storage(&mut storage)?;
+        Ok(storage)
+    }
+
+    fn open_storage(&self) -> Result<Storage, ApplicationError> {
+        let storage = Storage::open(self.paths.data_root(), &self.paths.database())?;
         ensure_central_store_layout(&self.paths)?;
-        recover_pending_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
-        recover_pending_mount_transactions(&self.paths, &mut storage, unix_timestamp_millis())?;
-        recover_pending_batch_mount_transactions(
-            &self.paths,
-            &mut storage,
-            unix_timestamp_millis(),
-        )?;
+        Ok(storage)
+    }
+
+    fn recover_storage(&self, storage: &mut Storage) -> Result<(), ApplicationError> {
+        recover_pending_transactions(&self.paths, storage, unix_timestamp_millis())?;
+        recover_pending_mount_transactions(&self.paths, storage, unix_timestamp_millis())?;
+        recover_pending_batch_mount_transactions(&self.paths, storage, unix_timestamp_millis())?;
         recover_pending_takeover_transactions(
             &self.paths,
-            &mut storage,
+            storage,
             unix_timestamp_millis(),
             self.lifecycle_failpoint,
         )?;
-        Ok(storage)
+        Ok(())
     }
 }
 

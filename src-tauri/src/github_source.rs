@@ -26,7 +26,7 @@ use crate::content::{
     MAX_TOTAL_FILE_BYTES, validate_skill_bundle_folder,
 };
 
-/// 所有 GitHub 响应（包括 archive）都不能超过这个固定上限。
+/// 一次 Source 获取收到的 metadata、commit 与 archive 总量不能超过这个固定上限。
 pub const MAX_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "SkillYard/1.0";
@@ -127,8 +127,8 @@ pub enum GithubSourceError {
     Network,
     #[error("GitHub 返回了不支持的 HTTP 状态")]
     HttpStatus,
-    #[error("GitHub 响应超过 100 MiB 限制")]
-    ResponseTooLarge,
+    #[error("GitHub 响应超过固定上限 {limit} bytes：已检测到 {actual} bytes")]
+    ResponseTooLarge { limit: u64, actual: u64 },
     #[error("GitHub 返回了无效响应")]
     InvalidResponse,
     #[error("GitHub 仓库不是公开仓库")]
@@ -311,9 +311,10 @@ pub fn resolve_github_source(
     input: &str,
     explicit_ref: Option<&str>,
 ) -> Result<ResolvedGithubSource, GithubSourceError> {
+    let mut receive_budget = ReceiveBudget::production();
     let parsed = parse_github_source(input, explicit_ref)?;
     let metadata_url = api_url(&["repos", &parsed.owner, &parsed.repository])?;
-    let metadata: RepositoryMetadata = read_json(transport, metadata_url)?;
+    let metadata: RepositoryMetadata = read_json(transport, metadata_url, &mut receive_budget)?;
     if metadata.private {
         return Err(GithubSourceError::PrivateRepository);
     }
@@ -325,7 +326,7 @@ pub fn resolve_github_source(
 
     // 每个 path segment 单独编码，禁止 ref 中的 `/`、`?`、`#` 改写 REST 路由。
     let commit_url = api_url(&["repos", &owner, &repository, "commits", &tracked_ref])?;
-    let commit: CommitMetadata = read_json(transport, commit_url)?;
+    let commit: CommitMetadata = read_json(transport, commit_url, &mut receive_budget)?;
     if !is_commit_sha(&commit.sha) {
         return Err(GithubSourceError::InvalidResponse);
     }
@@ -354,8 +355,9 @@ pub fn fetch_github_catalog(
     staging_root: &Path,
 ) -> Result<FetchedGithubCatalog, GithubSourceError> {
     validate_catalog_target(target)?;
+    let mut receive_budget = ReceiveBudget::production();
     let metadata_url = api_url(&["repos", target.owner, target.repository])?;
-    let metadata: RepositoryMetadata = read_json(transport, metadata_url)?;
+    let metadata: RepositoryMetadata = read_json(transport, metadata_url, &mut receive_budget)?;
     if metadata.private {
         return Err(GithubSourceError::PrivateRepository);
     }
@@ -371,7 +373,7 @@ pub fn fetch_github_catalog(
     }
 
     let commit_url = api_url(&["repos", &owner, &repository, "commits", target.tracked_ref])?;
-    let commit: CommitMetadata = read_json(transport, commit_url)?;
+    let commit: CommitMetadata = read_json(transport, commit_url, &mut receive_budget)?;
     if !is_commit_sha(&commit.sha) {
         return Err(GithubSourceError::InvalidResponse);
     }
@@ -384,6 +386,7 @@ pub fn fetch_github_catalog(
         target.repository,
         &commit.sha,
         &temporary.path,
+        &mut receive_budget,
     );
     let cleanup = temporary.cleanup();
     match cleanup {
@@ -413,6 +416,7 @@ pub fn prepare_github_install_snapshot(
 
     let mut snapshot =
         PreparedGithubInstallSnapshot::create(staging_root, target.repository, plan_id)?;
+    let mut receive_budget = ReceiveBudget::production();
     let fetched = fetch_catalog_into_temporary_tree(
         transport,
         target.owner,
@@ -420,6 +424,7 @@ pub fn prepare_github_install_snapshot(
         target.repository,
         expected_commit_sha,
         &snapshot.snapshot_root,
+        &mut receive_budget,
     )?;
     fs::remove_file(snapshot.snapshot_root.join("source.zip"))
         .map_err(|_| GithubSourceError::StagingCleanupFailed)?;
@@ -457,10 +462,11 @@ fn fetch_catalog_into_temporary_tree(
     repository_root_name: &str,
     commit_sha: &str,
     temporary_root: &Path,
+    receive_budget: &mut ReceiveBudget,
 ) -> Result<FetchedGithubCatalog, GithubSourceError> {
     let archive_url = api_url(&["repos", owner, repository, "zipball", commit_sha])?;
     let archive_path = temporary_root.join("source.zip");
-    download_archive(transport, archive_url, &archive_path)?;
+    download_archive(transport, archive_url, &archive_path, receive_budget)?;
 
     let archive_file =
         File::open(&archive_path).map_err(|_| GithubSourceError::StagingUnavailable)?;
@@ -509,6 +515,7 @@ fn download_archive(
     transport: &dyn SourceTransport,
     url: Url,
     archive_path: &Path,
+    receive_budget: &mut ReceiveBudget,
 ) -> Result<(), GithubSourceError> {
     let mut response = transport
         .get(SourceRequest {
@@ -524,13 +531,15 @@ fn download_archive(
         .create_new(true)
         .open(archive_path)
         .map_err(|_| GithubSourceError::StagingUnavailable)?;
-    match copy_with_limit(&mut response.body, &mut archive_file, MAX_RESPONSE_BYTES) {
+    match copy_with_budget(&mut response.body, &mut archive_file, receive_budget) {
         Ok(_) => archive_file
             .flush()
             .map_err(|_| GithubSourceError::StagingUnavailable),
         Err(StreamCopyError::Read) => Err(GithubSourceError::InvalidResponse),
         Err(StreamCopyError::Write) => Err(GithubSourceError::StagingUnavailable),
-        Err(StreamCopyError::LimitExceeded) => Err(GithubSourceError::ResponseTooLarge),
+        Err(StreamCopyError::LimitExceeded { limit, actual }) => {
+            Err(GithubSourceError::ResponseTooLarge { limit, actual })
+        }
     }
 }
 
@@ -1013,6 +1022,7 @@ impl Drop for CatalogTempTree {
 fn read_json<T: for<'de> Deserialize<'de>>(
     transport: &dyn SourceTransport,
     url: Url,
+    receive_budget: &mut ReceiveBudget,
 ) -> Result<T, GithubSourceError> {
     let mut response = transport
         .get(SourceRequest {
@@ -1023,39 +1033,63 @@ fn read_json<T: for<'de> Deserialize<'de>>(
     if !(200..300).contains(&response.status) {
         return Err(GithubSourceError::HttpStatus);
     }
-    let bytes = read_limited(&mut response.body)?;
-    serde_json::from_slice(&bytes).map_err(|_| GithubSourceError::InvalidResponse)
-}
-
-/// 读取时累计计数，不能因为错误 Content-Length 或 chunked body 绕过资源限制。
-pub fn read_limited(body: &mut dyn Read) -> Result<Vec<u8>, GithubSourceError> {
-    let mut output = Vec::new();
-    match copy_with_limit(body, &mut output, MAX_RESPONSE_BYTES) {
-        Ok(_) => Ok(output),
+    let mut bytes = Vec::new();
+    match copy_with_budget(&mut response.body, &mut bytes, receive_budget) {
+        Ok(_) => {}
         Err(StreamCopyError::Read | StreamCopyError::Write) => {
-            Err(GithubSourceError::InvalidResponse)
+            return Err(GithubSourceError::InvalidResponse);
         }
-        Err(StreamCopyError::LimitExceeded) => Err(GithubSourceError::ResponseTooLarge),
+        Err(StreamCopyError::LimitExceeded { limit, actual }) => {
+            return Err(GithubSourceError::ResponseTooLarge { limit, actual });
+        }
     }
+    serde_json::from_slice(&bytes).map_err(|_| GithubSourceError::InvalidResponse)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StreamCopyError {
     Read,
     Write,
-    LimitExceeded,
+    LimitExceeded { limit: u64, actual: u64 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReceiveBudget {
+    // 同一用户操作复用一个计数器，多个 HTTP body 不能分别消耗 100 MiB。
+    limit: u64,
+    received: u64,
+}
+
+impl ReceiveBudget {
+    fn production() -> Self {
+        Self::new(MAX_RESPONSE_BYTES)
+    }
+
+    fn new(limit: u64) -> Self {
+        Self { limit, received: 0 }
+    }
+}
+
+#[cfg(test)]
 fn copy_with_limit(
     reader: &mut dyn Read,
     writer: &mut dyn Write,
     limit: u64,
 ) -> Result<u64, StreamCopyError> {
-    let mut copied = 0_u64;
+    let mut budget = ReceiveBudget::new(limit);
+    copy_with_budget(reader, writer, &mut budget)
+}
+
+fn copy_with_budget(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    budget: &mut ReceiveBudget,
+) -> Result<u64, StreamCopyError> {
+    let started_at = budget.received;
     let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
     loop {
         // 达到上限后只探测下一字节，不能用一个完整 chunk 越过固定接收边界。
-        let remaining = limit.saturating_sub(copied);
+        let remaining = budget.limit.saturating_sub(budget.received);
         let probe = if remaining == 0 {
             1
         } else {
@@ -1065,16 +1099,19 @@ fn copy_with_limit(
             .read(&mut buffer[..probe])
             .map_err(|_| StreamCopyError::Read)?;
         if count == 0 {
-            return Ok(copied);
+            return Ok(budget.received - started_at);
         }
-        let next = copied.saturating_add(count as u64);
-        if next > limit {
-            return Err(StreamCopyError::LimitExceeded);
+        let next = budget.received.saturating_add(count as u64);
+        if next > budget.limit {
+            return Err(StreamCopyError::LimitExceeded {
+                limit: budget.limit,
+                actual: next,
+            });
         }
         writer
             .write_all(&buffer[..count])
             .map_err(|_| StreamCopyError::Write)?;
-        copied = next;
+        budget.received = next;
     }
 }
 
@@ -1704,10 +1741,36 @@ mod tests {
         let mut destination = Vec::new();
         assert_eq!(
             copy_with_limit(&mut source, &mut destination, 5),
-            Err(StreamCopyError::LimitExceeded)
+            Err(StreamCopyError::LimitExceeded {
+                limit: 5,
+                actual: 6,
+            })
         );
         assert_eq!(destination, b"12345");
         assert_eq!(source.position(), 6);
+    }
+
+    #[test]
+    fn receive_budget_is_shared_across_one_source_operation() {
+        let mut budget = ReceiveBudget::new(5);
+        let mut metadata = Cursor::new(b"123".to_vec());
+        let mut metadata_output = Vec::new();
+        assert_eq!(
+            copy_with_budget(&mut metadata, &mut metadata_output, &mut budget),
+            Ok(3)
+        );
+
+        let mut archive = Cursor::new(b"456".to_vec());
+        let mut archive_output = Vec::new();
+        assert_eq!(
+            copy_with_budget(&mut archive, &mut archive_output, &mut budget),
+            Err(StreamCopyError::LimitExceeded {
+                limit: 5,
+                actual: 6,
+            })
+        );
+        assert_eq!(metadata_output, b"123");
+        assert_eq!(archive_output, b"45");
     }
 
     #[test]

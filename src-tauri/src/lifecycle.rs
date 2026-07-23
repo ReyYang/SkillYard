@@ -24,7 +24,7 @@ use crate::{
         BundleCopyBudget, ContentValidationError, copy_single_skill_tree_into_open_directory,
         validate_single_skill_folder, validate_skill_bundle_folder,
     },
-    domain::{FolderInstallCandidate, FolderInstallPlan},
+    domain::{InstallCandidate, InstallInputKind, InstallMode, InstallPlan},
     github_source::{
         GithubCatalogTarget, GithubSourceError, SourceTransport, prepare_github_install_snapshot,
     },
@@ -324,7 +324,7 @@ pub fn create_folder_install_plan(
     storage: &mut Storage,
     input: &Path,
     now: i64,
-) -> Result<FolderInstallPlan, LifecycleError> {
+) -> Result<InstallPlan, LifecycleError> {
     let validated = validate_skill_bundle_folder(input)?;
     let input_metadata = fs::symlink_metadata(&validated.canonical_root)
         .map_err(|source| io_error("读取输入目录", &validated.canonical_root, source))?;
@@ -353,7 +353,7 @@ pub fn create_folder_install_plan(
                     .join(name),
             )
         });
-        candidates.push(FolderInstallCandidate {
+        candidates.push(InstallCandidate {
             candidate_id: Uuid::new_v4().to_string(),
             source_relative_path,
             skill_name: candidate.name.clone(),
@@ -410,8 +410,10 @@ pub fn create_folder_install_plan(
         expires_at,
     })?;
 
-    Ok(FolderInstallPlan {
+    Ok(InstallPlan {
         id: plan_id,
+        input_kind: InstallInputKind::LocalFolder,
+        mode: InstallMode::Create,
         input_path,
         bundle_display_name,
         candidates,
@@ -429,7 +431,7 @@ pub fn create_github_install_plan(
     transport: &dyn SourceTransport,
     source_id: &str,
     now: i64,
-) -> Result<FolderInstallPlan, LifecycleError> {
+) -> Result<InstallPlan, LifecycleError> {
     lifecycle_lock.recheck(paths)?;
     let source = storage.read_github_install_source(source_id)?;
     if storage.github_install_object_is_blocked(
@@ -568,10 +570,14 @@ pub fn create_github_install_plan(
             default_selected: candidate.default_selected,
         })
         .collect::<Vec<_>>();
-    let install_mode = if source.bundle.is_some() {
-        "supplement"
+    let mode = if source.bundle.is_some() {
+        InstallMode::Supplement
     } else {
-        "create"
+        InstallMode::Create
+    };
+    let install_mode = match mode {
+        InstallMode::Create => "create",
+        InstallMode::Supplement => "supplement",
     };
     storage.save_install_plan(NewInstallPlan {
         id: &plan_id,
@@ -606,7 +612,7 @@ pub fn create_github_install_plan(
     let candidates = drafts
         .into_iter()
         .filter(|candidate| !candidate.preserve_existing)
-        .map(|candidate| FolderInstallCandidate {
+        .map(|candidate| InstallCandidate {
             target_directory: candidate.skill_name.as_ref().map(|name| {
                 paths
                     .bundle_directory(&bundle_id)
@@ -625,8 +631,10 @@ pub fn create_github_install_plan(
             default_selected: candidate.default_selected,
         })
         .collect();
-    Ok(FolderInstallPlan {
+    Ok(InstallPlan {
         id: plan_id,
+        input_kind: InstallInputKind::Github,
+        mode,
         input_path: format!("https://github.com/{}/{}", source.owner, source.repository),
         bundle_display_name,
         candidates,
@@ -761,6 +769,34 @@ pub fn confirm_install(
     cleanup_completed(paths, &lifecycle_lock, storage, &journal, &plan)?;
     lifecycle_lock.recheck(paths)?;
     Ok(())
+}
+
+/// 放弃只适用于尚未进入事务的 Plan；确认开始后由同一套恢复协议接管。
+pub fn discard_install_plan(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    plan_id: &str,
+) -> Result<(), LifecycleError> {
+    let lifecycle_lock = acquire_lifecycle_lock(paths)?;
+    lifecycle_lock.recheck(paths)?;
+    let plan = match storage.read_install_plan(plan_id) {
+        Ok(plan) => plan,
+        Err(StorageError::InstallPlanNotFound)
+            if !storage.install_plan_confirmation_has_started(plan_id)? =>
+        {
+            // 恢复器可能已经清理过期 Plan；重复放弃必须保持幂等。
+            return Ok(());
+        }
+        Err(StorageError::InstallPlanNotFound) => {
+            return Err(StorageError::InstallPlanConsumed.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    validate_stored_plan_identifiers(&plan)?;
+    if plan.status != "pending" {
+        return Err(StorageError::InstallPlanConsumed.into());
+    }
+    discard_pending_install_plan(paths, &lifecycle_lock, storage, &plan)
 }
 
 fn install_plan_error_invalidates_snapshot(error: &StorageError) -> bool {

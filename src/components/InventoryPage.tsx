@@ -12,8 +12,9 @@ type ManagementFilter = "all" | "managed" | "takeover" | "other";
 
 interface InventoryPageProps {
   outcome: InventoryOutcome;
+  isWriteBlocked: boolean;
   isRefreshing: boolean;
-  isChoosingFolder: boolean;
+  isOpeningInstaller: boolean;
   isAddingProject: boolean;
   refreshError: string | null;
   installError: string | null;
@@ -37,8 +38,9 @@ const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
 
 export function InventoryPage({
   outcome,
+  isWriteBlocked,
   isRefreshing,
-  isChoosingFolder,
+  isOpeningInstaller,
   isAddingProject,
   refreshError,
   installError,
@@ -97,15 +99,15 @@ export function InventoryPage({
           <button
             className="primary-action"
             type="button"
-            disabled={isChoosingFolder}
+            disabled={isWriteBlocked || isOpeningInstaller}
             onClick={onInstall}
           >
-            {isChoosingFolder ? "正在选择…" : "安装 Skill"}
+            {isOpeningInstaller ? "正在加载来源…" : "安装 Skill"}
           </button>
           <button
             className="secondary-action"
             type="button"
-            disabled={isAddingProject}
+            disabled={isWriteBlocked || isAddingProject}
             onClick={onAddProject}
           >
             {isAddingProject ? "正在选择项目…" : "添加项目"}
@@ -113,7 +115,7 @@ export function InventoryPage({
           <button
             className="secondary-action"
             type="button"
-            disabled={isRefreshing}
+            disabled={isWriteBlocked || isRefreshing}
             onClick={onRefresh}
           >
             {isRefreshing ? "正在刷新本机…" : "刷新本机"}
@@ -234,6 +236,7 @@ export function InventoryPage({
             eyebrow="由 SkillYard 管理 · BUNDLE"
             entries={group.entries}
             mounts={outcome.mounts}
+            actionsDisabled={isWriteBlocked}
             onManageMount={onManageMount}
             batchMountBundleId={group.bundleId}
             onBatchMount={onBatchMount}
@@ -243,17 +246,20 @@ export function InventoryPage({
           title="待接管"
           eyebrow="本机已有 · 只读"
           entries={takeoverEntries}
+          actionsDisabled={isWriteBlocked}
           onTakeover={onTakeover}
         />
         <InventorySection
           title="Agent 应用管理"
           eyebrow="交回原管理方"
           entries={agentEntries}
+          actionsDisabled={isWriteBlocked}
         />
         <InventorySection
           title="项目仓库管理"
           eyebrow="交回项目仓库"
           entries={projectEntries}
+          actionsDisabled={isWriteBlocked}
         />
         {!hasVisibleEntries ? (
           <section className="empty-inventory">
@@ -275,6 +281,7 @@ function InventorySection({
   eyebrow,
   entries,
   mounts = [],
+  actionsDisabled = false,
   onManageMount,
   batchMountBundleId,
   onBatchMount,
@@ -284,6 +291,7 @@ function InventorySection({
   eyebrow: string;
   entries: InventoryObservation[];
   mounts?: MountSummary[];
+  actionsDisabled?: boolean;
   onManageMount?(memberId: string): void;
   batchMountBundleId?: string | null;
   onBatchMount?(bundleId: string): void;
@@ -302,6 +310,7 @@ function InventorySection({
             <button
               className="compact-action"
               type="button"
+              disabled={actionsDisabled}
               onClick={() => onBatchMount?.(batchMountBundleId)}
             >
               批量挂载
@@ -318,6 +327,7 @@ function InventorySection({
             mounts={mounts.filter(
               (mount) => mount.memberId === entry.memberId,
             )}
+            actionsDisabled={actionsDisabled}
             onManageMount={onManageMount}
             onTakeover={onTakeover}
           />
@@ -330,11 +340,13 @@ function InventorySection({
 function SkillCard({
   entry,
   mounts,
+  actionsDisabled,
   onManageMount,
   onTakeover,
 }: {
   entry: InventoryObservation;
   mounts: MountSummary[];
+  actionsDisabled: boolean;
   onManageMount?(memberId: string): void;
   onTakeover?(observationId: string): void;
 }) {
@@ -380,6 +392,7 @@ function SkillCard({
           <button
             className="compact-action"
             type="button"
+            disabled={actionsDisabled}
             onClick={() => onManageMount?.(entry.memberId!)}
           >
             管理挂载
@@ -392,6 +405,7 @@ function SkillCard({
           <button
             className="compact-action"
             type="button"
+            disabled={actionsDisabled}
             aria-label={`接管 ${presentationLabel(entry)}`}
             onClick={() => onTakeover?.(entry.id)}
           >

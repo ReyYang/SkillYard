@@ -28,6 +28,10 @@ pub enum UiIntent {
         plan_id: String,
         selected_candidate_ids: Vec<String>,
     },
+    DiscardInstallPlan {
+        #[serde(rename = "planId")]
+        plan_id: String,
+    },
     RegisterProject {
         root_path: String,
     },
@@ -469,20 +473,36 @@ pub struct InventoryItem {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FolderInstallPlan {
+pub struct InstallPlan {
     pub id: String,
+    pub input_kind: InstallInputKind,
+    pub mode: InstallMode,
     pub input_path: String,
     pub bundle_display_name: String,
-    pub candidates: Vec<FolderInstallCandidate>,
+    pub candidates: Vec<InstallCandidate>,
     pub warnings: Vec<String>,
     pub will_mount: bool,
     pub created_at: i64,
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallInputKind {
+    LocalFolder,
+    Github,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallMode {
+    Create,
+    Supplement,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FolderInstallCandidate {
+pub struct InstallCandidate {
     pub candidate_id: String,
     pub source_relative_path: String,
     pub skill_name: Option<String>,
@@ -830,9 +850,10 @@ pub enum UiOutcome {
     SourceRefChangePlan {
         plan: SourceRefChangePlan,
     },
-    FolderInstallPlan {
-        plan: FolderInstallPlan,
+    InstallPlan {
+        plan: InstallPlan,
     },
+    InstallPlanDiscarded,
     MountPlan {
         plan: MountPlan,
     },
@@ -1017,6 +1038,47 @@ mod tests {
                 "type": "confirmTakeoverPlan",
                 "planId": "takeover-plan-1"
             })
+        );
+    }
+
+    #[test]
+    fn install_plan_and_discard_use_the_canonical_frontend_contract() {
+        let plan = InstallPlan {
+            id: "install-plan-1".to_owned(),
+            input_kind: InstallInputKind::Github,
+            mode: InstallMode::Supplement,
+            input_path: "https://github.com/example/skills".to_owned(),
+            bundle_display_name: "example/skills".to_owned(),
+            candidates: Vec::new(),
+            warnings: Vec::new(),
+            will_mount: false,
+            created_at: 10,
+            expires_at: 20,
+        };
+        let plan_value =
+            serde_json::to_value(UiOutcome::InstallPlan { plan }).expect("应序列化安装 Plan");
+        assert_eq!(plan_value["type"], "installPlan");
+        assert_eq!(plan_value["plan"]["inputKind"], "github");
+        assert_eq!(plan_value["plan"]["mode"], "supplement");
+        assert_eq!(
+            plan_value["plan"]["inputPath"],
+            "https://github.com/example/skills"
+        );
+
+        let intent = serde_json::to_value(UiIntent::DiscardInstallPlan {
+            plan_id: "install-plan-1".to_owned(),
+        })
+        .expect("应序列化放弃安装 Plan 请求");
+        assert_eq!(
+            intent,
+            serde_json::json!({
+                "type": "discardInstallPlan",
+                "planId": "install-plan-1"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UiOutcome::InstallPlanDiscarded).expect("应序列化放弃完成状态"),
+            serde_json::json!({"type": "installPlanDiscarded"})
         );
     }
 }

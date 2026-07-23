@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   BatchMountPlan,
   BatchMountRequest,
-  FolderInstallPlan,
+  InstallPlan,
   MountPlan,
   MountScope,
   SupportedAppId,
@@ -16,7 +16,27 @@ export interface SkillYardClient {
   getStartupState(): Promise<UiOutcome>;
   startInitialScan(): Promise<UiOutcome>;
   refreshLocalInventory(): Promise<UiOutcome>;
-  chooseFolderInstallPlan(): Promise<FolderInstallPlan | null>;
+  openSourceDiscovery(): Promise<
+    Extract<UiOutcome, { type: "sourceDiscovery" }>
+  >;
+  reloadGithubSource(
+    sourceId: string,
+  ): Promise<Extract<UiOutcome, { type: "sourceDiscovery" }>>;
+  addGithubSource(
+    input: string,
+    trackedRef: string | null,
+  ): Promise<
+    Extract<
+      UiOutcome,
+      { type: "sourceDiscovery" | "sourceRefChangePlan" }
+    >
+  >;
+  confirmSourceRefChange(
+    planId: string,
+  ): Promise<Extract<UiOutcome, { type: "sourceDiscovery" }>>;
+  createGithubInstallPlan(sourceId: string): Promise<InstallPlan>;
+  discardInstallPlan(planId: string): Promise<void>;
+  chooseFolderInstallPlan(): Promise<InstallPlan | null>;
   confirmInstallPlan(
     planId: string,
     selectedCandidateIds: string[],
@@ -48,8 +68,33 @@ export const tauriSkillYardClient: SkillYardClient = {
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),
   startInitialScan: () => invoke<UiOutcome>("start_initial_scan"),
   refreshLocalInventory: () => invoke<UiOutcome>("refresh_local_inventory"),
+  openSourceDiscovery: () =>
+    invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
+      "open_source_discovery",
+    ),
+  reloadGithubSource: (sourceId) =>
+    invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
+      "reload_github_source",
+      { sourceId },
+    ),
+  addGithubSource: (input, trackedRef) =>
+    invoke<
+      Extract<
+        UiOutcome,
+        { type: "sourceDiscovery" | "sourceRefChangePlan" }
+      >
+    >("add_github_source", { input, trackedRef }),
+  confirmSourceRefChange: (planId) =>
+    invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
+      "confirm_source_ref_change",
+      { planId },
+    ),
+  createGithubInstallPlan: (sourceId) =>
+    invoke<InstallPlan>("create_github_install_plan", { sourceId }),
+  discardInstallPlan: (planId) =>
+    invoke<void>("discard_install_plan", { planId }),
   chooseFolderInstallPlan: () =>
-    invoke<FolderInstallPlan | null>("choose_folder_install_plan"),
+    invoke<InstallPlan | null>("choose_folder_install_plan"),
   confirmInstallPlan: (planId, selectedCandidateIds) =>
     invoke<UiOutcome>("confirm_install_plan", {
       planId,

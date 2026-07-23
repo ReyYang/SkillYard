@@ -54,6 +54,93 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("refresh_local_inventory");
   });
 
+  it("只通过任务级命令打开 Source 发现页", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "sourceDiscovery",
+      sources: [],
+      highlightedSourceId: null,
+      highlightedMemberPath: null,
+    });
+
+    await tauriSkillYardClient.openSourceDiscovery();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("open_source_discovery");
+  });
+
+  it("重新加载 GitHub Source 时只提交 sourceId", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "sourceDiscovery",
+      sources: [],
+      highlightedSourceId: "source-1",
+      highlightedMemberPath: null,
+    });
+
+    await tauriSkillYardClient.reloadGithubSource("source-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("reload_github_source", {
+      sourceId: "source-1",
+    });
+  });
+
+  it("添加 GitHub Source 时保留明确 ref 或 null", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "sourceDiscovery",
+      sources: [],
+      highlightedSourceId: "source-1",
+      highlightedMemberPath: "skills/example",
+    });
+
+    await tauriSkillYardClient.addGithubSource(
+      "https://github.com/owner/repo/tree/feature/example",
+      "feature",
+    );
+    await tauriSkillYardClient.addGithubSource("owner/repo", null);
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "add_github_source", {
+      input: "https://github.com/owner/repo/tree/feature/example",
+      trackedRef: "feature",
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "add_github_source", {
+      input: "owner/repo",
+      trackedRef: null,
+    });
+  });
+
+  it("确认 Tracked Ref 变更时只提交 opaque Plan ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "sourceDiscovery",
+      sources: [],
+      highlightedSourceId: "source-1",
+      highlightedMemberPath: null,
+    });
+
+    await tauriSkillYardClient.confirmSourceRefChange("ref-plan-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("confirm_source_ref_change", {
+      planId: "ref-plan-1",
+    });
+  });
+
+  it("从 GitHub Source 创建通用安装 Plan 时只提交 sourceId", async () => {
+    mocks.invoke.mockResolvedValue({ id: "install-plan-1" });
+
+    await tauriSkillYardClient.createGithubInstallPlan("source-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_github_install_plan", {
+      sourceId: "source-1",
+    });
+  });
+
+  it("放弃安装 Plan 时只提交 opaque Plan ID", async () => {
+    mocks.invoke.mockResolvedValue(undefined);
+
+    await tauriSkillYardClient.discardInstallPlan("install-plan-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("discard_install_plan", {
+      planId: "install-plan-1",
+    });
+  });
+
   it("只通过 Rust 任务命令打开文件夹选择器", async () => {
     mocks.invoke.mockResolvedValue(null);
 

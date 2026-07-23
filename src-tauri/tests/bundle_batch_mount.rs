@@ -1380,7 +1380,7 @@ fn install_bundle(harness: &TestHarness, label: &str, skill_names: &[&str]) -> I
         )
         .expect("应写入测试 Skill");
     }
-    let UiOutcome::FolderInstallPlan { plan } = harness
+    let UiOutcome::InstallPlan { plan } = harness
         .application
         .handle(UiIntent::CreateFolderInstallPlan {
             input_path: input.to_string_lossy().into_owned(),

@@ -1207,7 +1207,7 @@ fn installed_skill(
         format!("---\nname: {skill_name}\ndescription: Mount 测试 Skill\n---\n"),
     )
     .expect("应写入 Skill");
-    let UiOutcome::FolderInstallPlan { plan } = application
+    let UiOutcome::InstallPlan { plan } = application
         .handle(UiIntent::CreateFolderInstallPlan {
             input_path: source.to_string_lossy().into_owned(),
         })

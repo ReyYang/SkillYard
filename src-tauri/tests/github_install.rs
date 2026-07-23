@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     env, fs,
-    io::{Cursor, Write},
+    io::{self, Cursor, Read, Write},
     path::Path,
     process::Command,
     sync::{Arc, Mutex},
@@ -42,7 +42,7 @@ fn fresh_github_catalog_installs_one_unmounted_source_backed_bundle() {
         .id;
 
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
-    let UiOutcome::FolderInstallPlan { plan } = application
+    let UiOutcome::InstallPlan { plan } = application
         .handle(UiIntent::CreateGithubInstallPlan {
             source_id: source_id.clone(),
         })
@@ -301,7 +301,7 @@ fn supplement_keeps_existing_content_mount_and_adopted_commit_while_adding_selec
 }
 
 #[test]
-fn stale_catalog_cannot_create_an_install_plan_or_fetch_an_archive() {
+fn catalog_failures_keep_the_old_catalog_and_installed_bundle_unchanged() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let transport = Arc::new(RecordingTransport::default());
     let (application, data_root, _) = ready_application(sandbox.path(), transport.clone());
@@ -317,11 +317,90 @@ fn stale_catalog_cannot_create_an_install_plan_or_fetch_an_archive() {
         .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
         .expect("应先建立 Fresh Catalog")
         .id;
-    application
-        .handle(UiIntent::ReloadGitHubSource {
-            source_id: source_id.clone(),
+    transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
+    let plan = create_github_plan(&application, &source_id);
+    let installed = application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: plan.id,
+            selected_candidate_ids: plan
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.default_selected)
+                .map(|candidate| candidate.candidate_id.clone())
+                .collect(),
         })
-        .expect("reload 失败应保留旧 Catalog 并标记 Stale");
+        .expect("应先建立已安装 Bundle 基线");
+    let (bundle_id, member_id) = match installed {
+        UiOutcome::Inventory { entries, .. } => {
+            let entry = entries
+                .into_iter()
+                .find(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+                .expect("应找到已安装成员");
+            (
+                entry.bundle_id.expect("已安装成员应关联 Bundle"),
+                entry.member_id.expect("已安装成员应有稳定 ID"),
+            )
+        }
+        _ => panic!("安装后应返回 Inventory"),
+    };
+    mount_codex_global(&application, &member_id);
+    let current_link = data_root.join("bundles").join(&bundle_id).join("current");
+    let mount_path = sandbox.path().join("home/.codex/skills/alpha");
+    let old_current_target = fs::read_link(&current_link).expect("Bundle current 应为软链接");
+    let old_mount_target = fs::read_link(&mount_path).expect("Codex Mount 应为软链接");
+
+    let assert_preserved = |sources: Vec<skillyard_lib::SourceSummary>| {
+        let source = sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .expect("失败后 Source 应继续存在");
+        assert_eq!(
+            source.catalog_status,
+            skillyard_lib::SourceCatalogStatus::Stale
+        );
+        assert_eq!(source.catalog_commit_sha.as_deref(), Some(commit));
+        assert_eq!(source.bundle_id.as_deref(), Some(bundle_id.as_str()));
+        assert_eq!(source.members.len(), 2);
+        assert_eq!(
+            fs::read_link(&current_link).expect("失败后 current 应继续存在"),
+            old_current_target
+        );
+        assert_eq!(
+            fs::read_link(&mount_path).expect("失败后 Mount 应继续存在"),
+            old_mount_target
+        );
+    };
+
+    // 没有响应代表 timeout/断网等 transport failure，必须只把旧 Catalog 标成 Stale。
+    assert_preserved(reload_sources(&application, &source_id));
+
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        &[],
+    );
+    assert_preserved(reload_sources(&application, &source_id));
+
+    transport.enqueue_catalog_prefix(
+        "anthropics/skills",
+        "main",
+        "cccccccccccccccccccccccccccccccccccccccc",
+    );
+    transport.enqueue_interrupted(200);
+    assert_preserved(reload_sources(&application, &source_id));
+
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        "dddddddddddddddddddddddddddddddddddddddd",
+        &entry_limit_archive(),
+    );
+    assert_preserved(reload_sources(&application, &source_id));
+
+    application
+        .handle(UiIntent::OpenSourceDiscovery)
+        .expect("失败后的旧 Catalog 仍应可浏览");
     let request_count = transport.requests().len();
 
     let error = application
@@ -330,6 +409,88 @@ fn stale_catalog_cannot_create_an_install_plan_or_fetch_an_archive() {
     assert!(error.to_string().contains("状态已经变化"));
     assert_eq!(transport.requests().len(), request_count);
     assert_eq!(staging_entry_count(&data_root), 0);
+}
+
+#[test]
+fn confirmed_tracked_ref_change_keeps_installed_content_and_mount_unchanged() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let transport = Arc::new(RecordingTransport::default());
+    let (application, data_root, home) = ready_application(sandbox.path(), transport.clone());
+    let commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        commit,
+        &bundle_archive("alpha-original", true),
+    );
+    let source_id = open_sources(&application)
+        .into_iter()
+        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .expect("应先建立 Fresh Catalog")
+        .id;
+    transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
+    let plan = create_github_plan(&application, &source_id);
+    let alpha_candidate_id = candidate_id(&plan, "alpha");
+    let installed = application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: plan.id,
+            selected_candidate_ids: vec![alpha_candidate_id],
+        })
+        .expect("应先安装 alpha");
+    let member_id = managed_member_id(&installed, "alpha");
+    let bundle_id = match &installed {
+        UiOutcome::Inventory { entries, .. } => entries
+            .iter()
+            .find(|entry| entry.member_id.as_deref() == Some(member_id.as_str()))
+            .and_then(|entry| entry.bundle_id.clone())
+            .expect("alpha 应关联 Bundle"),
+        _ => panic!("安装后应返回 Inventory"),
+    };
+
+    mount_codex_global(&application, &member_id);
+
+    let current_link = data_root.join("bundles").join(&bundle_id).join("current");
+    let mount_path = home.join(".codex/skills/alpha");
+    let old_current_target = fs::read_link(&current_link).expect("current 应为软链接");
+    let old_mount_target = fs::read_link(&mount_path).expect("Codex Mount 应为软链接");
+    let old_payload =
+        fs::read_to_string(mount_path.join("payload.txt")).expect("应读取当前 alpha 内容");
+
+    transport.enqueue_catalog_prefix(
+        "anthropics/skills",
+        "main",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    let UiOutcome::SourceRefChangePlan { plan: ref_plan } = application
+        .handle(UiIntent::AddGitHubSource {
+            input: "https://github.com/anthropics/skills/tree/next".to_owned(),
+            tracked_ref: None,
+        })
+        .expect("不同 Tracked Ref 应先生成确认 Plan")
+    else {
+        panic!("不同 Tracked Ref 不能静默切换");
+    };
+    let UiOutcome::SourceDiscovery { sources, .. } = application
+        .handle(UiIntent::ConfirmSourceRefChange {
+            plan_id: ref_plan.id,
+        })
+        .expect("用户确认后应切换 Tracked Ref")
+    else {
+        panic!("确认后应返回 Source 发现状态");
+    };
+    let source = sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .expect("切换后 Source 应继续存在");
+
+    assert_eq!(source.tracked_ref, "next");
+    assert_eq!(source.bundle_id.as_deref(), Some(bundle_id.as_str()));
+    assert_eq!(fs::read_link(&current_link).unwrap(), old_current_target);
+    assert_eq!(fs::read_link(&mount_path).unwrap(), old_mount_target);
+    assert_eq!(
+        fs::read_to_string(mount_path.join("payload.txt")).unwrap(),
+        old_payload
+    );
 }
 
 #[test]
@@ -508,12 +669,17 @@ fn startup_discards_an_expired_github_plan_without_reopening_its_confirmation() 
     drop(connection);
     drop(application);
 
-    SkillYardApplication::new(
+    let recovered = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root.clone(), home),
         PlatformInfo::supported_for_test(),
-    )
-    .handle(UiIntent::GetStartupState)
-    .expect("启动恢复应清理过期 Plan");
+    );
+    recovered
+        .handle(UiIntent::GetStartupState)
+        .expect("启动恢复应清理过期 Plan");
+    let discard = recovered
+        .handle(UiIntent::DiscardInstallPlan { plan_id: plan.id })
+        .expect("恢复器已清理过期 Plan 时，用户返回仍应幂等成功");
+    assert_eq!(discard, UiOutcome::InstallPlanDiscarded);
     assert_eq!(staging_entry_count(&data_root), 0);
     let remaining = Connection::open(data_root.join("skillyard.sqlite3"))
         .expect("应打开真实 SQLite")
@@ -556,6 +722,52 @@ fn creating_a_new_plan_for_the_same_source_replaces_the_old_pending_snapshot() {
         })
         .expect("应读取剩余 Plan");
     assert_eq!(remaining, 1);
+}
+
+#[test]
+fn user_can_discard_a_pending_github_plan_and_its_snapshot() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let transport = Arc::new(RecordingTransport::default());
+    let (application, data_root, _) = ready_application(sandbox.path(), transport.clone());
+    let commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        commit,
+        &bundle_archive("alpha-original", true),
+    );
+    let source_id = open_sources(&application)
+        .into_iter()
+        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .expect("应建立 Fresh Catalog")
+        .id;
+    transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
+    let plan = create_github_plan(&application, &source_id);
+    let alpha_candidate_id = candidate_id(&plan, "alpha");
+    assert_eq!(staging_entry_count(&data_root), 1);
+
+    let outcome = application
+        .handle(UiIntent::DiscardInstallPlan {
+            plan_id: plan.id.clone(),
+        })
+        .expect("放弃 pending Plan 应成功");
+    assert_eq!(outcome, UiOutcome::InstallPlanDiscarded);
+    assert_eq!(staging_entry_count(&data_root), 0);
+    let remaining = Connection::open(data_root.join("skillyard.sqlite3"))
+        .expect("应打开真实 SQLite")
+        .query_row("SELECT COUNT(*) FROM install_plans", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("应读取剩余 Plan");
+    assert_eq!(remaining, 0);
+
+    let error = application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: plan.id,
+            selected_candidate_ids: vec![alpha_candidate_id],
+        })
+        .expect_err("已放弃 Plan 不能再次确认");
+    assert!(error.to_string().contains("未签发"));
 }
 
 #[test]
@@ -787,7 +999,7 @@ fn blocked_github_supplement_isolates_its_source_and_bundle_but_not_independent_
     )
     .expect("应写入独立 Skill metadata");
     fs::write(independent_input.join("payload.txt"), "independent").expect("应写入独立 Skill 内容");
-    let UiOutcome::FolderInstallPlan {
+    let UiOutcome::InstallPlan {
         plan: independent_plan,
     } = restarted
         .handle(UiIntent::CreateFolderInstallPlan {
@@ -1036,11 +1248,26 @@ fn open_sources(application: &SkillYardApplication) -> Vec<skillyard_lib::Source
     sources
 }
 
+fn reload_sources(
+    application: &SkillYardApplication,
+    source_id: &str,
+) -> Vec<skillyard_lib::SourceSummary> {
+    let UiOutcome::SourceDiscovery { sources, .. } = application
+        .handle(UiIntent::ReloadGitHubSource {
+            source_id: source_id.to_owned(),
+        })
+        .expect("远端内容失败应保存为 Stale Source 状态")
+    else {
+        panic!("重新加载后应返回 Source 发现状态");
+    };
+    sources
+}
+
 fn create_github_plan(
     application: &SkillYardApplication,
     source_id: &str,
-) -> skillyard_lib::FolderInstallPlan {
-    let UiOutcome::FolderInstallPlan { plan } = application
+) -> skillyard_lib::InstallPlan {
+    let UiOutcome::InstallPlan { plan } = application
         .handle(UiIntent::CreateGithubInstallPlan {
             source_id: source_id.to_owned(),
         })
@@ -1051,7 +1278,7 @@ fn create_github_plan(
     plan
 }
 
-fn candidate_id(plan: &skillyard_lib::FolderInstallPlan, skill_name: &str) -> String {
+fn candidate_id(plan: &skillyard_lib::InstallPlan, skill_name: &str) -> String {
     plan.candidates
         .iter()
         .find(|candidate| candidate.skill_name.as_deref() == Some(skill_name))
@@ -1074,6 +1301,23 @@ fn managed_member_id(outcome: &UiOutcome, skill_name: &str) -> String {
         .unwrap_or_else(|| panic!("应找到受管成员 {skill_name}"))
 }
 
+fn mount_codex_global(application: &SkillYardApplication, member_id: &str) {
+    let UiOutcome::MountPlan { plan } = application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: member_id.to_owned(),
+            app_id: SupportedAppId::Codex,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect("应生成 Codex global Mount Plan")
+    else {
+        panic!("应返回 Mount Plan");
+    };
+    application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: plan.id })
+        .expect("应完成 Codex global Mount");
+}
+
 #[derive(Default)]
 struct RecordingTransport {
     responses: Mutex<VecDeque<ScriptedResponse>>,
@@ -1082,11 +1326,32 @@ struct RecordingTransport {
 
 struct ScriptedResponse {
     status: u16,
-    body: Vec<u8>,
+    body: ScriptedBody,
+}
+
+enum ScriptedBody {
+    Bytes(Vec<u8>),
+    Interrupted,
+}
+
+struct InterruptedBody;
+
+impl Read for InterruptedBody {
+    fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "测试连接在读取 body 时中断",
+        ))
+    }
 }
 
 impl RecordingTransport {
     fn enqueue_catalog(&self, full_name: &str, tracked_ref: &str, sha: &str, archive: &[u8]) {
+        self.enqueue_catalog_prefix(full_name, tracked_ref, sha);
+        self.enqueue_bytes(200, archive);
+    }
+
+    fn enqueue_catalog_prefix(&self, full_name: &str, tracked_ref: &str, sha: &str) {
         self.enqueue(
             200,
             format!(
@@ -1095,7 +1360,6 @@ impl RecordingTransport {
             .into_bytes(),
         );
         self.enqueue(200, format!(r#"{{"sha":"{sha}"}}"#).into_bytes());
-        self.enqueue_bytes(200, archive);
     }
 
     fn enqueue_bytes(&self, status: u16, body: &[u8]) {
@@ -1106,7 +1370,20 @@ impl RecordingTransport {
         self.responses
             .lock()
             .expect("应写入响应队列")
-            .push_back(ScriptedResponse { status, body });
+            .push_back(ScriptedResponse {
+                status,
+                body: ScriptedBody::Bytes(body),
+            });
+    }
+
+    fn enqueue_interrupted(&self, status: u16) {
+        self.responses
+            .lock()
+            .expect("应写入中断响应")
+            .push_back(ScriptedResponse {
+                status,
+                body: ScriptedBody::Interrupted,
+            });
     }
 
     fn requests(&self) -> Vec<SourceRequest> {
@@ -1129,7 +1406,10 @@ impl SourceTransport for RecordingTransport {
         Ok(SourceResponse {
             status: response.status,
             final_url: request.url,
-            body: Box::new(Cursor::new(response.body)),
+            body: match response.body {
+                ScriptedBody::Bytes(body) => Box::new(Cursor::new(body)),
+                ScriptedBody::Interrupted => Box::new(InterruptedBody),
+            },
         })
     }
 }
@@ -1173,6 +1453,20 @@ fn supplement_archive() -> Vec<u8> {
     archive
         .finish()
         .expect("应完成补装 ZIP fixture")
+        .into_inner()
+}
+
+fn entry_limit_archive() -> Vec<u8> {
+    let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().unix_permissions(0o040755);
+    for index in 0..=20_000 {
+        archive
+            .add_directory(format!("repository-sha/entry-{index}/"), options)
+            .expect("应写入超限条目 fixture");
+    }
+    archive
+        .finish()
+        .expect("应完成超限条目 ZIP fixture")
         .into_inner()
 }
 

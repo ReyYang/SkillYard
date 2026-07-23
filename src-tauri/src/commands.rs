@@ -3,8 +3,8 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
-    BatchMountPlan, BatchMountRequest, FolderInstallPlan, MountPlan, MountScope,
-    SkillYardApplication, SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome,
+    BatchMountPlan, BatchMountRequest, InstallPlan, MountPlan, MountScope, SkillYardApplication,
+    SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome,
     application::ApplicationError,
 };
 
@@ -57,12 +57,79 @@ pub fn refresh_local_inventory(
     dispatch(&application, UiIntent::RefreshLocalInventory)
 }
 
+#[tauri::command(async)]
+pub fn open_source_discovery(
+    application: State<'_, SkillYardApplication>,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::OpenSourceDiscovery)? {
+        outcome @ UiOutcome::SourceDiscovery { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回 Source 列表")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn reload_github_source(
+    application: State<'_, SkillYardApplication>,
+    source_id: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::ReloadGitHubSource { source_id })? {
+        outcome @ UiOutcome::SourceDiscovery { .. } => Ok(outcome),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有返回重新加载后的 Source 列表",
+        )),
+    }
+}
+
+#[tauri::command(async)]
+pub fn add_github_source(
+    application: State<'_, SkillYardApplication>,
+    input: String,
+    tracked_ref: Option<String>,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::AddGitHubSource { input, tracked_ref },
+    )? {
+        outcome @ (UiOutcome::SourceDiscovery { .. } | UiOutcome::SourceRefChangePlan { .. }) => {
+            Ok(outcome)
+        }
+        _ => Err(invalid_outcome(
+            "SkillYard 没有返回 Source 或 Tracked Ref 变更确认",
+        )),
+    }
+}
+
+#[tauri::command(async)]
+pub fn confirm_source_ref_change(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::ConfirmSourceRefChange { plan_id })? {
+        outcome @ UiOutcome::SourceDiscovery { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回更新后的 Source 列表")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn create_github_install_plan(
+    application: State<'_, SkillYardApplication>,
+    source_id: String,
+) -> Result<InstallPlan, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::CreateGithubInstallPlan { source_id },
+    )? {
+        UiOutcome::InstallPlan { plan } => Ok(plan),
+        _ => Err(invalid_outcome("SkillYard 没有生成 GitHub 安装确认信息")),
+    }
+}
+
 /// 文件夹路径只由 Rust 原生选择器取得，前端不能提交任意本机路径。
 #[tauri::command(async)]
 pub fn choose_folder_install_plan(
     app: AppHandle,
     application: State<'_, SkillYardApplication>,
-) -> Result<Option<FolderInstallPlan>, UiError> {
+) -> Result<Option<InstallPlan>, UiError> {
     let Some(folder) = app
         .dialog()
         .file()
@@ -85,11 +152,8 @@ pub fn choose_folder_install_plan(
             input_path: input_path.to_owned(),
         },
     )? {
-        UiOutcome::FolderInstallPlan { plan } => Ok(Some(plan)),
-        _ => Err(UiError {
-            code: "invalidOutcome",
-            message: "SkillYard 没有生成安装确认信息".to_owned(),
-        }),
+        UiOutcome::InstallPlan { plan } => Ok(Some(plan)),
+        _ => Err(invalid_outcome("SkillYard 没有生成安装确认信息")),
     }
 }
 
@@ -106,6 +170,39 @@ pub fn confirm_install_plan(
             selected_candidate_ids,
         },
     )
+}
+
+#[tauri::command(async)]
+pub fn discard_install_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<(), UiError> {
+    let outcome = application
+        .handle(UiIntent::DiscardInstallPlan { plan_id })
+        .map_err(discard_install_plan_error)?;
+    match outcome {
+        UiOutcome::InstallPlanDiscarded => Ok(()),
+        _ => Err(invalid_outcome("SkillYard 没有放弃安装 Plan")),
+    }
+}
+
+fn discard_install_plan_error(error: ApplicationError) -> UiError {
+    let plan_was_consumed = matches!(
+        &error,
+        ApplicationError::Storage(crate::storage::StorageError::InstallPlanConsumed)
+            | ApplicationError::Lifecycle(crate::lifecycle::LifecycleError::Storage(
+                crate::storage::StorageError::InstallPlanConsumed
+            ))
+    );
+    if plan_was_consumed {
+        // 前端需要离开已经永久失效的确认页；其他清理失败仍保留页面供用户重试。
+        UiError {
+            code: "installPlanConsumed",
+            message: error.to_string(),
+        }
+    } else {
+        error.into()
+    }
 }
 
 /// Project 路径与安装文件夹一样，只能由 Rust 原生选择器签发。
@@ -264,6 +361,13 @@ fn dispatch(application: &SkillYardApplication, intent: UiIntent) -> Result<UiOu
     application.handle(intent).map_err(Into::into)
 }
 
+fn invalid_outcome(message: &str) -> UiError {
+    UiError {
+        code: "invalidOutcome",
+        message: message.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -345,6 +449,21 @@ mod tests {
 
         assert_eq!(error.code, "lifecycleError");
         assert!(error.message.contains("未签发"));
+    }
+
+    #[test]
+    fn discard_maps_consumed_plan_to_a_stable_ui_state_code() {
+        let direct = discard_install_plan_error(ApplicationError::Storage(
+            crate::storage::StorageError::InstallPlanConsumed,
+        ));
+        let recovered = discard_install_plan_error(ApplicationError::Lifecycle(
+            crate::lifecycle::LifecycleError::Storage(
+                crate::storage::StorageError::InstallPlanConsumed,
+            ),
+        ));
+
+        assert_eq!(direct.code, "installPlanConsumed");
+        assert_eq!(recovered.code, "installPlanConsumed");
     }
 
     #[test]

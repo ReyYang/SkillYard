@@ -5,10 +5,12 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type {
   BatchMountPlan,
-  FolderInstallPlan,
+  InstallPlan,
   InventoryObservation,
   MountPlan,
   MountSummary,
+  SourceRefChangePlan,
+  SourceSummary,
   TakeoverPlan,
   UiOutcome,
 } from "./domain";
@@ -113,13 +115,13 @@ describe("本机清单", () => {
   it("选择文件夹后先显示影响预览，确认前不写入", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([]));
-    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createFolderInstallPlan({
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createInstallPlan({
       inputPath: "/Users/test/Downloads/example",
       warnings: ["包含可执行文件，请确认来源可信"],
     }));
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await openLocalFolderPicker(user);
 
     expect(client.chooseFolderInstallPlan).toHaveBeenCalledTimes(1);
     expect(
@@ -137,15 +139,15 @@ describe("本机清单", () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([]));
     vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(
-      createFolderInstallPlan({
+      createInstallPlan({
         bundleDisplayName: "superpowers",
         candidates: [
-          createFolderCandidate({
+          createInstallCandidate({
             candidateId: "candidate-brainstorming",
             sourceRelativePath: "skills/brainstorming",
             skillName: "brainstorming",
           }),
-          createFolderCandidate({
+          createInstallCandidate({
             candidateId: "candidate-tdd",
             sourceRelativePath: "skills/tdd",
             skillName: "tdd",
@@ -156,7 +158,7 @@ describe("本机清单", () => {
     vi.mocked(client.confirmInstallPlan).mockResolvedValue(inventoryOutcome([]));
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await openLocalFolderPicker(user);
     const brainstorming = screen.getByRole("checkbox", { name: /brainstorming/ });
     const tdd = screen.getByRole("checkbox", { name: /tdd/ });
     expect(brainstorming).toBeChecked();
@@ -177,10 +179,10 @@ describe("本机清单", () => {
   it("没有选择任何有效成员时不能确认安装", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([]));
-    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createFolderInstallPlan());
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createInstallPlan());
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await openLocalFolderPicker(user);
     await user.click(screen.getByRole("checkbox", { name: /example/ }));
 
     expect(screen.getByText(/至少选择一个有效 Skill/)).toBeInTheDocument();
@@ -192,14 +194,14 @@ describe("本机清单", () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([]));
     vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(
-      createFolderInstallPlan({
+      createInstallPlan({
         candidates: [
-          createFolderCandidate({
+          createInstallCandidate({
             candidateId: "candidate-valid",
             sourceRelativePath: "skills/valid",
             skillName: "valid",
           }),
-          createFolderCandidate({
+          createInstallCandidate({
             candidateId: "candidate-broken",
             sourceRelativePath: "skills/broken",
             skillName: "broken",
@@ -213,7 +215,7 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await openLocalFolderPicker(user);
 
     expect(screen.getByRole("checkbox", { name: /valid/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /broken/ })).toBeDisabled();
@@ -224,7 +226,7 @@ describe("本机清单", () => {
     const user = userEvent.setup();
     let finishInstall: ((outcome: UiOutcome) => void) | undefined;
     const client = createClient(inventoryOutcome([]));
-    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createFolderInstallPlan());
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createInstallPlan());
     vi.mocked(client.confirmInstallPlan).mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -232,7 +234,7 @@ describe("本机清单", () => {
         }),
     );
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await openLocalFolderPicker(user);
     await user.click(screen.getByRole("button", { name: "确认安装" }));
 
     expect(client.confirmInstallPlan).toHaveBeenCalledWith("plan-1", [
@@ -270,7 +272,7 @@ describe("本机清单", () => {
       }),
     ]);
     const client = createClient(initial);
-    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createFolderInstallPlan());
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createInstallPlan());
     vi.mocked(client.confirmInstallPlan).mockRejectedValue({
       code: "lifecycleError",
       message: "安装中断，已自动恢复",
@@ -280,7 +282,7 @@ describe("本机清单", () => {
       .mockResolvedValueOnce(recovered);
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await openLocalFolderPicker(user);
     await user.click(screen.getByRole("button", { name: "确认安装" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -291,7 +293,7 @@ describe("本机清单", () => {
     expect(screen.getByRole("region", { name: "example" })).toBeInTheDocument();
   });
 
-  it("取消原生选择器时保持当前清单", async () => {
+  it("取消原生选择器时保留 Source 页面", async () => {
     const user = userEvent.setup();
     const client = createClient(
       inventoryOutcome([createEntry({ skillName: "preserved" })]),
@@ -299,9 +301,12 @@ describe("本机清单", () => {
     vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(null);
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await openLocalFolderPicker(user);
 
-    expect(screen.getByText("preserved")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "安装 Skill" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("anthropics/skills")).toBeInTheDocument();
     expect(client.confirmInstallPlan).not.toHaveBeenCalled();
   });
 
@@ -1182,6 +1187,10 @@ describe("本机清单", () => {
     expect(
       screen.getByRole("button", { name: "正在刷新本机…" }),
     ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "接管 old-skill" })).toBeDisabled();
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "正在刷新本机…" }));
     expect(client.refreshLocalInventory).toHaveBeenCalledTimes(1);
 
@@ -1601,6 +1610,429 @@ describe("接管已有 Skill", () => {
   });
 });
 
+describe("GitHub Source 安装", () => {
+  it("只在用户点击安装后进入 Source Catalog，返回时保留原 Inventory", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createEntry({ skillName: "saved" })]),
+    );
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+    expect(client.openSourceDiscovery).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "安装 Skill" }));
+
+    expect(client.openSourceDiscovery).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findByRole("heading", { name: "安装 Skill" }),
+    ).toBeInTheDocument();
+    expect(client.chooseFolderInstallPlan).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "返回清单" }));
+
+    expect(screen.getByText("saved")).toBeInTheDocument();
+    expect(client.getStartupState).toHaveBeenCalledTimes(1);
+  });
+
+  it("首次加载 Source 期间保留清单浏览，但禁用全部写入口", async () => {
+    const user = userEvent.setup();
+    let finishOpening:
+      | ((outcome: Extract<UiOutcome, { type: "sourceDiscovery" }>) => void)
+      | undefined;
+    const client = createClient(
+      inventoryOutcome([createManagedEntry(), createEntry()]),
+    );
+    vi.mocked(client.openSourceDiscovery).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishOpening = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    expect(screen.getByRole("button", { name: "正在加载来源…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "管理挂载" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "接管 example" })).toBeDisabled();
+
+    await act(async () => {
+      finishOpening?.(sourceDiscoveryOutcome());
+    });
+    expect(
+      screen.getByRole("heading", { name: "安装 Skill" }),
+    ).toBeInTheDocument();
+  });
+
+  it("展示 Fresh、Stale 和首次加载失败，并且只允许 Fresh 安装", async () => {
+    const user = userEvent.setup();
+    const initial = sourceDiscoveryOutcome([
+      createSource(),
+      createSource({
+        id: "source-stale",
+        canonicalIdentity: "github:example/stale",
+        displayName: "example/stale",
+        repositoryUrl: "https://github.com/example/stale",
+        catalogStatus: "stale",
+        lastReloadError: "GitHub 暂时不可用",
+      }),
+      createSource({
+        id: "source-unloaded",
+        canonicalIdentity: "github:example/unloaded",
+        displayName: "example/unloaded",
+        repositoryUrl: "https://github.com/example/unloaded",
+        catalogStatus: "unloaded",
+        catalogCommitSha: null,
+        catalogFetchedAt: null,
+        lastReloadError: "尚未成功加载",
+        members: [],
+      }),
+    ]);
+    const reloaded = sourceDiscoveryOutcome([
+      createSource(),
+      createSource({
+        id: "source-stale",
+        canonicalIdentity: "github:example/stale",
+        displayName: "example/stale",
+        repositoryUrl: "https://github.com/example/stale",
+      }),
+    ]);
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(initial);
+    vi.mocked(client.reloadGithubSource).mockResolvedValue(reloaded);
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    const freshCard = screen.getByRole("article", { name: "anthropics/skills" });
+    const staleCard = screen.getByRole("article", { name: "example/stale" });
+    const unloadedCard = screen.getByRole("article", { name: "example/unloaded" });
+    expect(within(freshCard).getByText("目录已加载")).toBeInTheDocument();
+    expect(within(freshCard).getByRole("button", { name: "安装 Bundle" })).toBeEnabled();
+    expect(within(staleCard).getByText("上次目录已过期")).toBeInTheDocument();
+    expect(within(staleCard).getByText(/上次成功加载/)).toBeInTheDocument();
+    expect(within(staleCard).getByText("等待重新加载")).toBeInTheDocument();
+    expect(within(staleCard).getByText(/GitHub 暂时不可用/)).toBeInTheDocument();
+    expect(within(staleCard).getByRole("button", { name: "安装 Bundle" })).toBeDisabled();
+    expect(within(unloadedCard).getByText("尚未加载")).toBeInTheDocument();
+    expect(within(unloadedCard).getByText(/尚未成功加载/)).toBeInTheDocument();
+
+    await user.click(
+      within(staleCard).getByRole("button", { name: "重新加载来源" }),
+    );
+
+    expect(client.reloadGithubSource).toHaveBeenCalledWith("source-stale");
+    expect(
+      within(screen.getByRole("article", { name: "example/stale" })).getByRole(
+        "button",
+        { name: "安装 Bundle" },
+      ),
+    ).toBeEnabled();
+  });
+
+  it("添加同一 Source 的不同 Ref 时先确认，确认后再显示新 Ref", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.addGithubSource).mockResolvedValue({
+      type: "sourceRefChangePlan",
+      plan: createSourceRefChangePlan(),
+    });
+    vi.mocked(client.confirmSourceRefChange).mockResolvedValue(
+      sourceDiscoveryOutcome([createSource({ trackedRef: "next" })]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.type(
+      screen.getByLabelText("GitHub 仓库"),
+      "https://github.com/anthropics/skills/tree/next",
+    );
+    await user.type(screen.getByLabelText("Tracked Ref（可选）"), "next");
+    await user.click(screen.getByRole("button", { name: "添加 Source" }));
+
+    expect(client.addGithubSource).toHaveBeenCalledWith(
+      "https://github.com/anthropics/skills/tree/next",
+      "next",
+    );
+    expect(
+      screen.getByRole("heading", { name: "确认更改 Source 分支" }),
+    ).toBeInTheDocument();
+    const refPreview = screen.getByLabelText("Tracked Ref 变更预览");
+    expect(refPreview).toHaveTextContent("当前 Refmain");
+    expect(refPreview).toHaveTextContent("新的 Refnext");
+    expect(refPreview).toHaveTextContent("已解析 Commitcommit-next");
+
+    await user.click(screen.getByRole("button", { name: "确认更改" }));
+
+    expect(client.confirmSourceRefChange).toHaveBeenCalledWith(
+      "source-ref-plan-1",
+    );
+    expect(screen.getByText("Tracked Ref: next")).toBeInTheDocument();
+  });
+
+  it("Ref 确认失败后丢弃旧 Plan，并重新读取 Source 状态", async () => {
+    const user = userEvent.setup();
+    const initial = sourceDiscoveryOutcome();
+    const recovered = sourceDiscoveryOutcome([
+      createSource({ trackedRef: "next" }),
+    ]);
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.openSourceDiscovery)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(recovered);
+    vi.mocked(client.addGithubSource).mockResolvedValue({
+      type: "sourceRefChangePlan",
+      plan: createSourceRefChangePlan(),
+    });
+    vi.mocked(client.confirmSourceRefChange).mockRejectedValue({
+      code: "storageError",
+      message: "Ref 状态不确定",
+    });
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.type(screen.getByLabelText("GitHub 仓库"), "anthropics/skills");
+    await user.type(screen.getByLabelText("Tracked Ref（可选）"), "next");
+    await user.click(screen.getByRole("button", { name: "添加 Source" }));
+    await user.click(screen.getByRole("button", { name: "确认更改" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Ref 状态不确定",
+    );
+    expect(client.openSourceDiscovery).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "确认更改" })).not.toBeInTheDocument();
+    expect(screen.getByText("Tracked Ref: next")).toBeInTheDocument();
+  });
+
+  it("添加 Source 返回错误时重读最终 SQLite 状态", async () => {
+    const user = userEvent.setup();
+    const initial = sourceDiscoveryOutcome();
+    const recovered = sourceDiscoveryOutcome([
+      createSource(),
+      createSource({
+        id: "source-new",
+        canonicalIdentity: "github:example/new-skills",
+        displayName: "example/new-skills",
+        repositoryUrl: "https://github.com/example/new-skills",
+      }),
+    ]);
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.openSourceDiscovery)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(recovered);
+    vi.mocked(client.addGithubSource).mockRejectedValue({
+      code: "noticeError",
+      message: "Source 已保存，但说明文件暂时无法更新",
+    });
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.type(screen.getByLabelText("GitHub 仓库"), "example/new-skills");
+    await user.click(screen.getByRole("button", { name: "添加 Source" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Source 已保存，但说明文件暂时无法更新",
+    );
+    expect(client.openSourceDiscovery).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("example/new-skills")).toBeInTheDocument();
+  });
+
+  it("GitHub 安装使用通用确认页，返回时先真实放弃 Plan", async () => {
+    const user = userEvent.setup();
+    let finishDiscard: (() => void) | undefined;
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.createGithubInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        inputKind: "github",
+        inputPath: "https://github.com/anthropics/skills",
+      }),
+    );
+    vi.mocked(client.discardInstallPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishDiscard = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(screen.getByRole("button", { name: "安装 Bundle" }));
+
+    expect(screen.getByLabelText("安装影响预览")).toHaveTextContent(
+      "Sourcehttps://github.com/anthropics/skills",
+    );
+    await user.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(client.discardInstallPlan).toHaveBeenCalledWith("plan-1");
+    expect(screen.getByRole("button", { name: "正在返回…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认安装" })).toBeDisabled();
+
+    await act(async () => {
+      finishDiscard?.();
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "安装 Skill" }),
+    ).toBeInTheDocument();
+  });
+
+  it("Plan 放弃失败时保留确认页，不能把清理失败伪装成返回成功", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.createGithubInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        inputKind: "github",
+        inputPath: "https://github.com/anthropics/skills",
+      }),
+    );
+    vi.mocked(client.discardInstallPlan).mockRejectedValue({
+      code: "storageError",
+      message: "无法删除安装快照",
+    });
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(screen.getByRole("button", { name: "安装 Bundle" }));
+    await user.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "无法删除安装快照",
+    );
+    expect(screen.getByRole("button", { name: "确认安装" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
+  });
+
+  it("Plan 已在其他实例消费时退出旧确认页并重读最终状态", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([]);
+    const recovered = inventoryOutcome([
+      createManagedEntry({ bundleDisplayName: "installed-elsewhere" }),
+    ]);
+    const client = createClient(initial);
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(recovered);
+    vi.mocked(client.createGithubInstallPlan).mockResolvedValue(
+      createInstallPlan({ inputKind: "github" }),
+    );
+    vi.mocked(client.discardInstallPlan).mockRejectedValue({
+      code: "installPlanConsumed",
+      message: "安装 Plan 已经使用，不能重复确认",
+    });
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(screen.getByRole("button", { name: "安装 Bundle" }));
+    await user.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "安装 Plan 已经使用",
+    );
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "确认安装" })).not.toBeInTheDocument();
+    expect(screen.getByText("installed-elsewhere: example")).toBeInTheDocument();
+  });
+
+  it("补装只提交未安装成员，并明确不覆盖已有内容和 Mount", async () => {
+    const user = userEvent.setup();
+    const supplementSource = createSource({
+      bundleId: "bundle-1",
+      adoptedCommitSha: "commit-old",
+      members: [
+        createSourceMember({ installedMemberId: "member-existing" }),
+        createSourceMember({
+          id: "catalog-member-new",
+          relativePath: "skills/new-skill",
+          skillName: "new-skill",
+        }),
+      ],
+    });
+    const client = createClient(
+      inventoryOutcome(
+        [createManagedEntry({ memberId: "member-existing" })],
+        null,
+        { mounts: [createMount({ memberId: "member-existing" })] },
+      ),
+    );
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([supplementSource]),
+    );
+    vi.mocked(client.createGithubInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        inputKind: "github",
+        mode: "supplement",
+        inputPath: "https://github.com/anthropics/skills",
+        candidates: [
+          createInstallCandidate({
+            candidateId: "candidate-new",
+            sourceRelativePath: "skills/new-skill",
+            skillName: "new-skill",
+          }),
+        ],
+      }),
+    );
+    vi.mocked(client.confirmInstallPlan).mockResolvedValue(inventoryOutcome([]));
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    expect(screen.getByText("已安装 · 已挂载 1 处")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "补装 Skill" }));
+
+    expect(screen.getByText(/已有 Skill 内容和 Mount 不会被覆盖/)).toBeInTheDocument();
+    expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+    expect(screen.getByRole("checkbox", { name: /new-skill/ })).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "确认安装" }));
+
+    expect(client.confirmInstallPlan).toHaveBeenCalledWith("plan-1", [
+      "candidate-new",
+    ]);
+  });
+
+  it("Source 成员把缺失或冲突的 Mount 显示为异常而不是正常挂载", async () => {
+    const user = userEvent.setup();
+    const source = createSource({
+      bundleId: "bundle-1",
+      members: [createSourceMember({ installedMemberId: "member-existing" })],
+    });
+    const client = createClient(
+      inventoryOutcome(
+        [createManagedEntry({ memberId: "member-existing" })],
+        null,
+        {
+          mounts: [
+            createMount({
+              id: "mount-missing",
+              memberId: "member-existing",
+              health: "missing",
+            }),
+            createMount({
+              id: "mount-conflict",
+              memberId: "member-existing",
+              health: "conflict",
+            }),
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([source]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    expect(screen.getByText("已安装 · 挂载异常 2 处")).toBeInTheDocument();
+    expect(screen.queryByText(/已安装 · 已挂载/)).not.toBeInTheDocument();
+  });
+});
+
 describe("平台检查", () => {
   it("在不支持的平台显示阻塞页", async () => {
     const client = createClient({
@@ -1624,14 +2056,25 @@ describe("平台检查", () => {
   });
 });
 
-function createFolderInstallPlan(
-  overrides: Partial<FolderInstallPlan> = {},
-): FolderInstallPlan {
+async function openLocalFolderPicker(
+  user: ReturnType<typeof userEvent.setup>,
+) {
+  await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+  await user.click(
+    await screen.findByRole("button", { name: "从本地文件夹安装" }),
+  );
+}
+
+function createInstallPlan(
+  overrides: Partial<InstallPlan> = {},
+): InstallPlan {
   return {
     id: "plan-1",
+    inputKind: "localFolder",
+    mode: "create",
     inputPath: "/tmp/example",
     bundleDisplayName: "example",
-    candidates: [createFolderCandidate()],
+    candidates: [createInstallCandidate()],
     warnings: [],
     willMount: false,
     createdAt: 1,
@@ -1640,9 +2083,9 @@ function createFolderInstallPlan(
   };
 }
 
-function createFolderCandidate(
-  overrides: Partial<FolderInstallPlan["candidates"][number]> = {},
-): FolderInstallPlan["candidates"][number] {
+function createInstallCandidate(
+  overrides: Partial<InstallPlan["candidates"][number]> = {},
+): InstallPlan["candidates"][number] {
   return {
     candidateId: "candidate-example",
     sourceRelativePath: "",
@@ -1658,11 +2101,83 @@ function createFolderCandidate(
   };
 }
 
+function sourceDiscoveryOutcome(
+  sources: SourceSummary[] = [createSource()],
+  overrides: Partial<Extract<UiOutcome, { type: "sourceDiscovery" }>> = {},
+): Extract<UiOutcome, { type: "sourceDiscovery" }> {
+  return {
+    type: "sourceDiscovery",
+    sources,
+    highlightedSourceId: null,
+    highlightedMemberPath: null,
+    ...overrides,
+  };
+}
+
+function createSource(overrides: Partial<SourceSummary> = {}): SourceSummary {
+  return {
+    id: "source-1",
+    canonicalIdentity: "github:anthropics/skills",
+    displayName: "anthropics/skills",
+    repositoryUrl: "https://github.com/anthropics/skills",
+    trackedRef: "main",
+    memberPathHint: null,
+    catalogStatus: "fresh",
+    catalogCommitSha: "commit-1",
+    catalogFetchedAt: 1,
+    lastReloadAt: 1,
+    lastReloadError: null,
+    bundleId: null,
+    adoptedCommitSha: null,
+    members: [createSourceMember()],
+    ...overrides,
+  };
+}
+
+function createSourceMember(
+  overrides: Partial<SourceSummary["members"][number]> = {},
+): SourceSummary["members"][number] {
+  return {
+    id: "catalog-member-1",
+    relativePath: "skills/example",
+    skillName: "example",
+    description: "test skill",
+    selectable: true,
+    validationErrors: [],
+    warnings: [],
+    installedMemberId: null,
+    ...overrides,
+  };
+}
+
+function createSourceRefChangePlan(
+  overrides: Partial<SourceRefChangePlan> = {},
+): SourceRefChangePlan {
+  return {
+    id: "source-ref-plan-1",
+    sourceId: "source-1",
+    sourceDisplayName: "anthropics/skills",
+    currentRef: "main",
+    candidateRef: "next",
+    candidateCommitSha: "commit-next",
+    memberPathHint: null,
+    createdAt: 1,
+    expiresAt: 2,
+    ...overrides,
+  };
+}
+
 function createClient(startup: UiOutcome): SkillYardClient {
   return {
     getStartupState: vi.fn().mockResolvedValue(startup),
     startInitialScan: vi.fn(),
     refreshLocalInventory: vi.fn(),
+    openSourceDiscovery: vi.fn().mockResolvedValue(sourceDiscoveryOutcome()),
+    reloadGithubSource: vi.fn(),
+    addGithubSource: vi.fn(),
+    confirmSourceRefChange: vi.fn(),
+    createGithubInstallPlan: vi.fn(),
+    discardInstallPlan: vi.fn().mockResolvedValue(undefined),
     chooseFolderInstallPlan: vi.fn(),
     confirmInstallPlan: vi.fn(),
     chooseAndRegisterProject: vi.fn(),

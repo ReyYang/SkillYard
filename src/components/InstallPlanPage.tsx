@@ -1,22 +1,24 @@
 import { useState } from "react";
 
-import type { FolderInstallPlan } from "../domain";
+import type { InstallPlan } from "../domain";
 
-interface InstallFolderPageProps {
-  plan: FolderInstallPlan;
+interface InstallPlanPageProps {
+  plan: InstallPlan;
   isInstalling: boolean;
+  isDiscarding: boolean;
   error: string | null;
   onCancel(): void;
   onConfirm(selectedCandidateIds: string[]): void;
 }
 
-export function InstallFolderPage({
+export function InstallPlanPage({
   plan,
   isInstalling,
+  isDiscarding,
   error,
   onCancel,
   onConfirm,
-}: InstallFolderPageProps) {
+}: InstallPlanPageProps) {
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>(
     plan.candidates
       .filter((candidate) => candidate.selectable && candidate.defaultSelected)
@@ -28,6 +30,8 @@ export function InstallFolderPage({
   const hasPartialSelection =
     selectedCandidateIds.length > 0 &&
     selectedCandidateIds.length < selectableCount;
+  const isBusy = isInstalling || isDiscarding;
+  const isGithubSource = plan.inputKind === "github";
 
   const toggleCandidate = (candidateId: string) => {
     setSelectedCandidateIds((current) =>
@@ -42,13 +46,21 @@ export function InstallFolderPage({
       <p className="eyebrow">SKILLYARD · INSTALL PLAN</p>
       <h1>确认安装这个 Bundle</h1>
       <p className="lead">
-        确认后，SkillYard 会把所选文件夹复制到自己的 Central Store。原文件夹不会被移动或修改。
+        {plan.mode === "supplement"
+          ? "确认后只新增当前未安装的 Skill；已有 Skill 内容和 Mount 不会被覆盖。"
+          : isGithubSource
+            ? "确认后，SkillYard 会采用刚刚验证的 GitHub 内容快照。"
+            : "确认后，SkillYard 会把所选文件夹复制到自己的 Central Store。原文件夹不会被移动或修改。"}
         安装开始后不能取消；如果应用意外退出，下次启动会自动恢复。
       </p>
 
       <section className="install-plan" aria-label="安装影响预览">
         <PlanRow label="Bundle" value={plan.bundleDisplayName} />
-        <PlanRow label="原文件夹" value={plan.inputPath} code />
+        <PlanRow
+          label={isGithubSource ? "Source" : "原文件夹"}
+          value={plan.inputPath}
+          code
+        />
         <div className="install-candidates" aria-label="Bundle 中的 Skill">
           {plan.candidates.map((candidate) => {
             const pathParts = candidate.sourceRelativePath
@@ -66,7 +78,7 @@ export function InstallFolderPage({
                 <input
                   type="checkbox"
                   checked={selectedCandidateIds.includes(candidate.candidateId)}
-                  disabled={isInstalling || !candidate.selectable}
+                  disabled={isBusy || !candidate.selectable}
                   onChange={() => toggleCandidate(candidate.candidateId)}
                 />
                 <span className="install-candidate-copy">
@@ -127,15 +139,15 @@ export function InstallFolderPage({
         <button
           className="secondary-action"
           type="button"
-          disabled={isInstalling}
+          disabled={isBusy}
           onClick={onCancel}
         >
-          返回
+          {isDiscarding ? "正在返回…" : "返回"}
         </button>
         <button
           className="primary-action"
           type="button"
-          disabled={isInstalling || selectedCandidateIds.length === 0}
+          disabled={isBusy || error !== null || selectedCandidateIds.length === 0}
           onClick={() => onConfirm(selectedCandidateIds)}
         >
           {isInstalling ? "正在安全安装…" : "确认安装"}

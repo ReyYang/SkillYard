@@ -2,7 +2,7 @@ use std::{env, fs, path::Path, process::Command};
 
 use rusqlite::Connection;
 use skillyard_lib::{
-    ApplicationPaths, FolderInstallPlan, LifecycleFailpoint, ManagementKind, PlatformInfo,
+    ApplicationPaths, InstallPlan, LifecycleFailpoint, ManagementKind, PlatformInfo,
     SkillYardApplication, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
@@ -26,7 +26,7 @@ fn creating_a_folder_install_plan_does_not_write_managed_content() {
             input_path: input.to_string_lossy().into_owned(),
         })
         .expect("有效单 Skill 文件夹应生成 Plan");
-    let UiOutcome::FolderInstallPlan { plan } = outcome else {
+    let UiOutcome::InstallPlan { plan } = outcome else {
         panic!("应返回文件夹安装 Plan");
     };
 
@@ -316,6 +316,41 @@ fn confirming_a_plan_installs_one_unmounted_managed_bundle() {
         )
         .expect("应读取安装领域记录");
     assert_eq!(counts, (1, 1, 1));
+}
+
+#[test]
+fn discard_cannot_cancel_a_plan_after_confirmation_has_started() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application_with_failpoint(
+        sandbox.path(),
+        LifecycleFailpoint::AfterTransactionRecord,
+    );
+    let input = sandbox.path().join("downloads/example-skill");
+    write_skill(&input, "example-skill", "original");
+    let plan = create_plan(&application, &input);
+
+    application
+        .handle(confirm_default_install_intent(&plan))
+        .expect_err("failpoint 应在确认开始后中断");
+    let state = Connection::open(data_root.join("skillyard.sqlite3"))
+        .expect("应打开真实 SQLite")
+        .query_row(
+            "SELECT
+                (SELECT status FROM install_plans WHERE id = ?1),
+                (SELECT COUNT(*) FROM lifecycle_transactions WHERE plan_id = ?1)",
+            [&plan.id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .expect("确认开始后应存在事务记录");
+    assert_eq!(state, ("consumed".to_owned(), 1));
+
+    let error = application
+        .handle(UiIntent::DiscardInstallPlan { plan_id: plan.id })
+        .expect_err("放弃入口不能取消已经开始的确认");
+    assert!(
+        error.to_string().contains("未签发") || error.to_string().contains("已经使用"),
+        "恢复完成后旧 Plan 必须保持不可放弃：{error}"
+    );
 }
 
 #[test]
@@ -1429,8 +1464,8 @@ fn run_hard_exit_worker(
     assert_eq!(status.code(), Some(91), "子进程必须在 failpoint 直接退出");
 }
 
-fn create_plan(application: &SkillYardApplication, input: &Path) -> FolderInstallPlan {
-    let UiOutcome::FolderInstallPlan { plan } = application
+fn create_plan(application: &SkillYardApplication, input: &Path) -> InstallPlan {
+    let UiOutcome::InstallPlan { plan } = application
         .handle(UiIntent::CreateFolderInstallPlan {
             input_path: input.to_string_lossy().into_owned(),
         })
@@ -1441,7 +1476,7 @@ fn create_plan(application: &SkillYardApplication, input: &Path) -> FolderInstal
     plan
 }
 
-fn confirm_install_intent(plan: &FolderInstallPlan, selected_skill_names: &[&str]) -> UiIntent {
+fn confirm_install_intent(plan: &InstallPlan, selected_skill_names: &[&str]) -> UiIntent {
     let selected_candidate_ids = selected_skill_names
         .iter()
         .map(|selected_name| candidate_id(plan, selected_name))
@@ -1449,7 +1484,7 @@ fn confirm_install_intent(plan: &FolderInstallPlan, selected_skill_names: &[&str
     confirm_candidate_ids(plan.id.clone(), selected_candidate_ids)
 }
 
-fn candidate_id(plan: &FolderInstallPlan, skill_name: &str) -> String {
+fn candidate_id(plan: &InstallPlan, skill_name: &str) -> String {
     plan.candidates
         .iter()
         .find(|candidate| candidate.skill_name.as_deref() == Some(skill_name))
@@ -1458,7 +1493,7 @@ fn candidate_id(plan: &FolderInstallPlan, skill_name: &str) -> String {
         .clone()
 }
 
-fn confirm_default_install_intent(plan: &FolderInstallPlan) -> UiIntent {
+fn confirm_default_install_intent(plan: &InstallPlan) -> UiIntent {
     let selected_candidate_ids = plan
         .candidates
         .iter()

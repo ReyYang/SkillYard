@@ -3,18 +3,21 @@ import { useEffect, useState } from "react";
 import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
 import { BundleMountPage } from "./components/BundleMountPage";
 import { InventoryPage } from "./components/InventoryPage";
-import { InstallFolderPage } from "./components/InstallFolderPage";
+import { InstallPlanPage } from "./components/InstallPlanPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
+import { SourceCatalogPage } from "./components/SourceCatalogPage";
+import { SourceRefChangePage } from "./components/SourceRefChangePage";
 import { TakeoverPlanPage } from "./components/TakeoverPlanPage";
 import { TakeoverSelectionPage } from "./components/TakeoverSelectionPage";
 import type {
   BatchMountPlan,
   BatchMountRequest,
-  FolderInstallPlan,
+  InstallPlan,
   MountPlan,
   MountScope,
+  SourceRefChangePlan,
   SupportedAppId,
   TakeoverPlan,
   TakeoverPlanRequest,
@@ -34,15 +37,33 @@ type ViewState =
   | { status: "ready"; outcome: UiOutcome }
   | { status: "error"; message: string };
 
+type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
+
+type SourceOperation =
+  | { type: "opening" }
+  | { type: "adding" }
+  | { type: "choosingFolder" }
+  | { type: "reloading"; sourceId: string }
+  | { type: "planningInstall"; sourceId: string }
+  | { type: "confirmingRef" };
+
 export function App({ client = tauriSkillYardClient }: AppProps) {
   const [viewState, setViewState] = useState<ViewState>({ status: "loading" });
   const [isScanning, setIsScanning] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
-  const [isChoosingFolder, setIsChoosingFolder] = useState(false);
+  // Inventory 保留为主界面基座；Source 页面只是临时路由，不覆盖已加载清单。
+  const [sourceDiscovery, setSourceDiscovery] =
+    useState<SourceDiscoveryOutcome | null>(null);
+  const [sourceOperation, setSourceOperation] =
+    useState<SourceOperation | null>(null);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [pendingSourceRefChange, setPendingSourceRefChange] =
+    useState<SourceRefChangePlan | null>(null);
   const [pendingInstallPlan, setPendingInstallPlan] =
-    useState<FolderInstallPlan | null>(null);
+    useState<InstallPlan | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
+  const [isDiscardingInstallPlan, setIsDiscardingInstallPlan] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [isAddingProject, setIsAddingProject] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
@@ -110,17 +131,154 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
+  const openSourceDiscovery = async () => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "opening" });
+    setSourceError(null);
+    setInstallError(null);
+    try {
+      const outcome = await client.openSourceDiscovery();
+      setSourceDiscovery(outcome);
+    } catch (error) {
+      // Source 首次加载失败不抹掉当前 Inventory，用户仍可继续管理本机 Skill。
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const returnToInventory = () => {
+    if (sourceOperation) return;
+    setSourceError(null);
+    setSourceDiscovery(null);
+  };
+
+  const rereadSourceAfterFailure = async (error: unknown) => {
+    const message = formatError(error);
+    try {
+      // 当前会话已经打开过发现页，这次只读取 SQLite 的最终状态，不会隐式重新联网。
+      const outcome = await client.openSourceDiscovery();
+      setSourceDiscovery(outcome);
+      setSourceError(message);
+    } catch (recoveryError) {
+      setSourceError(
+        `${message}；重新读取 Source 状态失败：${formatError(recoveryError)}`,
+      );
+    }
+  };
+
+  const reloadGithubSource = async (sourceId: string) => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "reloading", sourceId });
+    setSourceError(null);
+    try {
+      const outcome = await client.reloadGithubSource(sourceId);
+      setSourceDiscovery(outcome);
+    } catch (error) {
+      await rereadSourceAfterFailure(error);
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const addGithubSource = async (input: string, trackedRef: string | null) => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "adding" });
+    setSourceError(null);
+    try {
+      const outcome = await client.addGithubSource(input, trackedRef);
+      if (outcome.type === "sourceRefChangePlan") {
+        setPendingSourceRefChange(outcome.plan);
+      } else {
+        setSourceDiscovery(outcome);
+      }
+    } catch (error) {
+      await rereadSourceAfterFailure(error);
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const confirmSourceRefChange = async () => {
+    if (!pendingSourceRefChange || sourceOperation) return;
+    setSourceOperation({ type: "confirmingRef" });
+    setSourceError(null);
+    try {
+      const outcome = await client.confirmSourceRefChange(
+        pendingSourceRefChange.id,
+      );
+      setPendingSourceRefChange(null);
+      setSourceDiscovery(outcome);
+    } catch (error) {
+      // 确认失败后丢弃旧页面并重读持久状态，避免用户重试结果不确定的 Plan。
+      setPendingSourceRefChange(null);
+      await rereadSourceAfterFailure(error);
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
   const chooseFolderInstallPlan = async () => {
-    if (isChoosingFolder) return;
-    setIsChoosingFolder(true);
+    if (sourceOperation) return;
+    setSourceOperation({ type: "choosingFolder" });
+    setSourceError(null);
     setInstallError(null);
     try {
       const plan = await client.chooseFolderInstallPlan();
       if (plan) setPendingInstallPlan(plan);
     } catch (error) {
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const createGithubInstallPlan = async (sourceId: string) => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "planningInstall", sourceId });
+    setSourceError(null);
+    setInstallError(null);
+    try {
+      const plan = await client.createGithubInstallPlan(sourceId);
+      setPendingInstallPlan(plan);
+    } catch (error) {
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const discardInstallPlan = async () => {
+    if (!pendingInstallPlan || isInstalling || isDiscardingInstallPlan) return;
+    setIsDiscardingInstallPlan(true);
+    setInstallError(null);
+    try {
+      await client.discardInstallPlan(pendingInstallPlan.id);
+      setPendingInstallPlan(null);
+    } catch (error) {
+      if (errorCode(error) === "installPlanConsumed") {
+        const message = formatError(error);
+        try {
+          // 另一实例已经开始确认时，本页 Plan 永远不能再使用；回到持久化最终状态。
+          const outcome = await client.getStartupState();
+          setPendingInstallPlan(null);
+          setSourceDiscovery(null);
+          setViewState({ status: "ready", outcome });
+          setInstallError(message);
+        } catch (recoveryError) {
+          setPendingInstallPlan(null);
+          setSourceDiscovery(null);
+          setViewState({
+            status: "error",
+            message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+          });
+        }
+        return;
+      }
+      // 返回按钮只有在后端确实删除 Plan 和快照后才离开确认页。
       setInstallError(formatError(error));
     } finally {
-      setIsChoosingFolder(false);
+      setIsDiscardingInstallPlan(false);
     }
   };
 
@@ -134,16 +292,20 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         selectedCandidateIds,
       );
       setPendingInstallPlan(null);
+      setSourceDiscovery(null);
       setViewState({ status: "ready", outcome });
     } catch (error) {
       const message = formatError(error);
       // Plan 一旦确认就可能已消费；失败后重新读取后端最终状态，不能让用户重试旧 Plan。
-      setPendingInstallPlan(null);
       try {
         const outcome = await client.getStartupState();
+        setPendingInstallPlan(null);
+        setSourceDiscovery(null);
         setViewState({ status: "ready", outcome });
         setInstallError(message);
       } catch (recoveryError) {
+        setPendingInstallPlan(null);
+        setSourceDiscovery(null);
         setViewState({
           status: "error",
           message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
@@ -386,6 +548,20 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       </main>
     );
   }
+  if (pendingSourceRefChange) {
+    return (
+      <SourceRefChangePage
+        plan={pendingSourceRefChange}
+        isConfirming={sourceOperation?.type === "confirmingRef"}
+        error={sourceError}
+        onBack={() => {
+          setSourceError(null);
+          setPendingSourceRefChange(null);
+        }}
+        onConfirm={confirmSourceRefChange}
+      />
+    );
+  }
   if (pendingTakeoverPlan) {
     return (
       <TakeoverPlanPage
@@ -398,14 +574,12 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   }
   if (pendingInstallPlan) {
     return (
-      <InstallFolderPage
+      <InstallPlanPage
         plan={pendingInstallPlan}
         isInstalling={isInstalling}
+        isDiscarding={isDiscardingInstallPlan}
         error={installError}
-        onCancel={() => {
-          setInstallError(null);
-          setPendingInstallPlan(null);
-        }}
+        onCancel={discardInstallPlan}
         onConfirm={confirmInstall}
       />
     );
@@ -449,6 +623,24 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           Silicon Mac。
         </p>
       </main>
+    );
+  }
+
+  if (sourceDiscovery) {
+    return (
+      <SourceCatalogPage
+        outcome={sourceDiscovery}
+        mounts={
+          viewState.outcome.type === "inventory" ? viewState.outcome.mounts : []
+        }
+        operation={sourceOperation}
+        error={sourceError}
+        onBack={returnToInventory}
+        onAddSource={addGithubSource}
+        onChooseFolder={chooseFolderInstallPlan}
+        onReload={reloadGithubSource}
+        onInstall={createGithubInstallPlan}
+      />
     );
   }
 
@@ -558,16 +750,22 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   return (
     <InventoryPage
       outcome={viewState.outcome}
+      // 任一主界面写操作进行中时统一冻结其他写入口；搜索和筛选仍可使用。
+      isWriteBlocked={
+        isRefreshing ||
+        isAddingProject ||
+        sourceOperation?.type === "opening"
+      }
       isRefreshing={isRefreshing}
-      isChoosingFolder={isChoosingFolder}
+      isOpeningInstaller={sourceOperation?.type === "opening"}
       isAddingProject={isAddingProject}
       refreshError={refreshError}
-      installError={installError}
+      installError={installError ?? sourceError}
       projectError={projectError}
       mountError={mountError}
       takeoverError={takeoverError}
       onRefresh={refreshLocalInventory}
-      onInstall={chooseFolderInstallPlan}
+      onInstall={openSourceDiscovery}
       onAddProject={chooseAndRegisterProject}
       onTakeover={openTakeover}
       onManageMount={openMountManager}
@@ -588,4 +786,16 @@ function formatError(error: unknown): string {
     return error.message;
   }
   return "无法读取 SkillYard 状态";
+}
+
+function errorCode(error: unknown): string | null {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+  return null;
 }

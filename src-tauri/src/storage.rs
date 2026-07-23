@@ -2958,6 +2958,26 @@ impl Storage {
         transaction.commit().map_err(StorageError::SaveInstallPlan)
     }
 
+    /// Plan 行可能被恢复器清理；进入过确认的 Plan 仍不能再走放弃入口。
+    pub fn install_plan_confirmation_has_started(
+        &self,
+        plan_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM install_plans
+                    WHERE id = ?1 AND status <> 'pending'
+                    UNION ALL
+                    SELECT 1 FROM lifecycle_transactions WHERE plan_id = ?1
+                 )",
+                [plan_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|exists| exists != 0)
+            .map_err(StorageError::ReadInstallPlan)
+    }
+
     #[cfg(test)]
     pub fn begin_install_transaction(
         &mut self,

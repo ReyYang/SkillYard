@@ -294,7 +294,7 @@ fn precommit_blocked_takeover_reserves_its_host_path_from_other_members() {
         })
         .expect("应生成本地安装 Plan")
     {
-        UiOutcome::FolderInstallPlan { plan } => plan,
+        UiOutcome::InstallPlan { plan } => plan,
         _ => panic!("应返回 Folder Install Plan"),
     };
     let selected = install_plan
