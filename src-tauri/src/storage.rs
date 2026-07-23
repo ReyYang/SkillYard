@@ -54,6 +54,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         15,
         include_str!("../migrations/0015_source_association_plans.sql"),
     ),
+    (
+        16,
+        include_str!("../migrations/0016_source_association_transactions.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -270,6 +274,14 @@ pub enum StorageError {
     SaveSourceAssociationPlan(#[source] rusqlite::Error),
     #[error("无法读取 Source 关联 Plan：{0}")]
     ReadSourceAssociationPlan(#[source] rusqlite::Error),
+    #[error("无法保存 Source 关联事务：{0}")]
+    SaveSourceAssociationTransaction(#[source] rusqlite::Error),
+    #[error("无法读取 Source 关联事务：{0}")]
+    ReadSourceAssociationTransaction(#[source] rusqlite::Error),
+    #[error("Source 关联事务不存在或当前状态不允许该操作：{0}")]
+    SourceAssociationStateConflict(String),
+    #[error("SQLite 中包含未知 Source 关联事务阶段：{0}")]
+    InvalidSourceAssociationPhase(String),
 }
 
 pub struct Storage {
@@ -297,6 +309,29 @@ pub(crate) struct StoredSourceAssociationPlanRow {
     pub status: String,
     pub created_at: i64,
     pub expires_at: i64,
+}
+
+/// Merge 恢复只读取这一行和对应 Journal，不另建第二套步骤状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSourceAssociationTransaction {
+    pub id: String,
+    pub plan_id: String,
+    pub source_id: String,
+    pub target_bundle_id: String,
+    pub retiring_bundle_id: String,
+    pub content_choices_json: String,
+    pub source_mappings_json: String,
+    pub journal_path: String,
+    pub phase: String,
+    pub status: String,
+}
+
+/// Merge 事务把最终 mapping 保存成排序后的 JSON，恢复与最终提交只接受同一份合同。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSourceAssociationMemberMapping {
+    source_relative_path: String,
+    member_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -525,6 +560,7 @@ pub(crate) struct StoredSourceAssociationBundleMember {
     pub description: String,
     pub stable_relative_path: String,
     pub content_fingerprint: String,
+    pub source_relative_path: Option<String>,
     pub mounts: Vec<StoredMount>,
 }
 
@@ -549,6 +585,40 @@ pub(crate) struct DirectSourceAssociationMember<'a> {
 pub(crate) struct DirectSourceAssociationMemberMapping<'a> {
     pub member_id: &'a str,
     pub source_relative_path: &'a str,
+}
+
+/// Merge 最终成员只能复用原两个 Bundle 中的成员 ID。
+pub(crate) struct FinalSourceAssociationMember<'a> {
+    pub member_id: &'a str,
+    pub skill_name: &'a str,
+    pub description: &'a str,
+    pub stable_relative_path: &'a str,
+    pub content_fingerprint: &'a str,
+}
+
+/// 每个原 Mount 必须且只能指派给一个最终成员。
+pub(crate) struct FinalSourceAssociationMountAssignment<'a> {
+    pub mount_id: &'a str,
+    pub member_id: &'a str,
+}
+
+/// “不对应”的最终成员不会出现在 Source mapping 列表中。
+pub(crate) struct FinalSourceAssociationMemberMapping<'a> {
+    pub source_relative_path: &'a str,
+    pub member_id: &'a str,
+}
+
+/// Storage 只提交已由编排层准备好的最终状态，并以两个完整原始快照防止竞态覆盖。
+pub(crate) struct FinalSourceAssociationMerge<'a> {
+    pub transaction_id: &'a str,
+    pub source_id: &'a str,
+    pub expected_target_bundle: &'a StoredSourceAssociationBundle,
+    pub expected_retiring_bundle: &'a StoredSourceAssociationBundle,
+    pub final_current_target: &'a str,
+    pub final_members: &'a [FinalSourceAssociationMember<'a>],
+    pub mount_assignments: &'a [FinalSourceAssociationMountAssignment<'a>],
+    pub source_mappings: &'a [FinalSourceAssociationMemberMapping<'a>],
+    pub now: i64,
 }
 
 pub struct NewSourceCatalogMember<'a> {
@@ -1065,6 +1135,293 @@ impl Storage {
         } else {
             Err(StorageError::SourceAssociationPlanNotFound)
         }
+    }
+
+    /// Merge 开始时在一个 Immediate 事务中消费 Plan，并封存恢复所需的全部标识。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_source_association_merge(
+        &mut self,
+        plan_id: &str,
+        transaction_id: &str,
+        source_id: &str,
+        source_catalog_generation: i64,
+        source_marker: &str,
+        expected_target_bundle: &StoredSourceAssociationBundle,
+        expected_retiring_bundle: &StoredSourceAssociationBundle,
+        content_choices_json: &str,
+        source_mappings: &[FinalSourceAssociationMemberMapping<'_>],
+        journal_path: &str,
+        now: i64,
+    ) -> Result<StoredSourceAssociationPlanRow, StorageError> {
+        let target_bundle_id = expected_target_bundle.id.as_str();
+        let retiring_bundle_id = expected_retiring_bundle.id.as_str();
+        let original_member_ids = expected_target_bundle
+            .members
+            .iter()
+            .chain(expected_retiring_bundle.members.iter())
+            .map(|member| member.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let source_mappings_json =
+            canonical_source_association_mappings_json(source_mappings, &original_member_ids)?;
+        let final_source_paths = source_mappings
+            .iter()
+            .map(|mapping| mapping.source_relative_path)
+            .collect::<BTreeSet<_>>();
+        if expected_target_bundle
+            .members
+            .iter()
+            .filter_map(|member| member.source_relative_path.as_deref())
+            .any(|source_path| !final_source_paths.contains(source_path))
+        {
+            return Err(StorageError::InvalidSourceAssociationPlan);
+        }
+        if !is_single_path_component(transaction_id)
+            || !is_single_path_component(source_id)
+            || !is_single_path_component(target_bundle_id)
+            || !is_single_path_component(retiring_bundle_id)
+            || target_bundle_id == retiring_bundle_id
+            || source_catalog_generation <= 0
+            || source_marker.is_empty()
+            || !is_normalized_relative_path(journal_path)
+            || serde_json::from_str::<Vec<serde_json::Value>>(content_choices_json).is_err()
+        {
+            return Err(StorageError::InvalidSourceAssociationPlan);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        let mut plan = read_source_association_plan_from(&transaction, plan_id)?
+            .ok_or(StorageError::SourceAssociationPlanNotFound)?;
+        ensure_source_association_plan_is_confirmable(&plan, now)?;
+        let source_state = transaction
+            .query_row(
+                "SELECT catalog_status, catalog_generation, catalog_marker
+                 FROM sources
+                 WHERE id = ?1",
+                [source_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?
+            .ok_or(StorageError::SourceNotFound)?;
+        if source_state.0 != "fresh"
+            || source_state.1 != source_catalog_generation
+            || source_state.2.as_deref() != Some(source_marker)
+        {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        ensure_source_association_merge_relationships(
+            &transaction,
+            source_id,
+            target_bundle_id,
+            retiring_bundle_id,
+        )?;
+        if bundle_or_source_write_is_blocked(&transaction, Some(target_bundle_id), Some(source_id))?
+            || bundle_or_source_write_is_blocked(&transaction, Some(retiring_bundle_id), None)?
+        {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
+        let current_target =
+            read_source_association_bundle_from(&transaction, &self.data_root, target_bundle_id)?;
+        let current_retiring =
+            read_source_association_bundle_from(&transaction, &self.data_root, retiring_bundle_id)?;
+        if &current_target != expected_target_bundle
+            || &current_retiring != expected_retiring_bundle
+        {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        validate_source_association_mappings_for_generation(
+            &transaction,
+            source_id,
+            source_catalog_generation,
+            source_mappings,
+        )?;
+
+        // Merge 会删除或移动成员；先在同一事务内作废仍引用旧快照的 pending Plan。
+        transaction
+            .execute(
+                "DELETE FROM mount_plans
+                 WHERE status = 'pending'
+                   AND member_id IN (
+                       SELECT id FROM skill_members WHERE bundle_id IN (?1, ?2)
+                   )",
+                params![target_bundle_id, retiring_bundle_id],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        transaction
+            .execute(
+                "DELETE FROM batch_mount_plans
+                 WHERE status = 'pending' AND bundle_id IN (?1, ?2)",
+                params![target_bundle_id, retiring_bundle_id],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        transaction
+            .execute(
+                "INSERT INTO source_association_transactions (
+                    id, plan_id, source_id, target_bundle_id, retiring_bundle_id,
+                    content_choices_json, source_mappings_json, journal_path,
+                    phase, status, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                    'journal_pending', 'in_progress', ?9, ?9
+                 )",
+                params![
+                    transaction_id,
+                    plan_id,
+                    source_id,
+                    target_bundle_id,
+                    retiring_bundle_id,
+                    content_choices_json,
+                    source_mappings_json,
+                    journal_path,
+                    now
+                ],
+            )
+            .map_err(map_source_association_transaction_insert_error)?;
+        let consumed = transaction
+            .execute(
+                "UPDATE source_association_plans
+                 SET status = 'consumed'
+                 WHERE id = ?1 AND status = 'pending'",
+                [plan_id],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        ensure_one_source_association_row(consumed, transaction_id)?;
+        plan.status = "consumed".to_owned();
+        transaction
+            .commit()
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        Ok(plan)
+    }
+
+    pub(crate) fn recoverable_source_association_transactions(
+        &self,
+    ) -> Result<Vec<StoredSourceAssociationTransaction>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, plan_id, source_id, target_bundle_id, retiring_bundle_id,
+                        content_choices_json, source_mappings_json, journal_path, phase, status
+                 FROM source_association_transactions
+                 ORDER BY created_at, id",
+            )
+            .map_err(StorageError::ReadSourceAssociationTransaction)?;
+        let rows = statement
+            .query_map([], stored_source_association_transaction_from_row)
+            .map_err(StorageError::ReadSourceAssociationTransaction)?;
+        let stored = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadSourceAssociationTransaction)?;
+        for transaction in &stored {
+            validate_stored_source_association_transaction(transaction)?;
+        }
+        Ok(stored)
+    }
+
+    pub(crate) fn update_source_association_transaction_phase(
+        &mut self,
+        transaction_id: &str,
+        phase: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let previous = previous_source_association_phase(phase)?.ok_or_else(|| {
+            StorageError::SourceAssociationStateConflict(transaction_id.to_owned())
+        })?;
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE source_association_transactions
+                 SET phase = ?2, updated_at = ?4
+                 WHERE id = ?1 AND status = 'in_progress' AND phase IN (?2, ?3)",
+                params![transaction_id, phase, previous, now],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        ensure_one_source_association_row(changed, transaction_id)
+    }
+
+    pub(crate) fn abort_source_association_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: Option<&str>,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE source_association_transactions
+                 SET status = 'aborted', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status = 'in_progress' AND phase != 'state_committed'",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        ensure_one_source_association_row(changed, transaction_id)
+    }
+
+    pub(crate) fn block_source_association_transaction(
+        &mut self,
+        transaction_id: &str,
+        error_message: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE source_association_transactions
+                 SET status = 'blocked', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status IN ('in_progress', 'completed', 'aborted')",
+                params![transaction_id, error_message, now],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        ensure_one_source_association_row(changed, transaction_id)
+    }
+
+    pub(crate) fn forget_terminal_source_association_transaction(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        let stored = transaction
+            .query_row(
+                "SELECT plan_id, status
+                 FROM source_association_transactions
+                 WHERE id = ?1",
+                [transaction_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        if let Some((plan_id, status)) = stored {
+            if !matches!(status.as_str(), "completed" | "aborted") {
+                return Err(StorageError::SourceAssociationStateConflict(
+                    transaction_id.to_owned(),
+                ));
+            }
+            transaction
+                .execute(
+                    "DELETE FROM source_association_transactions WHERE id = ?1",
+                    [transaction_id],
+                )
+                .map_err(StorageError::SaveSourceAssociationTransaction)?;
+            transaction
+                .execute(
+                    "DELETE FROM source_association_plans WHERE id = ?1",
+                    [plan_id],
+                )
+                .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveSourceAssociationTransaction)
     }
 
     /// 开始时必须一次封存对象、路径与 Journal；拆成后续写入会留下未被隔离的窗口。
@@ -1684,6 +2041,97 @@ impl Storage {
             .map_err(StorageError::SaveSourceAssociationPlan)
     }
 
+    /// Merge 的领域提交只发生一次；文件系统切换和 Mount 应用必须已经由 Journal 记录完成。
+    pub(crate) fn finalize_source_association_merge(
+        &mut self,
+        merge: FinalSourceAssociationMerge<'_>,
+    ) -> Result<(), StorageError> {
+        validate_final_source_association_merge(&merge)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        let stored = transaction
+            .query_row(
+                "SELECT id, plan_id, source_id, target_bundle_id, retiring_bundle_id,
+                        content_choices_json, source_mappings_json, journal_path, phase, status
+                 FROM source_association_transactions
+                 WHERE id = ?1",
+                [merge.transaction_id],
+                stored_source_association_transaction_from_row,
+            )
+            .optional()
+            .map_err(StorageError::ReadSourceAssociationTransaction)?
+            .ok_or_else(|| {
+                StorageError::SourceAssociationStateConflict(merge.transaction_id.to_owned())
+            })?;
+        validate_stored_source_association_transaction(&stored)?;
+        if stored.source_id != merge.source_id
+            || stored.target_bundle_id != merge.expected_target_bundle.id
+            || stored.retiring_bundle_id != merge.expected_retiring_bundle.id
+        {
+            return Err(StorageError::SourceAssociationStateConflict(
+                merge.transaction_id.to_owned(),
+            ));
+        }
+        let final_member_ids = merge
+            .final_members
+            .iter()
+            .map(|member| member.member_id)
+            .collect::<BTreeSet<_>>();
+        let source_mappings_json =
+            canonical_source_association_mappings_json(merge.source_mappings, &final_member_ids)?;
+        if stored.source_mappings_json != source_mappings_json {
+            return Err(StorageError::SourceAssociationStateConflict(
+                merge.transaction_id.to_owned(),
+            ));
+        }
+
+        if stored.phase == "mounts_applied" && stored.status == "in_progress" {
+            ensure_source_association_merge_relationships(
+                &transaction,
+                merge.source_id,
+                &stored.target_bundle_id,
+                &stored.retiring_bundle_id,
+            )?;
+            let current_target = read_source_association_bundle_from(
+                &transaction,
+                &self.data_root,
+                &stored.target_bundle_id,
+            )?;
+            let current_retiring = read_source_association_bundle_from(
+                &transaction,
+                &self.data_root,
+                &stored.retiring_bundle_id,
+            )?;
+            if &current_target != merge.expected_target_bundle
+                || &current_retiring != merge.expected_retiring_bundle
+            {
+                return Err(StorageError::SourceBundleStateConflict);
+            }
+            apply_final_source_association_merge(&transaction, &self.data_root, &merge)?;
+            let changed = transaction
+                .execute(
+                    "UPDATE source_association_transactions
+                     SET phase = 'state_committed', status = 'completed', updated_at = ?2
+                     WHERE id = ?1 AND phase = 'mounts_applied' AND status = 'in_progress'",
+                    params![merge.transaction_id, merge.now],
+                )
+                .map_err(StorageError::SaveSourceAssociationTransaction)?;
+            ensure_one_source_association_row(changed, merge.transaction_id)?;
+        } else if stored.phase == "state_committed" && stored.status == "completed" {
+            // 重放只核验最终事实，不能静默补回被外部修改的领域行。
+            ensure_final_source_association_merge_matches(&transaction, &self.data_root, &merge)?;
+        } else {
+            return Err(StorageError::SourceAssociationStateConflict(
+                merge.transaction_id.to_owned(),
+            ));
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveSourceAssociationTransaction)
+    }
+
     /// Catalog 成功结果整体替换；旧成员与 Source 状态不会在事务中间对外可见。
     pub fn save_source_catalog_success(
         &mut self,
@@ -1708,6 +2156,9 @@ impl Storage {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveSourceCatalog)?;
+        if bundle_or_source_write_is_blocked(&transaction, None, Some(source_id))? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
         let (current_ref, current_generation) = transaction
             .query_row(
                 "SELECT tracked_ref, catalog_generation
@@ -1793,6 +2244,9 @@ impl Storage {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveSourceCatalog)?;
+        if bundle_or_source_write_is_blocked(&transaction, None, Some(source_id))? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
         let changed = transaction
             .execute(
                 "UPDATE sources
@@ -2024,6 +2478,9 @@ impl Storage {
             .map_err(StorageError::SaveSource)?;
 
         let result = if let Some((source_id, source_display_name, current_ref)) = existing {
+            if bundle_or_source_write_is_blocked(&transaction, None, Some(&source_id))? {
+                return Err(StorageError::ManagedObjectBlocked);
+            }
             if current_ref == source.tracked_ref {
                 let changed = transaction
                     .execute(
@@ -2152,6 +2609,9 @@ impl Storage {
         }
         if expires_at <= now {
             return Err(StorageError::SourceRefChangePlanExpired);
+        }
+        if bundle_or_source_write_is_blocked(&transaction, None, Some(&source_id))? {
+            return Err(StorageError::ManagedObjectBlocked);
         }
         let changed = transaction
             .execute(
@@ -3973,6 +4433,18 @@ impl Storage {
                            takeover_tx.created_at AS created_at
                     FROM takeover_transactions AS takeover_tx
                     WHERE takeover_tx.status = 'blocked'
+                    UNION ALL
+                    SELECT association_tx.id AS id,
+                           COALESCE(bundle.display_name, association_tx.target_bundle_id) AS display_name,
+                           COALESCE(
+                               association_tx.error_message,
+                               'Bundle Merge 事务状态无法自动判断'
+                           ) AS message,
+                           association_tx.created_at AS created_at
+                    FROM source_association_transactions AS association_tx
+                    LEFT JOIN bundles AS bundle
+                      ON bundle.id = association_tx.target_bundle_id
+                    WHERE association_tx.status = 'blocked'
                  ) ORDER BY created_at, id",
             )
             .map_err(StorageError::ReadRecoveryIssues)?;
@@ -4074,6 +4546,53 @@ fn ensure_one_takeover_row(changed: usize, transaction_id: &str) -> Result<(), S
             transaction_id.to_owned(),
         ))
     }
+}
+
+fn ensure_one_source_association_row(
+    changed: usize,
+    transaction_id: &str,
+) -> Result<(), StorageError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::SourceAssociationStateConflict(
+            transaction_id.to_owned(),
+        ))
+    }
+}
+
+fn previous_source_association_phase(phase: &str) -> Result<Option<&'static str>, StorageError> {
+    // state_committed 只能由最终领域提交写入，通用阶段 API 不得伪造完成。
+    match phase {
+        "journal_pending" => Ok(None),
+        "journal_ready" => Ok(Some("journal_pending")),
+        "candidate_ready" => Ok(Some("journal_ready")),
+        "current_activated" => Ok(Some("candidate_ready")),
+        "mounts_applied" => Ok(Some("current_activated")),
+        "state_committed" => Ok(None),
+        unknown => Err(StorageError::InvalidSourceAssociationPhase(
+            unknown.to_owned(),
+        )),
+    }
+}
+
+fn source_association_phase_and_status_are_consistent(phase: &str, status: &str) -> bool {
+    let phase_is_known = matches!(
+        phase,
+        "journal_pending"
+            | "journal_ready"
+            | "candidate_ready"
+            | "current_activated"
+            | "mounts_applied"
+            | "state_committed"
+    );
+    let terminal_state_is_consistent = match status {
+        "completed" => phase == "state_committed",
+        "in_progress" | "aborted" => phase != "state_committed",
+        "blocked" => true,
+        _ => false,
+    };
+    phase_is_known && terminal_state_is_consistent
 }
 
 fn previous_takeover_phase(phase: &str) -> Result<Option<&'static str>, StorageError> {
@@ -4530,6 +5049,18 @@ fn bundle_or_source_write_is_blocked(
                     WHERE takeover_tx.status = 'blocked'
                       AND ?1 IS NOT NULL
                       AND takeover_tx.bundle_id = ?1
+                )
+                OR EXISTS(
+                    SELECT 1
+                    FROM source_association_transactions AS association_tx
+                    WHERE association_tx.status = 'blocked'
+                      AND (
+                        (?1 IS NOT NULL AND (
+                            association_tx.target_bundle_id = ?1
+                            OR association_tx.retiring_bundle_id = ?1
+                        ))
+                        OR (?2 IS NOT NULL AND association_tx.source_id = ?2)
+                      )
                 )",
             params![bundle_id, source_id],
             |row| row.get::<_, bool>(0),
@@ -4601,6 +5132,26 @@ fn mount_object_is_blocked(
         )
         .map_err(StorageError::ReadBatchMountTransaction)?;
     if batch_is_blocked {
+        return Ok(true);
+    }
+
+    let association_is_blocked = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM source_association_transactions AS association_tx
+                LEFT JOIN skill_members AS member ON member.id = ?1
+                WHERE association_tx.status = 'blocked'
+                  AND (
+                    association_tx.target_bundle_id = member.bundle_id
+                    OR association_tx.retiring_bundle_id = member.bundle_id
+                  )
+             )",
+            [member_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadSourceAssociationTransaction)?;
+    if association_is_blocked {
         return Ok(true);
     }
 
@@ -5979,6 +6530,55 @@ fn is_single_path_component(value: &str) -> bool {
         && components.next().is_none()
 }
 
+fn stored_source_association_transaction_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredSourceAssociationTransaction> {
+    Ok(StoredSourceAssociationTransaction {
+        id: row.get(0)?,
+        plan_id: row.get(1)?,
+        source_id: row.get(2)?,
+        target_bundle_id: row.get(3)?,
+        retiring_bundle_id: row.get(4)?,
+        content_choices_json: row.get(5)?,
+        source_mappings_json: row.get(6)?,
+        journal_path: row.get(7)?,
+        phase: row.get(8)?,
+        status: row.get(9)?,
+    })
+}
+
+fn validate_stored_source_association_transaction(
+    transaction: &StoredSourceAssociationTransaction,
+) -> Result<(), StorageError> {
+    let stored_mappings = serde_json::from_str::<Vec<StoredSourceAssociationMemberMapping>>(
+        &transaction.source_mappings_json,
+    );
+    let mappings_are_canonical = stored_mappings.is_ok_and(|mappings| {
+        canonical_stored_source_association_mappings_json(mappings)
+            .is_ok_and(|canonical| canonical == transaction.source_mappings_json)
+    });
+    if !is_single_path_component(&transaction.id)
+        || !is_single_path_component(&transaction.plan_id)
+        || !is_single_path_component(&transaction.source_id)
+        || !is_single_path_component(&transaction.target_bundle_id)
+        || !is_single_path_component(&transaction.retiring_bundle_id)
+        || transaction.target_bundle_id == transaction.retiring_bundle_id
+        || serde_json::from_str::<Vec<serde_json::Value>>(&transaction.content_choices_json)
+            .is_err()
+        || !mappings_are_canonical
+        || !is_normalized_relative_path(&transaction.journal_path)
+        || !source_association_phase_and_status_are_consistent(
+            &transaction.phase,
+            &transaction.status,
+        )
+    {
+        return Err(StorageError::SourceAssociationStateConflict(
+            transaction.id.clone(),
+        ));
+    }
+    Ok(())
+}
+
 fn raw_takeover_transaction_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<RawStoredTakeoverTransaction> {
@@ -6252,6 +6852,548 @@ fn validate_direct_source_association_mappings(
         if selectable.map(sqlite_bool).transpose()? != Some(true) {
             return Err(StorageError::SourceCatalogStateChanged);
         }
+    }
+    Ok(())
+}
+
+fn canonical_source_association_mappings_json(
+    mappings: &[FinalSourceAssociationMemberMapping<'_>],
+    allowed_member_ids: &BTreeSet<&str>,
+) -> Result<String, StorageError> {
+    if mappings
+        .iter()
+        .any(|mapping| !allowed_member_ids.contains(mapping.member_id))
+    {
+        return Err(StorageError::InvalidSourceAssociationPlan);
+    }
+    canonical_stored_source_association_mappings_json(
+        mappings
+            .iter()
+            .map(|mapping| StoredSourceAssociationMemberMapping {
+                source_relative_path: mapping.source_relative_path.to_owned(),
+                member_id: mapping.member_id.to_owned(),
+            })
+            .collect(),
+    )
+}
+
+fn canonical_stored_source_association_mappings_json(
+    mut mappings: Vec<StoredSourceAssociationMemberMapping>,
+) -> Result<String, StorageError> {
+    let source_paths = mappings
+        .iter()
+        .map(|mapping| mapping.source_relative_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let member_ids = mappings
+        .iter()
+        .map(|mapping| mapping.member_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if source_paths.len() != mappings.len()
+        || member_ids.len() != mappings.len()
+        || mappings.iter().any(|mapping| {
+            !is_single_path_component(&mapping.member_id)
+                || (!mapping.source_relative_path.is_empty()
+                    && !is_normalized_relative_path(&mapping.source_relative_path))
+        })
+    {
+        return Err(StorageError::InvalidSourceAssociationPlan);
+    }
+    mappings.sort();
+    serde_json::to_string(&mappings).map_err(|_| StorageError::InvalidSourceAssociationPlan)
+}
+
+fn validate_source_association_mappings_for_generation(
+    transaction: &Transaction<'_>,
+    source_id: &str,
+    source_catalog_generation: i64,
+    mappings: &[FinalSourceAssociationMemberMapping<'_>],
+) -> Result<(), StorageError> {
+    for mapping in mappings {
+        let selectable = transaction
+            .query_row(
+                "SELECT selectable
+                 FROM source_catalog_members
+                 WHERE source_id = ?1
+                   AND catalog_generation = ?2
+                   AND relative_path = ?3",
+                params![
+                    source_id,
+                    source_catalog_generation,
+                    mapping.source_relative_path
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?;
+        if selectable.map(sqlite_bool).transpose()? != Some(true) {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_source_association_merge_relationships(
+    connection: &Connection,
+    source_id: &str,
+    target_bundle_id: &str,
+    retiring_bundle_id: &str,
+) -> Result<(), StorageError> {
+    let linked_bundle = connection
+        .query_row(
+            "SELECT bundle_id FROM source_bundle_links WHERE source_id = ?1",
+            [source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(StorageError::ReadSources)?;
+    let retiring_exists = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM bundles WHERE id = ?1)",
+            [retiring_bundle_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadSources)?;
+    let retiring_is_linked = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM source_bundle_links WHERE bundle_id = ?1
+             )",
+            [retiring_bundle_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadSources)?;
+    if linked_bundle.as_deref() == Some(target_bundle_id)
+        && target_bundle_id != retiring_bundle_id
+        && retiring_exists
+        && !retiring_is_linked
+    {
+        Ok(())
+    } else {
+        Err(StorageError::SourceBundleStateConflict)
+    }
+}
+
+fn validate_final_source_association_merge(
+    merge: &FinalSourceAssociationMerge<'_>,
+) -> Result<(), StorageError> {
+    let target = merge.expected_target_bundle;
+    let retiring = merge.expected_retiring_bundle;
+    let original_members = target
+        .members
+        .iter()
+        .chain(retiring.members.iter())
+        .map(|member| (member.id.as_str(), member))
+        .collect::<BTreeMap<_, _>>();
+    let final_member_ids = merge
+        .final_members
+        .iter()
+        .map(|member| member.member_id)
+        .collect::<BTreeSet<_>>();
+    let final_members_by_id = merge
+        .final_members
+        .iter()
+        .map(|member| (member.member_id, member))
+        .collect::<BTreeMap<_, _>>();
+    let final_names = merge
+        .final_members
+        .iter()
+        .map(|member| member.skill_name)
+        .collect::<BTreeSet<_>>();
+    let final_paths = merge
+        .final_members
+        .iter()
+        .map(|member| member.stable_relative_path)
+        .collect::<BTreeSet<_>>();
+    let final_members_are_valid = !merge.final_members.is_empty()
+        && final_member_ids.len() == merge.final_members.len()
+        && final_names.len() == merge.final_members.len()
+        && final_paths.len() == merge.final_members.len()
+        && merge.final_members.iter().all(|member| {
+            original_members
+                .get(member.member_id)
+                .is_some_and(|original| {
+                    member.skill_name == original.skill_name
+                        && member.description == original.description
+                        && member.stable_relative_path == original.stable_relative_path
+                        && member.content_fingerprint == original.content_fingerprint
+                        && is_single_path_component(member.member_id)
+                        && is_single_path_component(member.skill_name)
+                        && member.stable_relative_path == format!("members/{}", member.skill_name)
+                })
+        });
+
+    let original_mounts = original_members
+        .values()
+        .flat_map(|member| member.mounts.iter())
+        .map(|mount| (mount.id.as_str(), mount))
+        .collect::<BTreeMap<_, _>>();
+    let original_mount_ids = original_mounts.keys().copied().collect::<BTreeSet<_>>();
+    let assigned_mount_ids = merge
+        .mount_assignments
+        .iter()
+        .map(|assignment| assignment.mount_id)
+        .collect::<BTreeSet<_>>();
+    let mut assignments_are_valid = original_mount_ids.len() == merge.mount_assignments.len()
+        && assigned_mount_ids == original_mount_ids
+        && merge.mount_assignments.iter().all(|assignment| {
+            is_single_path_component(assignment.mount_id)
+                && final_member_ids.contains(assignment.member_id)
+        });
+    let mut global_assignments = BTreeSet::<(&str, &'static str)>::new();
+    let mut project_assignments = BTreeSet::<(&str, &'static str, &str)>::new();
+    let mut assigned_scopes = BTreeMap::<(&str, &'static str), MountScope>::new();
+    for assignment in merge.mount_assignments {
+        let Some(mount) = original_mounts.get(assignment.mount_id) else {
+            assignments_are_valid = false;
+            continue;
+        };
+        let Some(final_member) = final_members_by_id.get(assignment.member_id) else {
+            assignments_are_valid = false;
+            continue;
+        };
+        if Path::new(&mount.target_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(final_member.skill_name)
+        {
+            assignments_are_valid = false;
+        }
+        let key = (assignment.member_id, mount.app_id.as_str());
+        match mount.scope {
+            MountScope::Global => {
+                if !global_assignments.insert(key)
+                    || assigned_scopes
+                        .get(&key)
+                        .is_some_and(|scope| *scope == MountScope::Project)
+                {
+                    assignments_are_valid = false;
+                }
+                assigned_scopes.entry(key).or_insert(MountScope::Global);
+            }
+            MountScope::Project => {
+                let Some(project_id) = mount.project_id.as_deref() else {
+                    assignments_are_valid = false;
+                    continue;
+                };
+                if !project_assignments.insert((key.0, key.1, project_id))
+                    || assigned_scopes
+                        .get(&key)
+                        .is_some_and(|scope| *scope == MountScope::Global)
+                {
+                    assignments_are_valid = false;
+                }
+                assigned_scopes.entry(key).or_insert(MountScope::Project);
+            }
+        }
+    }
+
+    let mapping_paths = merge
+        .source_mappings
+        .iter()
+        .map(|mapping| mapping.source_relative_path)
+        .collect::<BTreeSet<_>>();
+    let mapping_members = merge
+        .source_mappings
+        .iter()
+        .map(|mapping| mapping.member_id)
+        .collect::<BTreeSet<_>>();
+    let mappings_are_valid = mapping_paths.len() == merge.source_mappings.len()
+        && mapping_members.len() == merge.source_mappings.len()
+        && merge.source_mappings.iter().all(|mapping| {
+            (mapping.source_relative_path.is_empty()
+                || is_normalized_relative_path(mapping.source_relative_path))
+                && final_member_ids.contains(mapping.member_id)
+        });
+
+    if is_single_path_component(merge.transaction_id)
+        && is_single_path_component(merge.source_id)
+        && target.id != retiring.id
+        && target.source_id.as_deref() == Some(merge.source_id)
+        && retiring.source_id.is_none()
+        && retiring.adopted_marker.is_none()
+        && merge.final_current_target == format!("contents/{}", merge.transaction_id)
+        && merge.now >= 0
+        && final_members_are_valid
+        && assignments_are_valid
+        && mappings_are_valid
+    {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidSourceAssociationPlan)
+    }
+}
+
+fn apply_final_source_association_merge(
+    transaction: &Transaction<'_>,
+    data_root: &Path,
+    merge: &FinalSourceAssociationMerge<'_>,
+) -> Result<(), StorageError> {
+    validate_final_source_association_source_mappings(transaction, merge)?;
+    let final_members = merge
+        .final_members
+        .iter()
+        .map(|member| (member.member_id, member))
+        .collect::<BTreeMap<_, _>>();
+
+    // Mount 必须先离开 loser，随后才能安全删除 loser Member。
+    for assignment in merge.mount_assignments {
+        let member = final_members
+            .get(assignment.member_id)
+            .ok_or(StorageError::InvalidSourceAssociationPlan)?;
+        let expected_target = final_source_association_member_target(
+            data_root,
+            merge.expected_target_bundle,
+            member.stable_relative_path,
+        )?;
+        let changed = transaction
+            .execute(
+                "UPDATE mounts
+                 SET member_id = ?2, expected_target = ?3, health = 'healthy', updated_at = ?4
+                 WHERE id = ?1",
+                params![
+                    assignment.mount_id,
+                    assignment.member_id,
+                    expected_target,
+                    merge.now
+                ],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        ensure_one_source_association_row(changed, merge.transaction_id)?;
+    }
+
+    transaction
+        .execute(
+            "DELETE FROM source_member_links WHERE source_id = ?1",
+            [merge.source_id],
+        )
+        .map_err(StorageError::SaveSourceAssociationTransaction)?;
+    transaction
+        .execute(
+            "DELETE FROM member_selections WHERE bundle_id IN (?1, ?2)",
+            params![
+                merge.expected_target_bundle.id,
+                merge.expected_retiring_bundle.id
+            ],
+        )
+        .map_err(StorageError::SaveSourceAssociationTransaction)?;
+
+    for original in merge
+        .expected_target_bundle
+        .members
+        .iter()
+        .chain(merge.expected_retiring_bundle.members.iter())
+        .filter(|member| !final_members.contains_key(member.id.as_str()))
+    {
+        let deleted = transaction
+            .execute(
+                "DELETE FROM skill_members
+                 WHERE id = ?1 AND bundle_id IN (?2, ?3)",
+                params![
+                    original.id,
+                    merge.expected_target_bundle.id,
+                    merge.expected_retiring_bundle.id
+                ],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        ensure_one_source_association_row(deleted, merge.transaction_id)?;
+    }
+
+    for member in merge.final_members {
+        let changed = transaction
+            .execute(
+                "UPDATE skill_members
+                 SET bundle_id = ?2, skill_name = ?3, description = ?4,
+                     stable_relative_path = ?5, content_fingerprint = ?6
+                 WHERE id = ?1 AND bundle_id IN (?2, ?7)",
+                params![
+                    member.member_id,
+                    merge.expected_target_bundle.id,
+                    member.skill_name,
+                    member.description,
+                    member.stable_relative_path,
+                    member.content_fingerprint,
+                    merge.expected_retiring_bundle.id
+                ],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+        ensure_one_source_association_row(changed, merge.transaction_id)?;
+        transaction
+            .execute(
+                "INSERT INTO member_selections (bundle_id, member_id, selected_at)
+                 VALUES (?1, ?2, ?3)",
+                params![merge.expected_target_bundle.id, member.member_id, merge.now],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+    }
+
+    let updated = transaction
+        .execute(
+            "UPDATE bundles
+             SET current_target = ?2
+             WHERE id = ?1",
+            params![merge.expected_target_bundle.id, merge.final_current_target],
+        )
+        .map_err(StorageError::SaveSourceAssociationTransaction)?;
+    ensure_one_source_association_row(updated, merge.transaction_id)?;
+
+    for mapping in merge.source_mappings {
+        transaction
+            .execute(
+                "INSERT INTO source_member_links (
+                    source_id, source_relative_path, member_id, linked_at
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    merge.source_id,
+                    mapping.source_relative_path,
+                    mapping.member_id,
+                    merge.now
+                ],
+            )
+            .map_err(StorageError::SaveSourceAssociationTransaction)?;
+    }
+
+    let deleted = transaction
+        .execute(
+            "DELETE FROM bundles WHERE id = ?1",
+            [&merge.expected_retiring_bundle.id],
+        )
+        .map_err(StorageError::SaveSourceAssociationTransaction)?;
+    ensure_one_source_association_row(deleted, merge.transaction_id)?;
+    ensure_final_source_association_merge_matches(transaction, data_root, merge)
+}
+
+fn validate_final_source_association_source_mappings(
+    transaction: &Transaction<'_>,
+    merge: &FinalSourceAssociationMerge<'_>,
+) -> Result<(), StorageError> {
+    for mapping in merge.source_mappings {
+        let selectable = transaction
+            .query_row(
+                "SELECT member.selectable
+                 FROM source_catalog_members AS member
+                 JOIN sources AS source
+                   ON source.id = member.source_id
+                  AND source.catalog_generation = member.catalog_generation
+                 WHERE member.source_id = ?1 AND member.relative_path = ?2",
+                params![merge.source_id, mapping.source_relative_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?;
+        if selectable.map(sqlite_bool).transpose()? != Some(true) {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+    }
+    Ok(())
+}
+
+fn final_source_association_member_target(
+    data_root: &Path,
+    target_bundle: &StoredSourceAssociationBundle,
+    stable_relative_path: &str,
+) -> Result<String, StorageError> {
+    data_root
+        .join(&target_bundle.managed_directory)
+        .join("current")
+        .join(stable_relative_path)
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| StorageError::UnsafeManagedPath(target_bundle.managed_directory.clone()))
+}
+
+fn ensure_final_source_association_merge_matches(
+    transaction: &Transaction<'_>,
+    data_root: &Path,
+    merge: &FinalSourceAssociationMerge<'_>,
+) -> Result<(), StorageError> {
+    let retiring_exists = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM bundles WHERE id = ?1)",
+            [&merge.expected_retiring_bundle.id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadSources)?;
+    if retiring_exists {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    let bundle = read_source_association_bundle_from(
+        transaction,
+        data_root,
+        &merge.expected_target_bundle.id,
+    )?;
+    if bundle.display_name != merge.expected_target_bundle.display_name
+        || bundle.managed_directory != merge.expected_target_bundle.managed_directory
+        || bundle.current_target != merge.final_current_target
+        || bundle.source_id.as_deref() != Some(merge.source_id)
+        || bundle.adopted_marker != merge.expected_target_bundle.adopted_marker
+        || bundle.members.len() != merge.final_members.len()
+    {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    let mappings = merge
+        .source_mappings
+        .iter()
+        .map(|mapping| (mapping.member_id, mapping.source_relative_path))
+        .collect::<BTreeMap<_, _>>();
+    let assignments = merge
+        .mount_assignments
+        .iter()
+        .map(|assignment| (assignment.mount_id, assignment.member_id))
+        .collect::<BTreeMap<_, _>>();
+    let original_mounts = merge
+        .expected_target_bundle
+        .members
+        .iter()
+        .chain(merge.expected_retiring_bundle.members.iter())
+        .flat_map(|member| member.mounts.iter())
+        .map(|mount| (mount.id.as_str(), mount))
+        .collect::<BTreeMap<_, _>>();
+    for expected in merge.final_members {
+        let actual = bundle
+            .members
+            .iter()
+            .find(|member| member.id == expected.member_id)
+            .ok_or(StorageError::SourceBundleStateConflict)?;
+        let expected_target = final_source_association_member_target(
+            data_root,
+            merge.expected_target_bundle,
+            expected.stable_relative_path,
+        )?;
+        if actual.skill_name != expected.skill_name
+            || actual.description != expected.description
+            || actual.stable_relative_path != expected.stable_relative_path
+            || actual.content_fingerprint != expected.content_fingerprint
+            || actual.source_relative_path.as_deref() != mappings.get(expected.member_id).copied()
+            || actual.mounts.iter().any(|mount| {
+                let original = original_mounts.get(mount.id.as_str());
+                assignments.get(mount.id.as_str()).copied() != Some(expected.member_id)
+                    || mount.member_id != expected.member_id
+                    || mount.bundle_id != merge.expected_target_bundle.id
+                    || mount.member_fingerprint != expected.content_fingerprint
+                    || mount.expected_target != expected_target
+                    || mount.health != MountHealth::Healthy
+                    || original.is_none_or(|original| {
+                        mount.app_id != original.app_id
+                            || mount.scope != original.scope
+                            || mount.project_id != original.project_id
+                            || mount.project_display_name != original.project_display_name
+                            || mount.project_root_path != original.project_root_path
+                            || mount.project_root_device != original.project_root_device
+                            || mount.project_root_inode != original.project_root_inode
+                            || mount.target_path != original.target_path
+                    })
+            })
+        {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+    }
+    let actual_mount_count = bundle
+        .members
+        .iter()
+        .map(|member| member.mounts.len())
+        .sum::<usize>();
+    if actual_mount_count != merge.mount_assignments.len() {
+        return Err(StorageError::SourceBundleStateConflict);
     }
     Ok(())
 }
@@ -7076,11 +8218,16 @@ fn read_source_association_bundle_from(
         .prepare(
             "SELECT member.id, member.skill_name, member.description,
                     member.stable_relative_path, member.content_fingerprint,
-                    selection.member_id
+                    selection.member_id, source_member.source_relative_path
              FROM skill_members AS member
              LEFT JOIN member_selections AS selection
                ON selection.bundle_id = member.bundle_id
               AND selection.member_id = member.id
+             LEFT JOIN source_bundle_links AS bundle_source
+               ON bundle_source.bundle_id = member.bundle_id
+             LEFT JOIN source_member_links AS source_member
+               ON source_member.member_id = member.id
+              AND source_member.source_id = bundle_source.source_id
              WHERE member.bundle_id = ?1
              ORDER BY member.stable_relative_path, member.id",
         )
@@ -7094,6 +8241,7 @@ fn read_source_association_bundle_from(
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })
         .map_err(StorageError::ReadSources)?
@@ -7109,6 +8257,7 @@ fn read_source_association_bundle_from(
         stable_relative_path,
         content_fingerprint,
         selected_member_id,
+        source_relative_path,
     ) in rows
     {
         if selected_member_id.as_deref() != Some(id.as_str())
@@ -7116,6 +8265,10 @@ fn read_source_association_bundle_from(
             || !is_single_path_component(&skill_name)
             || stable_relative_path != format!("members/{skill_name}")
             || content_fingerprint.is_empty()
+            || source_relative_path
+                .as_deref()
+                .is_some_and(|path| !path.is_empty() && !is_normalized_relative_path(path))
+            || (source_id.is_none() && source_relative_path.is_some())
         {
             return Err(StorageError::SourceBundleStateConflict);
         }
@@ -7141,10 +8294,28 @@ fn read_source_association_bundle_from(
             description,
             stable_relative_path,
             content_fingerprint,
+            source_relative_path,
             mounts,
         });
     }
-    if members.is_empty() {
+    let stored_mapping_count = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM source_member_links AS source_member
+             JOIN skill_members AS member ON member.id = source_member.member_id
+             WHERE member.bundle_id = ?1",
+            [bundle_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(StorageError::ReadSources)?;
+    let visible_mapping_count = members
+        .iter()
+        .filter(|member| member.source_relative_path.is_some())
+        .count() as i64;
+    if members.is_empty()
+        || stored_mapping_count != visible_mapping_count
+        || (source_id.is_none() && stored_mapping_count != 0)
+    {
         return Err(StorageError::SourceBundleStateConflict);
     }
     Ok(StoredSourceAssociationBundle {
@@ -7380,6 +8551,17 @@ fn map_takeover_transaction_insert_error(error: rusqlite::Error) -> StorageError
         return StorageError::ActiveLifecycleTransaction;
     }
     StorageError::SaveTakeoverTransaction(error)
+}
+
+fn map_source_association_transaction_insert_error(error: rusqlite::Error) -> StorageError {
+    if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error
+        && ((code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            && message.contains("source_association_transaction_single_active"))
+            || message.contains("active_lifecycle_transaction"))
+    {
+        return StorageError::ActiveLifecycleTransaction;
+    }
+    StorageError::SaveSourceAssociationTransaction(error)
 }
 
 fn ensure_install_transaction_can_finalize(
@@ -8512,6 +9694,178 @@ mod tests {
             .expect("应保存 Source 关联 Plan");
     }
 
+    fn setup_test_source_association_merge(
+        storage: &mut Storage,
+        suffix: &str,
+    ) -> (StoredSourceAssociationBundle, StoredSourceAssociationBundle) {
+        save_test_github_catalog(
+            storage,
+            "catalog-alpha-v1",
+            "catalog-beta-v1",
+            TEST_GITHUB_COMMIT_ONE,
+            "sha256:alpha-v1",
+            50,
+        );
+        let target_members = save_test_managed_bundle(storage, &format!("merge-target-{suffix}"));
+        let target_id = target_members[0].bundle_id.clone();
+        let target = storage
+            .read_source_association_bundle(&target_id)
+            .expect("应读取 Merge 目标 Bundle");
+        let link_plan_id = format!("merge-link-plan-{suffix}");
+        save_test_source_association_plan(storage, &link_plan_id, 100, 1_000);
+        let expected_members = target_members
+            .iter()
+            .map(|member| DirectSourceAssociationMember {
+                member_id: &member.id,
+                content_fingerprint: &member.content_fingerprint,
+            })
+            .collect::<Vec<_>>();
+        let source_mappings = [DirectSourceAssociationMemberMapping {
+            member_id: &target_members[0].id,
+            source_relative_path: "skills/alpha",
+        }];
+        storage
+            .finalize_direct_source_association(DirectSourceAssociation {
+                plan_id: &link_plan_id,
+                source_id: TEST_GITHUB_SOURCE_ID,
+                source_catalog_generation: 1,
+                source_marker: TEST_GITHUB_COMMIT_ONE,
+                bundle_id: &target_id,
+                expected_current_target: &target.current_target,
+                expected_members: &expected_members,
+                member_mappings: &source_mappings,
+                now: 110,
+            })
+            .expect("应建立 Merge 前的 Source-Bundle 关系");
+        let retiring_members =
+            save_test_managed_bundle(storage, &format!("merge-retiring-{suffix}"));
+        let retiring_id = retiring_members[0].bundle_id.clone();
+        (
+            storage
+                .read_source_association_bundle(&target_id)
+                .expect("应读取已关联 Source 的目标 Bundle"),
+            storage
+                .read_source_association_bundle(&retiring_id)
+                .expect("应读取待归入 Bundle"),
+        )
+    }
+
+    fn begin_test_source_association_merge(
+        storage: &mut Storage,
+        suffix: &str,
+        target: &StoredSourceAssociationBundle,
+        retiring: &StoredSourceAssociationBundle,
+    ) -> String {
+        let plan_id = format!("merge-plan-{suffix}");
+        let transaction_id = format!("merge-tx-{suffix}");
+        save_test_source_association_plan(storage, &plan_id, 120, 1_000);
+        let source_mappings = target
+            .members
+            .iter()
+            .chain(retiring.members.iter())
+            .filter_map(|member| {
+                member.source_relative_path.as_deref().map(|source_path| {
+                    FinalSourceAssociationMemberMapping {
+                        source_relative_path: source_path,
+                        member_id: &member.id,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        storage
+            .begin_source_association_merge(
+                &plan_id,
+                &transaction_id,
+                TEST_GITHUB_SOURCE_ID,
+                1,
+                TEST_GITHUB_COMMIT_ONE,
+                target,
+                retiring,
+                r#"[{"conflictId":"example","memberId":"winner"}]"#,
+                &source_mappings,
+                &format!("journals/{transaction_id}.json"),
+                130,
+            )
+            .expect("应原子消费 Merge Plan 并开始事务");
+        transaction_id
+    }
+
+    fn advance_source_association_to_mounts_applied(storage: &mut Storage, transaction_id: &str) {
+        for (phase, now) in [
+            ("journal_ready", 131),
+            ("candidate_ready", 132),
+            ("current_activated", 133),
+            ("mounts_applied", 134),
+        ] {
+            storage
+                .update_source_association_transaction_phase(transaction_id, phase, now)
+                .expect("应按唯一 Merge 阶段顺序推进");
+        }
+    }
+
+    fn test_source_association_mount(
+        id: &str,
+        bundle_id: &str,
+        member: &StoredSourceAssociationBundleMember,
+        scope: MountScope,
+        project_id: Option<&str>,
+        target_path: &str,
+    ) -> StoredMount {
+        StoredMount {
+            id: id.to_owned(),
+            member_id: member.id.clone(),
+            bundle_id: bundle_id.to_owned(),
+            skill_name: member.skill_name.clone(),
+            member_fingerprint: member.content_fingerprint.clone(),
+            app_id: SupportedAppId::Codex,
+            scope,
+            project_id: project_id.map(str::to_owned),
+            project_display_name: project_id.map(|_| "测试项目".to_owned()),
+            project_root_path: project_id.map(|_| "/project".to_owned()),
+            project_root_device: project_id.map(|_| 10),
+            project_root_inode: project_id.map(|_| 20),
+            target_path: target_path.to_owned(),
+            expected_target: "/managed/member".to_owned(),
+            health: MountHealth::Healthy,
+        }
+    }
+
+    fn validate_test_source_association_merge(
+        target: &StoredSourceAssociationBundle,
+        retiring: &StoredSourceAssociationBundle,
+        mount_assignments: &[FinalSourceAssociationMountAssignment<'_>],
+        final_current_target: &str,
+        description: &str,
+        content_fingerprint: &str,
+    ) -> Result<(), StorageError> {
+        let winner = &target.members[0];
+        let final_members = [FinalSourceAssociationMember {
+            member_id: &winner.id,
+            skill_name: &winner.skill_name,
+            description,
+            stable_relative_path: &winner.stable_relative_path,
+            content_fingerprint,
+        }];
+        let source_mappings = [FinalSourceAssociationMemberMapping {
+            source_relative_path: winner
+                .source_relative_path
+                .as_deref()
+                .expect("测试 winner 应有 Source mapping"),
+            member_id: &winner.id,
+        }];
+        validate_final_source_association_merge(&FinalSourceAssociationMerge {
+            transaction_id: "merge-validation",
+            source_id: TEST_GITHUB_SOURCE_ID,
+            expected_target_bundle: target,
+            expected_retiring_bundle: retiring,
+            final_current_target,
+            final_members: &final_members,
+            mount_assignments,
+            source_mappings: &source_mappings,
+            now: 150,
+        })
+    }
+
     fn register_test_project(storage: &mut Storage, root: &Path) -> StoredProject {
         storage
             .register_project(NewProject {
@@ -8597,7 +9951,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=15).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=16).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -8611,6 +9965,7 @@ mod tests {
             "takeover_plans",
             "takeover_transactions",
             "source_association_plans",
+            "source_association_transactions",
         ] {
             let exists = storage
                 .connection
@@ -8630,6 +9985,25 @@ mod tests {
             .expect("应执行外键检查")
             .count();
         assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn source_association_transaction_migration_seals_final_mappings() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let storage = open_test_storage(sandbox.path());
+        let columns = storage
+            .connection
+            .prepare("PRAGMA table_info(source_association_transactions)")
+            .expect("应读取 Source 关联事务 schema")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("应查询 Source 关联事务列")
+            .collect::<Result<BTreeSet<_>, _>>()
+            .expect("应收集 Source 关联事务列");
+
+        assert!(
+            columns.contains("source_mappings_json"),
+            "Merge 开始时必须把最终 Source mapping 封存在 canonical 事务中"
+        );
     }
 
     #[test]
@@ -8995,6 +10369,1237 @@ mod tests {
                 .read_source_association_plan("pending-association-plan")
                 .expect_err("放弃后 Plan 应不存在"),
             StorageError::SourceAssociationPlanNotFound
+        ));
+    }
+
+    #[test]
+    fn source_association_merge_single_writer_is_bidirectional_and_begin_is_atomic() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (target, retiring) = setup_test_source_association_merge(&mut storage, "writer");
+        save_test_source_association_plan(&mut storage, "merge-writer-plan", 120, 1_000);
+        save_test_plan(
+            &mut storage,
+            "merge-writer-install-plan",
+            "merge-writer-install-bundle",
+            "merge-writer-install-member",
+        );
+        storage
+            .begin_install_transaction(
+                "merge-writer-install-plan",
+                "merge-writer-install-tx",
+                "journals/merge-writer-install.json",
+                125,
+            )
+            .expect("应开始既有安装事务");
+        let source_mappings = [FinalSourceAssociationMemberMapping {
+            source_relative_path: target.members[0]
+                .source_relative_path
+                .as_deref()
+                .expect("目标成员应保留 Source mapping"),
+            member_id: &target.members[0].id,
+        }];
+        assert!(matches!(
+            storage
+                .begin_source_association_merge(
+                    "merge-writer-plan",
+                    "merge-writer-tx",
+                    TEST_GITHUB_SOURCE_ID,
+                    1,
+                    TEST_GITHUB_COMMIT_ONE,
+                    &target,
+                    &retiring,
+                    "[]",
+                    &source_mappings,
+                    "journals/merge-writer.json",
+                    130,
+                )
+                .expect_err("活跃安装事务必须阻止 Merge"),
+            StorageError::ActiveLifecycleTransaction
+        ));
+        assert_eq!(
+            storage
+                .read_source_association_plan("merge-writer-plan")
+                .expect("单写者拒绝不能消费 Plan")
+                .status,
+            "pending"
+        );
+        storage
+            .abort_lifecycle_transaction("merge-writer-install-tx", None, 131)
+            .expect("应中止测试安装事务");
+        storage
+            .forget_terminal_transaction("merge-writer-install-tx")
+            .expect("应清理测试安装事务");
+
+        let consumed = storage
+            .begin_source_association_merge(
+                "merge-writer-plan",
+                "merge-writer-tx",
+                TEST_GITHUB_SOURCE_ID,
+                1,
+                TEST_GITHUB_COMMIT_ONE,
+                &target,
+                &retiring,
+                r#"[{"conflictId":"one","memberId":"winner"}]"#,
+                &source_mappings,
+                "journals/merge-writer.json",
+                132,
+            )
+            .expect("应原子消费 Plan 并开始 Merge");
+        assert_eq!(consumed.status, "consumed");
+        let stored = storage
+            .recoverable_source_association_transactions()
+            .expect("应读回 Merge 恢复状态");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].content_choices_json,
+            r#"[{"conflictId":"one","memberId":"winner"}]"#
+        );
+
+        save_test_plan(
+            &mut storage,
+            "merge-writer-later-install-plan",
+            "merge-writer-later-bundle",
+            "merge-writer-later-member",
+        );
+        assert!(matches!(
+            storage
+                .begin_install_transaction(
+                    "merge-writer-later-install-plan",
+                    "merge-writer-later-install-tx",
+                    "journals/merge-writer-later.json",
+                    133,
+                )
+                .expect_err("活跃 Merge 必须阻止安装事务"),
+            StorageError::ActiveLifecycleTransaction
+        ));
+    }
+
+    #[test]
+    fn source_association_merge_begin_rechecks_snapshots_before_invalidating_pending_plans() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (initial_target, initial_retiring) =
+            setup_test_source_association_merge(&mut storage, "begin-snapshot");
+        let retiring_member = storage
+            .read_managed_member(&initial_retiring.members[0].id)
+            .expect("应读取 retiring Member");
+        let mounted_target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&retiring_member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &retiring_member,
+            MountOperation::Create,
+            "merge-begin-existing-mount",
+            "merge-begin-existing-plan",
+            MountScope::Global,
+            None,
+            &mounted_target,
+        );
+        finalize_test_mount_create(
+            &mut storage,
+            "merge-begin-existing-plan",
+            "merge-begin-existing-tx",
+        );
+        storage
+            .forget_terminal_mount_transaction("merge-begin-existing-tx")
+            .expect("应清理既有 Mount 事务");
+        let target = storage
+            .read_source_association_bundle(&initial_target.id)
+            .expect("应读取目标完整快照");
+        let retiring = storage
+            .read_source_association_bundle(&initial_retiring.id)
+            .expect("应读取含 Mount 的 retiring 快照");
+
+        let target_member = storage
+            .read_managed_member(&target.members[0].id)
+            .expect("应读取目标 Member");
+        let pending_target = sandbox
+            .path()
+            .join("home/.claude/skills")
+            .join(&target_member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &target_member,
+            MountOperation::Create,
+            "merge-begin-pending-mount",
+            "merge-begin-pending-plan",
+            MountScope::Global,
+            None,
+            &pending_target,
+        );
+        let retiring_batch_member = storage
+            .read_managed_member(&retiring.members[1].id)
+            .expect("应读取 Batch retiring Member");
+        let pending_batch_target = sandbox
+            .path()
+            .join("home/.claude/skills")
+            .join(&retiring_batch_member.skill_name);
+        let batch_items = [NewBatchMountPlanItem {
+            id: "merge-begin-pending-batch-item",
+            mount_id: "merge-begin-pending-batch-mount",
+            member_id: &retiring_batch_member.id,
+            app_id: SupportedAppId::ClaudeCode,
+            scope: MountScope::Global,
+            project_id: None,
+            target_path: pending_batch_target.to_str().expect("测试路径应是 UTF-8"),
+            expected_target: &retiring_batch_member.expected_target,
+            member_fingerprint: &retiring_batch_member.content_fingerprint,
+            target_observation: "absent",
+            disposition: BatchMountDisposition::Ready,
+            selectable: true,
+            default_selected: true,
+            conflict_reason: None,
+            target_health: MountHealth::Missing,
+        }];
+        storage
+            .save_batch_mount_plan(NewBatchMountPlan {
+                id: "merge-begin-pending-batch-plan",
+                bundle_id: &retiring.id,
+                items: &batch_items,
+                created_at: 120,
+                expires_at: 1_000,
+            })
+            .expect("应保存 retiring Bundle 的 pending Batch Plan");
+        save_test_source_association_plan(&mut storage, "merge-begin-plan", 120, 1_000);
+        let source_mappings = [FinalSourceAssociationMemberMapping {
+            source_relative_path: target.members[0]
+                .source_relative_path
+                .as_deref()
+                .expect("目标成员应保留 Source mapping"),
+            member_id: &target.members[0].id,
+        }];
+
+        assert!(matches!(
+            storage
+                .begin_source_association_merge(
+                    "merge-begin-plan",
+                    "merge-begin-dropped-mapping",
+                    TEST_GITHUB_SOURCE_ID,
+                    1,
+                    TEST_GITHUB_COMMIT_ONE,
+                    &target,
+                    &retiring,
+                    "[]",
+                    &[],
+                    "journals/merge-begin-dropped-mapping.json",
+                    129,
+                )
+                .expect_err("最终 mapping 不能丢失目标 Bundle 已有的 Source path"),
+            StorageError::InvalidSourceAssociationPlan
+        ));
+        storage
+            .connection
+            .execute(
+                "UPDATE sources SET catalog_marker = ?2 WHERE id = ?1",
+                params![TEST_GITHUB_SOURCE_ID, TEST_GITHUB_COMMIT_TWO],
+            )
+            .expect("应模拟 Source marker 竞态");
+        assert!(matches!(
+            storage
+                .begin_source_association_merge(
+                    "merge-begin-plan",
+                    "merge-begin-source-race",
+                    TEST_GITHUB_SOURCE_ID,
+                    1,
+                    TEST_GITHUB_COMMIT_ONE,
+                    &target,
+                    &retiring,
+                    "[]",
+                    &source_mappings,
+                    "journals/merge-begin-source-race.json",
+                    130,
+                )
+                .expect_err("Source marker 变化必须拒绝开始"),
+            StorageError::SourceCatalogStateChanged
+        ));
+        storage
+            .connection
+            .execute(
+                "UPDATE sources SET catalog_marker = ?2 WHERE id = ?1",
+                params![TEST_GITHUB_SOURCE_ID, TEST_GITHUB_COMMIT_ONE],
+            )
+            .expect("应恢复 Source marker");
+
+        storage
+            .connection
+            .execute(
+                "UPDATE skill_members SET description = '竞态描述' WHERE id = ?1",
+                [&target.members[0].id],
+            )
+            .expect("应模拟 Bundle 成员竞态");
+        assert!(matches!(
+            storage
+                .begin_source_association_merge(
+                    "merge-begin-plan",
+                    "merge-begin-bundle-race",
+                    TEST_GITHUB_SOURCE_ID,
+                    1,
+                    TEST_GITHUB_COMMIT_ONE,
+                    &target,
+                    &retiring,
+                    "[]",
+                    &source_mappings,
+                    "journals/merge-begin-bundle-race.json",
+                    131,
+                )
+                .expect_err("Bundle 快照变化必须拒绝开始"),
+            StorageError::SourceBundleStateConflict
+        ));
+        storage
+            .connection
+            .execute(
+                "UPDATE skill_members SET description = ?2 WHERE id = ?1",
+                params![target.members[0].id, target.members[0].description],
+            )
+            .expect("应恢复 Bundle 成员");
+
+        let changed_mount_target = sandbox
+            .path()
+            .join("alternate/.codex/skills")
+            .join(&retiring_member.skill_name);
+        storage
+            .connection
+            .execute(
+                "UPDATE mounts SET target_path = ?2 WHERE id = ?1",
+                params![
+                    retiring.members[0].mounts[0].id,
+                    changed_mount_target.to_str().expect("测试路径应是 UTF-8")
+                ],
+            )
+            .expect("应模拟 Mount SQLite 快照竞态");
+        assert!(matches!(
+            storage
+                .begin_source_association_merge(
+                    "merge-begin-plan",
+                    "merge-begin-mount-race",
+                    TEST_GITHUB_SOURCE_ID,
+                    1,
+                    TEST_GITHUB_COMMIT_ONE,
+                    &target,
+                    &retiring,
+                    "[]",
+                    &source_mappings,
+                    "journals/merge-begin-mount-race.json",
+                    132,
+                )
+                .expect_err("Mount 快照变化必须拒绝开始"),
+            StorageError::SourceBundleStateConflict
+        ));
+        storage
+            .connection
+            .execute(
+                "UPDATE mounts SET target_path = ?2 WHERE id = ?1",
+                params![
+                    retiring.members[0].mounts[0].id,
+                    retiring.members[0].mounts[0].target_path
+                ],
+            )
+            .expect("应恢复 Mount 快照");
+
+        for table in ["mount_plans", "batch_mount_plans"] {
+            let pending = storage
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE status = 'pending'"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("失败开始不能删除 pending Plan");
+            assert_eq!(pending, 1, "失败开始必须原子保留 {table}");
+        }
+        storage
+            .begin_source_association_merge(
+                "merge-begin-plan",
+                "merge-begin-success",
+                TEST_GITHUB_SOURCE_ID,
+                1,
+                TEST_GITHUB_COMMIT_ONE,
+                &target,
+                &retiring,
+                "[]",
+                &source_mappings,
+                "journals/merge-begin-success.json",
+                133,
+            )
+            .expect("快照一致时应开始 Merge");
+        for table in ["mount_plans", "batch_mount_plans"] {
+            let pending = storage
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE status = 'pending'"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("应检查 pending Plan 作废结果");
+            assert_eq!(pending, 0, "成功开始必须作废相关 {table}");
+        }
+    }
+
+    #[test]
+    fn blocked_source_association_merge_is_visible_and_isolates_all_objects() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (target, retiring) = setup_test_source_association_merge(&mut storage, "blocked");
+        let transaction_id =
+            begin_test_source_association_merge(&mut storage, "blocked", &target, &retiring);
+        storage
+            .block_source_association_transaction(&transaction_id, "测试 Merge 人工恢复", 140)
+            .expect("应把 Merge 标记为 blocked");
+
+        assert!(
+            bundle_or_source_write_is_blocked(
+                &storage.connection,
+                Some(&target.id),
+                Some(TEST_GITHUB_SOURCE_ID),
+            )
+            .expect("应检查目标 Bundle 与 Source 隔离")
+        );
+        assert!(
+            bundle_or_source_write_is_blocked(&storage.connection, Some(&retiring.id), None,)
+                .expect("应检查 retiring Bundle 隔离")
+        );
+        let recoverable = storage
+            .recoverable_source_association_transactions()
+            .expect("blocked Merge 必须可恢复");
+        assert_eq!(recoverable[0].status, "blocked");
+        let issues = storage
+            .read_recovery_issues()
+            .expect("blocked Merge 必须进入 RecoveryIssue");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, transaction_id);
+        assert_eq!(issues[0].message, "测试 Merge 人工恢复");
+    }
+
+    #[test]
+    fn blocked_source_association_rejects_github_catalog_and_ref_writes() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (target, retiring) =
+            setup_test_source_association_merge(&mut storage, "blocked-catalog-success");
+        let ref_change = storage
+            .save_or_prepare_github_source(
+                NewGitHubSource {
+                    id: "ignored-existing-source",
+                    canonical_identity: "github:anthropics/skills",
+                    owner: "anthropics",
+                    repository: "skills",
+                    display_name: "anthropics/skills",
+                    locator: "https://github.com/anthropics/skills",
+                    tracked_ref: "next",
+                    resolved_commit_sha: TEST_GITHUB_COMMIT_TWO,
+                    member_path_hint: None,
+                },
+                "blocked-ref-change-plan",
+                115,
+                1_000,
+            )
+            .expect("应先签发 Tracked Ref 变更 Plan");
+        assert!(matches!(
+            ref_change,
+            SaveGitHubSourceResult::RefChangeRequired { .. }
+        ));
+        let transaction_id = begin_test_source_association_merge(
+            &mut storage,
+            "blocked-catalog-success",
+            &target,
+            &retiring,
+        );
+        storage
+            .block_source_association_transaction(&transaction_id, "测试 Source 写隔离", 140)
+            .expect("应把 Merge 标记为 blocked");
+        let before = storage
+            .read_source_install_source(TEST_GITHUB_SOURCE_ID)
+            .expect("应读取 blocked 前 Source");
+        let github_before = storage
+            .read_github_source(TEST_GITHUB_SOURCE_ID)
+            .expect("应读取 blocked 前 GitHub metadata");
+        let members = [NewSourceCatalogMember {
+            id: "blocked-catalog-new",
+            relative_path: "skills/new",
+            skill_name: Some("new"),
+            description: Some("New Skill"),
+            content_fingerprint: Some("sha256:new"),
+            selectable: true,
+            validation_errors: &[],
+            warnings: &[],
+        }];
+
+        let error = storage
+            .save_source_catalog_success(
+                TEST_GITHUB_SOURCE_ID,
+                "main",
+                TEST_GITHUB_COMMIT_TWO,
+                150,
+                &members,
+            )
+            .expect_err("blocked Merge 影响的 Source 不能替换 Catalog");
+        assert!(matches!(error, StorageError::ManagedObjectBlocked));
+        assert_eq!(
+            storage
+                .read_source_install_source(TEST_GITHUB_SOURCE_ID)
+                .expect("拒绝后 Source 应保持原状"),
+            before
+        );
+
+        let error = storage
+            .save_source_catalog_failure(TEST_GITHUB_SOURCE_ID, "main", 151, "测试 Reload 失败")
+            .expect_err("blocked Merge 影响的 Source 不能写入 Catalog 失败状态");
+        assert!(matches!(error, StorageError::ManagedObjectBlocked));
+        assert_eq!(
+            storage
+                .read_source_install_source(TEST_GITHUB_SOURCE_ID)
+                .expect("拒绝失败状态后 Source 应保持原状"),
+            before
+        );
+
+        let error = storage
+            .confirm_source_ref_change("blocked-ref-change-plan", 152)
+            .expect_err("blocked Merge 影响的 Source 不能确认 Tracked Ref 变更");
+        assert!(matches!(error, StorageError::ManagedObjectBlocked));
+        assert_eq!(
+            storage
+                .read_source_tracked_ref("github:anthropics/skills")
+                .expect("应读取被拒绝后的 Tracked Ref"),
+            Some("main".to_owned())
+        );
+        let same_ref_error = match storage.save_or_prepare_github_source(
+            NewGitHubSource {
+                id: "ignored-blocked-same-ref",
+                canonical_identity: "github:anthropics/skills",
+                owner: "anthropics",
+                repository: "skills",
+                display_name: "Blocked Changed",
+                locator: "https://github.com/anthropics/skills",
+                tracked_ref: "main",
+                resolved_commit_sha: TEST_GITHUB_COMMIT_ONE,
+                member_path_hint: Some("skills"),
+            },
+            "unused-same-ref-plan",
+            153,
+            1_000,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("blocked Source 不能通过重复 GitHub 输入更新 metadata"),
+        };
+        assert!(matches!(same_ref_error, StorageError::ManagedObjectBlocked));
+        assert_eq!(
+            storage
+                .read_github_source(TEST_GITHUB_SOURCE_ID)
+                .expect("拒绝后 GitHub metadata 应保持原状"),
+            github_before
+        );
+        let different_ref_error = match storage.save_or_prepare_github_source(
+            NewGitHubSource {
+                id: "ignored-blocked-different-ref",
+                canonical_identity: "github:anthropics/skills",
+                owner: "anthropics",
+                repository: "skills",
+                display_name: "anthropics/skills",
+                locator: "https://github.com/anthropics/skills",
+                tracked_ref: "other",
+                resolved_commit_sha: TEST_GITHUB_COMMIT_TWO,
+                member_path_hint: None,
+            },
+            "blocked-second-ref-plan",
+            154,
+            1_000,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("blocked Source 不能签发新的 Tracked Ref Plan"),
+        };
+        assert!(matches!(
+            different_ref_error,
+            StorageError::ManagedObjectBlocked
+        ));
+
+        let independent_members = [NewSourceCatalogMember {
+            id: "independent-catalog-member",
+            relative_path: "skills/independent",
+            skill_name: Some("independent"),
+            description: Some("Independent Skill"),
+            content_fingerprint: Some("sha256:independent"),
+            selectable: true,
+            validation_errors: &[],
+            warnings: &[],
+        }];
+        storage
+            .save_source_catalog_success(
+                "source-jimliu-baoyu-skills",
+                "main",
+                TEST_GITHUB_COMMIT_ONE,
+                155,
+                &independent_members,
+            )
+            .expect("独立 Source 仍可刷新 Catalog");
+        let independent_ref_change = storage
+            .save_or_prepare_github_source(
+                NewGitHubSource {
+                    id: "ignored-independent-source",
+                    canonical_identity: "github:jimliu/baoyu-skills",
+                    owner: "JimLiu",
+                    repository: "baoyu-skills",
+                    display_name: "baoyu-skills",
+                    locator: "https://github.com/jimliu/baoyu-skills",
+                    tracked_ref: "next",
+                    resolved_commit_sha: TEST_GITHUB_COMMIT_TWO,
+                    member_path_hint: None,
+                },
+                "independent-ref-change-plan",
+                156,
+                1_000,
+            )
+            .expect("独立 Source 应可签发 Ref 变更");
+        assert!(matches!(
+            independent_ref_change,
+            SaveGitHubSourceResult::RefChangeRequired { .. }
+        ));
+        assert_eq!(
+            storage
+                .confirm_source_ref_change("independent-ref-change-plan", 157)
+                .expect("独立 Source 应可确认 Ref 变更"),
+            "source-jimliu-baoyu-skills"
+        );
+        storage
+            .save_source_catalog_failure(
+                "source-jimliu-baoyu-skills",
+                "next",
+                158,
+                "独立 Source Reload 失败",
+            )
+            .expect("独立 Source 仍可记录 Catalog 失败状态");
+        let new_source = storage
+            .save_or_prepare_github_source(
+                NewGitHubSource {
+                    id: "new-source-while-other-blocked",
+                    canonical_identity: "github:example/new-source",
+                    owner: "example",
+                    repository: "new-source",
+                    display_name: "example/new-source",
+                    locator: "https://github.com/example/new-source",
+                    tracked_ref: "main",
+                    resolved_commit_sha: TEST_GITHUB_COMMIT_ONE,
+                    member_path_hint: None,
+                },
+                "unused-new-source-ref-plan",
+                159,
+                1_000,
+            )
+            .expect("其他 Source blocked 时仍可创建全新 Source");
+        assert!(matches!(
+            new_source,
+            SaveGitHubSourceResult::Saved { source_id }
+                if source_id == "new-source-while-other-blocked"
+        ));
+    }
+
+    #[test]
+    fn source_association_merge_finalize_supports_root_mapping_and_replay() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (initial_target, initial_retiring) =
+            setup_test_source_association_merge(&mut storage, "finalize");
+        storage
+            .connection
+            .execute(
+                "UPDATE source_catalog_members
+                 SET relative_path = ''
+                 WHERE source_id = ?1 AND relative_path = 'skills/alpha'",
+                [TEST_GITHUB_SOURCE_ID],
+            )
+            .expect("应模拟 Source 根成员");
+        storage
+            .connection
+            .execute(
+                "UPDATE source_member_links
+                 SET source_relative_path = ''
+                 WHERE source_id = ?1",
+                [TEST_GITHUB_SOURCE_ID],
+            )
+            .expect("应把既有 mapping 调整为根成员");
+        let retiring_member = storage
+            .read_managed_member(&initial_retiring.members[0].id)
+            .expect("应读取 retiring Member");
+        let mount_target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&retiring_member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &retiring_member,
+            MountOperation::Create,
+            "merge-finalize-mount",
+            "merge-finalize-mount-plan",
+            MountScope::Global,
+            None,
+            &mount_target,
+        );
+        finalize_test_mount_create(
+            &mut storage,
+            "merge-finalize-mount-plan",
+            "merge-finalize-mount-tx",
+        );
+        storage
+            .forget_terminal_mount_transaction("merge-finalize-mount-tx")
+            .expect("应清理测试 Mount 事务");
+        let target = storage
+            .read_source_association_bundle(&initial_target.id)
+            .expect("应读取根 mapping 目标快照");
+        let retiring = storage
+            .read_source_association_bundle(&initial_retiring.id)
+            .expect("应读取带 Mount 的 retiring 快照");
+        assert_eq!(target.members[0].source_relative_path.as_deref(), Some(""));
+        let transaction_id =
+            begin_test_source_association_merge(&mut storage, "finalize", &target, &retiring);
+        advance_source_association_to_mounts_applied(&mut storage, &transaction_id);
+
+        let final_members = target
+            .members
+            .iter()
+            .chain(retiring.members.iter())
+            .map(|member| FinalSourceAssociationMember {
+                member_id: &member.id,
+                skill_name: &member.skill_name,
+                description: &member.description,
+                stable_relative_path: &member.stable_relative_path,
+                content_fingerprint: &member.content_fingerprint,
+            })
+            .collect::<Vec<_>>();
+        let mount_assignments = retiring
+            .members
+            .iter()
+            .flat_map(|member| {
+                member
+                    .mounts
+                    .iter()
+                    .map(|mount| FinalSourceAssociationMountAssignment {
+                        mount_id: &mount.id,
+                        member_id: &member.id,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let source_mappings = [FinalSourceAssociationMemberMapping {
+            source_relative_path: "",
+            member_id: &target.members[0].id,
+        }];
+        let final_current_target = format!("contents/{transaction_id}");
+        let merge = FinalSourceAssociationMerge {
+            transaction_id: &transaction_id,
+            source_id: TEST_GITHUB_SOURCE_ID,
+            expected_target_bundle: &target,
+            expected_retiring_bundle: &retiring,
+            final_current_target: &final_current_target,
+            final_members: &final_members,
+            mount_assignments: &mount_assignments,
+            source_mappings: &source_mappings,
+            now: 150,
+        };
+        let stored = storage
+            .recoverable_source_association_transactions()
+            .expect("应读回封存后的最终 Source mapping");
+        assert_eq!(
+            stored[0].source_mappings_json,
+            format!(
+                r#"[{{"source_relative_path":"","member_id":"{}"}}]"#,
+                target.members[0].id
+            )
+        );
+        let different_source_mappings = [FinalSourceAssociationMemberMapping {
+            source_relative_path: "skills/beta",
+            member_id: &retiring.members[0].id,
+        }];
+        assert!(matches!(
+            storage
+                .finalize_source_association_merge(FinalSourceAssociationMerge {
+                    transaction_id: &transaction_id,
+                    source_id: TEST_GITHUB_SOURCE_ID,
+                    expected_target_bundle: &target,
+                    expected_retiring_bundle: &retiring,
+                    final_current_target: &final_current_target,
+                    final_members: &final_members,
+                    mount_assignments: &mount_assignments,
+                    source_mappings: &different_source_mappings,
+                    now: 150,
+                })
+                .expect_err("最终提交不能替换 begin 时封存的 Source mapping"),
+            StorageError::SourceAssociationStateConflict(_)
+        ));
+        assert_eq!(
+            storage
+                .recoverable_source_association_transactions()
+                .expect("mapping 不一致后事务仍应可恢复")[0]
+                .phase,
+            "mounts_applied"
+        );
+        storage
+            .finalize_source_association_merge(merge)
+            .expect("应在一个 SQLite 事务中提交最终 Merge 状态");
+        let merged = storage
+            .read_source_association_bundle(&target.id)
+            .expect("应读取最终目标 Bundle");
+        assert_eq!(merged.members.len(), 4);
+        assert_eq!(merged.current_target, final_current_target);
+        assert_eq!(
+            merged
+                .members
+                .iter()
+                .find(|member| member.id == target.members[0].id)
+                .and_then(|member| member.source_relative_path.as_deref()),
+            Some("")
+        );
+        assert!(matches!(
+            storage
+                .read_source_association_bundle(&retiring.id)
+                .expect_err("retiring Bundle 必须删除"),
+            StorageError::ManagedMemberNotFound(_)
+        ));
+        assert_eq!(
+            storage
+                .recoverable_source_association_transactions()
+                .expect("完成状态在清理前仍可恢复")[0]
+                .status,
+            "completed"
+        );
+        storage
+            .finalize_source_association_merge(FinalSourceAssociationMerge {
+                transaction_id: &transaction_id,
+                source_id: TEST_GITHUB_SOURCE_ID,
+                expected_target_bundle: &target,
+                expected_retiring_bundle: &retiring,
+                final_current_target: &final_current_target,
+                final_members: &final_members,
+                mount_assignments: &mount_assignments,
+                source_mappings: &source_mappings,
+                now: 151,
+            })
+            .expect("state_committed 重放只能核验最终事实");
+
+        let mount_id = mount_assignments[0].mount_id;
+        storage
+            .connection
+            .execute(
+                "UPDATE mounts SET app_id = 'claude_code' WHERE id = ?1",
+                [mount_id],
+            )
+            .expect("应模拟 completed 后 Mount app 变化");
+        assert!(matches!(
+            storage.finalize_source_association_merge(FinalSourceAssociationMerge {
+                transaction_id: &transaction_id,
+                source_id: TEST_GITHUB_SOURCE_ID,
+                expected_target_bundle: &target,
+                expected_retiring_bundle: &retiring,
+                final_current_target: &final_current_target,
+                final_members: &final_members,
+                mount_assignments: &mount_assignments,
+                source_mappings: &source_mappings,
+                now: 152,
+            }),
+            Err(StorageError::SourceBundleStateConflict)
+        ));
+        storage
+            .connection
+            .execute(
+                "UPDATE mounts SET app_id = 'codex' WHERE id = ?1",
+                [mount_id],
+            )
+            .expect("应恢复 Mount app");
+
+        let replay_project =
+            register_test_project(&mut storage, &sandbox.path().join("replay-project"));
+        storage
+            .connection
+            .execute(
+                "UPDATE mounts SET scope = 'project', project_id = ?2 WHERE id = ?1",
+                params![mount_id, replay_project.id],
+            )
+            .expect("应模拟 completed 后 Mount scope/project 变化");
+        assert!(matches!(
+            storage.finalize_source_association_merge(FinalSourceAssociationMerge {
+                transaction_id: &transaction_id,
+                source_id: TEST_GITHUB_SOURCE_ID,
+                expected_target_bundle: &target,
+                expected_retiring_bundle: &retiring,
+                final_current_target: &final_current_target,
+                final_members: &final_members,
+                mount_assignments: &mount_assignments,
+                source_mappings: &source_mappings,
+                now: 153,
+            }),
+            Err(StorageError::SourceBundleStateConflict)
+        ));
+        storage
+            .connection
+            .execute(
+                "UPDATE mounts SET scope = 'global', project_id = NULL WHERE id = ?1",
+                [mount_id],
+            )
+            .expect("应恢复 Mount scope/project");
+
+        let changed_target_path = sandbox
+            .path()
+            .join("alternate/.codex/skills")
+            .join(&retiring_member.skill_name);
+        storage
+            .connection
+            .execute(
+                "UPDATE mounts SET target_path = ?2 WHERE id = ?1",
+                params![
+                    mount_id,
+                    changed_target_path.to_str().expect("测试路径应是 UTF-8")
+                ],
+            )
+            .expect("应模拟 completed 后 Mount target 变化");
+        assert!(matches!(
+            storage.finalize_source_association_merge(FinalSourceAssociationMerge {
+                transaction_id: &transaction_id,
+                source_id: TEST_GITHUB_SOURCE_ID,
+                expected_target_bundle: &target,
+                expected_retiring_bundle: &retiring,
+                final_current_target: &final_current_target,
+                final_members: &final_members,
+                mount_assignments: &mount_assignments,
+                source_mappings: &source_mappings,
+                now: 154,
+            }),
+            Err(StorageError::SourceBundleStateConflict)
+        ));
+    }
+
+    #[test]
+    fn source_association_merge_finalize_race_rolls_back_all_domain_changes() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (target, retiring) = setup_test_source_association_merge(&mut storage, "race");
+        let transaction_id =
+            begin_test_source_association_merge(&mut storage, "race", &target, &retiring);
+        advance_source_association_to_mounts_applied(&mut storage, &transaction_id);
+        storage
+            .connection
+            .execute(
+                "UPDATE skill_members SET description = '并发修改'
+                 WHERE id = ?1",
+                [&retiring.members[0].id],
+            )
+            .expect("应模拟 Plan 后成员竞态");
+        let final_members = target
+            .members
+            .iter()
+            .chain(retiring.members.iter())
+            .map(|member| FinalSourceAssociationMember {
+                member_id: &member.id,
+                skill_name: &member.skill_name,
+                description: &member.description,
+                stable_relative_path: &member.stable_relative_path,
+                content_fingerprint: &member.content_fingerprint,
+            })
+            .collect::<Vec<_>>();
+        let error = storage
+            .finalize_source_association_merge(FinalSourceAssociationMerge {
+                transaction_id: &transaction_id,
+                source_id: TEST_GITHUB_SOURCE_ID,
+                expected_target_bundle: &target,
+                expected_retiring_bundle: &retiring,
+                final_current_target: &format!("contents/{transaction_id}"),
+                final_members: &final_members,
+                mount_assignments: &[],
+                source_mappings: &[FinalSourceAssociationMemberMapping {
+                    source_relative_path: "skills/alpha",
+                    member_id: &target.members[0].id,
+                }],
+                now: 150,
+            })
+            .expect_err("成员竞态必须拒绝最终提交");
+        assert!(matches!(error, StorageError::SourceBundleStateConflict));
+        assert!(
+            storage.read_source_association_bundle(&retiring.id).is_ok(),
+            "失败提交不能删除 retiring Bundle"
+        );
+        assert_eq!(
+            storage
+                .recoverable_source_association_transactions()
+                .expect("失败后事务仍应可恢复")[0]
+                .phase,
+            "mounts_applied"
+        );
+    }
+
+    #[test]
+    fn source_association_merge_moves_loser_mount_to_winner_fingerprint() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (initial_target, initial_retiring) =
+            setup_test_source_association_merge(&mut storage, "mount-winner");
+        let winner = &initial_target.members[0];
+        let loser = &initial_retiring.members[0];
+        storage
+            .connection
+            .execute(
+                "UPDATE skill_members
+                 SET skill_name = ?2, stable_relative_path = ?3
+                 WHERE id = ?1",
+                params![loser.id, winner.skill_name, winner.stable_relative_path],
+            )
+            .expect("应建立同名内容冲突");
+        let renamed_loser = storage
+            .read_managed_member(&loser.id)
+            .expect("应读取同名 loser");
+        let mount_target = sandbox
+            .path()
+            .join("alternate/.codex/skills")
+            .join(&winner.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            &renamed_loser,
+            MountOperation::Create,
+            "merge-winner-mount",
+            "merge-winner-mount-plan",
+            MountScope::Global,
+            None,
+            &mount_target,
+        );
+        finalize_test_mount_create(
+            &mut storage,
+            "merge-winner-mount-plan",
+            "merge-winner-mount-tx",
+        );
+        storage
+            .forget_terminal_mount_transaction("merge-winner-mount-tx")
+            .expect("应清理 loser Mount 事务");
+        let target = storage
+            .read_source_association_bundle(&initial_target.id)
+            .expect("应读取目标快照");
+        let retiring = storage
+            .read_source_association_bundle(&initial_retiring.id)
+            .expect("应读取同名 retiring 快照");
+        let transaction_id =
+            begin_test_source_association_merge(&mut storage, "mount-winner", &target, &retiring);
+        advance_source_association_to_mounts_applied(&mut storage, &transaction_id);
+        let final_members = target
+            .members
+            .iter()
+            .chain(
+                retiring
+                    .members
+                    .iter()
+                    .filter(|member| member.id != renamed_loser.id),
+            )
+            .map(|member| FinalSourceAssociationMember {
+                member_id: &member.id,
+                skill_name: &member.skill_name,
+                description: &member.description,
+                stable_relative_path: &member.stable_relative_path,
+                content_fingerprint: &member.content_fingerprint,
+            })
+            .collect::<Vec<_>>();
+        let mount_assignments = [FinalSourceAssociationMountAssignment {
+            mount_id: "merge-winner-mount",
+            member_id: &winner.id,
+        }];
+        let source_mappings = [FinalSourceAssociationMemberMapping {
+            source_relative_path: target.members[0]
+                .source_relative_path
+                .as_deref()
+                .expect("winner 应保留 Source mapping"),
+            member_id: &winner.id,
+        }];
+        storage
+            .finalize_source_association_merge(FinalSourceAssociationMerge {
+                transaction_id: &transaction_id,
+                source_id: TEST_GITHUB_SOURCE_ID,
+                expected_target_bundle: &target,
+                expected_retiring_bundle: &retiring,
+                final_current_target: &format!("contents/{transaction_id}"),
+                final_members: &final_members,
+                mount_assignments: &mount_assignments,
+                source_mappings: &source_mappings,
+                now: 150,
+            })
+            .expect("同名 loser Mount 应迁移到 winner");
+        let merged = storage
+            .read_source_association_bundle(&target.id)
+            .expect("应读取 Merge 结果");
+        let moved_mount = merged
+            .members
+            .iter()
+            .find(|member| member.id == winner.id)
+            .and_then(|member| member.mounts.first())
+            .expect("winner 应接收 loser Mount");
+        assert_eq!(moved_mount.member_id, winner.id);
+        assert_eq!(moved_mount.member_fingerprint, winner.content_fingerprint);
+    }
+
+    #[test]
+    fn source_association_merge_validates_final_member_and_current_contract() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (target, retiring) =
+            setup_test_source_association_merge(&mut storage, "final-contract");
+        let winner = &target.members[0];
+
+        validate_test_source_association_merge(
+            &target,
+            &retiring,
+            &[],
+            "contents/merge-validation",
+            &winner.description,
+            &winner.content_fingerprint,
+        )
+        .expect("原成员合同与事务 current 目标应通过");
+        assert!(matches!(
+            validate_test_source_association_merge(
+                &target,
+                &retiring,
+                &[],
+                "contents/merge-validation",
+                "被篡改的描述",
+                &winner.content_fingerprint,
+            ),
+            Err(StorageError::InvalidSourceAssociationPlan)
+        ));
+        assert!(matches!(
+            validate_test_source_association_merge(
+                &target,
+                &retiring,
+                &[],
+                "contents/merge-validation",
+                &winner.description,
+                "sha256:changed",
+            ),
+            Err(StorageError::InvalidSourceAssociationPlan)
+        ));
+        assert!(matches!(
+            validate_test_source_association_merge(
+                &target,
+                &retiring,
+                &[],
+                "contents/other-transaction",
+                &winner.description,
+                &winner.content_fingerprint,
+            ),
+            Err(StorageError::InvalidSourceAssociationPlan)
+        ));
+    }
+
+    #[test]
+    fn source_association_merge_validates_mount_assignment_keys_and_target_basename() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let (target, retiring) =
+            setup_test_source_association_merge(&mut storage, "mount-contract");
+        let winner = &target.members[0];
+
+        let mut duplicate_global_target = target.clone();
+        let mut duplicate_global_retiring = retiring.clone();
+        duplicate_global_retiring.members[0].skill_name = winner.skill_name.clone();
+        duplicate_global_retiring.members[0].stable_relative_path =
+            winner.stable_relative_path.clone();
+        duplicate_global_target.members[0].mounts = vec![test_source_association_mount(
+            "duplicate-global-one",
+            &duplicate_global_target.id,
+            &duplicate_global_target.members[0],
+            MountScope::Global,
+            None,
+            &format!("/one/{}", winner.skill_name),
+        )];
+        duplicate_global_retiring.members[0].mounts = vec![test_source_association_mount(
+            "duplicate-global-two",
+            &duplicate_global_retiring.id,
+            &duplicate_global_retiring.members[0],
+            MountScope::Global,
+            None,
+            &format!("/two/{}", winner.skill_name),
+        )];
+        let duplicate_global_assignments = [
+            FinalSourceAssociationMountAssignment {
+                mount_id: "duplicate-global-one",
+                member_id: &winner.id,
+            },
+            FinalSourceAssociationMountAssignment {
+                mount_id: "duplicate-global-two",
+                member_id: &winner.id,
+            },
+        ];
+        assert!(matches!(
+            validate_test_source_association_merge(
+                &duplicate_global_target,
+                &duplicate_global_retiring,
+                &duplicate_global_assignments,
+                "contents/merge-validation",
+                &winner.description,
+                &winner.content_fingerprint,
+            ),
+            Err(StorageError::InvalidSourceAssociationPlan)
+        ));
+
+        let mut duplicate_project_target = duplicate_global_target.clone();
+        let mut duplicate_project_retiring = duplicate_global_retiring.clone();
+        duplicate_project_target.members[0].mounts[0].scope = MountScope::Project;
+        duplicate_project_target.members[0].mounts[0].project_id = Some("project-one".to_owned());
+        duplicate_project_retiring.members[0].mounts[0].scope = MountScope::Project;
+        duplicate_project_retiring.members[0].mounts[0].project_id = Some("project-one".to_owned());
+        assert!(matches!(
+            validate_test_source_association_merge(
+                &duplicate_project_target,
+                &duplicate_project_retiring,
+                &duplicate_global_assignments,
+                "contents/merge-validation",
+                &winner.description,
+                &winner.content_fingerprint,
+            ),
+            Err(StorageError::InvalidSourceAssociationPlan)
+        ));
+
+        duplicate_project_retiring.members[0].mounts[0].project_id = Some("project-two".to_owned());
+        validate_test_source_association_merge(
+            &duplicate_project_target,
+            &duplicate_project_retiring,
+            &duplicate_global_assignments,
+            "contents/merge-validation",
+            &winner.description,
+            &winner.content_fingerprint,
+        )
+        .expect("同一 member/app 在不同 Project 中各保留一个 Mount 应合法");
+
+        let mut mixed_scope_target = duplicate_global_target.clone();
+        let mut mixed_scope_retiring = duplicate_global_retiring.clone();
+        mixed_scope_retiring.members[0].mounts[0].scope = MountScope::Project;
+        mixed_scope_retiring.members[0].mounts[0].project_id = Some("project-one".to_owned());
+        assert!(matches!(
+            validate_test_source_association_merge(
+                &mixed_scope_target,
+                &mixed_scope_retiring,
+                &duplicate_global_assignments,
+                "contents/merge-validation",
+                &winner.description,
+                &winner.content_fingerprint,
+            ),
+            Err(StorageError::InvalidSourceAssociationPlan)
+        ));
+
+        mixed_scope_target.members[0].mounts.clear();
+        let wrong_member_assignment = [FinalSourceAssociationMountAssignment {
+            mount_id: "duplicate-global-two",
+            member_id: &winner.id,
+        }];
+        mixed_scope_retiring.members[0].skill_name = retiring.members[0].skill_name.clone();
+        mixed_scope_retiring.members[0].stable_relative_path =
+            retiring.members[0].stable_relative_path.clone();
+        mixed_scope_retiring.members[0].mounts[0].skill_name =
+            retiring.members[0].skill_name.clone();
+        mixed_scope_retiring.members[0].mounts[0].target_path =
+            format!("/project/{}", retiring.members[0].skill_name);
+        assert!(matches!(
+            validate_test_source_association_merge(
+                &mixed_scope_target,
+                &mixed_scope_retiring,
+                &wrong_member_assignment,
+                "contents/merge-validation",
+                &winner.description,
+                &winner.content_fingerprint,
+            ),
+            Err(StorageError::InvalidSourceAssociationPlan)
         ));
     }
 

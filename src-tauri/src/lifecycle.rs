@@ -104,6 +104,12 @@ pub enum LifecycleFailpoint {
     HardExitAfterFirstTakeoverRollbackOriginRestoredBeforeProgress,
     HardExitDuringTakeoverCandidateCleanup,
     HardExitDuringFirstTakeoverRecoveryRemoval,
+    AfterSourceAssociationCandidatePrepared,
+    AfterSourceAssociationCandidateDirectoryCreatedBeforeManifest,
+    AfterSourceAssociationCurrentActivated,
+    AfterSourceAssociationMountsApplied,
+    AfterSourceAssociationStateCommitted,
+    AfterSourceAssociationRollbackJournalRemovedBeforeForget,
 }
 
 #[derive(Debug, Error)]

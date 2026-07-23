@@ -33,7 +33,7 @@ use crate::{
     skills_sh::{SkillsShError, search_skills_sh},
     source_association::{
         SourceAssociationError, confirm_source_association_plan, create_source_association_plan,
-        discard_source_association_plan,
+        discard_source_association_plan, recover_pending_source_association_transactions,
     },
     storage::{
         NewGitHubSource, NewSourceCatalogMember, SaveGitHubSourceResult, Storage, StorageError,
@@ -731,6 +731,7 @@ impl SkillYardApplication {
             &plan_id,
             content_choices,
             unix_timestamp_millis(),
+            self.lifecycle_failpoint,
         )?;
         storage
             .read_initial_scan()?
@@ -924,6 +925,12 @@ impl SkillYardApplication {
 
     fn recover_storage(&self, storage: &mut Storage) -> Result<(), ApplicationError> {
         recover_pending_transactions(&self.paths, storage, unix_timestamp_millis())?;
+        recover_pending_source_association_transactions(
+            &self.paths,
+            storage,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
         recover_pending_mount_transactions(&self.paths, storage, unix_timestamp_millis())?;
         recover_pending_batch_mount_transactions(&self.paths, storage, unix_timestamp_millis())?;
         recover_pending_takeover_transactions(
