@@ -42,6 +42,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0011_takeover_transactions.sql"),
     ),
     (12, include_str!("../migrations/0012_github_sources.sql")),
+    (
+        13,
+        include_str!("../migrations/0013_install_bundle_protocol.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -78,6 +82,8 @@ pub enum StorageError {
     SourceNotFound,
     #[error("Source 状态已经变化，请重新加载来源")]
     SourceCatalogStateChanged,
+    #[error("Source 与已关联 Bundle 的持久化状态不一致")]
+    SourceBundleStateConflict,
     #[error("Tracked Ref 变更 Plan 未签发或已经不存在")]
     SourceRefChangePlanNotFound,
     #[error("Tracked Ref 变更 Plan 已经使用，不能重复确认")]
@@ -114,10 +120,12 @@ pub enum StorageError {
     InstallPlanNotFound,
     #[error("安装 Plan 已经使用，不能重复确认")]
     InstallPlanConsumed,
-    #[error("安装 Plan 已过期，请重新选择文件夹")]
+    #[error("安装 Plan 已过期，请重新生成")]
     InstallPlanExpired,
     #[error("安装 Plan 没有可保存的候选成员")]
     EmptyInstallPlanCandidates,
+    #[error("安装 Plan 不符合唯一的 folder/GitHub 安装协议")]
+    InvalidInstallPlan,
     #[error("确认的成员选择不属于当前安装 Plan")]
     InvalidInstallSelection,
     #[error("已有一项生命周期写事务正在执行")]
@@ -199,7 +207,7 @@ pub enum StorageError {
     #[error("Batch Mount Plan 的 Bundle、成员、Project 或目标状态不一致")]
     InvalidBatchMountPlan,
     #[error("相关 Skill 或 Mount 路径正在等待人工恢复，暂时不能修改")]
-    BatchMountObjectBlocked,
+    ManagedObjectBlocked,
     #[error("SQLite 中包含未知 Batch Mount disposition：{0}")]
     UnknownBatchMountDisposition(String),
     #[error("无法保存 Batch Mount Plan：{0}")]
@@ -290,15 +298,22 @@ pub struct SavedLocalRefresh {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredInstallPlan {
     pub id: String,
-    pub input_path: String,
+    pub kind: String,
+    pub install_mode: String,
+    pub input_path: Option<String>,
     pub input_device: u64,
     pub input_inode: u64,
     pub input_fingerprint: String,
+    /// GitHub 快照路径直接指向 repository root，并始终相对 Central Store。
+    pub snapshot_relative_path: Option<String>,
+    pub source_id: Option<String>,
+    pub source_tracked_ref: Option<String>,
+    pub source_catalog_generation: Option<i64>,
+    pub source_commit_sha: Option<String>,
+    pub expected_current_target: Option<String>,
+    pub expected_adopted_commit_sha: Option<String>,
     pub bundle_id: String,
     pub bundle_display_name: String,
-    pub member_id: String,
-    pub skill_name: String,
-    pub _legacy_skill_description: String,
     pub expires_at: i64,
     pub status: String,
     pub candidates: Vec<StoredInstallCandidate>,
@@ -312,6 +327,8 @@ pub struct StoredInstallCandidate {
     pub skill_description: Option<String>,
     pub content_fingerprint: Option<String>,
     pub selectable: bool,
+    /// 已安装成员属于最终完整集合，但不能再次作为用户选择提交。
+    pub preserve_existing: bool,
     pub validation_errors: Vec<String>,
     pub warnings: Vec<String>,
     pub default_selected: bool,
@@ -320,15 +337,21 @@ pub struct StoredInstallCandidate {
 
 pub struct NewInstallPlan<'a> {
     pub id: &'a str,
-    pub input_path: &'a str,
+    pub kind: &'a str,
+    pub install_mode: &'a str,
+    pub input_path: Option<&'a str>,
     pub input_device: u64,
     pub input_inode: u64,
     pub input_fingerprint: &'a str,
+    pub snapshot_relative_path: Option<&'a str>,
+    pub source_id: Option<&'a str>,
+    pub source_tracked_ref: Option<&'a str>,
+    pub source_catalog_generation: Option<i64>,
+    pub source_commit_sha: Option<&'a str>,
+    pub expected_current_target: Option<&'a str>,
+    pub expected_adopted_commit_sha: Option<&'a str>,
     pub bundle_id: &'a str,
     pub bundle_display_name: &'a str,
-    pub member_id: &'a str,
-    pub skill_name: &'a str,
-    pub skill_description: &'a str,
     pub warnings: &'a [String],
     pub candidates: &'a [NewInstallCandidate<'a>],
     pub created_at: i64,
@@ -342,9 +365,32 @@ pub struct NewInstallCandidate<'a> {
     pub skill_description: Option<&'a str>,
     pub content_fingerprint: Option<&'a str>,
     pub selectable: bool,
+    pub preserve_existing: bool,
     pub validation_errors: &'a [String],
     pub warnings: &'a [String],
     pub default_selected: bool,
+}
+
+/// SQLite 回调只负责读取原始值，组合协议在离开回调后统一验证。
+struct RawStoredInstallPlan {
+    id: String,
+    kind: String,
+    install_mode: String,
+    input_path: Option<String>,
+    input_device: i64,
+    input_inode: i64,
+    input_fingerprint: String,
+    snapshot_relative_path: Option<String>,
+    source_id: Option<String>,
+    source_tracked_ref: Option<String>,
+    source_catalog_generation: Option<i64>,
+    source_commit_sha: Option<String>,
+    expected_current_target: Option<String>,
+    expected_adopted_commit_sha: Option<String>,
+    bundle_id: String,
+    bundle_display_name: String,
+    expires_at: i64,
+    status: String,
 }
 
 pub struct NewGitHubSource<'a> {
@@ -372,6 +418,51 @@ pub struct StoredGithubSource {
     pub repository: String,
     pub display_name: String,
     pub tracked_ref: String,
+}
+
+/// Lifecycle 组 Plan 时只接收同一个 SQLite 快照中的 Fresh Catalog 与本地关联状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGithubInstallSource {
+    pub id: String,
+    pub owner: String,
+    pub repository: String,
+    pub display_name: String,
+    pub tracked_ref: String,
+    pub catalog_generation: i64,
+    pub catalog_commit_sha: String,
+    pub catalog_members: Vec<StoredGithubInstallCatalogMember>,
+    pub bundle: Option<StoredGithubInstallBundle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGithubInstallCatalogMember {
+    pub id: String,
+    pub relative_path: String,
+    pub skill_name: Option<String>,
+    pub description: Option<String>,
+    pub content_fingerprint: Option<String>,
+    pub selectable: bool,
+    pub validation_errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGithubInstallBundle {
+    pub id: String,
+    pub display_name: String,
+    pub current_target: String,
+    pub adopted_commit_sha: Option<String>,
+    pub members: Vec<StoredGithubInstallBundleMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGithubInstallBundleMember {
+    pub id: String,
+    pub skill_name: String,
+    pub description: String,
+    pub stable_relative_path: String,
+    pub content_fingerprint: String,
+    pub source_relative_path: String,
 }
 
 pub struct NewSourceCatalogMember<'a> {
@@ -1276,6 +1367,20 @@ impl Storage {
             .ok_or(StorageError::SourceNotFound)
     }
 
+    pub fn read_github_install_source(
+        &mut self,
+        source_id: &str,
+    ) -> Result<StoredGithubInstallSource, StorageError> {
+        // Source、Catalog、Bundle 与成员关系必须来自同一个读快照。
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(StorageError::ReadSources)?;
+        let source = read_github_install_source_from(&transaction, source_id)?;
+        transaction.commit().map_err(StorageError::ReadSources)?;
+        Ok(source)
+    }
+
     /// Catalog 成功结果整体替换；旧成员与 Source 状态不会在事务中间对外可见。
     pub fn save_source_catalog_success(
         &mut self,
@@ -1851,6 +1956,14 @@ impl Storage {
         mount_object_is_blocked(&self.connection, member_id, target_path)
     }
 
+    pub(crate) fn github_install_object_is_blocked(
+        &self,
+        source_id: &str,
+        bundle_id: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        bundle_or_source_write_is_blocked(&self.connection, bundle_id, Some(source_id))
+    }
+
     pub(crate) fn save_mount_plan(&mut self, plan: NewMountPlan<'_>) -> Result<(), StorageError> {
         validate_new_mount_plan_shape(&plan)?;
         let transaction = self
@@ -2266,7 +2379,7 @@ impl Storage {
             if item.disposition == BatchMountDisposition::Ready
                 && mount_object_is_blocked(&transaction, item.member_id, item.target_path)?
             {
-                return Err(StorageError::BatchMountObjectBlocked);
+                return Err(StorageError::ManagedObjectBlocked);
             }
             let project_snapshot = item
                 .project_id
@@ -2680,30 +2793,46 @@ impl Storage {
     }
 
     pub fn save_install_plan(&mut self, plan: NewInstallPlan<'_>) -> Result<(), StorageError> {
-        if plan.candidates.is_empty() {
-            return Err(StorageError::EmptyInstallPlanCandidates);
-        }
+        validate_new_install_plan_contract(&plan)?;
         let warnings =
             serde_json::to_string(plan.warnings).map_err(StorageError::InvalidPlanWarnings)?;
+        let input_device =
+            i64::try_from(plan.input_device).map_err(|_| StorageError::InvalidInstallPlan)?;
+        let input_inode =
+            i64::try_from(plan.input_inode).map_err(|_| StorageError::InvalidInstallPlan)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveInstallPlan)?;
         transaction
             .execute(
-                "INSERT INTO install_plans (id, kind, input_path, input_device, input_inode, input_fingerprint, bundle_id, bundle_display_name, member_id, skill_name, skill_description, warnings_json, created_at, expires_at, status)
-                 VALUES (?1, 'folder_snapshot', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending')",
+                "INSERT INTO install_plans (
+                    id, kind, install_mode, input_path, input_device, input_inode,
+                    input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
+                    source_catalog_generation, source_commit_sha, expected_current_target,
+                    expected_adopted_commit_sha, bundle_id, bundle_display_name,
+                    warnings_json, created_at, expires_at, status
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?18, ?19, 'pending'
+                 )",
                 params![
                     plan.id,
+                    plan.kind,
+                    plan.install_mode,
                     plan.input_path,
-                    plan.input_device as i64,
-                    plan.input_inode as i64,
+                    input_device,
+                    input_inode,
                     plan.input_fingerprint,
+                    plan.snapshot_relative_path,
+                    plan.source_id,
+                    plan.source_tracked_ref,
+                    plan.source_catalog_generation,
+                    plan.source_commit_sha,
+                    plan.expected_current_target,
+                    plan.expected_adopted_commit_sha,
                     plan.bundle_id,
                     plan.bundle_display_name,
-                    plan.member_id,
-                    plan.skill_name,
-                    plan.skill_description,
                     warnings,
                     plan.created_at,
                     plan.expires_at
@@ -2720,9 +2849,11 @@ impl Storage {
                     "INSERT INTO install_plan_candidates (
                         plan_id, candidate_id, source_relative_path, skill_name,
                         skill_description, content_fingerprint, selectable,
-                        validation_errors_json, warnings_json, default_selected,
-                        selected, sort_order
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)",
+                        preserve_existing, validation_errors_json, warnings_json,
+                        default_selected, selected, sort_order
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12
+                     )",
                     params![
                         plan.id,
                         candidate.candidate_id,
@@ -2731,6 +2862,7 @@ impl Storage {
                         candidate.skill_description,
                         candidate.content_fingerprint,
                         i64::from(candidate.selectable),
+                        i64::from(candidate.preserve_existing),
                         validation_errors,
                         candidate_warnings,
                         i64::from(candidate.default_selected),
@@ -2739,11 +2871,91 @@ impl Storage {
                 )
                 .map_err(StorageError::SaveInstallPlan)?;
         }
+        let stored = read_install_plan_from(&transaction, plan.id)?
+            .ok_or(StorageError::InvalidInstallPlan)?;
+        validate_install_plan_source_contract(&transaction, &stored)?;
         transaction.commit().map_err(StorageError::SaveInstallPlan)
     }
 
     pub fn read_install_plan(&self, plan_id: &str) -> Result<StoredInstallPlan, StorageError> {
         read_install_plan_from(&self.connection, plan_id)?.ok_or(StorageError::InstallPlanNotFound)
+    }
+
+    pub fn read_expired_pending_install_plans(
+        &self,
+        now: i64,
+    ) -> Result<Vec<StoredInstallPlan>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id FROM install_plans
+                 WHERE status = 'pending'
+                   AND kind = 'github_snapshot'
+                   AND expires_at <= ?1
+                 ORDER BY created_at, id",
+            )
+            .map_err(StorageError::ReadInstallPlan)?;
+        let ids = statement
+            .query_map([now], |row| row.get::<_, String>(0))
+            .map_err(StorageError::ReadInstallPlan)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadInstallPlan)?;
+        ids.into_iter()
+            .map(|id| {
+                read_install_plan_from(&self.connection, &id)?
+                    .ok_or(StorageError::InstallPlanNotFound)
+            })
+            .collect()
+    }
+
+    pub fn read_pending_github_install_plans_for_source(
+        &self,
+        source_id: &str,
+    ) -> Result<Vec<StoredInstallPlan>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id FROM install_plans
+                 WHERE status = 'pending'
+                   AND kind = 'github_snapshot'
+                   AND source_id = ?1
+                 ORDER BY created_at, id",
+            )
+            .map_err(StorageError::ReadInstallPlan)?;
+        let ids = statement
+            .query_map([source_id], |row| row.get::<_, String>(0))
+            .map_err(StorageError::ReadInstallPlan)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadInstallPlan)?;
+        ids.into_iter()
+            .map(|id| {
+                read_install_plan_from(&self.connection, &id)?
+                    .ok_or(StorageError::InstallPlanNotFound)
+            })
+            .collect()
+    }
+
+    /// 只删除尚未进入生命周期事务的失效 Plan；快照内容由 Lifecycle 先安全清理。
+    pub fn discard_pending_install_plan(&mut self, plan_id: &str) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveInstallPlan)?;
+        let deleted = transaction
+            .execute(
+                "DELETE FROM install_plans
+                 WHERE id = ?1
+                   AND status = 'pending'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM lifecycle_transactions WHERE plan_id = ?1
+                   )",
+                [plan_id],
+            )
+            .map_err(StorageError::SaveInstallPlan)?;
+        if deleted != 1 {
+            return Err(StorageError::InstallPlanConsumed);
+        }
+        transaction.commit().map_err(StorageError::SaveInstallPlan)
     }
 
     #[cfg(test)]
@@ -2790,20 +3002,32 @@ impl Storage {
         if plan.expires_at <= now {
             return Err(StorageError::InstallPlanExpired);
         }
+        validate_install_plan_source_contract(&transaction, &plan)?;
+        if bundle_or_source_write_is_blocked(
+            &transaction,
+            Some(&plan.bundle_id),
+            plan.source_id.as_deref(),
+        )? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
         let selected = selected_candidate_ids.iter().collect::<BTreeSet<_>>();
         if selected.is_empty() || selected.len() != selected_candidate_ids.len() {
             return Err(StorageError::InvalidInstallSelection);
         }
         if selected.iter().any(|candidate_id| {
             !plan.candidates.iter().any(|candidate| {
-                candidate.selectable && candidate.candidate_id.as_str() == candidate_id.as_str()
+                candidate.selectable
+                    && !candidate.preserve_existing
+                    && candidate.candidate_id.as_str() == candidate_id.as_str()
             })
         }) {
             return Err(StorageError::InvalidInstallSelection);
         }
         transaction
             .execute(
-                "UPDATE install_plan_candidates SET selected = 0 WHERE plan_id = ?1",
+                "UPDATE install_plan_candidates
+                 SET selected = preserve_existing
+                 WHERE plan_id = ?1",
                 [&plan.id],
             )
             .map_err(StorageError::SaveLifecycleTransaction)?;
@@ -2821,14 +3045,16 @@ impl Storage {
         let anchor_member_id = plan
             .candidates
             .iter()
-            .find(|candidate| selected.contains(&candidate.candidate_id))
+            .find(|candidate| {
+                candidate.preserve_existing || selected.contains(&candidate.candidate_id)
+            })
             .expect("前面已拒绝空选择")
             .candidate_id
             .as_str();
         let inserted = transaction
             .execute(
                 "INSERT INTO lifecycle_transactions (id, kind, plan_id, bundle_id, member_id, journal_path, phase, status, created_at, updated_at)
-                 VALUES (?1, 'install_folder', ?2, ?3, ?4, ?5, 'journal_pending', 'in_progress', ?6, ?6)",
+                 VALUES (?1, 'install_bundle', ?2, ?3, ?4, ?5, 'journal_pending', 'in_progress', ?6, ?6)",
                 params![
                     transaction_id,
                     plan.id,
@@ -2850,7 +3076,8 @@ impl Storage {
         // 返回这次 SQLite 事务实际确认的内存快照，避免提交后第三次读取引入新的竞态窗口。
         plan.status = "consumed".to_owned();
         for candidate in &mut plan.candidates {
-            candidate.selected = selected.contains(&candidate.candidate_id);
+            candidate.selected =
+                candidate.preserve_existing || selected.contains(&candidate.candidate_id);
         }
         transaction
             .commit()
@@ -2986,52 +3213,35 @@ impl Storage {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveManagedBundle)?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO bundles (id, display_name, managed_directory, current_target, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    plan.bundle_id,
-                    plan.bundle_display_name,
-                    managed_directory,
-                    current_target,
-                    now
-                ],
-            )
-            .map_err(StorageError::SaveManagedBundle)?;
-        for candidate in &selected {
-            let skill_name = candidate
-                .skill_name
-                .as_deref()
-                .ok_or(StorageError::InvalidInstallSelection)?;
-            let description = candidate
-                .skill_description
-                .as_deref()
-                .ok_or(StorageError::InvalidInstallSelection)?;
-            let fingerprint = candidate
-                .content_fingerprint
-                .as_deref()
-                .ok_or(StorageError::InvalidInstallSelection)?;
-            let stable_path = format!("members/{skill_name}");
-            transaction
-                .execute(
-                    "INSERT OR IGNORE INTO skill_members (id, bundle_id, skill_name, description, stable_relative_path, content_fingerprint, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        candidate.candidate_id,
-                        plan.bundle_id,
-                        skill_name,
-                        description,
-                        stable_path,
-                        fingerprint,
-                        now
-                    ],
-                )
-                .map_err(StorageError::SaveManagedBundle)?;
-            transaction
-                .execute(
-                    "INSERT OR IGNORE INTO member_selections (bundle_id, member_id, selected_at) VALUES (?1, ?2, ?3)",
-                    params![plan.bundle_id, candidate.candidate_id, now],
-                )
-                .map_err(StorageError::SaveManagedBundle)?;
+        let persisted_plan = read_install_plan_from(&transaction, &plan.id)?
+            .ok_or_else(|| StorageError::LifecycleStateConflict(transaction_id.to_owned()))?;
+        if persisted_plan != *plan {
+            return Err(StorageError::ManagedStateConflict);
+        }
+        ensure_install_transaction_can_finalize(
+            &transaction,
+            transaction_id,
+            plan,
+            &anchor.candidate_id,
+        )?;
+        match plan.install_mode.as_str() {
+            "create" => finalize_install_create_rows(
+                &transaction,
+                plan,
+                &selected,
+                managed_directory,
+                current_target,
+                now,
+            )?,
+            "supplement" => finalize_install_supplement_rows(
+                &transaction,
+                plan,
+                &selected,
+                managed_directory,
+                current_target,
+                now,
+            )?,
+            _ => return Err(StorageError::InvalidInstallPlan),
         }
         ensure_managed_state_matches(
             &transaction,
@@ -3040,11 +3250,13 @@ impl Storage {
             managed_directory,
             current_target,
         )?;
+        ensure_source_install_state_matches(&transaction, plan, &selected)?;
         let changed = transaction
             .execute(
                 "UPDATE lifecycle_transactions
                  SET phase = 'state_committed', status = 'completed', updated_at = ?5
                  WHERE id = ?1
+                   AND kind = 'install_bundle'
                    AND plan_id = ?2
                    AND bundle_id = ?3
                    AND member_id = ?4
@@ -3139,6 +3351,23 @@ impl Storage {
             ));
         }
         Ok(safe_rows)
+    }
+
+    /// Notice 只展示 Source 的稳定发布页；Catalog 与错误详情仍以 SQLite 为准。
+    pub fn source_notice_rows(&self) -> Result<Vec<(String, String)>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT display_name, repository_url
+                 FROM sources
+                 ORDER BY sort_order, id",
+            )
+            .map_err(StorageError::ReadSources)?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(StorageError::ReadSources)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadSources)
     }
 
     fn with_managed_entries(
@@ -3656,7 +3885,7 @@ fn validate_mount_plan_state(
         return Err(StorageError::InvalidMountPlan);
     }
     if mount_object_is_blocked(connection, member_id, target_path)? {
-        return Err(StorageError::BatchMountObjectBlocked);
+        return Err(StorageError::ManagedObjectBlocked);
     }
     match (scope, project_id) {
         (MountScope::Global, None) => {}
@@ -3753,11 +3982,101 @@ fn validate_stored_mount_plan_state(
     )
 }
 
+/// 人工恢复按 Source／Bundle 隔离写操作；其他 Bundle 仍可正常使用。
+fn bundle_or_source_write_is_blocked(
+    connection: &Connection,
+    bundle_id: Option<&str>,
+    source_id: Option<&str>,
+) -> Result<bool, StorageError> {
+    connection
+        .query_row(
+            "SELECT
+                EXISTS(
+                    SELECT 1
+                    FROM lifecycle_transactions AS lifecycle
+                    JOIN install_plans AS plan ON plan.id = lifecycle.plan_id
+                    WHERE lifecycle.status = 'blocked'
+                      AND (
+                        (?1 IS NOT NULL AND lifecycle.bundle_id = ?1)
+                        OR (?2 IS NOT NULL AND plan.source_id = ?2)
+                      )
+                )
+                OR EXISTS(
+                    SELECT 1
+                    FROM mount_transactions AS mount_tx
+                    JOIN mount_plans AS mount_plan ON mount_plan.id = mount_tx.plan_id
+                    JOIN skill_members AS member ON member.id = mount_plan.member_id
+                    WHERE mount_tx.status = 'blocked'
+                      AND ?1 IS NOT NULL
+                      AND member.bundle_id = ?1
+                )
+                OR EXISTS(
+                    SELECT 1
+                    FROM batch_mount_transactions AS batch_tx
+                    WHERE batch_tx.status = 'blocked'
+                      AND ?1 IS NOT NULL
+                      AND batch_tx.bundle_id = ?1
+                )
+                OR EXISTS(
+                    SELECT 1
+                    FROM takeover_transactions AS takeover_tx
+                    WHERE takeover_tx.status = 'blocked'
+                      AND ?1 IS NOT NULL
+                      AND takeover_tx.bundle_id = ?1
+                )",
+            params![bundle_id, source_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadRecoveryIssues)
+}
+
 fn mount_object_is_blocked(
     connection: &Connection,
     member_id: &str,
     target_path: &str,
 ) -> Result<bool, StorageError> {
+    let bundle_id = connection
+        .query_row(
+            "SELECT bundle_id FROM skill_members WHERE id = ?1",
+            [member_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(StorageError::ReadManagedMember)?;
+    let install_is_blocked = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM lifecycle_transactions
+                WHERE status = 'blocked'
+                  AND ?1 IS NOT NULL
+                  AND bundle_id = ?1
+             )",
+            [bundle_id.as_deref()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadLifecycleTransaction)?;
+    if install_is_blocked {
+        return Ok(true);
+    }
+
+    let mount_is_blocked = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM mount_transactions AS mount_tx
+                JOIN mount_plans AS plan ON plan.id = mount_tx.plan_id
+                WHERE mount_tx.status = 'blocked'
+                  AND (plan.member_id = ?1 OR plan.target_path = ?2)
+             )",
+            params![member_id, target_path],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadMountTransaction)?;
+    if mount_is_blocked {
+        return Ok(true);
+    }
+
     let batch_is_blocked = connection
         .query_row(
             "SELECT EXISTS(
@@ -3900,7 +4219,7 @@ fn validate_batch_ready_item_state(
         return Err(StorageError::InvalidBatchMountPlan);
     }
     if mount_object_is_blocked(connection, &item.member_id, &item.target_path)? {
-        return Err(StorageError::BatchMountObjectBlocked);
+        return Err(StorageError::ManagedObjectBlocked);
     }
     match item.scope {
         MountScope::Global => {
@@ -4698,6 +5017,306 @@ fn complete_mount_transaction(
     ensure_one_mount_row(changed, transaction_id)
 }
 
+fn validate_new_install_plan_contract(plan: &NewInstallPlan<'_>) -> Result<(), StorageError> {
+    if plan.candidates.is_empty() {
+        return Err(StorageError::EmptyInstallPlanCandidates);
+    }
+    validate_install_plan_shape(
+        plan.kind,
+        plan.install_mode,
+        plan.input_path,
+        plan.snapshot_relative_path,
+        plan.source_id,
+        plan.source_tracked_ref,
+        plan.source_catalog_generation,
+        plan.source_commit_sha,
+        plan.expected_current_target,
+        plan.expected_adopted_commit_sha,
+        plan.id,
+        plan.bundle_id,
+        plan.bundle_display_name,
+    )?;
+    if plan.candidates.iter().any(|candidate| {
+        !valid_install_candidate_shape(
+            plan.kind,
+            plan.install_mode,
+            candidate.candidate_id,
+            candidate.source_relative_path,
+            candidate.skill_name,
+            candidate.skill_description,
+            candidate.content_fingerprint,
+            candidate.selectable,
+            candidate.preserve_existing,
+            candidate.default_selected,
+            candidate.default_selected,
+        )
+    }) {
+        return Err(StorageError::InvalidInstallPlan);
+    }
+    Ok(())
+}
+
+fn validate_stored_install_plan_contract(plan: &StoredInstallPlan) -> Result<(), StorageError> {
+    validate_install_plan_shape(
+        &plan.kind,
+        &plan.install_mode,
+        plan.input_path.as_deref(),
+        plan.snapshot_relative_path.as_deref(),
+        plan.source_id.as_deref(),
+        plan.source_tracked_ref.as_deref(),
+        plan.source_catalog_generation,
+        plan.source_commit_sha.as_deref(),
+        plan.expected_current_target.as_deref(),
+        plan.expected_adopted_commit_sha.as_deref(),
+        &plan.id,
+        &plan.bundle_id,
+        &plan.bundle_display_name,
+    )?;
+    if !matches!(plan.status.as_str(), "pending" | "consumed")
+        || plan.candidates.is_empty()
+        || plan.candidates.iter().any(|candidate| {
+            !valid_install_candidate_shape(
+                &plan.kind,
+                &plan.install_mode,
+                &candidate.candidate_id,
+                &candidate.source_relative_path,
+                candidate.skill_name.as_deref(),
+                candidate.skill_description.as_deref(),
+                candidate.content_fingerprint.as_deref(),
+                candidate.selectable,
+                candidate.preserve_existing,
+                candidate.default_selected,
+                candidate.selected,
+            )
+        })
+    {
+        return Err(StorageError::InvalidInstallPlan);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_install_plan_shape(
+    kind: &str,
+    install_mode: &str,
+    input_path: Option<&str>,
+    snapshot_relative_path: Option<&str>,
+    source_id: Option<&str>,
+    source_tracked_ref: Option<&str>,
+    source_catalog_generation: Option<i64>,
+    source_commit_sha: Option<&str>,
+    expected_current_target: Option<&str>,
+    expected_adopted_commit_sha: Option<&str>,
+    plan_id: &str,
+    bundle_id: &str,
+    bundle_display_name: &str,
+) -> Result<(), StorageError> {
+    let common_is_valid = is_single_path_component(plan_id)
+        && is_single_path_component(bundle_id)
+        && !bundle_display_name.trim().is_empty();
+    let source_values_are_absent = source_id.is_none()
+        && source_tracked_ref.is_none()
+        && source_catalog_generation.is_none()
+        && source_commit_sha.is_none()
+        && expected_current_target.is_none()
+        && expected_adopted_commit_sha.is_none();
+    let folder_is_valid = kind == "folder_snapshot"
+        && install_mode == "create"
+        && input_path.is_some_and(is_normalized_absolute_path)
+        && snapshot_relative_path.is_none()
+        && source_values_are_absent;
+    let github_source_is_valid = source_id.is_some_and(is_single_path_component)
+        && source_tracked_ref.is_some_and(|value| !value.is_empty())
+        && source_catalog_generation.is_some_and(|generation| generation > 0)
+        && source_commit_sha.is_some_and(|value| !value.is_empty())
+        && snapshot_relative_path.is_some_and(is_normalized_relative_path)
+        && input_path.is_none();
+    let github_mode_is_valid = match install_mode {
+        "create" => expected_current_target.is_none() && expected_adopted_commit_sha.is_none(),
+        "supplement" => {
+            expected_current_target.is_some_and(is_safe_current_target)
+                && expected_adopted_commit_sha.is_none_or(|value| !value.is_empty())
+        }
+        _ => false,
+    };
+    if common_is_valid
+        && (folder_is_valid
+            || (kind == "github_snapshot" && github_source_is_valid && github_mode_is_valid))
+    {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidInstallPlan)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn valid_install_candidate_shape(
+    plan_kind: &str,
+    install_mode: &str,
+    candidate_id: &str,
+    source_relative_path: &str,
+    skill_name: Option<&str>,
+    skill_description: Option<&str>,
+    content_fingerprint: Option<&str>,
+    selectable: bool,
+    preserve_existing: bool,
+    default_selected: bool,
+    selected: bool,
+) -> bool {
+    let metadata_is_complete = skill_name.is_some_and(is_single_path_component)
+        && skill_description.is_some()
+        && content_fingerprint.is_some_and(|value| !value.is_empty());
+    let source_path_is_valid =
+        source_relative_path.is_empty() || is_normalized_relative_path(source_relative_path);
+    is_single_path_component(candidate_id)
+        && source_path_is_valid
+        && (!selectable || metadata_is_complete)
+        && (!preserve_existing
+            || (plan_kind == "github_snapshot"
+                && install_mode == "supplement"
+                && !selectable
+                && default_selected
+                && selected
+                && metadata_is_complete))
+        && (!default_selected || selectable || preserve_existing)
+        && (!selected || selectable || preserve_existing)
+}
+
+fn validate_install_plan_source_contract(
+    connection: &Connection,
+    plan: &StoredInstallPlan,
+) -> Result<(), StorageError> {
+    if plan.kind == "folder_snapshot" {
+        return if plan
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.preserve_existing)
+        {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidInstallPlan)
+        };
+    }
+
+    let source_id = plan
+        .source_id
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallPlan)?;
+    let source = read_github_install_source_from(connection, source_id)?;
+    if plan.source_tracked_ref.as_deref() != Some(source.tracked_ref.as_str())
+        || plan.source_catalog_generation != Some(source.catalog_generation)
+        || plan.source_commit_sha.as_deref() != Some(source.catalog_commit_sha.as_str())
+    {
+        return Err(StorageError::SourceCatalogStateChanged);
+    }
+
+    let bundle = match plan.install_mode.as_str() {
+        "create" => {
+            let bundle_exists = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM bundles WHERE id = ?1)",
+                    [&plan.bundle_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(StorageError::ReadSources)?;
+            if source.bundle.is_some() || bundle_exists {
+                return Err(StorageError::SourceBundleStateConflict);
+            }
+            None
+        }
+        "supplement" => {
+            let bundle = source
+                .bundle
+                .as_ref()
+                .ok_or(StorageError::SourceBundleStateConflict)?;
+            if bundle.id != plan.bundle_id
+                || bundle.display_name != plan.bundle_display_name
+                || Some(bundle.current_target.as_str()) != plan.expected_current_target.as_deref()
+                || bundle.adopted_commit_sha != plan.expected_adopted_commit_sha
+            {
+                return Err(StorageError::SourceBundleStateConflict);
+            }
+            validate_preserved_install_members(plan, bundle)?;
+            Some(bundle)
+        }
+        _ => return Err(StorageError::InvalidInstallPlan),
+    };
+    validate_github_install_candidates(plan, &source.catalog_members, bundle)
+}
+
+fn validate_preserved_install_members(
+    plan: &StoredInstallPlan,
+    bundle: &StoredGithubInstallBundle,
+) -> Result<(), StorageError> {
+    let preserved = plan
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.preserve_existing)
+        .map(|candidate| (candidate.candidate_id.as_str(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    if preserved.len() != bundle.members.len() {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    for member in &bundle.members {
+        let candidate = preserved
+            .get(member.id.as_str())
+            .ok_or(StorageError::SourceBundleStateConflict)?;
+        if candidate.source_relative_path != member.source_relative_path
+            || candidate.skill_name.as_deref() != Some(member.skill_name.as_str())
+            || candidate.skill_description.as_deref() != Some(member.description.as_str())
+            || candidate.content_fingerprint.as_deref() != Some(member.content_fingerprint.as_str())
+            || candidate.selectable
+            || !candidate.default_selected
+            || !candidate.selected
+        {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+    }
+    Ok(())
+}
+
+fn validate_github_install_candidates(
+    plan: &StoredInstallPlan,
+    catalog_members: &[StoredGithubInstallCatalogMember],
+    bundle: Option<&StoredGithubInstallBundle>,
+) -> Result<(), StorageError> {
+    let existing_paths = bundle
+        .into_iter()
+        .flat_map(|bundle| bundle.members.iter())
+        .map(|member| member.source_relative_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let candidates = plan
+        .candidates
+        .iter()
+        .filter(|candidate| !candidate.preserve_existing)
+        .map(|candidate| (candidate.source_relative_path.as_str(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    let expected = catalog_members
+        .iter()
+        .filter(|member| !existing_paths.contains(member.relative_path.as_str()))
+        .collect::<Vec<_>>();
+    if candidates.len() != expected.len() {
+        return Err(StorageError::InvalidInstallPlan);
+    }
+    for member in expected {
+        let candidate = candidates
+            .get(member.relative_path.as_str())
+            .ok_or(StorageError::InvalidInstallPlan)?;
+        if candidate.candidate_id != member.id
+            || candidate.skill_name != member.skill_name
+            || candidate.skill_description != member.description
+            || candidate.content_fingerprint != member.content_fingerprint
+            || candidate.selectable != member.selectable
+            || candidate.validation_errors != member.validation_errors
+            || candidate.warnings != member.warnings
+            || candidate.default_selected != member.selectable
+        {
+            return Err(StorageError::InvalidInstallPlan);
+        }
+    }
+    Ok(())
+}
+
 fn validate_managed_install_paths(
     transaction_id: &str,
     plan: &StoredInstallPlan,
@@ -4711,7 +5330,7 @@ fn validate_managed_install_paths(
         .and_then(|candidate| candidate.skill_name.as_deref())
         .ok_or(StorageError::InvalidInstallSelection)?;
     let members_are_safe = selected.iter().all(|candidate| {
-        candidate.selectable
+        (candidate.selectable || candidate.preserve_existing)
             && candidate
                 .skill_name
                 .as_deref()
@@ -4742,7 +5361,14 @@ fn selected_install_candidates(
         .iter()
         .filter(|candidate| candidate.selected)
         .collect::<Vec<_>>();
-    if selected.is_empty() || selected.iter().any(|candidate| !candidate.selectable) {
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|candidate| !candidate.selectable && !candidate.preserve_existing)
+        || !selected
+            .iter()
+            .any(|candidate| candidate.selectable && !candidate.preserve_existing)
+    {
         Err(StorageError::InvalidInstallSelection)
     } else {
         Ok(selected)
@@ -5269,60 +5895,70 @@ fn read_install_plan_from(
 ) -> Result<Option<StoredInstallPlan>, StorageError> {
     let row = connection
         .query_row(
-            "SELECT id, input_path, input_device, input_inode, input_fingerprint, bundle_id, bundle_display_name, member_id, skill_name, skill_description, expires_at, status FROM install_plans WHERE id = ?1",
+            "SELECT
+                id, kind, install_mode, input_path, input_device, input_inode,
+                input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
+                source_catalog_generation, source_commit_sha, expected_current_target,
+                expected_adopted_commit_sha, bundle_id, bundle_display_name, expires_at, status
+             FROM install_plans
+             WHERE id = ?1",
             [plan_id],
             |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, String>(11)?,
-                ))
+                Ok(RawStoredInstallPlan {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    install_mode: row.get(2)?,
+                    input_path: row.get(3)?,
+                    input_device: row.get(4)?,
+                    input_inode: row.get(5)?,
+                    input_fingerprint: row.get(6)?,
+                    snapshot_relative_path: row.get(7)?,
+                    source_id: row.get(8)?,
+                    source_tracked_ref: row.get(9)?,
+                    source_catalog_generation: row.get(10)?,
+                    source_commit_sha: row.get(11)?,
+                    expected_current_target: row.get(12)?,
+                    expected_adopted_commit_sha: row.get(13)?,
+                    bundle_id: row.get(14)?,
+                    bundle_display_name: row.get(15)?,
+                    expires_at: row.get(16)?,
+                    status: row.get(17)?,
+                })
             },
         )
         .optional()
         .map_err(StorageError::ReadInstallPlan)?;
-    let Some((
-        id,
-        input_path,
-        input_device,
-        input_inode,
-        input_fingerprint,
-        bundle_id,
-        bundle_display_name,
-        member_id,
-        skill_name,
-        skill_description,
-        expires_at,
-        status,
-    )) = row
-    else {
+    let Some(row) = row else {
         return Ok(None);
     };
-    let candidates = read_install_candidates_from(connection, &id)?;
-    Ok(Some(StoredInstallPlan {
-        id,
-        input_path,
-        input_device: input_device as u64,
-        input_inode: input_inode as u64,
-        input_fingerprint,
-        bundle_id,
-        bundle_display_name,
-        member_id,
-        skill_name,
-        _legacy_skill_description: skill_description,
-        expires_at,
-        status,
+    let input_device =
+        u64::try_from(row.input_device).map_err(|_| StorageError::InvalidInstallPlan)?;
+    let input_inode =
+        u64::try_from(row.input_inode).map_err(|_| StorageError::InvalidInstallPlan)?;
+    let candidates = read_install_candidates_from(connection, &row.id)?;
+    let plan = StoredInstallPlan {
+        id: row.id,
+        kind: row.kind,
+        install_mode: row.install_mode,
+        input_path: row.input_path,
+        input_device,
+        input_inode,
+        input_fingerprint: row.input_fingerprint,
+        snapshot_relative_path: row.snapshot_relative_path,
+        source_id: row.source_id,
+        source_tracked_ref: row.source_tracked_ref,
+        source_catalog_generation: row.source_catalog_generation,
+        source_commit_sha: row.source_commit_sha,
+        expected_current_target: row.expected_current_target,
+        expected_adopted_commit_sha: row.expected_adopted_commit_sha,
+        bundle_id: row.bundle_id,
+        bundle_display_name: row.bundle_display_name,
+        expires_at: row.expires_at,
+        status: row.status,
         candidates,
-    }))
+    };
+    validate_stored_install_plan_contract(&plan)?;
+    Ok(Some(plan))
 }
 
 fn read_install_candidates_from(
@@ -5332,8 +5968,8 @@ fn read_install_candidates_from(
     let mut statement = connection
         .prepare(
             "SELECT candidate_id, source_relative_path, skill_name, skill_description,
-                    content_fingerprint, selectable, validation_errors_json, warnings_json,
-                    default_selected, selected
+                    content_fingerprint, selectable, preserve_existing,
+                    validation_errors_json, warnings_json, default_selected, selected
              FROM install_plan_candidates
              WHERE plan_id = ?1
              ORDER BY sort_order",
@@ -5348,10 +5984,11 @@ fn read_install_candidates_from(
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, i64>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, i64>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, i64>(8)?,
+                row.get::<_, String>(8)?,
                 row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
             ))
         })
         .map_err(StorageError::ReadInstallPlan)?;
@@ -5364,6 +6001,7 @@ fn read_install_candidates_from(
             skill_description,
             content_fingerprint,
             selectable,
+            preserve_existing,
             validation_errors_json,
             warnings_json,
             default_selected,
@@ -5376,6 +6014,7 @@ fn read_install_candidates_from(
             skill_description,
             content_fingerprint,
             selectable: sqlite_bool(selectable)?,
+            preserve_existing: sqlite_bool(preserve_existing)?,
             validation_errors: serde_json::from_str(&validation_errors_json)
                 .map_err(StorageError::InvalidPlanValidationErrors)?,
             warnings: serde_json::from_str(&warnings_json)
@@ -5395,6 +6034,254 @@ fn stored_github_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<St
         repository: row.get(3)?,
         display_name: row.get(4)?,
         tracked_ref: row.get(5)?,
+    })
+}
+
+fn read_github_install_source_from(
+    connection: &Connection,
+    source_id: &str,
+) -> Result<StoredGithubInstallSource, StorageError> {
+    let source = connection
+        .query_row(
+            "SELECT owner, repository, display_name, tracked_ref, catalog_status,
+                    catalog_generation, catalog_commit_sha
+             FROM sources
+             WHERE id = ?1 AND kind = 'github'",
+            [source_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadSources)?
+        .ok_or(StorageError::SourceNotFound)?;
+    let (
+        owner,
+        repository,
+        display_name,
+        tracked_ref,
+        catalog_status,
+        catalog_generation,
+        catalog_commit_sha,
+    ) = source;
+    let Some(catalog_commit_sha) = catalog_commit_sha else {
+        return Err(StorageError::SourceCatalogStateChanged);
+    };
+    if catalog_status != "fresh"
+        || catalog_generation <= 0
+        || tracked_ref.is_empty()
+        || catalog_commit_sha.is_empty()
+    {
+        return Err(StorageError::SourceCatalogStateChanged);
+    }
+
+    let catalog_members =
+        read_github_install_catalog_members_from(connection, source_id, catalog_generation)?;
+    let linked = connection
+        .query_row(
+            "SELECT bundle_id, adopted_commit_sha
+             FROM source_bundle_links
+             WHERE source_id = ?1",
+            [source_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(StorageError::ReadSources)?;
+    let bundle = linked
+        .map(|(bundle_id, adopted_commit_sha)| {
+            read_github_install_bundle_from(connection, source_id, &bundle_id, adopted_commit_sha)
+        })
+        .transpose()?;
+
+    Ok(StoredGithubInstallSource {
+        id: source_id.to_owned(),
+        owner,
+        repository,
+        display_name,
+        tracked_ref,
+        catalog_generation,
+        catalog_commit_sha,
+        catalog_members,
+        bundle,
+    })
+}
+
+fn read_github_install_catalog_members_from(
+    connection: &Connection,
+    source_id: &str,
+    catalog_generation: i64,
+) -> Result<Vec<StoredGithubInstallCatalogMember>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, relative_path, skill_name, description, content_fingerprint,
+                    selectable, validation_errors_json, warnings_json
+             FROM source_catalog_members
+             WHERE source_id = ?1 AND catalog_generation = ?2
+             ORDER BY sort_order, relative_path",
+        )
+        .map_err(StorageError::ReadSources)?;
+    let rows = statement
+        .query_map(params![source_id, catalog_generation], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(StorageError::ReadSources)?;
+    let mut members = Vec::new();
+    for row in rows {
+        let (
+            id,
+            relative_path,
+            skill_name,
+            description,
+            content_fingerprint,
+            selectable,
+            validation_errors,
+            warnings,
+        ) = row.map_err(StorageError::ReadSources)?;
+        if !is_single_path_component(&id)
+            || (!relative_path.is_empty() && !is_normalized_relative_path(&relative_path))
+        {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        members.push(StoredGithubInstallCatalogMember {
+            id,
+            relative_path,
+            skill_name,
+            description,
+            content_fingerprint,
+            selectable: sqlite_bool(selectable)?,
+            validation_errors: serde_json::from_str(&validation_errors)
+                .map_err(StorageError::InvalidSourceCatalogMetadata)?,
+            warnings: serde_json::from_str(&warnings)
+                .map_err(StorageError::InvalidSourceCatalogMetadata)?,
+        });
+    }
+    Ok(members)
+}
+
+fn read_github_install_bundle_from(
+    connection: &Connection,
+    source_id: &str,
+    bundle_id: &str,
+    adopted_commit_sha: Option<String>,
+) -> Result<StoredGithubInstallBundle, StorageError> {
+    let bundle = connection
+        .query_row(
+            "SELECT display_name, managed_directory, current_target
+             FROM bundles
+             WHERE id = ?1",
+            [bundle_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadSources)?
+        .ok_or(StorageError::SourceBundleStateConflict)?;
+    let (display_name, managed_directory, current_target) = bundle;
+    if !is_single_path_component(bundle_id)
+        || managed_directory != format!("bundles/{bundle_id}")
+        || !is_safe_current_target(&current_target)
+    {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT member.id, member.skill_name, member.description,
+                    member.stable_relative_path, member.content_fingerprint,
+                    source_link.source_relative_path, selection.member_id
+             FROM skill_members AS member
+             LEFT JOIN member_selections AS selection
+               ON selection.bundle_id = member.bundle_id
+              AND selection.member_id = member.id
+             LEFT JOIN source_member_links AS source_link
+               ON source_link.source_id = ?1
+              AND source_link.member_id = member.id
+             WHERE member.bundle_id = ?2
+             ORDER BY member.stable_relative_path, member.id",
+        )
+        .map_err(StorageError::ReadSources)?;
+    let rows = statement
+        .query_map(params![source_id, bundle_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .map_err(StorageError::ReadSources)?;
+    let mut members = Vec::new();
+    for row in rows {
+        let (
+            id,
+            skill_name,
+            description,
+            stable_relative_path,
+            content_fingerprint,
+            source_relative_path,
+            selected_member_id,
+        ) = row.map_err(StorageError::ReadSources)?;
+        let Some(source_relative_path) = source_relative_path else {
+            return Err(StorageError::SourceBundleStateConflict);
+        };
+        if selected_member_id.as_deref() != Some(id.as_str())
+            || stable_relative_path != format!("members/{skill_name}")
+            || (!source_relative_path.is_empty()
+                && !is_normalized_relative_path(&source_relative_path))
+        {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        members.push(StoredGithubInstallBundleMember {
+            id,
+            skill_name,
+            description,
+            stable_relative_path,
+            content_fingerprint,
+            source_relative_path,
+        });
+    }
+    drop(statement);
+    let source_link_count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM source_member_links WHERE source_id = ?1",
+            [source_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(StorageError::ReadSources)?;
+    if members.is_empty() || source_link_count != members.len() as i64 {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    Ok(StoredGithubInstallBundle {
+        id: bundle_id.to_owned(),
+        display_name,
+        current_target,
+        adopted_commit_sha,
+        members,
     })
 }
 
@@ -5498,12 +6385,15 @@ fn read_managed_entries_from(
     connection: &Connection,
     data_root: &Path,
 ) -> Result<Vec<InventoryItem>, StorageError> {
+    // folder、takeover 与已删除 Source 的 Bundle 都没有来源关联，因此这里必须保留 LEFT JOIN。
     let mut statement = connection
         .prepare(
-            "SELECT member.id, member.skill_name, member.description, member.stable_relative_path, member.content_fingerprint, bundle.id, bundle.display_name, bundle.managed_directory, bundle.current_target
+            "SELECT member.id, member.skill_name, member.description, member.stable_relative_path, member.content_fingerprint, bundle.id, bundle.display_name, bundle.managed_directory, bundle.current_target, source.display_name
              FROM skill_members member
              JOIN member_selections selection ON selection.member_id = member.id AND selection.bundle_id = member.bundle_id
              JOIN bundles bundle ON bundle.id = member.bundle_id
+             LEFT JOIN source_bundle_links source_link ON source_link.bundle_id = bundle.id
+             LEFT JOIN sources source ON source.id = source_link.source_id
              ORDER BY bundle.display_name, member.skill_name, member.id",
         )
         .map_err(StorageError::ReadInventory)?;
@@ -5519,6 +6409,7 @@ fn read_managed_entries_from(
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         })
         .map_err(StorageError::ReadInventory)?;
@@ -5534,6 +6425,7 @@ fn read_managed_entries_from(
             bundle_display_name,
             managed_directory,
             current_target,
+            source_display_name,
         ) = row.map_err(StorageError::ReadInventory)?;
         validate_stored_managed_paths(
             &bundle_id,
@@ -5564,7 +6456,7 @@ fn read_managed_entries_from(
             bundle_id: Some(bundle_id),
             member_id: Some(member_id),
             bundle_display_name: Some(bundle_display_name),
-            source_display_name: None,
+            source_display_name,
             project_display_name: None,
         });
     }
@@ -5615,6 +6507,303 @@ fn map_takeover_transaction_insert_error(error: rusqlite::Error) -> StorageError
         return StorageError::ActiveLifecycleTransaction;
     }
     StorageError::SaveTakeoverTransaction(error)
+}
+
+fn ensure_install_transaction_can_finalize(
+    transaction: &Transaction<'_>,
+    transaction_id: &str,
+    plan: &StoredInstallPlan,
+    anchor_member_id: &str,
+) -> Result<(), StorageError> {
+    let stored = transaction
+        .query_row(
+            "SELECT kind, plan_id, bundle_id, member_id, phase, status
+             FROM lifecycle_transactions
+             WHERE id = ?1",
+            [transaction_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::SaveManagedBundle)?;
+    let Some((kind, plan_id, bundle_id, member_id, phase, status)) = stored else {
+        return Err(StorageError::LifecycleStateConflict(
+            transaction_id.to_owned(),
+        ));
+    };
+    let state_can_finalize = (status == "in_progress"
+        && matches!(phase.as_str(), "candidate_ready" | "activated"))
+        || (status == "completed" && phase == "state_committed");
+    if kind != "install_bundle"
+        || plan_id != plan.id
+        || bundle_id != plan.bundle_id
+        || member_id != anchor_member_id
+        || !state_can_finalize
+    {
+        return Err(StorageError::LifecycleStateConflict(
+            transaction_id.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn finalize_install_create_rows(
+    transaction: &Transaction<'_>,
+    plan: &StoredInstallPlan,
+    selected: &[&StoredInstallCandidate],
+    managed_directory: &str,
+    current_target: &str,
+    now: i64,
+) -> Result<(), StorageError> {
+    if selected.iter().any(|candidate| candidate.preserve_existing) {
+        return Err(StorageError::InvalidInstallPlan);
+    }
+    transaction
+        .execute(
+            "INSERT INTO bundles (
+                id, display_name, managed_directory, current_target, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                plan.bundle_id,
+                plan.bundle_display_name,
+                managed_directory,
+                current_target,
+                now
+            ],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    for candidate in selected {
+        persist_install_member(transaction, &plan.bundle_id, candidate, now)?;
+    }
+    if plan.kind == "github_snapshot" {
+        let source_id = plan
+            .source_id
+            .as_deref()
+            .ok_or(StorageError::InvalidInstallPlan)?;
+        let source_commit_sha = plan
+            .source_commit_sha
+            .as_deref()
+            .ok_or(StorageError::InvalidInstallPlan)?;
+        transaction
+            .execute(
+                "INSERT INTO source_bundle_links (
+                    source_id, bundle_id, adopted_commit_sha, linked_at
+                 ) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_id) DO NOTHING",
+                params![source_id, plan.bundle_id, source_commit_sha, now],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+        for candidate in selected {
+            persist_source_member_link(transaction, source_id, candidate, now)?;
+        }
+    }
+    Ok(())
+}
+
+fn finalize_install_supplement_rows(
+    transaction: &Transaction<'_>,
+    plan: &StoredInstallPlan,
+    selected: &[&StoredInstallCandidate],
+    managed_directory: &str,
+    current_target: &str,
+    now: i64,
+) -> Result<(), StorageError> {
+    if plan.kind != "github_snapshot" {
+        return Err(StorageError::InvalidInstallPlan);
+    }
+    let source_id = plan
+        .source_id
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallPlan)?;
+    let expected_current_target = plan
+        .expected_current_target
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallPlan)?;
+    let source_baseline = transaction
+        .query_row(
+            "SELECT bundle_id, adopted_commit_sha
+             FROM source_bundle_links
+             WHERE source_id = ?1",
+            [source_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(StorageError::SaveManagedBundle)?
+        .ok_or(StorageError::SourceBundleStateConflict)?;
+    if source_baseline
+        != (
+            plan.bundle_id.clone(),
+            plan.expected_adopted_commit_sha.clone(),
+        )
+    {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE bundles
+             SET current_target = ?4
+             WHERE id = ?1
+               AND display_name = ?2
+               AND managed_directory = ?3
+               AND current_target IN (?4, ?5)",
+            params![
+                plan.bundle_id,
+                plan.bundle_display_name,
+                managed_directory,
+                current_target,
+                expected_current_target
+            ],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    if changed != 1 {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    for candidate in selected
+        .iter()
+        .filter(|candidate| !candidate.preserve_existing)
+    {
+        persist_install_member(transaction, &plan.bundle_id, candidate, now)?;
+        persist_source_member_link(transaction, source_id, candidate, now)?;
+    }
+    Ok(())
+}
+
+fn persist_install_member(
+    transaction: &Transaction<'_>,
+    bundle_id: &str,
+    candidate: &StoredInstallCandidate,
+    now: i64,
+) -> Result<(), StorageError> {
+    let skill_name = candidate
+        .skill_name
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallSelection)?;
+    let description = candidate
+        .skill_description
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallSelection)?;
+    let fingerprint = candidate
+        .content_fingerprint
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallSelection)?;
+    let stable_path = format!("members/{skill_name}");
+    transaction
+        .execute(
+            "INSERT INTO skill_members (
+                id, bundle_id, skill_name, description, stable_relative_path,
+                content_fingerprint, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                candidate.candidate_id,
+                bundle_id,
+                skill_name,
+                description,
+                stable_path,
+                fingerprint,
+                now
+            ],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    transaction
+        .execute(
+            "INSERT INTO member_selections (bundle_id, member_id, selected_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(bundle_id, member_id) DO NOTHING",
+            params![bundle_id, candidate.candidate_id, now],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    Ok(())
+}
+
+fn persist_source_member_link(
+    transaction: &Transaction<'_>,
+    source_id: &str,
+    candidate: &StoredInstallCandidate,
+    now: i64,
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO source_member_links (
+                source_id, source_relative_path, member_id, linked_at
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(source_id, source_relative_path) DO NOTHING",
+            params![
+                source_id,
+                candidate.source_relative_path,
+                candidate.candidate_id,
+                now
+            ],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    Ok(())
+}
+
+fn ensure_source_install_state_matches(
+    transaction: &Transaction<'_>,
+    plan: &StoredInstallPlan,
+    selected: &[&StoredInstallCandidate],
+) -> Result<(), StorageError> {
+    if plan.kind == "folder_snapshot" {
+        return Ok(());
+    }
+    let source_id = plan
+        .source_id
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallPlan)?;
+    let expected_adopted_commit_sha = if plan.install_mode == "create" {
+        plan.source_commit_sha.clone()
+    } else {
+        plan.expected_adopted_commit_sha.clone()
+    };
+    let source_bundle = transaction
+        .query_row(
+            "SELECT bundle_id, adopted_commit_sha
+             FROM source_bundle_links
+             WHERE source_id = ?1",
+            [source_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(StorageError::SaveManagedBundle)?;
+    if source_bundle != Some((plan.bundle_id.clone(), expected_adopted_commit_sha)) {
+        return Err(StorageError::ManagedStateConflict);
+    }
+    let link_count = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM source_member_links WHERE source_id = ?1",
+            [source_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    if link_count != selected.len() as i64 {
+        return Err(StorageError::ManagedStateConflict);
+    }
+    for candidate in selected {
+        let linked_path = transaction
+            .query_row(
+                "SELECT source_relative_path
+                 FROM source_member_links
+                 WHERE source_id = ?1 AND member_id = ?2",
+                params![source_id, candidate.candidate_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StorageError::SaveManagedBundle)?;
+        if linked_path.as_deref() != Some(candidate.source_relative_path.as_str()) {
+            return Err(StorageError::ManagedStateConflict);
+        }
+    }
+    Ok(())
 }
 
 fn ensure_managed_state_matches(
@@ -5953,6 +7142,10 @@ mod tests {
         Storage::open(&data_root, &database).expect("应打开隔离 SQLite")
     }
 
+    const TEST_GITHUB_SOURCE_ID: &str = "source-anthropics-skills";
+    const TEST_GITHUB_COMMIT_ONE: &str = "1111111111111111111111111111111111111111";
+    const TEST_GITHUB_COMMIT_TWO: &str = "2222222222222222222222222222222222222222";
+
     fn takeover_plan_for(storage: &Storage, root: &Path, suffix: &str) -> TakeoverPlan {
         let skill_name = format!("skill-{suffix}");
         let bundle_id = format!("takeover-bundle-{suffix}");
@@ -6066,6 +7259,7 @@ mod tests {
             skill_description: Some("测试 Skill"),
             content_fingerprint: Some("sha256:test"),
             selectable: true,
+            preserve_existing: false,
             validation_errors: &[],
             warnings: &[],
             default_selected: true,
@@ -6073,21 +7267,221 @@ mod tests {
         storage
             .save_install_plan(NewInstallPlan {
                 id: plan_id,
-                input_path: "/tmp/example-skill",
+                kind: "folder_snapshot",
+                install_mode: "create",
+                input_path: Some("/tmp/example-skill"),
                 input_device: 1,
                 input_inode: 2,
                 input_fingerprint: "sha256:test",
+                snapshot_relative_path: None,
+                source_id: None,
+                source_tracked_ref: None,
+                source_catalog_generation: None,
+                source_commit_sha: None,
+                expected_current_target: None,
+                expected_adopted_commit_sha: None,
                 bundle_id,
                 bundle_display_name: bundle_id,
-                member_id,
-                skill_name: member_id,
-                skill_description: "测试 Skill",
                 warnings: &[],
                 candidates: &candidates,
                 created_at: 100,
                 expires_at: 1_000,
             })
             .expect("应保存安装 Plan");
+    }
+
+    fn save_test_github_catalog(
+        storage: &mut Storage,
+        alpha_id: &str,
+        beta_id: &str,
+        commit_sha: &str,
+        alpha_fingerprint: &str,
+        fetched_at: i64,
+    ) {
+        let members = [
+            NewSourceCatalogMember {
+                id: alpha_id,
+                relative_path: "skills/alpha",
+                skill_name: Some("alpha"),
+                description: Some("Alpha Skill"),
+                content_fingerprint: Some(alpha_fingerprint),
+                selectable: true,
+                validation_errors: &[],
+                warnings: &[],
+            },
+            NewSourceCatalogMember {
+                id: beta_id,
+                relative_path: "skills/beta",
+                skill_name: Some("beta"),
+                description: Some("Beta Skill"),
+                content_fingerprint: Some("sha256:beta"),
+                selectable: true,
+                validation_errors: &[],
+                warnings: &[],
+            },
+        ];
+        storage
+            .save_source_catalog_success(
+                TEST_GITHUB_SOURCE_ID,
+                "main",
+                commit_sha,
+                fetched_at,
+                &members,
+            )
+            .expect("应保存 Fresh GitHub Catalog");
+    }
+
+    fn save_test_github_create_plan(storage: &mut Storage, plan_id: &str, bundle_id: &str) {
+        let snapshot_relative_path = format!("staging/.install-plan-{plan_id}/skills");
+        let candidates = [
+            NewInstallCandidate {
+                candidate_id: "catalog-alpha-v1",
+                source_relative_path: "skills/alpha",
+                skill_name: Some("alpha"),
+                skill_description: Some("Alpha Skill"),
+                content_fingerprint: Some("sha256:alpha-v1"),
+                selectable: true,
+                preserve_existing: false,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+            NewInstallCandidate {
+                candidate_id: "catalog-beta-v1",
+                source_relative_path: "skills/beta",
+                skill_name: Some("beta"),
+                skill_description: Some("Beta Skill"),
+                content_fingerprint: Some("sha256:beta"),
+                selectable: true,
+                preserve_existing: false,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+        ];
+        storage
+            .save_install_plan(NewInstallPlan {
+                id: plan_id,
+                kind: "github_snapshot",
+                install_mode: "create",
+                input_path: None,
+                input_device: 10,
+                input_inode: 20,
+                input_fingerprint: "sha256:github-snapshot-v1",
+                snapshot_relative_path: Some(&snapshot_relative_path),
+                source_id: Some(TEST_GITHUB_SOURCE_ID),
+                source_tracked_ref: Some("main"),
+                source_catalog_generation: Some(1),
+                source_commit_sha: Some(TEST_GITHUB_COMMIT_ONE),
+                expected_current_target: None,
+                expected_adopted_commit_sha: None,
+                bundle_id,
+                bundle_display_name: "anthropics/skills",
+                warnings: &[],
+                candidates: &candidates,
+                created_at: 100,
+                expires_at: 1_000,
+            })
+            .expect("应保存 GitHub create Plan");
+    }
+
+    fn save_test_github_supplement_plan(
+        storage: &mut Storage,
+        plan_id: &str,
+        bundle_id: &str,
+        expected_current_target: &str,
+    ) {
+        let snapshot_relative_path = format!("staging/.install-plan-{plan_id}/skills");
+        let candidates = [
+            NewInstallCandidate {
+                candidate_id: "catalog-alpha-v1",
+                source_relative_path: "skills/alpha",
+                skill_name: Some("alpha"),
+                skill_description: Some("Alpha Skill"),
+                content_fingerprint: Some("sha256:alpha-v1"),
+                selectable: false,
+                preserve_existing: true,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+            NewInstallCandidate {
+                candidate_id: "catalog-beta-v2",
+                source_relative_path: "skills/beta",
+                skill_name: Some("beta"),
+                skill_description: Some("Beta Skill"),
+                content_fingerprint: Some("sha256:beta"),
+                selectable: true,
+                preserve_existing: false,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+        ];
+        storage
+            .save_install_plan(NewInstallPlan {
+                id: plan_id,
+                kind: "github_snapshot",
+                install_mode: "supplement",
+                input_path: None,
+                input_device: 11,
+                input_inode: 21,
+                input_fingerprint: "sha256:github-snapshot-v2",
+                snapshot_relative_path: Some(&snapshot_relative_path),
+                source_id: Some(TEST_GITHUB_SOURCE_ID),
+                source_tracked_ref: Some("main"),
+                source_catalog_generation: Some(2),
+                source_commit_sha: Some(TEST_GITHUB_COMMIT_TWO),
+                expected_current_target: Some(expected_current_target),
+                expected_adopted_commit_sha: Some(TEST_GITHUB_COMMIT_ONE),
+                bundle_id,
+                bundle_display_name: "anthropics/skills",
+                warnings: &[],
+                candidates: &candidates,
+                created_at: 300,
+                expires_at: 2_000,
+            })
+            .expect("应保存 GitHub supplement Plan");
+    }
+
+    fn create_test_github_bundle_with_alpha(
+        storage: &mut Storage,
+        plan_id: &str,
+        transaction_id: &str,
+        bundle_id: &str,
+    ) {
+        save_test_github_catalog(
+            storage,
+            "catalog-alpha-v1",
+            "catalog-beta-v1",
+            TEST_GITHUB_COMMIT_ONE,
+            "sha256:alpha-v1",
+            50,
+        );
+        save_test_github_create_plan(storage, plan_id, bundle_id);
+        let plan = storage
+            .begin_install_transaction_with_selection(
+                plan_id,
+                &["catalog-alpha-v1".to_owned()],
+                transaction_id,
+                &format!("journals/{transaction_id}.json"),
+                200,
+            )
+            .expect("应开始 GitHub create 事务");
+        advance_to_candidate_ready(storage, transaction_id);
+        storage
+            .finalize_install(
+                transaction_id,
+                &plan,
+                &format!("bundles/{bundle_id}"),
+                &format!("contents/{transaction_id}"),
+                "members/alpha",
+                203,
+            )
+            .expect("应创建 Source-backed Bundle");
+        storage
+            .forget_terminal_transaction(transaction_id)
+            .expect("应清理 GitHub create 事务");
     }
 
     fn advance_to_candidate_ready(storage: &mut Storage, transaction_id: &str) {
@@ -6147,6 +7541,7 @@ mod tests {
                 skill_description: Some("第一个测试 Skill"),
                 content_fingerprint: Some("sha256:alpha"),
                 selectable: true,
+                preserve_existing: false,
                 validation_errors: &[],
                 warnings: &[],
                 default_selected: true,
@@ -6158,6 +7553,7 @@ mod tests {
                 skill_description: Some("第二个测试 Skill"),
                 content_fingerprint: Some("sha256:beta"),
                 selectable: true,
+                preserve_existing: false,
                 validation_errors: &[],
                 warnings: &[],
                 default_selected: true,
@@ -6166,15 +7562,21 @@ mod tests {
         storage
             .save_install_plan(NewInstallPlan {
                 id: &plan_id,
-                input_path: "/tmp/batch-bundle",
+                kind: "folder_snapshot",
+                install_mode: "create",
+                input_path: Some("/tmp/batch-bundle"),
                 input_device: 1,
                 input_inode: 2,
                 input_fingerprint: "sha256:bundle",
+                snapshot_relative_path: None,
+                source_id: None,
+                source_tracked_ref: None,
+                source_catalog_generation: None,
+                source_commit_sha: None,
+                expected_current_target: None,
+                expected_adopted_commit_sha: None,
                 bundle_id: &bundle_id,
                 bundle_display_name: &format!("Batch {suffix}"),
-                member_id: &first_id,
-                skill_name: &first_name,
-                skill_description: "第一个测试 Skill",
                 warnings: &[],
                 candidates: &candidates,
                 created_at: 100,
@@ -6301,7 +7703,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=12).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=13).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -6333,6 +7735,588 @@ mod tests {
             .expect("应执行外键检查")
             .count();
         assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn install_bundle_migration_rebuilds_the_canonical_protocol() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let storage = open_test_storage(sandbox.path());
+        let install_columns = storage
+            .connection
+            .prepare("PRAGMA table_info(install_plans)")
+            .expect("应读取安装 Plan schema")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+            })
+            .expect("应查询安装 Plan schema")
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .expect("应收集安装 Plan schema");
+        for column in [
+            "kind",
+            "install_mode",
+            "snapshot_relative_path",
+            "source_id",
+            "source_tracked_ref",
+            "source_catalog_generation",
+            "source_commit_sha",
+            "expected_current_target",
+            "expected_adopted_commit_sha",
+        ] {
+            assert!(
+                install_columns.contains_key(column),
+                "统一安装协议应包含 {column}"
+            );
+        }
+        assert_eq!(
+            install_columns.get("input_path"),
+            Some(&0),
+            "GitHub Plan 不应伪造本地输入路径"
+        );
+        for legacy_anchor in ["member_id", "skill_name", "skill_description"] {
+            assert!(
+                !install_columns.contains_key(legacy_anchor),
+                "Bundle Plan 的成员身份只能来自候选集合，不能保留 {legacy_anchor}"
+            );
+        }
+
+        let candidate_columns = storage
+            .connection
+            .prepare("PRAGMA table_info(install_plan_candidates)")
+            .expect("应读取候选 schema")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("应查询候选 schema")
+            .collect::<Result<BTreeSet<_>, _>>()
+            .expect("应收集候选 schema");
+        assert!(candidate_columns.contains("preserve_existing"));
+
+        let lifecycle_sql = storage
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'lifecycle_transactions'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("应读取唯一安装事务 schema");
+        assert!(lifecycle_sql.contains("kind = 'install_bundle'"));
+
+        for trigger in [
+            "mount_transaction_reject_active_install",
+            "install_transaction_reject_active_mount",
+            "batch_mount_transaction_reject_active_writer",
+            "install_transaction_reject_active_batch_mount",
+            "takeover_transaction_reject_active_writer",
+            "install_transaction_reject_active_takeover",
+        ] {
+            let exists = storage
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = ?1
+                     )",
+                    [trigger],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("应检查跨事务单写者约束");
+            assert!(exists, "migration 应重建 {trigger}");
+        }
+    }
+
+    #[test]
+    fn install_bundle_migration_rejects_an_existing_lifecycle_transaction() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let database = data_root.join("skillyard.sqlite3");
+        let connection = Connection::open(&database).expect("应创建旧版 SQLite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("应建立 migration 表");
+        for (version, migration) in MIGRATIONS.iter().take(12) {
+            connection
+                .execute_batch(migration)
+                .expect("应建立 version 12 schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 1)",
+                    [version],
+                )
+                .expect("应记录旧 migration");
+        }
+        connection
+            .execute(
+                "INSERT INTO install_plans (
+                    id, kind, input_path, input_device, input_inode, input_fingerprint,
+                    bundle_id, bundle_display_name, member_id, skill_name,
+                    skill_description, warnings_json, created_at, expires_at, status
+                 ) VALUES (
+                    'old-plan', 'folder_snapshot', '/tmp/old', 1, 2, 'sha256:old',
+                    'old-bundle', 'Old', 'old-member', 'old-member',
+                    '旧事务', '[]', 1, 2, 'consumed'
+                 )",
+                [],
+            )
+            .expect("应建立旧 Plan");
+        connection
+            .execute(
+                "INSERT INTO lifecycle_transactions (
+                    id, kind, plan_id, bundle_id, member_id, journal_path,
+                    phase, status, created_at, updated_at
+                 ) VALUES (
+                    'old-transaction', 'install_folder', 'old-plan', 'old-bundle',
+                    'old-member', 'journals/old.json', 'journal_pending',
+                    'in_progress', 1, 1
+                 )",
+                [],
+            )
+            .expect("应建立旧生命周期事务");
+        drop(connection);
+
+        let error = Storage::open(&data_root, &database)
+            .err()
+            .expect("非空旧事务必须阻止迁移");
+        assert!(matches!(error, StorageError::Migration(_)));
+        let connection = Connection::open(&database).expect("失败后旧库应保持可读");
+        let latest = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("应读取旧 migration 版本");
+        let transaction_count = connection
+            .query_row("SELECT COUNT(*) FROM lifecycle_transactions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("失败迁移不能删除旧事务");
+        assert_eq!((latest, transaction_count), (12, 1));
+    }
+
+    #[test]
+    fn install_bundle_schema_rejects_mixed_plan_and_preserved_candidate_shapes() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let mixed_plan = storage.connection.execute(
+            "INSERT INTO install_plans (
+                id, kind, install_mode, input_path, input_device, input_inode,
+                input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
+                source_catalog_generation, source_commit_sha, expected_current_target,
+                expected_adopted_commit_sha, bundle_id, bundle_display_name,
+                warnings_json, created_at, expires_at, status
+             ) VALUES (
+                'mixed-plan', 'folder_snapshot', 'supplement', '/tmp/input', 1, 2,
+                'sha256:test', NULL, NULL, NULL, NULL, NULL, 'contents/old', NULL,
+                'bundle', 'Bundle', '[]', 1, 2, 'pending'
+             )",
+            [],
+        );
+        assert!(mixed_plan.is_err(), "folder Plan 不能伪装成 supplement");
+
+        save_test_plan(
+            &mut storage,
+            "folder-plan",
+            "folder-bundle",
+            "folder-member",
+        );
+        let invalid_preserved = storage.connection.execute(
+            "INSERT INTO install_plan_candidates (
+                plan_id, candidate_id, source_relative_path, skill_name,
+                skill_description, content_fingerprint, selectable, preserve_existing,
+                validation_errors_json, warnings_json, default_selected, selected, sort_order
+             ) VALUES (
+                'folder-plan', 'preserved', 'preserved', 'preserved',
+                'Preserved', 'sha256:preserved', 1, 1, '[]', '[]', 1, 1, 1
+             )",
+            [],
+        );
+        assert!(
+            invalid_preserved.is_err(),
+            "preserved 成员必须是不可选择且由 Core 强制保留"
+        );
+    }
+
+    #[test]
+    fn github_create_finalize_persists_one_source_backed_bundle() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_github_catalog(
+            &mut storage,
+            "catalog-alpha-v1",
+            "catalog-beta-v1",
+            TEST_GITHUB_COMMIT_ONE,
+            "sha256:alpha-v1",
+            50,
+        );
+        let source = storage
+            .read_github_install_source(TEST_GITHUB_SOURCE_ID)
+            .expect("Fresh Catalog 应可组成安装输入");
+        assert_eq!(source.owner, "anthropics");
+        assert_eq!(source.repository, "skills");
+        assert_eq!(source.catalog_generation, 1);
+        assert_eq!(source.catalog_commit_sha, TEST_GITHUB_COMMIT_ONE);
+        assert_eq!(source.catalog_members.len(), 2);
+        assert_eq!(
+            source.catalog_members[0].content_fingerprint.as_deref(),
+            Some("sha256:alpha-v1")
+        );
+        assert!(source.bundle.is_none());
+
+        save_test_github_create_plan(&mut storage, "github-create-plan", "github-bundle");
+        let selected = vec!["catalog-alpha-v1".to_owned(), "catalog-beta-v1".to_owned()];
+        let plan = storage
+            .begin_install_transaction_with_selection(
+                "github-create-plan",
+                &selected,
+                "github-create-txn",
+                "journals/github-create.json",
+                200,
+            )
+            .expect("应开始统一安装事务");
+        let anchor = storage
+            .connection
+            .query_row(
+                "SELECT kind, member_id FROM lifecycle_transactions WHERE id = ?1",
+                ["github-create-txn"],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("应读取安装事务 anchor");
+        assert_eq!(
+            anchor,
+            ("install_bundle".to_owned(), "catalog-alpha-v1".to_owned())
+        );
+        advance_to_candidate_ready(&mut storage, "github-create-txn");
+        storage
+            .finalize_install(
+                "github-create-txn",
+                &plan,
+                "bundles/github-bundle",
+                "contents/github-create-txn",
+                "members/alpha",
+                203,
+            )
+            .expect("应原子提交 Source-backed Bundle");
+
+        let source = storage
+            .read_github_install_source(TEST_GITHUB_SOURCE_ID)
+            .expect("应读取已关联 Source");
+        let bundle = source.bundle.expect("create 应关联唯一 Bundle");
+        assert_eq!(bundle.id, "github-bundle");
+        assert_eq!(
+            bundle.adopted_commit_sha.as_deref(),
+            Some(TEST_GITHUB_COMMIT_ONE)
+        );
+        assert_eq!(bundle.members.len(), 2);
+        assert_eq!(
+            bundle
+                .members
+                .iter()
+                .map(|member| member.source_relative_path.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["skills/alpha", "skills/beta"])
+        );
+        let mount_count = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM mounts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("应读取 Mount 数量");
+        assert_eq!(mount_count, 0, "GitHub 安装不能自动创建 Mount");
+    }
+
+    #[test]
+    fn github_supplement_keeps_existing_member_mount_and_adopted_commit() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        create_test_github_bundle_with_alpha(
+            &mut storage,
+            "seed-create-plan",
+            "seed-create-txn",
+            "github-bundle",
+        );
+        let member = storage
+            .read_managed_member("catalog-alpha-v1")
+            .expect("应读取旧成员");
+        let mount_target = sandbox.path().join("home/.codex/skills/alpha");
+        save_test_mount_plan(
+            &mut storage,
+            &member,
+            MountOperation::Create,
+            "alpha-mount",
+            "alpha-mount-plan",
+            MountScope::Global,
+            None,
+            &mount_target,
+        );
+        finalize_test_mount_create(&mut storage, "alpha-mount-plan", "alpha-mount-txn");
+        storage
+            .forget_terminal_mount_transaction("alpha-mount-txn")
+            .expect("应清理 Mount 事务");
+        let mount_before = storage
+            .connection
+            .query_row(
+                "SELECT member_id, target_path, expected_target, created_at
+                 FROM mounts WHERE id = 'alpha-mount'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("应读取旧 Mount");
+
+        save_test_github_catalog(
+            &mut storage,
+            "catalog-alpha-v2",
+            "catalog-beta-v2",
+            TEST_GITHUB_COMMIT_TWO,
+            "sha256:alpha-upstream-changed",
+            300,
+        );
+        save_test_github_supplement_plan(
+            &mut storage,
+            "github-supplement-plan",
+            "github-bundle",
+            "contents/seed-create-txn",
+        );
+        let preserved_selection_error = storage
+            .begin_install_transaction_with_selection(
+                "github-supplement-plan",
+                &["catalog-alpha-v1".to_owned()],
+                "invalid-preserved-txn",
+                "journals/invalid-preserved.json",
+                400,
+            )
+            .expect_err("用户不能把 preserved 成员作为选择提交");
+        assert!(matches!(
+            preserved_selection_error,
+            StorageError::InvalidInstallSelection
+        ));
+        let plan = storage
+            .begin_install_transaction_with_selection(
+                "github-supplement-plan",
+                &["catalog-beta-v2".to_owned()],
+                "github-supplement-txn",
+                "journals/github-supplement.json",
+                400,
+            )
+            .expect("应开始 supplement 事务");
+        assert!(
+            plan.candidates
+                .iter()
+                .find(|candidate| candidate.candidate_id == "catalog-alpha-v1")
+                .is_some_and(|candidate| candidate.preserve_existing && candidate.selected),
+            "旧成员必须由 Core 自动保留"
+        );
+        let anchor = storage
+            .recoverable_lifecycle_transactions()
+            .expect("应读取 supplement 事务")
+            .into_iter()
+            .find(|transaction| transaction.id == "github-supplement-txn")
+            .expect("supplement 事务应存在")
+            .member_id;
+        assert_eq!(anchor, "catalog-alpha-v1");
+        advance_to_candidate_ready(&mut storage, "github-supplement-txn");
+        storage
+            .finalize_install(
+                "github-supplement-txn",
+                &plan,
+                "bundles/github-bundle",
+                "contents/github-supplement-txn",
+                "members/alpha",
+                403,
+            )
+            .expect("应原子补装新成员");
+
+        let state = storage
+            .connection
+            .query_row(
+                "SELECT bundle.current_target, link.adopted_commit_sha,
+                        (SELECT COUNT(*) FROM skill_members WHERE bundle_id = bundle.id),
+                        (SELECT content_fingerprint FROM skill_members
+                         WHERE id = 'catalog-alpha-v1')
+                 FROM bundles AS bundle
+                 JOIN source_bundle_links AS link ON link.bundle_id = bundle.id
+                 WHERE bundle.id = 'github-bundle'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .expect("应读取 supplement 后状态");
+        assert_eq!(state.0, "contents/github-supplement-txn");
+        assert_eq!(state.1.as_deref(), Some(TEST_GITHUB_COMMIT_ONE));
+        assert_eq!(state.2, 2);
+        assert_eq!(state.3, "sha256:alpha-v1");
+        let mount_after = storage
+            .connection
+            .query_row(
+                "SELECT member_id, target_path, expected_target, created_at
+                 FROM mounts WHERE id = 'alpha-mount'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("应读取保留的 Mount");
+        assert_eq!(mount_after, mount_before);
+    }
+
+    #[test]
+    fn github_begin_rolls_back_when_source_catalog_or_current_changes() {
+        let stale_sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut stale_storage = open_test_storage(stale_sandbox.path());
+        save_test_github_catalog(
+            &mut stale_storage,
+            "catalog-alpha-v1",
+            "catalog-beta-v1",
+            TEST_GITHUB_COMMIT_ONE,
+            "sha256:alpha-v1",
+            50,
+        );
+        save_test_github_create_plan(&mut stale_storage, "stale-plan", "stale-bundle");
+        stale_storage
+            .save_source_catalog_failure(TEST_GITHUB_SOURCE_ID, "main", 60, "测试网络失败")
+            .expect("应把 Source 标记为 stale");
+        let stale_error = stale_storage
+            .begin_install_transaction_with_selection(
+                "stale-plan",
+                &["catalog-alpha-v1".to_owned()],
+                "stale-txn",
+                "journals/stale.json",
+                200,
+            )
+            .expect_err("stale Source 不能授权安装");
+        assert!(matches!(
+            stale_error,
+            StorageError::SourceCatalogStateChanged
+        ));
+        assert_eq!(
+            stale_storage
+                .read_install_plan("stale-plan")
+                .expect("失败确认不能消耗 Plan")
+                .status,
+            "pending"
+        );
+
+        let catalog_sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut catalog_storage = open_test_storage(catalog_sandbox.path());
+        save_test_github_catalog(
+            &mut catalog_storage,
+            "catalog-alpha-v1",
+            "catalog-beta-v1",
+            TEST_GITHUB_COMMIT_ONE,
+            "sha256:alpha-v1",
+            50,
+        );
+        save_test_github_create_plan(&mut catalog_storage, "catalog-plan", "catalog-bundle");
+        save_test_github_catalog(
+            &mut catalog_storage,
+            "catalog-alpha-v2",
+            "catalog-beta-v2",
+            TEST_GITHUB_COMMIT_TWO,
+            "sha256:alpha-v2",
+            60,
+        );
+        let catalog_error = catalog_storage
+            .begin_install_transaction_with_selection(
+                "catalog-plan",
+                &["catalog-alpha-v1".to_owned()],
+                "catalog-txn",
+                "journals/catalog.json",
+                200,
+            )
+            .expect_err("Catalog generation 变化后必须重新生成 Plan");
+        assert!(matches!(
+            catalog_error,
+            StorageError::SourceCatalogStateChanged
+        ));
+        assert_eq!(
+            catalog_storage
+                .connection
+                .query_row("SELECT COUNT(*) FROM lifecycle_transactions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("应读取事务数量"),
+            0
+        );
+
+        let current_sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut current_storage = open_test_storage(current_sandbox.path());
+        create_test_github_bundle_with_alpha(
+            &mut current_storage,
+            "current-seed-plan",
+            "current-seed-txn",
+            "current-bundle",
+        );
+        save_test_github_catalog(
+            &mut current_storage,
+            "catalog-alpha-v2",
+            "catalog-beta-v2",
+            TEST_GITHUB_COMMIT_TWO,
+            "sha256:alpha-v2",
+            300,
+        );
+        save_test_github_supplement_plan(
+            &mut current_storage,
+            "current-plan",
+            "current-bundle",
+            "contents/current-seed-txn",
+        );
+        current_storage
+            .connection
+            .execute(
+                "UPDATE bundles SET current_target = 'contents/external'
+                 WHERE id = 'current-bundle'",
+                [],
+            )
+            .expect("应模拟 current 前置状态变化");
+        let current_error = current_storage
+            .begin_install_transaction_with_selection(
+                "current-plan",
+                &["catalog-beta-v2".to_owned()],
+                "current-txn",
+                "journals/current.json",
+                400,
+            )
+            .expect_err("current baseline 变化后不能开始 supplement");
+        assert!(matches!(
+            current_error,
+            StorageError::SourceBundleStateConflict
+        ));
+        assert_eq!(
+            current_storage
+                .read_install_plan("current-plan")
+                .expect("失败确认不能消耗 supplement Plan")
+                .status,
+            "pending"
+        );
+        assert_eq!(
+            current_storage
+                .connection
+                .query_row("SELECT COUNT(*) FROM lifecycle_transactions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("应读取事务数量"),
+            0
+        );
     }
 
     #[test]
@@ -6982,6 +8966,21 @@ mod tests {
         storage
             .block_mount_transaction("mount-txn-recovery", "目标归属无法判断", 402)
             .expect("应阻塞 Mount 事务");
+        assert!(
+            bundle_or_source_write_is_blocked(&storage.connection, Some(&member.bundle_id), None,)
+                .expect("应检查相关 Bundle"),
+            "blocked Mount 必须阻止同 Bundle 的安装与补装"
+        );
+        let unrelated = save_test_managed_member(&mut storage, "unrelated-recovery");
+        assert!(
+            !bundle_or_source_write_is_blocked(
+                &storage.connection,
+                Some(&unrelated.bundle_id),
+                None,
+            )
+            .expect("应检查无关 Bundle"),
+            "人工恢复不能阻止其他 Bundle"
+        );
         let recoverable = storage
             .recoverable_mount_transactions()
             .expect("应读取 Mount 恢复事务");

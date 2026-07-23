@@ -12,9 +12,9 @@ use crate::{
         fetch_github_catalog, parse_github_source, resolve_github_source,
     },
     lifecycle::{
-        LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
-        confirm_folder_install, create_folder_install_plan, ensure_central_store_layout,
-        recover_pending_transactions,
+        LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock, confirm_install,
+        create_folder_install_plan, create_github_install_plan, ensure_central_store_layout,
+        recover_pending_transactions, write_notice_from_storage,
     },
     mount_lifecycle::{
         MountLifecycleError, confirm_batch_mount_plan, confirm_mount_plan, create_batch_mount_plan,
@@ -165,6 +165,9 @@ impl SkillYardApplication {
             }
             UiIntent::CreateFolderInstallPlan { input_path } => {
                 self.with_write_operation(|| self.create_folder_install_plan(input_path))
+            }
+            UiIntent::CreateGithubInstallPlan { source_id } => {
+                self.with_write_operation(|| self.create_github_install_plan(source_id))
             }
             UiIntent::ConfirmInstallPlan {
                 plan_id,
@@ -473,11 +476,15 @@ impl SkillYardApplication {
         )?;
         lifecycle_lock.recheck(&self.paths)?;
         match result {
-            SaveGitHubSourceResult::Saved { source_id } => Ok(UiOutcome::SourceDiscovery {
-                sources: storage.read_source_summaries()?,
-                highlighted_source_id: Some(source_id),
-                highlighted_member_path: resolved.member_hint,
-            }),
+            SaveGitHubSourceResult::Saved { source_id } => {
+                write_notice_from_storage(&self.paths, lifecycle_lock.root(), &storage)?;
+                lifecycle_lock.recheck(&self.paths)?;
+                Ok(UiOutcome::SourceDiscovery {
+                    sources: storage.read_source_summaries()?,
+                    highlighted_source_id: Some(source_id),
+                    highlighted_member_path: resolved.member_hint,
+                })
+            }
             SaveGitHubSourceResult::RefChangeRequired { plan } => {
                 Ok(UiOutcome::SourceRefChangePlan { plan })
             }
@@ -490,6 +497,8 @@ impl SkillYardApplication {
         let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
         lifecycle_lock.recheck(&self.paths)?;
         let source_id = storage.confirm_source_ref_change(&plan_id, unix_timestamp_millis())?;
+        lifecycle_lock.recheck(&self.paths)?;
+        write_notice_from_storage(&self.paths, lifecycle_lock.root(), &storage)?;
         lifecycle_lock.recheck(&self.paths)?;
         let sources = storage.read_source_summaries()?;
         let highlighted_member_path = sources
@@ -522,6 +531,27 @@ impl SkillYardApplication {
         Ok(UiOutcome::FolderInstallPlan { plan })
     }
 
+    fn create_github_install_plan(&self, source_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let transport = self
+            .source_transport
+            .as_deref()
+            .ok_or(GithubSourceError::Network)?;
+        let plan = create_github_install_plan(
+            &self.paths,
+            &lifecycle_lock,
+            &mut storage,
+            transport,
+            &source_id,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::FolderInstallPlan { plan })
+    }
+
     fn confirm_install_plan(
         &self,
         plan_id: String,
@@ -529,7 +559,7 @@ impl SkillYardApplication {
     ) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_recovered_storage()?;
         ensure_onboarding_completed(&storage)?;
-        confirm_folder_install(
+        confirm_install(
             &self.paths,
             &mut storage,
             &plan_id,

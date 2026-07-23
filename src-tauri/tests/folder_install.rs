@@ -1071,6 +1071,134 @@ fn a_tampered_journal_is_blocked_without_touching_other_managed_content() {
     assert_eq!(status, "blocked");
 }
 
+/// `members` 缺失或为空都不能退化成零成员事务，恢复必须隔离自身并保留证据。
+#[test]
+fn journals_without_a_non_empty_members_contract_are_blocked_in_isolation() {
+    for (case_name, replacement) in [
+        ("缺少 members", None),
+        ("members 为空", Some(serde_json::json!([]))),
+    ] {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let (application, data_root, home) = ready_application(sandbox.path());
+
+        // 先安装真实受管 Skill，证明损坏事务不会污染同一 Central Store 的其他对象。
+        let protected_input = sandbox.path().join("downloads/protected-skill");
+        write_skill(&protected_input, "protected-skill", "keep");
+        let protected_plan = create_plan(&application, &protected_input);
+        let protected_outcome = application
+            .handle(confirm_default_install_intent(&protected_plan))
+            .expect("应先安装不相关的受管 Skill");
+        let UiOutcome::Inventory {
+            entries: protected_entries,
+            ..
+        } = protected_outcome
+        else {
+            panic!("安装完成后应返回 Inventory");
+        };
+        let protected_entry = protected_entries
+            .iter()
+            .find(|entry| {
+                entry.skill_name == "protected-skill"
+                    && entry.management_kind == ManagementKind::SkillYardManaged
+            })
+            .expect("清单应包含不相关的受管 Skill");
+        let protected_bundle_id = protected_entry.bundle_id.clone();
+        let protected_skill_root = protected_entry.skill_root.clone();
+        drop(application);
+
+        let interrupted = SkillYardApplication::new_with_lifecycle_failpoint(
+            ApplicationPaths::for_home(data_root.clone(), home.clone()),
+            PlatformInfo::supported_for_test(),
+            LifecycleFailpoint::AfterCandidatePrepared,
+        );
+        let input = sandbox.path().join("downloads/example-skill");
+        write_skill(&input, "example-skill", "original");
+        let plan = create_plan(&interrupted, &input);
+        interrupted
+            .handle(confirm_default_install_intent(&plan))
+            .expect_err("failpoint 应留下真实 Journal");
+
+        let journal_path = only_journal_path(&data_root);
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal_path).expect("应读取 Journal"))
+                .expect("Journal 应为 JSON");
+        let transaction_id = journal["transaction_id"]
+            .as_str()
+            .expect("Journal 应记录事务 ID")
+            .to_owned();
+        if let Some(members) = replacement {
+            journal["members"] = members;
+        } else {
+            journal
+                .as_object_mut()
+                .expect("Journal 根应为对象")
+                .remove("members")
+                .expect("真实 Journal 应包含 members");
+        }
+        let damaged_journal = serde_json::to_vec_pretty(&journal).expect("应序列化损坏 Journal");
+        fs::write(&journal_path, &damaged_journal).expect("应写入损坏 Journal");
+        drop(interrupted);
+
+        let reopened = SkillYardApplication::new(
+            ApplicationPaths::for_home(data_root.clone(), home),
+            PlatformInfo::supported_for_test(),
+        );
+        let UiOutcome::Inventory {
+            entries,
+            recovery_issues,
+            ..
+        } = reopened
+            .handle(UiIntent::GetStartupState)
+            .unwrap_or_else(|error| panic!("{case_name} 时清单仍应可读：{error}"))
+        else {
+            panic!("{case_name} 时恢复后应返回 Inventory");
+        };
+
+        assert_eq!(recovery_issues.len(), 1, "{case_name} 应只阻塞相关事务");
+        assert_eq!(recovery_issues[0].id, transaction_id);
+        assert_eq!(
+            recovery_issues[0].bundle_display_name, "example-skill",
+            "{case_name} 应把恢复问题归到损坏事务"
+        );
+        let protected_after = entries
+            .iter()
+            .find(|entry| {
+                entry.skill_name == "protected-skill"
+                    && entry.management_kind == ManagementKind::SkillYardManaged
+            })
+            .unwrap_or_else(|| panic!("{case_name} 不应移除不相关的受管 Skill"));
+        assert_eq!(protected_after.bundle_id, protected_bundle_id);
+        assert_eq!(protected_after.skill_root, protected_skill_root);
+        assert!(
+            !entries.iter().any(|entry| {
+                entry.skill_name == "example-skill"
+                    && entry.management_kind == ManagementKind::SkillYardManaged
+            }),
+            "{case_name} 不应把损坏事务提交到清单"
+        );
+        assert_eq!(
+            fs::read_to_string(Path::new(&protected_skill_root).join("payload.txt"))
+                .expect("不相关的受管内容必须仍可读取"),
+            "keep"
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("阻塞恢复必须保留 Journal"),
+            damaged_journal
+        );
+
+        let connection =
+            Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+        let status = connection
+            .query_row(
+                "SELECT status FROM lifecycle_transactions WHERE id = ?1",
+                [transaction_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("应读取相关事务状态");
+        assert_eq!(status, "blocked", "{case_name} 应标记相关事务 blocked");
+    }
+}
+
 #[test]
 fn a_journal_with_unknown_fields_is_rejected_as_an_incompatible_contract() {
     let sandbox = tempdir().expect("应创建隔离测试目录");

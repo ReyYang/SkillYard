@@ -117,6 +117,10 @@ pub enum GithubSourceError {
     UnsupportedInput,
     #[error("GitHub Tracked Ref 不合法")]
     InvalidTrackedRef,
+    #[error("GitHub Install Plan commit SHA 不合法")]
+    InvalidCommitSha,
+    #[error("GitHub Install Plan ID 不合法")]
+    InvalidInstallPlanId,
     #[error("GitHub URL 与 Tracked Ref 冲突")]
     RefConflict,
     #[error("GitHub 网络请求失败")]
@@ -129,9 +133,9 @@ pub enum GithubSourceError {
     InvalidResponse,
     #[error("GitHub 仓库不是公开仓库")]
     PrivateRepository,
-    #[error("GitHub Catalog 临时区不可用")]
+    #[error("GitHub 临时区不可用")]
     StagingUnavailable,
-    #[error("GitHub Catalog 临时内容清理失败")]
+    #[error("GitHub 临时内容清理失败")]
     StagingCleanupFailed,
     #[error("GitHub 返回了无效 ZIP archive")]
     InvalidArchive,
@@ -198,6 +202,65 @@ pub struct GithubCatalogTarget<'a> {
 pub struct FetchedGithubCatalog {
     pub commit_sha: String,
     pub candidates: Vec<DiscoveredBundleCandidate>,
+}
+
+/// 固定 commit 的受管安装快照；未显式持久化时离开作用域会自动清理。
+#[derive(Debug)]
+pub struct PreparedGithubInstallSnapshot {
+    snapshot_root: PathBuf,
+    repository_root: PathBuf,
+    candidates: Vec<DiscoveredBundleCandidate>,
+    persisted: bool,
+}
+
+impl PreparedGithubInstallSnapshot {
+    #[cfg(test)]
+    pub fn snapshot_root(&self) -> &Path {
+        &self.snapshot_root
+    }
+
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    #[cfg(test)]
+    pub fn candidates(&self) -> &[DiscoveredBundleCandidate] {
+        &self.candidates
+    }
+
+    /// 将快照所有权交给现有 Plan 生命周期，后续不再由本 guard 清理。
+    pub fn persist(mut self) -> PathBuf {
+        self.persisted = true;
+        self.snapshot_root.clone()
+    }
+
+    fn create(
+        staging_root: &Path,
+        repository_name: &str,
+        plan_id: &str,
+    ) -> Result<Self, GithubSourceError> {
+        fs::create_dir_all(staging_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+        let snapshot_root = staging_root.join(format!(".install-plan-{plan_id}"));
+        fs::create_dir(&snapshot_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+        let snapshot = Self {
+            repository_root: snapshot_root.join(repository_name),
+            snapshot_root,
+            candidates: Vec::new(),
+            persisted: false,
+        };
+        fs::set_permissions(&snapshot.snapshot_root, Permissions::from_mode(0o700))
+            .map_err(|_| GithubSourceError::StagingUnavailable)?;
+        Ok(snapshot)
+    }
+}
+
+impl Drop for PreparedGithubInstallSnapshot {
+    fn drop(&mut self) {
+        if !self.persisted {
+            // Drop 只能尽力清理；准备过程中的显式清理失败仍会作为正常错误返回。
+            let _ = fs::remove_dir_all(&self.snapshot_root);
+        }
+    }
 }
 
 /// `Arc<dyn SourceTransport>` 便于 application 只持有一个可替换的外部网络能力。
@@ -327,6 +390,41 @@ pub fn fetch_github_catalog(
         Ok(()) => result,
         Err(error) => Err(error),
     }
+}
+
+/// 只按 Catalog 已固定的 commit 获取内容，并交给现有 Plan 生命周期管理快照目录。
+pub fn prepare_github_install_snapshot(
+    transport: &dyn SourceTransport,
+    target: GithubCatalogTarget<'_>,
+    expected_commit_sha: &str,
+    staging_root: &Path,
+    plan_id: &str,
+) -> Result<PreparedGithubInstallSnapshot, GithubSourceError> {
+    validate_catalog_target(target)?;
+    if !is_commit_sha(expected_commit_sha) {
+        return Err(GithubSourceError::InvalidCommitSha);
+    }
+    let parsed_plan_id =
+        Uuid::parse_str(plan_id).map_err(|_| GithubSourceError::InvalidInstallPlanId)?;
+    if parsed_plan_id.hyphenated().to_string() != plan_id {
+        // 只接受产品内部生成的 canonical UUID，避免同一 Plan 对应多个目录名。
+        return Err(GithubSourceError::InvalidInstallPlanId);
+    }
+
+    let mut snapshot =
+        PreparedGithubInstallSnapshot::create(staging_root, target.repository, plan_id)?;
+    let fetched = fetch_catalog_into_temporary_tree(
+        transport,
+        target.owner,
+        target.repository,
+        target.repository,
+        expected_commit_sha,
+        &snapshot.snapshot_root,
+    )?;
+    fs::remove_file(snapshot.snapshot_root.join("source.zip"))
+        .map_err(|_| GithubSourceError::StagingCleanupFailed)?;
+    snapshot.candidates = fetched.candidates;
+    Ok(snapshot)
 }
 
 fn validate_catalog_target(target: GithubCatalogTarget<'_>) -> Result<(), GithubSourceError> {
@@ -1424,6 +1522,175 @@ mod tests {
     }
 
     #[test]
+    fn prepares_install_snapshot_from_exact_sha_with_one_archive_request() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let plan_id = "11111111-1111-4111-8111-111111111111";
+        let transport = FixtureTransport::new([binary_fixture(
+            200,
+            zip_fixture(&[(
+                "repository-sha/skills/alpha/SKILL.md",
+                "---\nname: alpha\ndescription: installable skill\n---\n",
+            )]),
+        )]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        let snapshot = prepare_github_install_snapshot(
+            &transport,
+            install_catalog_target(),
+            sha,
+            &staging,
+            plan_id,
+        )
+        .expect("固定 commit archive 应生成安装快照");
+
+        assert_eq!(
+            snapshot.snapshot_root(),
+            staging.join(format!(".install-plan-{plan_id}"))
+        );
+        assert_eq!(
+            snapshot.repository_root(),
+            snapshot.snapshot_root().join("Repo")
+        );
+        assert_eq!(snapshot.candidates().len(), 1);
+        assert!(!snapshot.snapshot_root().join("source.zip").exists());
+        let requests = transport.requests.lock().expect("应读取请求记录");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .url
+                .path()
+                .ends_with(&format!("/repos/Owner/Repo/zipball/{sha}"))
+        );
+    }
+
+    #[test]
+    fn removes_install_snapshot_when_guard_drops_without_persist() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let plan_id = "22222222-2222-4222-8222-222222222222";
+        let transport = FixtureTransport::new([binary_fixture(
+            200,
+            zip_fixture(&[("repository-sha/README.md", "# repository\n")]),
+        )]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        let snapshot = prepare_github_install_snapshot(
+            &transport,
+            install_catalog_target(),
+            sha,
+            &staging,
+            plan_id,
+        )
+        .expect("合法 archive 应生成安装快照");
+        let snapshot_root = snapshot.snapshot_root().to_owned();
+        assert!(snapshot_root.exists());
+
+        drop(snapshot);
+
+        assert!(!snapshot_root.exists(), "未持久化的安装快照必须自动清理");
+    }
+
+    #[test]
+    fn persisted_install_snapshot_keeps_only_repository_tree() {
+        let sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let plan_id = "33333333-3333-4333-8333-333333333333";
+        let transport = FixtureTransport::new([binary_fixture(
+            200,
+            zip_fixture(&[
+                ("repository-sha/README.md", "# repository\n"),
+                (
+                    "repository-sha/skills/alpha/SKILL.md",
+                    "---\nname: alpha\ndescription: installable skill\n---\n",
+                ),
+            ]),
+        )]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        let snapshot = prepare_github_install_snapshot(
+            &transport,
+            install_catalog_target(),
+            sha,
+            &staging,
+            plan_id,
+        )
+        .expect("合法 archive 应生成安装快照");
+        let snapshot_root = snapshot.persist();
+        let entries = fs::read_dir(&snapshot_root)
+            .expect("持久化快照应可读")
+            .map(|entry| entry.expect("目录项应可读").file_name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(entries, vec![std::ffi::OsString::from("Repo")]);
+        assert!(snapshot_root.join("Repo/README.md").is_file());
+        assert!(snapshot_root.join("Repo/skills/alpha/SKILL.md").is_file());
+        assert!(!snapshot_root.join("source.zip").exists());
+    }
+
+    #[test]
+    fn rejects_invalid_install_snapshot_inputs_without_leaving_staging() {
+        let transport = FixtureTransport::new([]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        assert_eq!(
+            prepare_github_install_snapshot(
+                &transport,
+                install_catalog_target(),
+                "moving-ref",
+                &staging,
+                "44444444-4444-4444-8444-444444444444",
+            )
+            .expect_err("移动 ref 不能替代固定 SHA"),
+            GithubSourceError::InvalidCommitSha
+        );
+        assert_eq!(
+            prepare_github_install_snapshot(
+                &transport,
+                install_catalog_target(),
+                "cccccccccccccccccccccccccccccccccccccccc",
+                &staging,
+                "../plan",
+            )
+            .expect_err("Plan ID 不能改写 staging 路径"),
+            GithubSourceError::InvalidInstallPlanId
+        );
+        assert!(!staging.exists(), "输入校验失败前不能创建 staging");
+        assert!(
+            transport
+                .requests
+                .lock()
+                .expect("应读取请求记录")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn removes_fixed_install_snapshot_after_archive_error() {
+        let plan_id = "55555555-5555-4555-8555-555555555555";
+        let transport = FixtureTransport::new([binary_fixture(200, b"not-a-zip".to_vec())]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        assert_eq!(
+            prepare_github_install_snapshot(
+                &transport,
+                install_catalog_target(),
+                "dddddddddddddddddddddddddddddddddddddddd",
+                &staging,
+                plan_id,
+            )
+            .expect_err("无效 archive 必须失败"),
+            GithubSourceError::InvalidArchive
+        );
+        assert!(
+            !staging.join(format!(".install-plan-{plan_id}")).exists(),
+            "准备失败时必须清理已创建的固定快照目录"
+        );
+    }
+
+    #[test]
     fn receive_limit_accepts_exact_bytes_and_rejects_the_next_byte() {
         let mut exact_source = Cursor::new(b"12345".to_vec());
         let mut exact_destination = Vec::new();
@@ -1640,6 +1907,16 @@ mod tests {
             final_url: Url::parse("https://api.github.com/fixture").expect("fixture URL 应合法"),
             body: Box::new(Cursor::new(body)),
         })
+    }
+
+    fn install_catalog_target() -> GithubCatalogTarget<'static> {
+        GithubCatalogTarget {
+            owner: "Owner",
+            repository: "Repo",
+            canonical_identity: "github:owner/repo",
+            display_name: "Owner/Repo",
+            tracked_ref: "main",
+        }
     }
 
     fn zip_fixture(entries: &[(&str, &str)]) -> Vec<u8> {

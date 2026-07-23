@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    fs,
     io::{Cursor, Write},
     sync::{Arc, Condvar, Mutex},
     thread,
@@ -171,6 +172,14 @@ fn common_inputs_reuse_one_canonical_source_and_default_branch_comes_from_github
     assert_eq!(added.display_name, "Acme/Toolkit");
     assert_eq!(added.tracked_ref, "trunk");
     assert!(added.bundle_id.is_none());
+    let notice = fs::read_to_string(
+        sandbox
+            .path()
+            .join("application-support/SkillYard/SKILLYARD-INFO.md"),
+    )
+    .expect("新增 Source 后应同步更新 Central Store 说明");
+    assert!(notice.contains("Acme/Toolkit"));
+    assert!(notice.contains("https://github.com/Acme/Toolkit"));
 
     transport.enqueue_public_repository("Acme/Toolkit", "next-default");
     transport.enqueue_commit("1111111111111111111111111111111111111111");

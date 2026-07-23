@@ -21,6 +21,9 @@ pub enum UiIntent {
     CreateFolderInstallPlan {
         input_path: String,
     },
+    CreateGithubInstallPlan {
+        source_id: String,
+    },
     ConfirmInstallPlan {
         plan_id: String,
         selected_candidate_ids: Vec<String>,
