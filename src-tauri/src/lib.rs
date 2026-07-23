@@ -19,9 +19,9 @@ pub use domain::{
     LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
     MountOperation, MountPlan, MountPlanPurpose, MountScope, MountSummary, PlatformInfo,
     ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
-    SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
-    TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest,
-    UiIntent, UiOutcome,
+    SourceCatalogMemberSummary, SourceCatalogStatus, SourceSummary, SupportedAppId,
+    TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin,
+    TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest, UiIntent, UiOutcome,
 };
 pub use lifecycle::LifecycleFailpoint;
 pub use paths::ApplicationPaths;

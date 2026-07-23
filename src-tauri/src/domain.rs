@@ -7,6 +7,7 @@ pub enum UiIntent {
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
+    OpenSourceDiscovery,
     CreateFolderInstallPlan {
         input_path: String,
     },
@@ -481,6 +482,58 @@ pub struct FolderInstallCandidate {
     pub default_selected: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceCatalogStatus {
+    Unloaded,
+    Fresh,
+    Stale,
+}
+
+impl SourceCatalogStatus {
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "unloaded" => Some(Self::Unloaded),
+            "fresh" => Some(Self::Fresh),
+            "stale" => Some(Self::Stale),
+            _ => None,
+        }
+    }
+}
+
+/// Catalog Member 只是上游发现 metadata；只有关联到 Member ID 后才表示已经安装。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCatalogMemberSummary {
+    pub id: String,
+    pub relative_path: String,
+    pub skill_name: Option<String>,
+    pub description: Option<String>,
+    pub selectable: bool,
+    pub validation_errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub installed_member_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSummary {
+    pub id: String,
+    pub canonical_identity: String,
+    pub display_name: String,
+    pub repository_url: String,
+    pub tracked_ref: String,
+    pub member_path_hint: Option<String>,
+    pub catalog_status: SourceCatalogStatus,
+    pub catalog_commit_sha: Option<String>,
+    pub catalog_fetched_at: Option<i64>,
+    pub last_reload_at: Option<i64>,
+    pub last_reload_error: Option<String>,
+    pub bundle_id: Option<String>,
+    pub adopted_commit_sha: Option<String>,
+    pub members: Vec<SourceCatalogMemberSummary>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScanRootKey {
@@ -740,6 +793,11 @@ pub enum UiOutcome {
         recovery_issues: Vec<RecoveryIssue>,
         projects: Vec<ProjectSummary>,
         mounts: Vec<MountSummary>,
+    },
+    SourceDiscovery {
+        sources: Vec<SourceSummary>,
+        highlighted_source_id: Option<String>,
+        highlighted_member_path: Option<String>,
     },
     FolderInstallPlan {
         plan: FolderInstallPlan,

@@ -91,6 +91,9 @@ impl SkillYardApplication {
             UiIntent::RefreshLocalInventory => {
                 self.with_write_operation(|| self.refresh_local_inventory())
             }
+            UiIntent::OpenSourceDiscovery => {
+                self.with_write_operation(|| self.open_source_discovery())
+            }
             UiIntent::CreateFolderInstallPlan { input_path } => {
                 self.with_write_operation(|| self.create_folder_install_plan(input_path))
             }
@@ -226,6 +229,16 @@ impl SkillYardApplication {
             recovery_issues: saved.recovery_issues,
             projects: saved.projects,
             mounts: saved.mounts,
+        })
+    }
+
+    fn open_source_discovery(&self) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        Ok(UiOutcome::SourceDiscovery {
+            sources: storage.read_source_summaries()?,
+            highlighted_source_id: None,
+            highlighted_member_path: None,
         })
     }
 

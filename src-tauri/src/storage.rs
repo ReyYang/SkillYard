@@ -15,7 +15,8 @@ use crate::domain::{
     BatchMountDisposition, InventoryItem, InventoryLocationKind, InventoryObservation,
     LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
     MountOperation, MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue,
-    ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SupportedAppId,
+    ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus,
+    SourceCatalogMemberSummary, SourceCatalogStatus, SourceSummary, SupportedAppId,
     SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
 
@@ -40,6 +41,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         11,
         include_str!("../migrations/0011_takeover_transactions.sql"),
     ),
+    (12, include_str!("../migrations/0012_github_sources.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -60,6 +62,12 @@ pub enum StorageError {
     Migration(#[source] rusqlite::Error),
     #[error("无法读取本机清单状态：{0}")]
     ReadInventory(#[source] rusqlite::Error),
+    #[error("无法读取 Source 状态：{0}")]
+    ReadSources(#[source] rusqlite::Error),
+    #[error("SQLite 中包含未知 Source Catalog 状态：{0}")]
+    UnknownSourceCatalogStatus(String),
+    #[error("Source Catalog 成员 metadata 无法解析：{0}")]
+    InvalidSourceCatalogMetadata(#[source] serde_json::Error),
     #[error("无法保存首次扫描结果：{0}")]
     SaveInitialScan(#[source] rusqlite::Error),
     #[error("无法保存本机刷新结果：{0}")]
@@ -1081,6 +1089,92 @@ impl Storage {
             projects,
             mounts,
         }))
+    }
+
+    /// 发现页从一个 SQLite 快照读取 Source、Catalog 与已安装关系，不自行访问网络。
+    pub fn read_source_summaries(&mut self) -> Result<Vec<SourceSummary>, StorageError> {
+        // Source、Catalog generation 与成员必须来自同一个快照，不能和另一实例的 reload 拼接。
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(StorageError::ReadSources)?;
+        let mut statement = transaction
+            .prepare(
+                "SELECT source.id, source.canonical_identity, source.display_name,
+                        source.repository_url, source.tracked_ref, source.member_path_hint,
+                        source.catalog_status, source.catalog_commit_sha,
+                        source.catalog_fetched_at, source.last_reload_at,
+                        source.last_reload_error, source.catalog_generation,
+                        link.bundle_id, link.adopted_commit_sha
+                 FROM sources AS source
+                 LEFT JOIN source_bundle_links AS link ON link.source_id = source.id
+                 ORDER BY source.sort_order, source.id",
+            )
+            .map_err(StorageError::ReadSources)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                ))
+            })
+            .map_err(StorageError::ReadSources)?;
+        let rows = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadSources)?;
+        drop(statement);
+        let mut sources = Vec::new();
+        for row in rows {
+            let (
+                id,
+                canonical_identity,
+                display_name,
+                repository_url,
+                tracked_ref,
+                member_path_hint,
+                catalog_status,
+                catalog_commit_sha,
+                catalog_fetched_at,
+                last_reload_at,
+                last_reload_error,
+                catalog_generation,
+                bundle_id,
+                adopted_commit_sha,
+            ) = row;
+            let catalog_status = SourceCatalogStatus::from_str(&catalog_status)
+                .ok_or_else(|| StorageError::UnknownSourceCatalogStatus(catalog_status.clone()))?;
+            let members = read_source_catalog_members_from(&transaction, &id, catalog_generation)?;
+            sources.push(SourceSummary {
+                id,
+                canonical_identity,
+                display_name,
+                repository_url,
+                tracked_ref,
+                member_path_hint,
+                catalog_status,
+                catalog_commit_sha,
+                catalog_fetched_at,
+                last_reload_at,
+                last_reload_error,
+                bundle_id,
+                adopted_commit_sha,
+                members,
+            });
+        }
+        transaction.commit().map_err(StorageError::ReadSources)?;
+        Ok(sources)
     }
 
     pub fn save_initial_scan(
@@ -4873,6 +4967,67 @@ fn read_install_candidates_from(
     Ok(candidates)
 }
 
+fn read_source_catalog_members_from(
+    connection: &Connection,
+    source_id: &str,
+    catalog_generation: i64,
+) -> Result<Vec<SourceCatalogMemberSummary>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT member.id, member.relative_path, member.skill_name,
+                    member.description, member.selectable,
+                    member.validation_errors_json, member.warnings_json,
+                    link.member_id
+             FROM source_catalog_members AS member
+             LEFT JOIN source_member_links AS link
+               ON link.source_id = member.source_id
+              AND link.source_relative_path = member.relative_path
+             WHERE member.source_id = ?1 AND member.catalog_generation = ?2
+             ORDER BY member.sort_order, member.relative_path",
+        )
+        .map_err(StorageError::ReadSources)?;
+    let rows = statement
+        .query_map(params![source_id, catalog_generation], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })
+        .map_err(StorageError::ReadSources)?;
+    let mut members = Vec::new();
+    for row in rows {
+        let (
+            id,
+            relative_path,
+            skill_name,
+            description,
+            selectable,
+            validation_errors,
+            warnings,
+            installed_member_id,
+        ) = row.map_err(StorageError::ReadSources)?;
+        members.push(SourceCatalogMemberSummary {
+            id,
+            relative_path,
+            skill_name,
+            description,
+            selectable: sqlite_bool(selectable)?,
+            validation_errors: serde_json::from_str(&validation_errors)
+                .map_err(StorageError::InvalidSourceCatalogMetadata)?,
+            warnings: serde_json::from_str(&warnings)
+                .map_err(StorageError::InvalidSourceCatalogMetadata)?,
+            installed_member_id,
+        });
+    }
+    Ok(members)
+}
+
 fn sqlite_bool(value: i64) -> Result<bool, StorageError> {
     match value {
         0 => Ok(false),
@@ -5715,7 +5870,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=11).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=12).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
