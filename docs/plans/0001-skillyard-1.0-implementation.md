@@ -200,6 +200,60 @@ Stage 4 在提交 `9abc7d0` 后从 Stage 3 已验收基线重新实现。此前�
 3. typed Tauri command/client 与 `App`：用户选择、只读影响预览、不可取消确认和失败后重读。
 4. 独立子进程硬退出：确认各持久化阶段的重启恢复和幂等性。
 
+### 完整技术实现图
+
+Stage 4 的六个切片共同实现并验证下面这一条接管路径，不能各自建立独立流程：
+
+```text
+TakeoverPlan（只读、已封存）
+  -> TakeoverTransaction + TakeoverJournal
+  -> 在 staging 中准备完整 Bundle 内容
+  -> 原子发布 contents/<content-id> 并建立 Bundle current
+  -> 隔离全部原始 Skill 目录
+  -> 在用户确认的 Supported App 位置建立全部 Mount
+  -> 验证 current、内容和 Mount
+  -> 一次 SQLite 事务提交 Bundle、Member、Selection、Mount 并消费 Plan
+  -> 清理隔离内容、Journal 和 Transaction
+```
+
+模型与职责固定如下：
+
+- `TakeoverPlan`：保存扫描证据、用户选择、全部原始位置、最终 Mount 和后端派生路径。创建后不可修改；确认只传 `plan_id`。
+- `TakeoverTransaction`：SQLite 中唯一的接管总体状态，负责回答操作是否已经越过领域提交点。
+- `TakeoverJournal`：文件系统事务合同，保存候选内容、原始位置、隔离位置、最终 Mount 和逐项进度；它不是第二套领域状态。
+- `takeover.rs`：编排上述单一路径。单副本、多副本、scope 冲突和共享目录只能改变 Plan 输入，不能改变事务协议。
+- `storage.rs` 与 `0011_takeover_transactions.sql`：保存唯一接管事务，并在一个 SQLite 事务中提交完整受管领域状态；不引入 Source 或 Stage 5 schema。
+- `application.rs`、typed Tauri command/client 与 UI：只暴露创建 Plan、确认 Plan、读取持久状态三个生产动作，不暴露内部文件步骤。
+
+Stage 3 能力按以下方式直接复用：
+
+- 继续使用全局 lifecycle writer lock，并在写入前调用 `LifecycleLock::recheck`，防止 Takeover 与 Install、Mount 同时修改 Central Store。
+- 使用 `copy_single_skill_tree_into_open_directory` 和 `BundleCopyBudget` 复制并校验 Skill，沿用既有的路径、资源上限和内容指纹规则。
+- 使用 `open_managed_directory_from_root`、`open_directory_at`、`mkdir_at`、`entry_metadata_at`、`rename_at_no_replace`、`symlink_at`、`unlink_at` 和 `write_atomic_at` 操作 Central Store；不新增基于裸绝对路径的弱化实现。
+- 沿用 Stage 3 的原子发布方式：候选内容在 staging 完整准备后，原子移动到 `bundles/<bundle-id>/contents/<content-id>`，再通过临时链接和 no-replace rename 建立 `current`。
+- 从现有 Mount 生命周期中复用 Host 父目录打开、重检和占用快照能力；Takeover 不能自己实现一套较弱的 Host 路径检查。
+- 复用 `write_notice_from_storage` 更新 `SKILLYARD-INFO.md`，但不能串联调用 Install 与 Mount 的生产事务，因为那会产生两个提交点和可见的半完成状态。
+
+恢复方向只有两个：
+
+- `state_committed` 之前：删除本次新 Mount 和候选，按 Journal 把所有原始目录从隔离位置恢复，然后清除未提交领域状态。
+- `state_committed` 之后：保留新领域状态，只继续完成 Mount 验证、隔离内容和事务记录清理；重复启动必须幂等。
+
+如果原位置或 Mount 被未知内容占用、路径身份变化或权限状态无法判断，相关事务进入 blocked recovery。正常中断不能询问用户选择旧状态还是新状态。
+
+各切片只增加同一条路径的输入与验收覆盖：
+
+| 切片 | 新增产品输入或观察点 | 不变的生产路径 |
+| --- | --- | --- |
+| Plan | 单副本、多副本、唯一内容选择 | 只生成封存 Plan，不写文件 |
+| 单副本确认 | 一个原位置和保留／排除 Mount | 唯一 TakeoverTransaction 与 Journal |
+| 多副本确认 | 多个原位置、一个选中内容 | 同一候选发布、隔离、Mount 和提交顺序 |
+| scope／共享目录 | 不同最终 Mount 拓扑 | 同一事务，仅共享入口最后隔离 |
+| 恢复 | 各持久化阶段的硬退出 | 同一 Journal 按提交点前后恢复 |
+| UI | typed IPC 与用户影响预览 | 调用同一创建／确认生产入口 |
+
+例如，同一 Skill 同时存在于 Codex global 与 Claude Code project 时，Plan 只会多出两个 origin 和两个最终 Mount；确认后仍然只创建一个候选 Bundle、一个 `current`、一个 TakeoverTransaction 和一个 Journal，不会先执行“安装事务”再执行“挂载事务”。
+
 实现只允许按以下纵向切片推进，每片先出现公开 seam 的失败测试，再写最少实现，并独立提交、推送：
 
 1. 单一 Takeover Plan：单副本、多副本显式身份确认、唯一内容选择和零文件修改。
