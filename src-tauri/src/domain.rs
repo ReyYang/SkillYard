@@ -77,6 +77,24 @@ pub enum UiIntent {
         plan_id: String,
         selected_item_ids: Vec<String>,
     },
+    CreateSourceAssociationPlan {
+        #[serde(rename = "bundleId")]
+        bundle_id: String,
+        #[serde(rename = "sourceId")]
+        source_id: String,
+        #[serde(rename = "memberChoices")]
+        member_choices: Vec<SourceMemberMappingChoice>,
+    },
+    ConfirmSourceAssociationPlan {
+        #[serde(rename = "planId")]
+        plan_id: String,
+        #[serde(rename = "contentChoices")]
+        content_choices: Vec<MergeContentChoice>,
+    },
+    DiscardSourceAssociationPlan {
+        #[serde(rename = "planId")]
+        plan_id: String,
+    },
 }
 
 /// 固定 Supported App 的稳定标识。
@@ -615,6 +633,78 @@ pub struct SourceSummary {
     pub members: Vec<SourceCatalogMemberSummary>,
 }
 
+/// 同一份关联 Plan 用 mode 区分直接关联和归并，不建立第二套确认协议。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceAssociationMode {
+    Link,
+    Merge,
+}
+
+/// 创建 Plan 时，每个本地成员都必须明确选择“对应”或“不对应”。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceMemberMappingChoice {
+    pub member_id: String,
+    pub source_relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceAssociationMemberChoice {
+    pub member_id: String,
+    pub skill_name: String,
+    pub source_relative_path: Option<String>,
+}
+
+/// 成员快照让用户看到归并范围，也让确认阶段能够检查计划后的状态变化。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceAssociationMember {
+    pub member_id: String,
+    pub bundle_id: String,
+    pub bundle_display_name: String,
+    pub skill_name: String,
+    pub content_fingerprint: String,
+}
+
+/// 常见的一对一内容冲突可由用户选择一个成员；交叉冲突会单独阻塞计划。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceAssociationConflict {
+    pub id: String,
+    pub label: String,
+    pub candidate_member_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeContentChoice {
+    pub conflict_id: String,
+    pub member_id: String,
+}
+
+/// 公开 DTO 只包含确认界面需要展示的事实；额外竞态快照由编排器内部封存。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceAssociationPlan {
+    pub id: String,
+    pub mode: SourceAssociationMode,
+    pub source_id: String,
+    pub source_display_name: String,
+    pub target_bundle_id: String,
+    pub target_bundle_display_name: String,
+    pub retiring_bundle_id: Option<String>,
+    pub retiring_bundle_display_name: Option<String>,
+    pub member_choices: Vec<SourceAssociationMemberChoice>,
+    pub members: Vec<SourceAssociationMember>,
+    pub mounts: Vec<MountSummary>,
+    pub conflicts: Vec<SourceAssociationConflict>,
+    pub blocking_issues: Vec<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
 /// Tracked Ref 变更只冻结用户需要确认的 metadata，不创建文件系统事务。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -932,6 +1022,10 @@ pub enum UiOutcome {
     TakeoverPlan {
         plan: TakeoverPlan,
     },
+    SourceAssociationPlan {
+        plan: SourceAssociationPlan,
+    },
+    SourceAssociationPlanDiscarded,
 }
 
 impl UiOutcome {
@@ -1182,6 +1276,54 @@ mod tests {
         assert_eq!(
             serde_json::to_value(UiOutcome::InstallPlanDiscarded).expect("应序列化放弃完成状态"),
             serde_json::json!({"type": "installPlanDiscarded"})
+        );
+    }
+
+    #[test]
+    fn source_association_intents_use_one_camel_case_contract() {
+        let create = UiIntent::CreateSourceAssociationPlan {
+            bundle_id: "bundle-local".to_owned(),
+            source_id: "source-upstream".to_owned(),
+            member_choices: vec![SourceMemberMappingChoice {
+                member_id: "member-alpha".to_owned(),
+                source_relative_path: Some("skills/alpha".to_owned()),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(create).expect("应序列化来源关联请求"),
+            serde_json::json!({
+                "type": "createSourceAssociationPlan",
+                "bundleId": "bundle-local",
+                "sourceId": "source-upstream",
+                "memberChoices": [{
+                    "memberId": "member-alpha",
+                    "sourceRelativePath": "skills/alpha"
+                }]
+            })
+        );
+
+        let confirm = UiIntent::ConfirmSourceAssociationPlan {
+            plan_id: "association-plan".to_owned(),
+            content_choices: vec![MergeContentChoice {
+                conflict_id: "conflict-alpha".to_owned(),
+                member_id: "member-alpha".to_owned(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(confirm).expect("应序列化来源关联确认请求"),
+            serde_json::json!({
+                "type": "confirmSourceAssociationPlan",
+                "planId": "association-plan",
+                "contentChoices": [{
+                    "conflictId": "conflict-alpha",
+                    "memberId": "member-alpha"
+                }]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UiOutcome::SourceAssociationPlanDiscarded)
+                .expect("应序列化来源关联放弃结果"),
+            serde_json::json!({"type": "sourceAssociationPlanDiscarded"})
         );
     }
 }

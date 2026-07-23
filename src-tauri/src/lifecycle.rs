@@ -204,7 +204,8 @@ struct InstallJournal {
 #[serde(deny_unknown_fields)]
 struct InstallJournalMember {
     candidate_id: String,
-    source_relative_path: String,
+    /// 保留的“不对应”成员没有 Source 路径；新候选始终为 `Some`。
+    source_relative_path: Option<String>,
     skill_name: String,
     content_fingerprint: String,
     stable_member_relative: String,
@@ -260,7 +261,7 @@ enum CurrentState {
 
 struct InstallPlanCandidateDraft {
     candidate_id: String,
-    source_relative_path: String,
+    source_relative_path: Option<String>,
     skill_name: Option<String>,
     skill_description: Option<String>,
     content_fingerprint: Option<String>,
@@ -390,7 +391,7 @@ pub fn create_folder_install_plan(
         .zip(&validated.candidates)
         .map(|(candidate, discovered)| NewInstallCandidate {
             candidate_id: &candidate.candidate_id,
-            source_relative_path: &candidate.source_relative_path,
+            source_relative_path: Some(candidate.source_relative_path.as_str()),
             skill_name: candidate.skill_name.as_deref(),
             skill_description: candidate.description.as_deref(),
             content_fingerprint: discovered.fingerprint.as_deref(),
@@ -707,7 +708,7 @@ fn create_source_install_plan_from_prepared_snapshot(
         drafts.push(InstallPlanCandidateDraft {
             // Catalog ID 在确认后成为本地 Member ID，避免额外的映射层。
             candidate_id: member.id.clone(),
-            source_relative_path: member.relative_path.clone(),
+            source_relative_path: Some(member.relative_path.clone()),
             skill_name: member.skill_name.clone(),
             skill_description: member.description.clone(),
             content_fingerprint: member.content_fingerprint.clone(),
@@ -741,7 +742,7 @@ fn create_source_install_plan_from_prepared_snapshot(
         .iter()
         .map(|candidate| NewInstallCandidate {
             candidate_id: &candidate.candidate_id,
-            source_relative_path: &candidate.source_relative_path,
+            source_relative_path: candidate.source_relative_path.as_deref(),
             skill_name: candidate.skill_name.as_deref(),
             skill_description: candidate.skill_description.as_deref(),
             content_fingerprint: candidate.content_fingerprint.as_deref(),
@@ -803,7 +804,9 @@ fn create_source_install_plan_from_prepared_snapshot(
                     .to_string()
             }),
             candidate_id: candidate.candidate_id,
-            source_relative_path: candidate.source_relative_path,
+            source_relative_path: candidate
+                .source_relative_path
+                .expect("非保留 Source 候选必须包含来源路径"),
             skill_name: candidate.skill_name,
             description: candidate.skill_description,
             selectable: candidate.selectable,
@@ -848,7 +851,7 @@ fn preflight_source_install(
             bundle
                 .members
                 .iter()
-                .map(|member| member.source_relative_path.clone())
+                .filter_map(|member| member.source_relative_path.clone())
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
@@ -1217,7 +1220,11 @@ fn execute_install(
                 .join("members")
                 .join(&member.skill_name)
         } else {
-            plan_input_root.join(&member.source_relative_path)
+            let source_relative_path = member
+                .source_relative_path
+                .as_deref()
+                .ok_or(LifecycleError::PlanPreconditionChanged)?;
+            plan_input_root.join(source_relative_path)
         };
         copy_single_skill_tree_into_open_directory(
             &source,
@@ -1586,10 +1593,13 @@ fn validate_stored_plan_identifiers(plan: &StoredInstallPlan) -> Result<(), Life
         if let Some(skill_name) = &candidate.skill_name {
             ensure_single_path_component("candidate skill name", skill_name)?;
         }
-        ensure_safe_relative_path(
-            "candidate source relative path",
-            &candidate.source_relative_path,
-        )?;
+        if let Some(source_relative_path) = &candidate.source_relative_path {
+            ensure_safe_relative_path("candidate source relative path", source_relative_path)?;
+        } else if !candidate.preserve_existing {
+            return Err(LifecycleError::RecoveryBlocked(
+                "非保留安装候选缺少 Source 路径".to_owned(),
+            ));
+        }
     }
     match (plan.kind.as_str(), plan.install_mode.as_str()) {
         ("folder_snapshot", "create")
@@ -1633,7 +1643,8 @@ fn stored_candidates_match(
         return Ok(false);
     }
     for (stored, discovered) in stored.iter().zip(discovered) {
-        if stored.source_relative_path != path_to_string(&discovered.relative_path)?
+        if stored.source_relative_path.as_deref()
+            != Some(path_to_string(&discovered.relative_path)?.as_str())
             || stored.skill_name != discovered.name
             || stored.skill_description != discovered.description
             || stored.content_fingerprint != discovered.fingerprint
@@ -1656,9 +1667,13 @@ fn stored_source_plan_candidates_match(
         .iter()
         .filter(|candidate| !candidate.preserve_existing)
     {
-        let Some(discovered) = discovered.iter().find(|candidate| {
-            candidate.relative_path.to_str() == Some(stored.source_relative_path.as_str())
-        }) else {
+        let Some(source_relative_path) = stored.source_relative_path.as_deref() else {
+            return Ok(false);
+        };
+        let Some(discovered) = discovered
+            .iter()
+            .find(|candidate| candidate.relative_path.to_str() == Some(source_relative_path))
+        else {
             return Ok(false);
         };
         if stored.skill_name != discovered.name
@@ -3550,7 +3565,7 @@ mod tests {
     fn stored_candidate(index: usize, fingerprint: &str) -> StoredInstallCandidate {
         StoredInstallCandidate {
             candidate_id: format!("candidate-{index}"),
-            source_relative_path: format!("skills/skill-{index}"),
+            source_relative_path: Some(format!("skills/skill-{index}")),
             skill_name: Some(format!("skill-{index}")),
             skill_description: Some("测试 Skill".to_owned()),
             content_fingerprint: Some(fingerprint.to_owned()),
@@ -3592,6 +3607,8 @@ mod tests {
             .len();
         journal.members[0]
             .source_relative_path
+            .as_mut()
+            .expect("测试成员应包含来源相对路径")
             .push_str(&"x".repeat(MAX_JOURNAL_BYTES - ready_size));
         assert_eq!(
             serde_json::to_vec_pretty(&journal)
@@ -3622,7 +3639,7 @@ mod tests {
         let mut plan =
             stored_plan_with_candidates(vec![stored_candidate(0, &validated.fingerprint)]);
         plan.candidates[0].candidate_id = "candidate-demo".to_owned();
-        plan.candidates[0].source_relative_path = "demo".to_owned();
+        plan.candidates[0].source_relative_path = Some("demo".to_owned());
         plan.candidates[0].skill_name = Some("demo".to_owned());
         let journal =
             build_journal("00000000-0000-4000-8000-000000000000", &plan).expect("应构建 Journal");

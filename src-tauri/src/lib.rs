@@ -12,6 +12,7 @@ mod paths;
 mod scanner;
 mod skills_sh;
 mod source_archive;
+mod source_association;
 mod source_input;
 mod storage;
 mod takeover;
@@ -21,13 +22,14 @@ pub use domain::{
     BatchMountDisposition, BatchMountPlan, BatchMountPlanItem, BatchMountRequest, InstallCandidate,
     InstallInputKind, InstallMode, InstallPlan, InventoryItem, InventoryLocationKind,
     InventoryObservation, LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind,
-    ManagementKind, MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope,
-    MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode,
-    ScanRootKey, SkillMetadataStatus, SkillsShSearchMember, SkillsShSearchSource,
-    SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind, SourceRefChangePlan,
-    SourceSummary, SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
-    TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest,
-    UiIntent, UiOutcome,
+    ManagementKind, MergeContentChoice, MountHealth, MountOperation, MountPlan, MountPlanPurpose,
+    MountScope, MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, ScanIssue,
+    ScanIssueCode, ScanRootKey, SkillMetadataStatus, SkillsShSearchMember, SkillsShSearchSource,
+    SourceAssociationConflict, SourceAssociationMember, SourceAssociationMemberChoice,
+    SourceAssociationMode, SourceAssociationPlan, SourceCatalogMemberSummary, SourceCatalogStatus,
+    SourceKind, SourceMemberMappingChoice, SourceRefChangePlan, SourceSummary, SupportedAppId,
+    TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin,
+    TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest, UiIntent, UiOutcome,
 };
 pub use github_source::{
     GithubSourceError, ReqwestSourceTransport, ResolvedGithubSource, SharedSourceTransport,
@@ -66,6 +68,9 @@ pub fn run() {
             commands::choose_editable_local_install_plan,
             commands::confirm_install_plan,
             commands::discard_install_plan,
+            commands::create_source_association_plan,
+            commands::confirm_source_association_plan,
+            commands::discard_source_association_plan,
             commands::choose_and_register_project,
             commands::create_takeover_plan,
             commands::confirm_takeover_plan,

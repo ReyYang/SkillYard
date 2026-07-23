@@ -454,6 +454,36 @@ Stage 3 能力按以下方式直接复用：
 - 成功后清理已经为空的原 Bundle；未选择内容不保存为版本或回滚点。
 - GitHub Source 与来源未知 Bundle 关联后显示“可更新”，不猜测历史 commit。
 
+### 完整技术实现图
+
+Stage 7 只建立一套 `SourceAssociationPlan`。`link` 与 `merge` 是同一份封存计划根据 Source 当前关系得到的两种 mode，不能分别建立两套 Plan 或确认入口：
+
+```text
+选择无 Source Bundle + 当前 Fresh Source + 对应／不对应
+  -> SourceAssociationPlan（封存 Source、Bundle、成员、Mount 与用户映射）
+  -> link：一个 SQLite 事务建立 Source、Bundle 和可选成员映射
+  -> merge：一个 SourceAssociationTransaction + Journal
+       -> 从两个本地 current 准备完整候选
+       -> 原子切换 Source 已关联 Bundle 的唯一 current
+       -> 校正待归入 Bundle 的 Mount
+       -> 一个 SQLite 事务提交最终成员、Mount、映射和 Bundle 关系
+       -> 清理已经为空的原 Managed Bundle Directory
+```
+
+模型和边界固定如下：
+
+- `SourceAssociationPlan` 同时覆盖直接关联和归并；创建时保存当前 Catalog generation／marker、两个 Bundle 的 `current`、全部成员、Mount、对应选择、内容冲突和阻塞冲突，确认只能在计划已列出的内容候选中选择。
+- `source_member_links` 只保存“对应”。本地成员选择“不对应”时不写任何原因或替代状态；Source 安装读取模型必须允许 Bundle 成员没有 Source Member 映射。
+- Source 必须拥有 Fresh Catalog，所选 Source Member 必须是当前可安装成员，同一个 Source Member 最多对应一个最终本地成员。不通过名称、路径、描述或内容相似度自动建立对应。
+- Source 尚未关联 Bundle 时，直接关联不修改 `current`、内容或 Mount，也不创建文件系统事务；GitHub 的 adopted marker 保存为空，表示第一次完整更新尚未发生。
+- Source 已关联另一个 Bundle 时，以该 Bundle 为保留目标。归并只组合两个本地 Bundle 的当前受管内容，不获取 Source、不安装 Catalog 中其他成员，也不推进已有 adopted marker。
+- 同名成员或映射到同一 Source Member 的常见一对一冲突由用户选择唯一内容；所有 Mount 最终使用该成员。未选择内容不保留为 Revision。一个成员同时卷入多组交叉冲突，或归并后同一成员出现无法同时成立的 global／project Mount scope 时，计划列为阻塞冲突，1.0 要求用户先处理后重新生成，不增加冲突编辑器。
+- Merge 的唯一文件系统生效点是目标 Bundle `current` 的原子替换。生效前中断清理候选并保留两个 Bundle；生效后中断继续完成 Mount、SQLite 和目录清理。未知 `current`、Mount 被外部替换、目录身份变化或权限异常进入 blocked recovery。
+
+Stage 7 新增 `source_association.rs` 作为唯一关联与归并编排器；`domain.rs` 保存公开 Plan／选择 DTO，`storage.rs` 保存同一 Plan、可选归并事务和最终领域提交，`content.rs` 与 `mount_lifecycle.rs` 只提供现有安全文件和 Mount 原语，`application.rs` 与 typed IPC 继续作为薄入口。不能把归并塞进 Install Plan，也不能先调用安装事务再调用 Batch Mount 事务。
+
+本阶段按三个纵向切片实施：先让“对应／不对应”的直接关联穿过公开应用 seam，并把 Source 安装读取器原地改为允许无映射成员；再用同一 Plan 完成归并、单一 Journal 和重启恢复；最后补齐 typed IPC、关联／冲突确认界面和失败后重读。每个切片保持可编译、可回归并独立提交。
+
 ### 不包含
 
 - Update Check 和任何自动或隐式上游内容采用。

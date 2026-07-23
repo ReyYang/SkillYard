@@ -50,6 +50,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         14,
         include_str!("../migrations/0014_general_source_install.sql"),
     ),
+    (
+        15,
+        include_str!("../migrations/0015_source_association_plans.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -254,6 +258,18 @@ pub enum StorageError {
     TakeoverStateConflict(String),
     #[error("SQLite 中包含未知 Takeover 事务阶段：{0}")]
     InvalidTakeoverPhase(String),
+    #[error("Source 关联 Plan 未签发或已经不存在")]
+    SourceAssociationPlanNotFound,
+    #[error("Source 关联 Plan 已经使用，不能重复确认")]
+    SourceAssociationPlanConsumed,
+    #[error("Source 关联 Plan 已过期，请重新生成")]
+    SourceAssociationPlanExpired,
+    #[error("Source 关联 Plan 的不可变合同已经损坏")]
+    InvalidSourceAssociationPlan,
+    #[error("无法保存 Source 关联 Plan：{0}")]
+    SaveSourceAssociationPlan(#[source] rusqlite::Error),
+    #[error("无法读取 Source 关联 Plan：{0}")]
+    ReadSourceAssociationPlan(#[source] rusqlite::Error),
 }
 
 pub struct Storage {
@@ -264,6 +280,17 @@ pub struct Storage {
 /// Storage 不解释 Plan 内容，只原样保存由 Takeover 模块签发的不可变合同。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredTakeoverPlanRow {
+    pub id: String,
+    pub payload_json: String,
+    pub payload_sha256: String,
+    pub status: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+/// 关联层负责解释 payload；Storage 只保存并消费这一份不可变确认合同。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSourceAssociationPlanRow {
     pub id: String,
     pub payload_json: String,
     pub payload_sha256: String,
@@ -332,7 +359,8 @@ pub struct StoredInstallPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredInstallCandidate {
     pub candidate_id: String,
-    pub source_relative_path: String,
+    /// “不对应”的既有成员没有 Source 路径；新候选始终为 `Some`。
+    pub source_relative_path: Option<String>,
     pub skill_name: Option<String>,
     pub skill_description: Option<String>,
     pub content_fingerprint: Option<String>,
@@ -370,7 +398,7 @@ pub struct NewInstallPlan<'a> {
 
 pub struct NewInstallCandidate<'a> {
     pub candidate_id: &'a str,
-    pub source_relative_path: &'a str,
+    pub source_relative_path: Option<&'a str>,
     pub skill_name: Option<&'a str>,
     pub skill_description: Option<&'a str>,
     pub content_fingerprint: Option<&'a str>,
@@ -475,7 +503,52 @@ pub struct StoredSourceInstallBundleMember {
     pub description: String,
     pub stable_relative_path: String,
     pub content_fingerprint: String,
-    pub source_relative_path: String,
+    pub source_relative_path: Option<String>,
+}
+
+/// 关联 Plan 必须从一个 SQLite 读快照取得 Bundle、成员和 Mount。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSourceAssociationBundle {
+    pub id: String,
+    pub display_name: String,
+    pub managed_directory: String,
+    pub current_target: String,
+    pub source_id: Option<String>,
+    pub adopted_marker: Option<String>,
+    pub members: Vec<StoredSourceAssociationBundleMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSourceAssociationBundleMember {
+    pub id: String,
+    pub skill_name: String,
+    pub description: String,
+    pub stable_relative_path: String,
+    pub content_fingerprint: String,
+    pub mounts: Vec<StoredMount>,
+}
+
+/// 直接关联在同一个 SQLite 事务中重检这份完整成员快照。
+pub(crate) struct DirectSourceAssociation<'a> {
+    pub plan_id: &'a str,
+    pub source_id: &'a str,
+    pub source_catalog_generation: i64,
+    pub source_marker: &'a str,
+    pub bundle_id: &'a str,
+    pub expected_current_target: &'a str,
+    pub expected_members: &'a [DirectSourceAssociationMember<'a>],
+    pub member_mappings: &'a [DirectSourceAssociationMemberMapping<'a>],
+    pub now: i64,
+}
+
+pub(crate) struct DirectSourceAssociationMember<'a> {
+    pub member_id: &'a str,
+    pub content_fingerprint: &'a str,
+}
+
+pub(crate) struct DirectSourceAssociationMemberMapping<'a> {
+    pub member_id: &'a str,
+    pub source_relative_path: &'a str,
 }
 
 pub struct NewSourceCatalogMember<'a> {
@@ -927,6 +1000,71 @@ impl Storage {
     ) -> Result<StoredTakeoverPlanRow, StorageError> {
         read_takeover_plan_from(&self.connection, plan_id)?
             .ok_or(StorageError::TakeoverPlanNotFound)
+    }
+
+    pub(crate) fn save_source_association_plan(
+        &mut self,
+        plan: &StoredSourceAssociationPlanRow,
+    ) -> Result<(), StorageError> {
+        validate_source_association_plan_row(plan)?;
+        if plan.status != "pending" {
+            return Err(StorageError::InvalidSourceAssociationPlan);
+        }
+        self.connection
+            .execute(
+                "INSERT INTO source_association_plans (
+                    id, payload_json, payload_sha256, status, created_at, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    plan.id,
+                    plan.payload_json,
+                    plan.payload_sha256,
+                    plan.status,
+                    plan.created_at,
+                    plan.expires_at
+                ],
+            )
+            .map_err(StorageError::SaveSourceAssociationPlan)?;
+        Ok(())
+    }
+
+    pub(crate) fn read_source_association_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<StoredSourceAssociationPlanRow, StorageError> {
+        read_source_association_plan_from(&self.connection, plan_id)?
+            .ok_or(StorageError::SourceAssociationPlanNotFound)
+    }
+
+    pub(crate) fn discard_source_association_plan(
+        &mut self,
+        plan_id: &str,
+    ) -> Result<(), StorageError> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM source_association_plans
+                 WHERE id = ?1 AND status = 'pending'",
+                [plan_id],
+            )
+            .map_err(StorageError::SaveSourceAssociationPlan)?;
+        if deleted == 1 {
+            Ok(())
+        } else if self
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM source_association_plans WHERE id = ?1
+                 )",
+                [plan_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::ReadSourceAssociationPlan)?
+        {
+            Err(StorageError::SourceAssociationPlanConsumed)
+        } else {
+            Err(StorageError::SourceAssociationPlanNotFound)
+        }
     }
 
     /// 开始时必须一次封存对象、路径与 Journal；拆成后续写入会留下未被隔离的窗口。
@@ -1421,6 +1559,129 @@ impl Storage {
         let source = read_source_install_source_from(&transaction, source_id)?;
         transaction.commit().map_err(StorageError::ReadSources)?;
         Ok(source)
+    }
+
+    pub(crate) fn read_source_association_bundle(
+        &mut self,
+        bundle_id: &str,
+    ) -> Result<StoredSourceAssociationBundle, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(StorageError::ReadSources)?;
+        let bundle = read_source_association_bundle_from(&transaction, &self.data_root, bundle_id)?;
+        transaction.commit().map_err(StorageError::ReadSources)?;
+        Ok(bundle)
+    }
+
+    /// 直接关联只写元数据，并在一个事务中消费 Plan，不能留下半条一对一关系。
+    pub(crate) fn finalize_direct_source_association(
+        &mut self,
+        association: DirectSourceAssociation<'_>,
+    ) -> Result<(), StorageError> {
+        validate_direct_source_association_input(&association)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSourceAssociationPlan)?;
+        let plan = read_source_association_plan_from(&transaction, association.plan_id)?
+            .ok_or(StorageError::SourceAssociationPlanNotFound)?;
+        ensure_source_association_plan_is_confirmable(&plan, association.now)?;
+
+        let source_state = transaction
+            .query_row(
+                "SELECT catalog_status, catalog_generation, catalog_marker
+                 FROM sources
+                 WHERE id = ?1",
+                [association.source_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?
+            .ok_or(StorageError::SourceNotFound)?;
+        if source_state.0 != "fresh"
+            || source_state.1 != association.source_catalog_generation
+            || source_state.2.as_deref() != Some(association.source_marker)
+        {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        let relationship_exists = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM source_bundle_links
+                    WHERE source_id = ?1 OR bundle_id = ?2
+                 )",
+                params![association.source_id, association.bundle_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::ReadSources)?;
+        if relationship_exists {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        if bundle_or_source_write_is_blocked(
+            &transaction,
+            Some(association.bundle_id),
+            Some(association.source_id),
+        )? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
+
+        let bundle = read_source_association_bundle_from(
+            &transaction,
+            &self.data_root,
+            association.bundle_id,
+        )?;
+        ensure_direct_source_association_snapshot_matches(&association, &bundle)?;
+        validate_direct_source_association_mappings(&transaction, &association)?;
+
+        transaction
+            .execute(
+                "INSERT INTO source_bundle_links (
+                    source_id, bundle_id, adopted_marker, linked_at
+                 ) VALUES (?1, ?2, NULL, ?3)",
+                params![
+                    association.source_id,
+                    association.bundle_id,
+                    association.now
+                ],
+            )
+            .map_err(StorageError::SaveSourceAssociationPlan)?;
+        for mapping in association.member_mappings {
+            transaction
+                .execute(
+                    "INSERT INTO source_member_links (
+                        source_id, source_relative_path, member_id, linked_at
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        association.source_id,
+                        mapping.source_relative_path,
+                        mapping.member_id,
+                        association.now
+                    ],
+                )
+                .map_err(StorageError::SaveSourceAssociationPlan)?;
+        }
+        let consumed = transaction
+            .execute(
+                "UPDATE source_association_plans
+                 SET status = 'consumed'
+                 WHERE id = ?1 AND status = 'pending'",
+                [association.plan_id],
+            )
+            .map_err(StorageError::SaveSourceAssociationPlan)?;
+        if consumed != 1 {
+            return Err(StorageError::SourceAssociationPlanConsumed);
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveSourceAssociationPlan)
     }
 
     /// Catalog 成功结果整体替换；旧成员与 Source 状态不会在事务中间对外可见。
@@ -5374,7 +5635,7 @@ fn validate_stored_install_plan_contract(plan: &StoredInstallPlan) -> Result<(),
                 &plan.kind,
                 &plan.install_mode,
                 &candidate.candidate_id,
-                &candidate.source_relative_path,
+                candidate.source_relative_path.as_deref(),
                 candidate.skill_name.as_deref(),
                 candidate.skill_description.as_deref(),
                 candidate.content_fingerprint.as_deref(),
@@ -5449,7 +5710,7 @@ fn valid_install_candidate_shape(
     plan_kind: &str,
     install_mode: &str,
     candidate_id: &str,
-    source_relative_path: &str,
+    source_relative_path: Option<&str>,
     skill_name: Option<&str>,
     skill_description: Option<&str>,
     content_fingerprint: Option<&str>,
@@ -5461,8 +5722,9 @@ fn valid_install_candidate_shape(
     let metadata_is_complete = skill_name.is_some_and(is_single_path_component)
         && skill_description.is_some()
         && content_fingerprint.is_some_and(|value| !value.is_empty());
-    let source_path_is_valid =
-        source_relative_path.is_empty() || is_normalized_relative_path(source_relative_path);
+    let source_path_is_valid = source_relative_path
+        .is_some_and(|path| path.is_empty() || is_normalized_relative_path(path))
+        || (source_relative_path.is_none() && preserve_existing);
     is_single_path_component(candidate_id)
         && source_path_is_valid
         && (!selectable || metadata_is_complete)
@@ -5578,14 +5840,20 @@ fn validate_source_install_candidates(
     let existing_paths = bundle
         .into_iter()
         .flat_map(|bundle| bundle.members.iter())
-        .map(|member| member.source_relative_path.as_str())
+        .filter_map(|member| member.source_relative_path.as_deref())
         .collect::<BTreeSet<_>>();
     let candidates = plan
         .candidates
         .iter()
         .filter(|candidate| !candidate.preserve_existing)
-        .map(|candidate| (candidate.source_relative_path.as_str(), candidate))
-        .collect::<BTreeMap<_, _>>();
+        .map(|candidate| {
+            candidate
+                .source_relative_path
+                .as_deref()
+                .map(|path| (path, candidate))
+                .ok_or(StorageError::InvalidInstallPlan)
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let expected = catalog_members
         .iter()
         .filter(|member| !existing_paths.contains(member.relative_path.as_str()))
@@ -5817,6 +6085,175 @@ fn read_takeover_plan_from(
         return Err(StorageError::InvalidTakeoverPlan);
     }
     Ok(plan)
+}
+
+fn read_source_association_plan_from(
+    connection: &Connection,
+    plan_id: &str,
+) -> Result<Option<StoredSourceAssociationPlanRow>, StorageError> {
+    let plan = connection
+        .query_row(
+            "SELECT id, payload_json, payload_sha256, status, created_at, expires_at
+             FROM source_association_plans
+             WHERE id = ?1",
+            [plan_id],
+            |row| {
+                Ok(StoredSourceAssociationPlanRow {
+                    id: row.get(0)?,
+                    payload_json: row.get(1)?,
+                    payload_sha256: row.get(2)?,
+                    status: row.get(3)?,
+                    created_at: row.get(4)?,
+                    expires_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadSourceAssociationPlan)?;
+    if let Some(plan) = &plan {
+        validate_source_association_plan_row(plan)?;
+        if plan.id != plan_id {
+            return Err(StorageError::InvalidSourceAssociationPlan);
+        }
+    }
+    Ok(plan)
+}
+
+fn validate_source_association_plan_row(
+    plan: &StoredSourceAssociationPlanRow,
+) -> Result<(), StorageError> {
+    let hash_is_valid = plan.payload_sha256.len() == 64
+        && plan
+            .payload_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+    if is_single_path_component(&plan.id)
+        && !plan.payload_json.is_empty()
+        && hash_is_valid
+        && matches!(plan.status.as_str(), "pending" | "consumed")
+        && plan.created_at >= 0
+        && plan.expires_at >= plan.created_at
+    {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidSourceAssociationPlan)
+    }
+}
+
+fn ensure_source_association_plan_is_confirmable(
+    plan: &StoredSourceAssociationPlanRow,
+    now: i64,
+) -> Result<(), StorageError> {
+    if plan.status != "pending" {
+        Err(StorageError::SourceAssociationPlanConsumed)
+    } else if now < 0 {
+        Err(StorageError::InvalidSourceAssociationPlan)
+    } else if plan.expires_at <= now {
+        Err(StorageError::SourceAssociationPlanExpired)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_direct_source_association_input(
+    association: &DirectSourceAssociation<'_>,
+) -> Result<(), StorageError> {
+    let expected_member_ids = association
+        .expected_members
+        .iter()
+        .map(|member| member.member_id)
+        .collect::<BTreeSet<_>>();
+    let mapping_member_ids = association
+        .member_mappings
+        .iter()
+        .map(|mapping| mapping.member_id)
+        .collect::<BTreeSet<_>>();
+    let mapping_source_paths = association
+        .member_mappings
+        .iter()
+        .map(|mapping| mapping.source_relative_path)
+        .collect::<BTreeSet<_>>();
+    let expected_members_are_valid = !association.expected_members.is_empty()
+        && expected_member_ids.len() == association.expected_members.len()
+        && association.expected_members.iter().all(|member| {
+            is_single_path_component(member.member_id) && !member.content_fingerprint.is_empty()
+        });
+    let mappings_are_valid = mapping_member_ids.len() == association.member_mappings.len()
+        && mapping_source_paths.len() == association.member_mappings.len()
+        && association.member_mappings.iter().all(|mapping| {
+            expected_member_ids.contains(mapping.member_id)
+                && is_single_path_component(mapping.member_id)
+                && (mapping.source_relative_path.is_empty()
+                    || is_normalized_relative_path(mapping.source_relative_path))
+        });
+    if is_single_path_component(association.plan_id)
+        && is_single_path_component(association.source_id)
+        && association.source_catalog_generation > 0
+        && !association.source_marker.is_empty()
+        && is_single_path_component(association.bundle_id)
+        && is_safe_current_target(association.expected_current_target)
+        && association.now >= 0
+        && expected_members_are_valid
+        && mappings_are_valid
+    {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidSourceAssociationPlan)
+    }
+}
+
+fn ensure_direct_source_association_snapshot_matches(
+    association: &DirectSourceAssociation<'_>,
+    bundle: &StoredSourceAssociationBundle,
+) -> Result<(), StorageError> {
+    let expected = association
+        .expected_members
+        .iter()
+        .map(|member| (member.member_id, member.content_fingerprint))
+        .collect::<BTreeMap<_, _>>();
+    let actual = bundle
+        .members
+        .iter()
+        .map(|member| (member.id.as_str(), member.content_fingerprint.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    if bundle.id == association.bundle_id
+        && bundle.current_target == association.expected_current_target
+        && bundle.source_id.is_none()
+        && bundle.adopted_marker.is_none()
+        && actual == expected
+    {
+        Ok(())
+    } else {
+        Err(StorageError::SourceBundleStateConflict)
+    }
+}
+
+fn validate_direct_source_association_mappings(
+    transaction: &Transaction<'_>,
+    association: &DirectSourceAssociation<'_>,
+) -> Result<(), StorageError> {
+    for mapping in association.member_mappings {
+        let selectable = transaction
+            .query_row(
+                "SELECT selectable
+                 FROM source_catalog_members
+                 WHERE source_id = ?1
+                   AND catalog_generation = ?2
+                   AND relative_path = ?3",
+                params![
+                    association.source_id,
+                    association.source_catalog_generation,
+                    mapping.source_relative_path
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?;
+        if selectable.map(sqlite_bool).transpose()? != Some(true) {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+    }
+    Ok(())
 }
 
 fn validate_takeover_domain_contract(
@@ -6274,7 +6711,7 @@ fn read_install_candidates_from(
         .query_map([plan_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
@@ -6557,13 +6994,11 @@ fn read_source_install_bundle_from(
             source_relative_path,
             selected_member_id,
         ) = row.map_err(StorageError::ReadSources)?;
-        let Some(source_relative_path) = source_relative_path else {
-            return Err(StorageError::SourceBundleStateConflict);
-        };
         if selected_member_id.as_deref() != Some(id.as_str())
             || stable_relative_path != format!("members/{skill_name}")
-            || (!source_relative_path.is_empty()
-                && !is_normalized_relative_path(&source_relative_path))
+            || source_relative_path
+                .as_deref()
+                .is_some_and(|path| !path.is_empty() && !is_normalized_relative_path(path))
         {
             return Err(StorageError::SourceBundleStateConflict);
         }
@@ -6584,13 +7019,140 @@ fn read_source_install_bundle_from(
             |row| row.get::<_, i64>(0),
         )
         .map_err(StorageError::ReadSources)?;
-    if members.is_empty() || source_link_count != members.len() as i64 {
+    let mapped_member_count = members
+        .iter()
+        .filter(|member| member.source_relative_path.is_some())
+        .count() as i64;
+    if members.is_empty() || source_link_count != mapped_member_count {
         return Err(StorageError::SourceBundleStateConflict);
     }
     Ok(StoredSourceInstallBundle {
         id: bundle_id.to_owned(),
         display_name,
         current_target,
+        adopted_marker,
+        members,
+    })
+}
+
+fn read_source_association_bundle_from(
+    connection: &Connection,
+    data_root: &Path,
+    bundle_id: &str,
+) -> Result<StoredSourceAssociationBundle, StorageError> {
+    let bundle = connection
+        .query_row(
+            "SELECT bundle.display_name, bundle.managed_directory, bundle.current_target,
+                    source_link.source_id, source_link.adopted_marker
+             FROM bundles AS bundle
+             LEFT JOIN source_bundle_links AS source_link
+               ON source_link.bundle_id = bundle.id
+             WHERE bundle.id = ?1",
+            [bundle_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadSources)?
+        .ok_or_else(|| StorageError::ManagedMemberNotFound(bundle_id.to_owned()))?;
+    let (display_name, managed_directory, current_target, source_id, adopted_marker) = bundle;
+    if !is_single_path_component(bundle_id)
+        || display_name.trim().is_empty()
+        || managed_directory != format!("bundles/{bundle_id}")
+        || !is_safe_current_target(&current_target)
+        || (source_id.is_none() && adopted_marker.is_some())
+    {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT member.id, member.skill_name, member.description,
+                    member.stable_relative_path, member.content_fingerprint,
+                    selection.member_id
+             FROM skill_members AS member
+             LEFT JOIN member_selections AS selection
+               ON selection.bundle_id = member.bundle_id
+              AND selection.member_id = member.id
+             WHERE member.bundle_id = ?1
+             ORDER BY member.stable_relative_path, member.id",
+        )
+        .map_err(StorageError::ReadSources)?;
+    let rows = statement
+        .query_map([bundle_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(StorageError::ReadSources)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::ReadSources)?;
+    drop(statement);
+
+    let mut members = Vec::with_capacity(rows.len());
+    for (
+        id,
+        skill_name,
+        description,
+        stable_relative_path,
+        content_fingerprint,
+        selected_member_id,
+    ) in rows
+    {
+        if selected_member_id.as_deref() != Some(id.as_str())
+            || !is_single_path_component(&id)
+            || !is_single_path_component(&skill_name)
+            || stable_relative_path != format!("members/{skill_name}")
+            || content_fingerprint.is_empty()
+        {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        let mut mount_statement = connection
+            .prepare("SELECT id FROM mounts WHERE member_id = ?1 ORDER BY target_path, id")
+            .map_err(StorageError::ReadMountTransaction)?;
+        let mount_ids = mount_statement
+            .query_map([&id], |row| row.get::<_, String>(0))
+            .map_err(StorageError::ReadMountTransaction)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadMountTransaction)?;
+        drop(mount_statement);
+        let mounts = mount_ids
+            .into_iter()
+            .map(|mount_id| {
+                read_mount_from(connection, data_root, &mount_id)?
+                    .ok_or(StorageError::MountNotFound(mount_id))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        members.push(StoredSourceAssociationBundleMember {
+            id,
+            skill_name,
+            description,
+            stable_relative_path,
+            content_fingerprint,
+            mounts,
+        });
+    }
+    if members.is_empty() {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    Ok(StoredSourceAssociationBundle {
+        id: bundle_id.to_owned(),
+        display_name,
+        managed_directory,
+        current_target,
+        source_id,
         adopted_marker,
         members,
     })
@@ -7037,18 +7599,17 @@ fn persist_source_member_link(
     candidate: &StoredInstallCandidate,
     now: i64,
 ) -> Result<(), StorageError> {
+    let Some(source_relative_path) = candidate.source_relative_path.as_deref() else {
+        // “不对应”的保留成员属于完整 Bundle，但不制造假的上游路径。
+        return Ok(());
+    };
     transaction
         .execute(
             "INSERT INTO source_member_links (
                 source_id, source_relative_path, member_id, linked_at
              ) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(source_id, source_relative_path) DO NOTHING",
-            params![
-                source_id,
-                candidate.source_relative_path,
-                candidate.candidate_id,
-                now
-            ],
+            params![source_id, source_relative_path, candidate.candidate_id, now],
         )
         .map_err(StorageError::SaveManagedBundle)?;
     Ok(())
@@ -7084,6 +7645,15 @@ fn ensure_source_install_state_matches(
     if source_bundle != Some((plan.bundle_id.clone(), expected_adopted_marker)) {
         return Err(StorageError::ManagedStateConflict);
     }
+    let linked_candidates = selected
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .source_relative_path
+                .as_deref()
+                .map(|path| (*candidate, path))
+        })
+        .collect::<Vec<_>>();
     let link_count = transaction
         .query_row(
             "SELECT COUNT(*) FROM source_member_links WHERE source_id = ?1",
@@ -7091,10 +7661,10 @@ fn ensure_source_install_state_matches(
             |row| row.get::<_, i64>(0),
         )
         .map_err(StorageError::SaveManagedBundle)?;
-    if link_count != selected.len() as i64 {
+    if link_count != linked_candidates.len() as i64 {
         return Err(StorageError::ManagedStateConflict);
     }
-    for candidate in selected {
+    for (candidate, source_relative_path) in linked_candidates {
         let linked_path = transaction
             .query_row(
                 "SELECT source_relative_path
@@ -7105,7 +7675,7 @@ fn ensure_source_install_state_matches(
             )
             .optional()
             .map_err(StorageError::SaveManagedBundle)?;
-        if linked_path.as_deref() != Some(candidate.source_relative_path.as_str()) {
+        if linked_path.as_deref() != Some(source_relative_path) {
             return Err(StorageError::ManagedStateConflict);
         }
     }
@@ -7560,7 +8130,7 @@ mod tests {
     fn save_test_plan(storage: &mut Storage, plan_id: &str, bundle_id: &str, member_id: &str) {
         let candidates = [NewInstallCandidate {
             candidate_id: member_id,
-            source_relative_path: "",
+            source_relative_path: Some(""),
             skill_name: Some(member_id),
             skill_description: Some("测试 Skill"),
             content_fingerprint: Some("sha256:test"),
@@ -7642,7 +8212,7 @@ mod tests {
         let candidates = [
             NewInstallCandidate {
                 candidate_id: "catalog-alpha-v1",
-                source_relative_path: "skills/alpha",
+                source_relative_path: Some("skills/alpha"),
                 skill_name: Some("alpha"),
                 skill_description: Some("Alpha Skill"),
                 content_fingerprint: Some("sha256:alpha-v1"),
@@ -7654,7 +8224,7 @@ mod tests {
             },
             NewInstallCandidate {
                 candidate_id: "catalog-beta-v1",
-                source_relative_path: "skills/beta",
+                source_relative_path: Some("skills/beta"),
                 skill_name: Some("beta"),
                 skill_description: Some("Beta Skill"),
                 content_fingerprint: Some("sha256:beta"),
@@ -7701,7 +8271,7 @@ mod tests {
         let candidates = [
             NewInstallCandidate {
                 candidate_id: "catalog-alpha-v1",
-                source_relative_path: "skills/alpha",
+                source_relative_path: Some("skills/alpha"),
                 skill_name: Some("alpha"),
                 skill_description: Some("Alpha Skill"),
                 content_fingerprint: Some("sha256:alpha-v1"),
@@ -7713,7 +8283,7 @@ mod tests {
             },
             NewInstallCandidate {
                 candidate_id: "catalog-beta-v2",
-                source_relative_path: "skills/beta",
+                source_relative_path: Some("skills/beta"),
                 skill_name: Some("beta"),
                 skill_description: Some("Beta Skill"),
                 content_fingerprint: Some("sha256:beta"),
@@ -7842,7 +8412,7 @@ mod tests {
         let candidates = [
             NewInstallCandidate {
                 candidate_id: &first_id,
-                source_relative_path: &first_name,
+                source_relative_path: Some(&first_name),
                 skill_name: Some(&first_name),
                 skill_description: Some("第一个测试 Skill"),
                 content_fingerprint: Some("sha256:alpha"),
@@ -7854,7 +8424,7 @@ mod tests {
             },
             NewInstallCandidate {
                 candidate_id: &second_id,
-                source_relative_path: &second_name,
+                source_relative_path: Some(&second_name),
                 skill_name: Some(&second_name),
                 skill_description: Some("第二个测试 Skill"),
                 content_fingerprint: Some("sha256:beta"),
@@ -7922,6 +8492,24 @@ mod tests {
                     .expect("应读取多成员测试 Bundle")
             })
             .collect()
+    }
+
+    fn save_test_source_association_plan(
+        storage: &mut Storage,
+        plan_id: &str,
+        created_at: i64,
+        expires_at: i64,
+    ) {
+        storage
+            .save_source_association_plan(&StoredSourceAssociationPlanRow {
+                id: plan_id.to_owned(),
+                payload_json: "{}".to_owned(),
+                payload_sha256: "0".repeat(64),
+                status: "pending".to_owned(),
+                created_at,
+                expires_at,
+            })
+            .expect("应保存 Source 关联 Plan");
     }
 
     fn register_test_project(storage: &mut Storage, root: &Path) -> StoredProject {
@@ -8009,7 +8597,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=14).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=15).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -8022,6 +8610,7 @@ mod tests {
             "inventory_management_evidence",
             "takeover_plans",
             "takeover_transactions",
+            "source_association_plans",
         ] {
             let exists = storage
                 .connection
@@ -8094,6 +8683,20 @@ mod tests {
             .collect::<Result<BTreeSet<_>, _>>()
             .expect("应收集候选 schema");
         assert!(candidate_columns.contains("preserve_existing"));
+        let source_path_not_null = storage
+            .connection
+            .query_row(
+                "SELECT \"notnull\"
+                 FROM pragma_table_info('install_plan_candidates')
+                 WHERE name = 'source_relative_path'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应读取 optional Source 路径约束");
+        assert_eq!(
+            source_path_not_null, 0,
+            "“不对应”的保留成员不能被迫制造 Source 路径"
+        );
 
         let source_columns = storage
             .connection
@@ -8262,6 +8865,478 @@ mod tests {
             .expect("应执行外键检查")
             .count();
         assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn source_association_migration_preserves_pending_plan_and_active_lifecycle() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let database = data_root.join("skillyard.sqlite3");
+        let connection = Connection::open(&database).expect("应创建 version 14 SQLite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("应建立 migration 表");
+        for (version, migration) in MIGRATIONS.iter().take(14) {
+            connection
+                .execute_batch(migration)
+                .expect("应建立 version 14 schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 1)",
+                    [version],
+                )
+                .expect("应记录旧 migration");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO install_plans (
+                    id, kind, install_mode, input_path, input_device, input_inode,
+                    input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
+                    source_catalog_generation, source_marker, expected_current_target,
+                    expected_adopted_marker, bundle_id, bundle_display_name,
+                    warnings_json, created_at, expires_at, status
+                 ) VALUES
+                    ('pending-before-association', 'folder_snapshot', 'create',
+                     '/tmp/pending', 1, 2, 'sha256:pending', NULL, NULL, NULL,
+                     NULL, NULL, NULL, NULL, 'pending-bundle', 'Pending',
+                     '[]', 10, 1000, 'pending'),
+                    ('active-before-association', 'folder_snapshot', 'create',
+                     '/tmp/active', 3, 4, 'sha256:active', NULL, NULL, NULL,
+                     NULL, NULL, NULL, NULL, 'active-bundle', 'Active',
+                     '[]', 11, 1000, 'consumed');
+
+                 INSERT INTO install_plan_candidates (
+                    plan_id, candidate_id, source_relative_path, skill_name,
+                    skill_description, content_fingerprint, selectable, preserve_existing,
+                    validation_errors_json, warnings_json, default_selected, selected, sort_order
+                 ) VALUES
+                    ('pending-before-association', 'pending-member', '', 'pending',
+                     'Pending', 'sha256:pending', 1, 0, '[]', '[]', 1, 1, 0),
+                    ('active-before-association', 'active-member', '', 'active',
+                     'Active', 'sha256:active', 1, 0, '[]', '[]', 1, 1, 0);
+
+                 INSERT INTO lifecycle_transactions (
+                    id, kind, plan_id, bundle_id, member_id, journal_path,
+                    phase, status, created_at, updated_at
+                 ) VALUES (
+                    'active-before-association-tx', 'install_bundle',
+                    'active-before-association', 'active-bundle', 'active-member',
+                    'journals/active-before-association.json',
+                    'journal_ready', 'in_progress', 12, 12
+                 );",
+            )
+            .expect("应写入 0015 迁移前状态");
+        drop(connection);
+
+        let storage = Storage::open(&data_root, &database).expect("0015 应保留未完成状态");
+        let pending = storage
+            .read_install_plan("pending-before-association")
+            .expect("pending Plan 应保持可读");
+        assert_eq!(
+            pending.candidates[0].source_relative_path.as_deref(),
+            Some("")
+        );
+        assert!(
+            storage
+                .recoverable_lifecycle_transactions()
+                .expect("active lifecycle 应保持可恢复")
+                .iter()
+                .any(|transaction| transaction.id == "active-before-association-tx")
+        );
+        let foreign_key_issues = storage
+            .connection
+            .prepare("PRAGMA foreign_key_check")
+            .expect("应准备外键检查")
+            .query_map([], |_| Ok(()))
+            .expect("应执行外键检查")
+            .count();
+        assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn source_association_plan_storage_enforces_pending_and_hash_contract() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let invalid = storage
+            .save_source_association_plan(&StoredSourceAssociationPlanRow {
+                id: "invalid-association-plan".to_owned(),
+                payload_json: "{}".to_owned(),
+                payload_sha256: "ABC".to_owned(),
+                status: "pending".to_owned(),
+                created_at: 100,
+                expires_at: 200,
+            })
+            .expect_err("非法 hash 不能进入 Plan 表");
+        assert!(matches!(
+            invalid,
+            StorageError::InvalidSourceAssociationPlan
+        ));
+
+        save_test_source_association_plan(&mut storage, "pending-association-plan", 100, 200);
+        assert_eq!(
+            storage
+                .read_source_association_plan("pending-association-plan")
+                .expect("应读回 pending Plan")
+                .status,
+            "pending"
+        );
+        storage
+            .discard_source_association_plan("pending-association-plan")
+            .expect("pending Plan 可被放弃");
+        assert!(matches!(
+            storage
+                .read_source_association_plan("pending-association-plan")
+                .expect_err("放弃后 Plan 应不存在"),
+            StorageError::SourceAssociationPlanNotFound
+        ));
+    }
+
+    #[test]
+    fn direct_source_association_keeps_partial_mapping_and_mount_state() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_github_catalog(
+            &mut storage,
+            "catalog-alpha-v1",
+            "catalog-beta-v1",
+            TEST_GITHUB_COMMIT_ONE,
+            "sha256:alpha-v1",
+            50,
+        );
+        let members = save_test_managed_bundle(&mut storage, "partial-association");
+        let bundle_id = members[0].bundle_id.clone();
+        let member = &members[0];
+        let mount_target = sandbox
+            .path()
+            .join("home/.codex/skills")
+            .join(&member.skill_name);
+        save_test_mount_plan(
+            &mut storage,
+            member,
+            MountOperation::Create,
+            "partial-association-mount",
+            "partial-association-mount-plan",
+            MountScope::Global,
+            None,
+            &mount_target,
+        );
+        finalize_test_mount_create(
+            &mut storage,
+            "partial-association-mount-plan",
+            "partial-association-mount-tx",
+        );
+        storage
+            .forget_terminal_mount_transaction("partial-association-mount-tx")
+            .expect("测试 Mount 事务应清理");
+
+        let before = storage
+            .read_source_association_bundle(&bundle_id)
+            .expect("应从同一快照读取待关联 Bundle");
+        assert!(before.source_id.is_none());
+        assert_eq!(
+            before
+                .members
+                .iter()
+                .map(|member| member.mounts.len())
+                .sum::<usize>(),
+            1
+        );
+        save_test_source_association_plan(&mut storage, "partial-association-plan", 100, 1_000);
+        let expected_members = members
+            .iter()
+            .map(|member| DirectSourceAssociationMember {
+                member_id: &member.id,
+                content_fingerprint: &member.content_fingerprint,
+            })
+            .collect::<Vec<_>>();
+        let mappings = [DirectSourceAssociationMemberMapping {
+            member_id: &members[0].id,
+            source_relative_path: "skills/alpha",
+        }];
+        storage
+            .finalize_direct_source_association(DirectSourceAssociation {
+                plan_id: "partial-association-plan",
+                source_id: TEST_GITHUB_SOURCE_ID,
+                source_catalog_generation: 1,
+                source_marker: TEST_GITHUB_COMMIT_ONE,
+                bundle_id: &bundle_id,
+                expected_current_target: &before.current_target,
+                expected_members: &expected_members,
+                member_mappings: &mappings,
+                now: 200,
+            })
+            .expect("直接关联应只写一对一关系与用户选择的映射");
+        assert_eq!(
+            storage
+                .read_source_association_plan("partial-association-plan")
+                .expect("确认后仍可读取封存 Plan")
+                .status,
+            "consumed"
+        );
+        assert!(matches!(
+            storage
+                .discard_source_association_plan("partial-association-plan")
+                .expect_err("已确认 Plan 不能再次放弃"),
+            StorageError::SourceAssociationPlanConsumed
+        ));
+
+        let source = storage
+            .read_source_install_source(TEST_GITHUB_SOURCE_ID)
+            .expect("部分映射的 Source-backed Bundle 必须可读");
+        let linked = source.bundle.expect("Source 应关联本地 Bundle");
+        let relationship_count = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_bundle_links
+                 WHERE source_id = ?1 AND bundle_id = ?2",
+                params![TEST_GITHUB_SOURCE_ID, bundle_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应检查唯一 Source-Bundle 关系");
+        assert_eq!(relationship_count, 1);
+        assert!(linked.adopted_marker.is_none());
+        assert_eq!(linked.members.len(), 2);
+        assert_eq!(
+            linked
+                .members
+                .iter()
+                .filter(|member| member.source_relative_path.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            linked
+                .members
+                .iter()
+                .find(|linked| linked.id == members[0].id)
+                .and_then(|linked| linked.source_relative_path.as_deref()),
+            Some("skills/alpha")
+        );
+        let after = storage
+            .read_source_association_bundle(&bundle_id)
+            .expect("关联后仍应读取同一 Bundle 与 Mount");
+        assert_eq!(after.source_id.as_deref(), Some(TEST_GITHUB_SOURCE_ID));
+        assert_eq!(
+            after
+                .members
+                .iter()
+                .map(|member| member.mounts.len())
+                .sum::<usize>(),
+            1,
+            "直接关联不能改变 Mount"
+        );
+    }
+
+    #[test]
+    fn all_not_corresponding_members_allow_multiple_null_preserved_candidates() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_github_catalog(
+            &mut storage,
+            "catalog-alpha-v1",
+            "catalog-beta-v1",
+            TEST_GITHUB_COMMIT_ONE,
+            "sha256:alpha-v1",
+            50,
+        );
+        let members = save_test_managed_bundle(&mut storage, "null-association");
+        let bundle_id = members[0].bundle_id.clone();
+        let bundle = storage
+            .read_source_association_bundle(&bundle_id)
+            .expect("应读取待关联 Bundle");
+        save_test_source_association_plan(&mut storage, "null-association-plan", 100, 1_000);
+        let expected_members = members
+            .iter()
+            .map(|member| DirectSourceAssociationMember {
+                member_id: &member.id,
+                content_fingerprint: &member.content_fingerprint,
+            })
+            .collect::<Vec<_>>();
+        storage
+            .finalize_direct_source_association(DirectSourceAssociation {
+                plan_id: "null-association-plan",
+                source_id: TEST_GITHUB_SOURCE_ID,
+                source_catalog_generation: 1,
+                source_marker: TEST_GITHUB_COMMIT_ONE,
+                bundle_id: &bundle_id,
+                expected_current_target: &bundle.current_target,
+                expected_members: &expected_members,
+                member_mappings: &[],
+                now: 200,
+            })
+            .expect("全部选择“不对应”仍是合法 Source 关联");
+        assert!(
+            storage
+                .read_source_install_source(TEST_GITHUB_SOURCE_ID)
+                .expect("全无映射 Bundle 必须可读")
+                .bundle
+                .expect("Source 应关联 Bundle")
+                .members
+                .iter()
+                .all(|member| member.source_relative_path.is_none())
+        );
+
+        let candidates = [
+            NewInstallCandidate {
+                candidate_id: &members[0].id,
+                source_relative_path: None,
+                skill_name: Some(&members[0].skill_name),
+                skill_description: Some("第一个测试 Skill"),
+                content_fingerprint: Some(&members[0].content_fingerprint),
+                selectable: false,
+                preserve_existing: true,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+            NewInstallCandidate {
+                candidate_id: &members[1].id,
+                source_relative_path: None,
+                skill_name: Some(&members[1].skill_name),
+                skill_description: Some("第二个测试 Skill"),
+                content_fingerprint: Some(&members[1].content_fingerprint),
+                selectable: false,
+                preserve_existing: true,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+            NewInstallCandidate {
+                candidate_id: "catalog-alpha-v1",
+                source_relative_path: Some("skills/alpha"),
+                skill_name: Some("alpha"),
+                skill_description: Some("Alpha Skill"),
+                content_fingerprint: Some("sha256:alpha-v1"),
+                selectable: true,
+                preserve_existing: false,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+            NewInstallCandidate {
+                candidate_id: "catalog-beta-v1",
+                source_relative_path: Some("skills/beta"),
+                skill_name: Some("beta"),
+                skill_description: Some("Beta Skill"),
+                content_fingerprint: Some("sha256:beta"),
+                selectable: true,
+                preserve_existing: false,
+                validation_errors: &[],
+                warnings: &[],
+                default_selected: true,
+            },
+        ];
+        storage
+            .save_install_plan(NewInstallPlan {
+                id: "null-preserved-supplement",
+                kind: "source_snapshot",
+                install_mode: "supplement",
+                input_path: None,
+                input_device: 10,
+                input_inode: 20,
+                input_fingerprint: "sha256:null-preserved-snapshot",
+                snapshot_relative_path: Some("staging/null-preserved-supplement/source"),
+                source_id: Some(TEST_GITHUB_SOURCE_ID),
+                source_tracked_ref: Some("main"),
+                source_catalog_generation: Some(1),
+                source_marker: Some(TEST_GITHUB_COMMIT_ONE),
+                expected_current_target: Some(&bundle.current_target),
+                expected_adopted_marker: None,
+                bundle_id: &bundle_id,
+                bundle_display_name: &bundle.display_name,
+                warnings: &[],
+                candidates: &candidates,
+                created_at: 300,
+                expires_at: 1_000,
+            })
+            .expect("同一 supplement Plan 应允许多个无映射保留成员");
+        let stored = storage
+            .read_install_plan("null-preserved-supplement")
+            .expect("应读回 optional mapping");
+        assert_eq!(
+            stored
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.preserve_existing && candidate.source_relative_path.is_none()
+                })
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn direct_source_association_race_rolls_back_relationship_and_plan_consumption() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        save_test_github_catalog(
+            &mut storage,
+            "catalog-alpha-v1",
+            "catalog-beta-v1",
+            TEST_GITHUB_COMMIT_ONE,
+            "sha256:alpha-v1",
+            50,
+        );
+        let members = save_test_managed_bundle(&mut storage, "association-race");
+        let bundle_id = members[0].bundle_id.clone();
+        let before = storage
+            .read_source_association_bundle(&bundle_id)
+            .expect("应读取关联前快照");
+        save_test_source_association_plan(&mut storage, "association-race-plan", 100, 1_000);
+        storage
+            .connection
+            .execute(
+                "UPDATE bundles
+                 SET current_target = 'contents/raced'
+                 WHERE id = ?1",
+                [&bundle_id],
+            )
+            .expect("应模拟 Plan 后 Bundle current 变化");
+        let expected_members = members
+            .iter()
+            .map(|member| DirectSourceAssociationMember {
+                member_id: &member.id,
+                content_fingerprint: &member.content_fingerprint,
+            })
+            .collect::<Vec<_>>();
+        let error = storage
+            .finalize_direct_source_association(DirectSourceAssociation {
+                plan_id: "association-race-plan",
+                source_id: TEST_GITHUB_SOURCE_ID,
+                source_catalog_generation: 1,
+                source_marker: TEST_GITHUB_COMMIT_ONE,
+                bundle_id: &bundle_id,
+                expected_current_target: &before.current_target,
+                expected_members: &expected_members,
+                member_mappings: &[],
+                now: 200,
+            })
+            .expect_err("快照变化必须拒绝确认");
+        assert!(matches!(error, StorageError::SourceBundleStateConflict));
+        let relationship_count = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_bundle_links
+                 WHERE source_id = ?1 OR bundle_id = ?2",
+                params![TEST_GITHUB_SOURCE_ID, bundle_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应检查一对一关系");
+        assert_eq!(relationship_count, 0, "失败确认不能留下半条关系");
+        assert_eq!(
+            storage
+                .read_source_association_plan("association-race-plan")
+                .expect("失败确认必须保留 Plan")
+                .status,
+            "pending"
+        );
     }
 
     #[test]
@@ -8451,7 +9526,7 @@ mod tests {
 
         let candidates = [NewInstallCandidate {
             candidate_id: "manual-alpha-v2",
-            source_relative_path: "skills/alpha",
+            source_relative_path: Some("skills/alpha"),
             skill_name: Some("alpha"),
             skill_description: Some("Alpha Skill"),
             content_fingerprint: Some("sha256:alpha-v2"),
@@ -8547,7 +9622,7 @@ mod tests {
             .expect("应先保存待阻塞的 Source");
         let candidates = [NewInstallCandidate {
             candidate_id: "blocked-alpha",
-            source_relative_path: "skills/alpha",
+            source_relative_path: Some("skills/alpha"),
             skill_name: Some("alpha"),
             skill_description: Some("Alpha Skill"),
             content_fingerprint: Some("sha256:alpha-original"),
@@ -8702,7 +9777,7 @@ mod tests {
             bundle
                 .members
                 .iter()
-                .map(|member| member.source_relative_path.as_str())
+                .filter_map(|member| member.source_relative_path.as_deref())
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["skills/alpha", "skills/beta"])
         );

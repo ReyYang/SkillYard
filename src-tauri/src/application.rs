@@ -6,7 +6,10 @@ use std::sync::{
 use thiserror::Error;
 
 use crate::{
-    domain::{PlatformInfo, TakeoverPlanRequest, UiIntent, UiOutcome},
+    domain::{
+        MergeContentChoice, PlatformInfo, SourceMemberMappingChoice, TakeoverPlanRequest, UiIntent,
+        UiOutcome,
+    },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
         fetch_github_catalog, parse_github_source, resolve_github_source,
@@ -28,6 +31,10 @@ use crate::{
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
     skills_sh::{SkillsShError, search_skills_sh},
+    source_association::{
+        SourceAssociationError, confirm_source_association_plan, create_source_association_plan,
+        discard_source_association_plan,
+    },
     storage::{
         NewGitHubSource, NewSourceCatalogMember, SaveGitHubSourceResult, Storage, StorageError,
         StoredGithubSource,
@@ -61,6 +68,8 @@ pub enum ApplicationError {
     GithubSource(#[from] GithubSourceError),
     #[error(transparent)]
     SkillsSh(#[from] SkillsShError),
+    #[error(transparent)]
+    SourceAssociation(#[from] SourceAssociationError),
     #[error("首次扫描未完整完成：{0}")]
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
@@ -230,6 +239,22 @@ impl SkillYardApplication {
                 selected_item_ids,
             } => self
                 .with_write_operation(|| self.confirm_batch_mount_plan(plan_id, selected_item_ids)),
+            UiIntent::CreateSourceAssociationPlan {
+                bundle_id,
+                source_id,
+                member_choices,
+            } => self.with_write_operation(|| {
+                self.create_source_association_plan(bundle_id, source_id, member_choices)
+            }),
+            UiIntent::ConfirmSourceAssociationPlan {
+                plan_id,
+                content_choices,
+            } => self.with_write_operation(|| {
+                self.confirm_source_association_plan(plan_id, content_choices)
+            }),
+            UiIntent::DiscardSourceAssociationPlan { plan_id } => {
+                self.with_write_operation(|| self.discard_source_association_plan(plan_id))
+            }
         }
     }
 
@@ -672,6 +697,54 @@ impl SkillYardApplication {
         }
         discard_install_plan(&self.paths, &mut storage, &plan_id)?;
         Ok(UiOutcome::InstallPlanDiscarded)
+    }
+
+    fn create_source_association_plan(
+        &self,
+        bundle_id: String,
+        source_id: String,
+        member_choices: Vec<SourceMemberMappingChoice>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let plan = create_source_association_plan(
+            &self.paths,
+            &mut storage,
+            &bundle_id,
+            &source_id,
+            member_choices,
+            unix_timestamp_millis(),
+        )?;
+        Ok(UiOutcome::SourceAssociationPlan { plan })
+    }
+
+    fn confirm_source_association_plan(
+        &self,
+        plan_id: String,
+        content_choices: Vec<MergeContentChoice>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        confirm_source_association_plan(
+            &self.paths,
+            &mut storage,
+            &plan_id,
+            content_choices,
+            unix_timestamp_millis(),
+        )?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn discard_source_association_plan(
+        &self,
+        plan_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        discard_source_association_plan(&self.paths, &mut storage, &plan_id)?;
+        Ok(UiOutcome::SourceAssociationPlanDiscarded)
     }
 
     fn register_project(&self, root_path: String) -> Result<UiOutcome, ApplicationError> {

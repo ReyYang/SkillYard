@@ -3,9 +3,9 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
-    BatchMountPlan, BatchMountRequest, InstallPlan, MountPlan, MountScope, SkillYardApplication,
-    SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome,
-    application::ApplicationError,
+    BatchMountPlan, BatchMountRequest, InstallPlan, MergeContentChoice, MountPlan, MountScope,
+    SkillYardApplication, SourceAssociationPlan, SourceMemberMappingChoice, SupportedAppId,
+    TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -24,6 +24,7 @@ impl From<ApplicationError> for UiError {
             ApplicationError::Takeover(_) => "takeoverError",
             ApplicationError::GithubSource(_) => "sourceError",
             ApplicationError::SkillsSh(_) => "sourceError",
+            ApplicationError::SourceAssociation(_) => "sourceAssociationError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",
@@ -295,6 +296,58 @@ fn discard_install_plan_error(error: ApplicationError) -> UiError {
         }
     } else {
         error.into()
+    }
+}
+
+#[tauri::command(async)]
+pub fn create_source_association_plan(
+    application: State<'_, SkillYardApplication>,
+    bundle_id: String,
+    source_id: String,
+    member_choices: Vec<SourceMemberMappingChoice>,
+) -> Result<SourceAssociationPlan, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::CreateSourceAssociationPlan {
+            bundle_id,
+            source_id,
+            member_choices,
+        },
+    )? {
+        UiOutcome::SourceAssociationPlan { plan } => Ok(plan),
+        _ => Err(invalid_outcome("SkillYard 没有生成补充来源确认信息")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn confirm_source_association_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+    content_choices: Vec<MergeContentChoice>,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::ConfirmSourceAssociationPlan {
+            plan_id,
+            content_choices,
+        },
+    )? {
+        outcome @ UiOutcome::Inventory { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回补充来源后的本机清单")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn discard_source_association_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<(), UiError> {
+    match dispatch(
+        &application,
+        UiIntent::DiscardSourceAssociationPlan { plan_id },
+    )? {
+        UiOutcome::SourceAssociationPlanDiscarded => Ok(()),
+        _ => Err(invalid_outcome("SkillYard 没有放弃补充来源 Plan")),
     }
 }
 
