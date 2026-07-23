@@ -18,7 +18,7 @@ use crate::{
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
     storage::{Storage, StorageError},
-    takeover::{TakeoverError, create_takeover_plan},
+    takeover::{TakeoverError, confirm_takeover_plan, create_takeover_plan},
 };
 
 #[derive(Debug, Error)]
@@ -102,6 +102,9 @@ impl SkillYardApplication {
             }
             UiIntent::CreateTakeoverPlan { request } => {
                 self.with_write_operation(|| self.create_takeover_plan(request))
+            }
+            UiIntent::ConfirmTakeoverPlan { plan_id } => {
+                self.with_write_operation(|| self.confirm_takeover_plan(plan_id))
             }
             UiIntent::CreateMountPlan {
                 member_id,
@@ -299,6 +302,21 @@ impl SkillYardApplication {
             create_takeover_plan(&self.paths, &mut storage, request, unix_timestamp_millis())?;
         lifecycle_lock.recheck(&self.paths)?;
         Ok(UiOutcome::TakeoverPlan { plan })
+    }
+
+    fn confirm_takeover_plan(&self, plan_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        confirm_takeover_plan(
+            &self.paths,
+            &mut storage,
+            &plan_id,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
     }
 
     fn create_mount_plan(

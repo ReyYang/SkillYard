@@ -20,6 +20,9 @@ pub enum UiIntent {
     CreateTakeoverPlan {
         request: TakeoverPlanRequest,
     },
+    ConfirmTakeoverPlan {
+        plan_id: String,
+    },
     CreateMountPlan {
         member_id: String,
         app_id: SupportedAppId,

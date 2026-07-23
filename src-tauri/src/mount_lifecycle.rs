@@ -161,17 +161,27 @@ struct BatchMountJournal {
     items: Vec<BatchMountJournalItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TargetKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetKind {
     Absent,
     ExpectedLink,
     Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TargetSnapshot {
+pub(crate) struct TargetSnapshot {
     kind: TargetKind,
     observation: String,
+}
+
+impl TargetSnapshot {
+    pub(crate) fn kind(&self) -> TargetKind {
+        self.kind
+    }
+
+    pub(crate) fn observation(&self) -> &str {
+        &self.observation
+    }
 }
 
 struct PreparedBatchMountItem {
@@ -221,14 +231,28 @@ struct BatchMountPlanSealItem<'a> {
     target_health: MountHealth,
 }
 
-struct OpenMountParent {
+#[derive(Debug)]
+pub(crate) struct OpenMountParent {
     base: File,
     base_path: PathBuf,
     parent: File,
     parent_path: PathBuf,
 }
 
-enum ParentLookup {
+impl OpenMountParent {
+    /// 文件操作必须继续通过这个已经逐组件验证的目录句柄完成。
+    pub(crate) fn directory(&self) -> &File {
+        &self.parent
+    }
+
+    /// 可见路径只用于错误信息和确认计划中的目标仍落在同一父目录。
+    pub(crate) fn path(&self) -> &Path {
+        &self.parent_path
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ParentLookup {
     Missing,
     Open(OpenMountParent),
 }
@@ -3069,7 +3093,7 @@ fn observe_removal_target(
     }
 }
 
-fn open_mount_parent(
+pub(crate) fn open_mount_parent(
     paths: &ApplicationPaths,
     app_id: SupportedAppId,
     scope: MountScope,
@@ -3101,6 +3125,28 @@ fn open_mount_parent(
             ));
         }
     }
+    walk_relative_parent(base, base_path, &relative, create_missing)
+}
+
+/// 从一个真实根目录开始逐组件打开相对目录，任何祖先软链接都会被拒绝。
+///
+/// 这个入口只处理目录安全，不解释 Supported App 或 Mount Scope；调用方仍需自行派生
+/// `base_path` 与 `relative`，避免在不同生命周期操作中复制一套更弱的路径遍历逻辑。
+pub(crate) fn open_relative_parent(
+    base_path: &Path,
+    relative: &Path,
+    create_missing: bool,
+) -> Result<ParentLookup, MountLifecycleError> {
+    let base = open_real_directory(base_path)?;
+    walk_relative_parent(base, base_path.to_path_buf(), relative, create_missing)
+}
+
+fn walk_relative_parent(
+    base: File,
+    base_path: PathBuf,
+    relative: &Path,
+    create_missing: bool,
+) -> Result<ParentLookup, MountLifecycleError> {
     let mut parent = base
         .try_clone()
         .map_err(|source| mount_io("保留 Mount 根目录", &base_path, source))?;
@@ -3168,7 +3214,7 @@ fn open_real_directory(path: &Path) -> Result<File, MountLifecycleError> {
     Ok(opened)
 }
 
-fn recheck_open_parent(parent: &OpenMountParent) -> Result<(), MountLifecycleError> {
+pub(crate) fn recheck_open_parent(parent: &OpenMountParent) -> Result<(), MountLifecycleError> {
     let visible = fs::symlink_metadata(&parent.base_path)
         .map_err(|source| mount_io("重新检查 Mount 根目录", &parent.base_path, source))?;
     let opened = parent
@@ -3224,7 +3270,7 @@ fn ensure_batch_parent_matches_target(
     }
 }
 
-fn snapshot_at(
+pub(crate) fn snapshot_at(
     parent: &File,
     name: &OsStr,
     expected_target: &str,
@@ -3851,6 +3897,52 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn relative_parent_walker_rejects_an_intermediate_symlink() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let base = sandbox.path().join("home");
+        let external = sandbox.path().join("external");
+        fs::create_dir(&base).expect("应创建可信根目录");
+        fs::create_dir(&external).expect("应创建外部目录");
+        symlink(&external, base.join("redirected")).expect("应创建中间祖先软链接");
+
+        let error = open_relative_parent(&base, Path::new("redirected/skills"), false)
+            .expect_err("逐组件 walker 必须拒绝中间祖先软链接");
+
+        assert!(
+            matches!(error, MountLifecycleError::UnsafeMountPath(path) if path == base.join("redirected").display().to_string())
+        );
+    }
+
+    #[test]
+    fn relative_parent_walker_opens_real_components_for_snapshot_and_recheck() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let base = sandbox.path().join("home");
+        let relative = Path::new(".agents/skills");
+        let parent_path = base.join(relative);
+        let expected_target = sandbox.path().join("managed/example-skill");
+        fs::create_dir_all(&parent_path).expect("应创建普通目录链");
+        fs::create_dir_all(&expected_target).expect("应创建受管目标");
+        symlink(&expected_target, parent_path.join("example-skill")).expect("应创建 Mount");
+
+        let ParentLookup::Open(parent) =
+            open_relative_parent(&base, relative, false).expect("应逐组件打开普通目录链")
+        else {
+            panic!("已存在的普通目录链不应报告缺失");
+        };
+        let snapshot = snapshot_at(
+            parent.directory(),
+            OsStr::new("example-skill"),
+            expected_target.to_str().expect("测试路径应是 UTF-8"),
+        )
+        .expect("应通过已打开目录读取叶子快照");
+
+        assert_eq!(parent.path(), parent_path);
+        assert_eq!(snapshot.kind(), TargetKind::ExpectedLink);
+        assert!(snapshot.observation().starts_with("expected_symlink:"));
+        recheck_open_parent(&parent).expect("可见路径仍指向同一目录句柄");
+    }
 
     #[test]
     fn remove_leaf_swap_restores_unknown_content_instead_of_deleting_it() {

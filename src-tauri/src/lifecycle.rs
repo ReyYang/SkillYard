@@ -67,6 +67,8 @@ pub enum LifecycleFailpoint {
     HardExitAfterFirstBatchMountRollbackBeforeProgress,
     HardExitAfterAllBatchMountTargetsAppliedBeforeState,
     HardExitAfterBatchMountStateCommittedBeforeJournal,
+    AfterTakeoverOriginMovedBeforeProgress,
+    AfterTakeoverMountStagedBeforeProgress,
 }
 
 #[derive(Debug, Error)]
@@ -1246,7 +1248,9 @@ impl Drop for DirectoryStream {
     }
 }
 
-fn read_entry_names_from_handle(directory: &File) -> Result<Vec<String>, LifecycleError> {
+pub(crate) fn read_entry_names_from_handle(
+    directory: &File,
+) -> Result<Vec<String>, LifecycleError> {
     read_entry_names_os_from_handle(directory)?
         .into_iter()
         .map(|name| {
@@ -1876,7 +1880,7 @@ pub(crate) fn open_managed_directory_from_root(
     Ok(handle)
 }
 
-fn open_expected_directory_at(
+pub(crate) fn open_expected_directory_at(
     parent: &File,
     name: &OsStr,
     path: &Path,
@@ -1884,7 +1888,7 @@ fn open_expected_directory_at(
     open_directory_at(parent, name).map_err(|source| io_error("安全打开受管目录", path, source))
 }
 
-fn ensure_open_directory_matches_managed_path(
+pub(crate) fn ensure_open_directory_matches_managed_path(
     paths: &ApplicationPaths,
     handle: &File,
     path: &Path,
@@ -2070,7 +2074,7 @@ pub(crate) fn unlink_at(parent: &File, name: &OsStr, directory: bool) -> io::Res
     }
 }
 
-fn remove_empty_directory_at(
+pub(crate) fn remove_empty_directory_at(
     parent: &File,
     name: &OsStr,
     path: &Path,
@@ -2093,7 +2097,11 @@ fn remove_empty_directory_at(
         .map_err(|source| io_error("同步事务目录父级", path, source))
 }
 
-fn remove_owned_tree_at(parent: &File, name: &OsStr, path: &Path) -> Result<(), LifecycleError> {
+pub(crate) fn remove_owned_tree_at(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<(), LifecycleError> {
     let child = open_directory_at(parent, name)
         .map_err(|source| io_error("安全打开事务清理目标", path, source))?;
     remove_owned_tree_contents(&child, path)?;
@@ -2179,7 +2187,7 @@ pub(crate) fn write_atomic_at(
     result
 }
 
-fn ensure_entry_absent_at(parent: &File, name: &OsStr) -> io::Result<()> {
+pub(crate) fn ensure_entry_absent_at(parent: &File, name: &OsStr) -> io::Result<()> {
     if entry_metadata_at(parent, name)?.is_some() {
         Err(io::Error::new(
             io::ErrorKind::AlreadyExists,

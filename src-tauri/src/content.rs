@@ -322,6 +322,14 @@ pub fn validate_single_skill_folder(
     validate_single_skill_folder_with_limits(root, ContentLimits::PRODUCTION)
 }
 
+/// 事务隔离目录会使用隐藏名称，但其中的 Skill 仍按原始成员名校验内容与指纹。
+pub(crate) fn validate_single_skill_folder_as(
+    root: &Path,
+    expected_name: &str,
+) -> Result<ValidatedSingleSkill, ContentValidationError> {
+    validate_tree_as(root, ContentLimits::PRODUCTION, expected_name).map(|tree| tree.skill)
+}
+
 /// 普通本地文件夹既可以是单 Skill，也可以是包含多个成员的完整 Bundle。
 pub fn validate_skill_bundle_folder(
     root: &Path,
@@ -552,6 +560,15 @@ fn validate_single_skill_folder_with_limits(
     Ok(validate_tree(root, limits)?.skill)
 }
 
+fn validate_tree_as(
+    root: &Path,
+    limits: ContentLimits,
+    expected_name: &str,
+) -> Result<ValidatedTree, ContentValidationError> {
+    let inspected = inspect_tree(root, limits)?;
+    build_validated_tree(inspected, expected_name)
+}
+
 fn validate_tree(
     root: &Path,
     limits: ContentLimits,
@@ -565,9 +582,16 @@ fn validate_tree(
             ContentValidationError::InvalidMetadata(
                 "Skill 根目录名必须是有效 UTF-8 名称".to_owned(),
             )
-        })?;
-    let (name, description) =
-        parse_skill_metadata(&inspected.skill_metadata_bytes, directory_name)?;
+        })?
+        .to_owned();
+    build_validated_tree(inspected, &directory_name)
+}
+
+fn build_validated_tree(
+    inspected: InspectedTree,
+    expected_name: &str,
+) -> Result<ValidatedTree, ContentValidationError> {
+    let (name, description) = parse_skill_metadata(&inspected.skill_metadata_bytes, expected_name)?;
     let warnings = if inspected.has_executable_risk {
         vec![EXECUTABLE_WARNING.to_owned()]
     } else {
