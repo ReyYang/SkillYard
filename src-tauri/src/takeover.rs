@@ -66,8 +66,6 @@ pub enum TakeoverError {
     InvalidPlanContract,
     #[error("Takeover Plan 已过期，请重新生成")]
     PlanExpired,
-    #[error("当前接管切片只允许确认一个本地副本")]
-    UnsupportedConfirmation,
     #[error("Takeover Journal 无法解析：{0}")]
     InvalidJournal(#[from] serde_json::Error),
     #[error("Takeover Journal 超过安全大小限制")]
@@ -448,13 +446,47 @@ fn validate_confirmation_contract(
         return Err(TakeoverError::PlanExpired);
     }
     let plan = &contract.plan;
-    if plan.origins.len() != 1
-        || contract.origin_snapshots.len() != 1
-        || plan.selected_observation_id != plan.origins[0].observation_id
-        || plan.targets.len() > 1
+    let origin_ids = plan
+        .origins
+        .iter()
+        .map(|origin| origin.observation_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let origin_paths = plan
+        .origins
+        .iter()
+        .map(|origin| origin.original_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let target_ids = plan
+        .targets
+        .iter()
+        .map(|target| target.mount_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let target_paths = plan
+        .targets
+        .iter()
+        .map(|target| target.target_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let selected_count = plan
+        .origins
+        .iter()
+        .filter(|origin| origin.observation_id == plan.selected_observation_id)
+        .count();
+    let identity_basis_matches = matches!(
+        (plan.origins.len(), plan.identity_basis),
+        (1, TakeoverIdentityBasis::SingleOrigin)
+    ) || (plan.origins.len() > 1
+        && plan.identity_basis == TakeoverIdentityBasis::UserConfirmed);
+    if plan.origins.is_empty()
+        || contract.origin_snapshots.len() != plan.origins.len()
         || contract.target_snapshots.len() != plan.targets.len()
+        || origin_ids.len() != plan.origins.len()
+        || origin_paths.len() != plan.origins.len()
+        || target_ids.len() != plan.targets.len()
+        || target_paths.len() != plan.targets.len()
+        || selected_count != 1
+        || !identity_basis_matches
     {
-        return Err(TakeoverError::UnsupportedConfirmation);
+        return Err(TakeoverError::InvalidPlanContract);
     }
     for id in [&plan.id, &plan.bundle_id, &plan.member_id, &plan.content_id] {
         Uuid::parse_str(id).map_err(|_| TakeoverError::InvalidPlanContract)?;
@@ -471,32 +503,53 @@ fn validate_confirmation_contract(
         return Err(TakeoverError::InvalidPlanContract);
     }
     ensure_absent(&expected_managed)?;
-    let origin = &plan.origins[0];
-    let snapshot = &contract.origin_snapshots[0];
-    if snapshot.observation_id != origin.observation_id {
-        return Err(TakeoverError::InvalidPlanContract);
+    for target in &plan.targets {
+        Uuid::parse_str(&target.mount_id).map_err(|_| TakeoverError::InvalidPlanContract)?;
     }
-    let validated = validate_live_origin(paths, storage, origin, snapshot)?;
-    if validated.name != plan.skill_name {
-        return Err(TakeoverError::InvalidPlanContract);
+    for (origin, snapshot) in plan.origins.iter().zip(&contract.origin_snapshots) {
+        if snapshot.observation_id != origin.observation_id {
+            return Err(TakeoverError::InvalidPlanContract);
+        }
+        let validated = validate_live_origin(paths, storage, origin, snapshot)?;
+        if validated.name != plan.skill_name {
+            return Err(TakeoverError::InvalidPlanContract);
+        }
+        let matching_targets = plan
+            .targets
+            .iter()
+            .filter(|target| target.target_path == origin.original_path)
+            .collect::<Vec<_>>();
+        match (origin.final_disposition, matching_targets.as_slice()) {
+            (TakeoverOriginDisposition::Mount, [target])
+                if target.expected_target == plan.expected_target
+                    && Some(target.app_id) == origin.app_id
+                    && Some(target.scope) == origin.scope
+                    && target.project_id == origin.project_id
+                    && target.project_display_name == origin.project_display_name => {}
+            (TakeoverOriginDisposition::Remove, []) => {}
+            _ => return Err(TakeoverError::InvalidPlanContract),
+        }
     }
-    let matching_target = plan
-        .targets
-        .iter()
-        .find(|target| target.target_path == origin.original_path);
-    match (origin.final_disposition, matching_target) {
-        (TakeoverOriginDisposition::Mount, Some(target))
-            if target.expected_target == plan.expected_target => {}
-        (TakeoverOriginDisposition::Remove, None) => {}
-        _ => return Err(TakeoverError::InvalidPlanContract),
-    }
-    if let Some(target_snapshot) = contract.target_snapshots.first()
-        && (target_snapshot.target_path != origin.original_path
-            || target_snapshot.occupied_by_observation_id.as_deref()
-                != Some(origin.observation_id.as_str())
-            || target_snapshot.target_observation != snapshot.target_observation)
-    {
-        return Err(TakeoverError::InvalidPlanContract);
+    for (target, target_snapshot) in plan.targets.iter().zip(&contract.target_snapshots) {
+        let occupied_origin = target_snapshot
+            .occupied_by_observation_id
+            .as_deref()
+            .and_then(|observation_id| {
+                plan.origins
+                    .iter()
+                    .position(|origin| origin.observation_id == observation_id)
+            })
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let origin = &plan.origins[occupied_origin];
+        let origin_snapshot = &contract.origin_snapshots[occupied_origin];
+        if target_snapshot.target_path != target.target_path
+            || target.target_path != origin.original_path
+            || origin.final_disposition != TakeoverOriginDisposition::Mount
+            || target_snapshot.target_observation != origin_snapshot.target_observation
+            || target.expected_target != plan.expected_target
+        {
+            return Err(TakeoverError::InvalidPlanContract);
+        }
     }
     Ok(())
 }
@@ -732,6 +785,11 @@ fn execute_before_domain_commit(
         recheck_open_parent(&parent)?;
         lifecycle_lock.recheck(paths)?;
         write_journal(paths, managed_root, journal)?;
+        if index == 0 && failpoint == LifecycleFailpoint::AfterFirstTakeoverOriginApplied {
+            return Err(
+                LifecycleError::SimulatedInterruption("Takeover 第一个原位置已生效").into(),
+            );
+        }
     }
     lifecycle_lock.recheck(paths)?;
     journal.phase = TakeoverJournalPhase::OriginsApplied;

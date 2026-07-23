@@ -69,6 +69,7 @@ pub enum LifecycleFailpoint {
     HardExitAfterBatchMountStateCommittedBeforeJournal,
     AfterTakeoverOriginMovedBeforeProgress,
     AfterTakeoverMountStagedBeforeProgress,
+    AfterFirstTakeoverOriginApplied,
 }
 
 #[derive(Debug, Error)]
