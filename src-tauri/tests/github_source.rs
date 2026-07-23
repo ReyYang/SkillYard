@@ -1,7 +1,9 @@
 use std::{
     collections::VecDeque,
-    io::Cursor,
-    sync::{Arc, Mutex},
+    io::{Cursor, Write},
+    sync::{Arc, Condvar, Mutex},
+    thread,
+    time::Duration,
 };
 
 use rusqlite::Connection;
@@ -10,6 +12,7 @@ use skillyard_lib::{
     SourceResponse, SourceTransport, SourceTransportError, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
+use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 #[test]
 fn recommended_github_sources_exist_without_creating_bundles_and_survive_restart() {
@@ -17,12 +20,27 @@ fn recommended_github_sources_exist_without_creating_bundles_and_survive_restart
     let home = sandbox.path().join("home");
     let data_root = sandbox.path().join("application-support/SkillYard");
     let paths = ApplicationPaths::for_home(data_root.clone(), home);
-    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let transport = Arc::new(RecordingTransport::default());
+    let application = SkillYardApplication::new_with_source_transport(
+        paths.clone(),
+        PlatformInfo::supported_for_test(),
+        transport.clone(),
+    );
     application
         .handle(UiIntent::StartInitialScan)
         .expect("首次扫描应成功");
+    assert_eq!(
+        transport.request_count(),
+        0,
+        "启动和首次扫描不能访问 GitHub"
+    );
 
     let first = open_source_discovery(&application);
+    assert_eq!(
+        transport.request_count(),
+        4,
+        "首次打开应逐个尝试加载当前四个 Source"
+    );
     assert_eq!(
         first
             .iter()
@@ -53,8 +71,33 @@ fn recommended_github_sources_exist_without_creating_bundles_and_survive_restart
     drop(connection);
 
     drop(application);
-    let restarted = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
-    assert_eq!(open_source_discovery(&restarted), first);
+    let restarted_transport = Arc::new(RecordingTransport::default());
+    let restarted = SkillYardApplication::new_with_source_transport(
+        paths,
+        PlatformInfo::supported_for_test(),
+        restarted_transport.clone(),
+    );
+    let restarted_sources = open_source_discovery(&restarted);
+    assert_eq!(restarted_transport.request_count(), 4);
+    assert_eq!(
+        restarted_sources
+            .iter()
+            .map(|source| (
+                source.id.as_str(),
+                source.display_name.as_str(),
+                source.tracked_ref.as_str(),
+            ))
+            .collect::<Vec<_>>(),
+        first
+            .iter()
+            .map(|source| (
+                source.id.as_str(),
+                source.display_name.as_str(),
+                source.tracked_ref.as_str(),
+            ))
+            .collect::<Vec<_>>(),
+        "重启后的网络失败不能改变已登记 Source 的稳定身份"
+    );
 }
 
 #[test]
@@ -63,7 +106,11 @@ fn deleting_a_recommended_source_does_not_seed_it_again_on_restart() {
     let home = sandbox.path().join("home");
     let data_root = sandbox.path().join("application-support/SkillYard");
     let paths = ApplicationPaths::for_home(data_root.clone(), home);
-    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let application = SkillYardApplication::new_with_source_transport(
+        paths.clone(),
+        PlatformInfo::supported_for_test(),
+        Arc::new(RecordingTransport::default()),
+    );
     application
         .handle(UiIntent::StartInitialScan)
         .expect("首次扫描应成功");
@@ -79,8 +126,14 @@ fn deleting_a_recommended_source_does_not_seed_it_again_on_restart() {
         .expect("应模拟后续 Source 删除功能的领域结果");
     drop(connection);
 
-    let restarted = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let restarted_transport = Arc::new(RecordingTransport::default());
+    let restarted = SkillYardApplication::new_with_source_transport(
+        paths,
+        PlatformInfo::supported_for_test(),
+        restarted_transport.clone(),
+    );
     let sources = open_source_discovery(&restarted);
+    assert_eq!(restarted_transport.request_count(), 3);
     assert_eq!(sources.len(), 3);
     assert!(
         sources
@@ -328,6 +381,195 @@ fn a_different_tracked_ref_requires_confirmation_before_source_changes() {
     assert!(replay.to_string().contains("已经使用"));
 }
 
+#[test]
+fn first_discovery_reloads_every_catalog_once_and_restart_preserves_failed_catalogs() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let transport = Arc::new(RecordingTransport::default());
+    let application = ready_application_with_transport(sandbox.path(), transport.clone());
+    let archive = catalog_archive();
+    transport.enqueue_seed_catalogs(&archive);
+
+    let first = open_source_discovery(&application);
+    assert_eq!(transport.request_count(), 12);
+    assert!(first.iter().all(|source| {
+        source.catalog_status == SourceCatalogStatus::Fresh
+            && source.catalog_commit_sha.is_some()
+            && source.members.len() == 2
+            && source.members.iter().all(|member| member.selectable)
+    }));
+    assert_eq!(first[0].members[0].relative_path, "skills/alpha");
+    assert_eq!(first[0].members[0].skill_name.as_deref(), Some("alpha"));
+
+    let second = open_source_discovery(&application);
+    assert_eq!(second, first);
+    assert_eq!(transport.request_count(), 12, "同一会话不能再次自动联网");
+
+    drop(application);
+    let failing_transport = Arc::new(RecordingTransport::default());
+    let restarted = ready_application_with_transport(sandbox.path(), failing_transport.clone());
+    let stale = open_source_discovery(&restarted);
+    assert_eq!(failing_transport.request_count(), 4);
+    assert!(stale.iter().all(|source| {
+        source.catalog_status == SourceCatalogStatus::Stale
+            && source.last_reload_error.is_some()
+            && source.members.len() == 2
+    }));
+    assert!(stale.iter().all(|source| source.bundle_id.is_none()));
+    assert_eq!(
+        open_source_discovery(&restarted),
+        stale,
+        "失败后同一会话也只能由用户主动重新加载"
+    );
+    assert_eq!(failing_transport.request_count(), 4);
+}
+
+#[test]
+fn catalog_network_fetch_holds_the_cross_process_lifecycle_lock() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let paths = ApplicationPaths::for_home(
+        sandbox.path().join("application-support/SkillYard"),
+        sandbox.path().join("home"),
+    );
+    let transport = Arc::new(BlockingTransport::default());
+    let loading_application = Arc::new(SkillYardApplication::new_with_source_transport(
+        paths.clone(),
+        PlatformInfo::supported_for_test(),
+        transport.clone(),
+    ));
+    loading_application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+
+    let loading_thread = {
+        let application = loading_application.clone();
+        thread::spawn(move || application.handle(UiIntent::OpenSourceDiscovery))
+    };
+    transport.wait_until_request();
+
+    let competing_application = SkillYardApplication::new_with_source_transport(
+        paths,
+        PlatformInfo::supported_for_test(),
+        Arc::new(RecordingTransport::default()),
+    );
+    let error = competing_application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect_err("Catalog 联网期间另一实例不能开始生命周期写操作");
+    assert!(error.to_string().contains("已有另一个 SkillYard 实例"));
+
+    transport.release();
+    loading_thread
+        .join()
+        .expect("Catalog 加载线程不应 panic")
+        .expect("网络失败应保存为 Source 状态而不是让加载失败");
+}
+
+#[test]
+fn dangerous_reload_keeps_the_old_catalog_and_valid_empty_archive_replaces_it() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let transport = Arc::new(RecordingTransport::default());
+    let application = ready_application_with_transport(sandbox.path(), transport.clone());
+    transport.enqueue_seed_catalogs(&catalog_archive());
+    let first = open_source_discovery(&application);
+    let source_id = first[0].id.clone();
+    let tracked_ref = first[0].tracked_ref.clone();
+    let old_commit = first[0]
+        .catalog_commit_sha
+        .clone()
+        .expect("首次 Catalog 应保存 commit");
+
+    transport.enqueue_public_repository("anthropics/skills", &tracked_ref);
+    transport.enqueue_commit("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    transport.enqueue_bytes(200, &symlink_archive());
+    let stale = reload_source(&application, &source_id);
+    let source = stale
+        .iter()
+        .find(|source| source.id == source_id)
+        .expect("失败后 Source 应继续存在");
+    assert_eq!(source.catalog_status, SourceCatalogStatus::Stale);
+    assert_eq!(
+        source.catalog_commit_sha.as_deref(),
+        Some(old_commit.as_str())
+    );
+    assert_eq!(source.members.len(), 2);
+    assert!(source.last_reload_error.is_some());
+
+    transport.enqueue_public_repository("anthropics/skills", &tracked_ref);
+    transport.enqueue_commit("ffffffffffffffffffffffffffffffffffffffff");
+    transport.enqueue_bytes(200, &empty_catalog_archive());
+    let fresh = reload_source(&application, &source_id);
+    let source = fresh
+        .iter()
+        .find(|source| source.id == source_id)
+        .expect("空 Catalog 成功后 Source 应继续存在");
+    assert_eq!(source.catalog_status, SourceCatalogStatus::Fresh);
+    assert!(source.members.is_empty());
+    assert_eq!(
+        source.catalog_commit_sha.as_deref(),
+        Some("ffffffffffffffffffffffffffffffffffffffff")
+    );
+    assert_eq!(
+        std::fs::read_dir(sandbox.path().join("application-support/SkillYard/staging"))
+            .expect("应读取 staging")
+            .count(),
+        0,
+        "Catalog 成功或失败都不能遗留临时内容"
+    );
+}
+
+#[test]
+fn catalog_database_failure_rolls_back_the_complete_previous_snapshot() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let transport = Arc::new(RecordingTransport::default());
+    let application = ready_application_with_transport(sandbox.path(), transport.clone());
+    transport.enqueue_seed_catalogs(&catalog_archive());
+    let first = open_source_discovery(&application);
+    let source_id = first[0].id.clone();
+    let old_commit = first[0]
+        .catalog_commit_sha
+        .clone()
+        .expect("首次 Catalog 应保存 commit");
+
+    let database = sandbox
+        .path()
+        .join("application-support/SkillYard/skillyard.sqlite3");
+    let connection = Connection::open(&database).expect("应打开真实 SQLite");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER abort_catalog_insert
+             BEFORE INSERT ON source_catalog_members
+             BEGIN
+                 SELECT RAISE(ABORT, 'catalog fixture abort');
+             END;",
+        )
+        .expect("应安装 Catalog 事务失败 fixture");
+    drop(connection);
+
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        &catalog_archive(),
+    );
+    let error = application
+        .handle(UiIntent::ReloadGitHubSource {
+            source_id: source_id.clone(),
+        })
+        .expect_err("SQLite 提交失败不能伪装成远端 Stale");
+    assert!(error.to_string().contains("无法保存 Source Catalog"));
+
+    let after = open_source_discovery(&application);
+    let source = after
+        .iter()
+        .find(|source| source.id == source_id)
+        .expect("回滚后原 Source 应存在");
+    assert_eq!(source.catalog_status, SourceCatalogStatus::Fresh);
+    assert_eq!(
+        source.catalog_commit_sha.as_deref(),
+        Some(old_commit.as_str())
+    );
+    assert_eq!(source.members.len(), 2);
+}
+
 fn open_source_discovery(application: &SkillYardApplication) -> Vec<skillyard_lib::SourceSummary> {
     match application
         .handle(UiIntent::OpenSourceDiscovery)
@@ -373,10 +615,70 @@ fn add_source(
     }
 }
 
+fn reload_source(
+    application: &SkillYardApplication,
+    source_id: &str,
+) -> Vec<skillyard_lib::SourceSummary> {
+    match application
+        .handle(UiIntent::ReloadGitHubSource {
+            source_id: source_id.to_owned(),
+        })
+        .expect("预期的远端失败应记录为 Source 状态")
+    {
+        UiOutcome::SourceDiscovery { sources, .. } => sources,
+        _ => panic!("重新加载后应返回 Source 发现状态"),
+    }
+}
+
 #[derive(Default)]
 struct RecordingTransport {
     responses: Mutex<VecDeque<ScriptedResponse>>,
     requests: Mutex<Vec<SourceRequest>>,
+}
+
+#[derive(Default)]
+struct BlockingTransport {
+    state: Mutex<BlockingTransportState>,
+    requested: Condvar,
+    released: Condvar,
+}
+
+#[derive(Default)]
+struct BlockingTransportState {
+    requested: bool,
+    released: bool,
+}
+
+impl BlockingTransport {
+    fn wait_until_request(&self) {
+        let state = self.state.lock().expect("应读取阻塞 transport 状态");
+        let (state, timeout) = self
+            .requested
+            .wait_timeout_while(state, Duration::from_secs(5), |state| !state.requested)
+            .expect("应等待 Catalog 网络请求");
+        assert!(
+            state.requested && !timeout.timed_out(),
+            "Catalog 请求应在期限内开始"
+        );
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("应写入阻塞 transport 状态");
+        state.released = true;
+        self.released.notify_all();
+    }
+}
+
+impl SourceTransport for BlockingTransport {
+    fn get(&self, _request: SourceRequest) -> Result<SourceResponse, SourceTransportError> {
+        let mut state = self.state.lock().expect("应写入阻塞 transport 状态");
+        state.requested = true;
+        self.requested.notify_all();
+        while !state.released {
+            state = self.released.wait(state).expect("应等待测试释放网络请求");
+        }
+        Err(SourceTransportError::Unavailable)
+    }
 }
 
 struct ScriptedResponse {
@@ -408,6 +710,49 @@ impl RecordingTransport {
         self.enqueue(200, &format!(r#"{{"sha":"{sha}"}}"#));
     }
 
+    fn enqueue_catalog(&self, full_name: &str, tracked_ref: &str, sha: &str, archive: &[u8]) {
+        self.enqueue_public_repository(full_name, tracked_ref);
+        self.enqueue_commit(sha);
+        self.enqueue_bytes(200, archive);
+    }
+
+    fn enqueue_seed_catalogs(&self, archive: &[u8]) {
+        for (full_name, tracked_ref, sha) in [
+            (
+                "anthropics/skills",
+                "main",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            (
+                "ComposioHQ/awesome-claude-skills",
+                "master",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            (
+                "cexll/myclaude",
+                "master",
+                "cccccccccccccccccccccccccccccccccccccccc",
+            ),
+            (
+                "JimLiu/baoyu-skills",
+                "main",
+                "dddddddddddddddddddddddddddddddddddddddd",
+            ),
+        ] {
+            self.enqueue_catalog(full_name, tracked_ref, sha, archive);
+        }
+    }
+
+    fn enqueue_bytes(&self, status: u16, body: &[u8]) {
+        self.responses
+            .lock()
+            .expect("应写入响应队列")
+            .push_back(ScriptedResponse {
+                status,
+                body: body.to_vec(),
+            });
+    }
+
     fn request_count(&self) -> usize {
         self.requests.lock().expect("应读取请求记录").len()
     }
@@ -415,6 +760,57 @@ impl RecordingTransport {
     fn requests(&self) -> Vec<SourceRequest> {
         self.requests.lock().expect("应读取请求记录").clone()
     }
+}
+
+fn catalog_archive() -> Vec<u8> {
+    let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o100644);
+    for (path, name) in [
+        ("repository-sha/skills/alpha/SKILL.md", "alpha"),
+        ("repository-sha/skills/beta/SKILL.md", "beta"),
+    ] {
+        archive.start_file(path, options).expect("应写入 ZIP entry");
+        write!(
+            archive,
+            "---\nname: {name}\ndescription: {name} catalog skill\n---\n# {name}\n"
+        )
+        .expect("应写入 Skill metadata");
+    }
+    archive.finish().expect("应完成 ZIP fixture").into_inner()
+}
+
+fn symlink_archive() -> Vec<u8> {
+    let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+    archive
+        .add_symlink(
+            "repository-sha/skills/alpha/link",
+            "../../outside",
+            SimpleFileOptions::default().unix_permissions(0o120777),
+        )
+        .expect("应写入 symlink fixture");
+    archive
+        .finish()
+        .expect("应完成 symlink ZIP fixture")
+        .into_inner()
+}
+
+fn empty_catalog_archive() -> Vec<u8> {
+    let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+    archive
+        .start_file(
+            "repository-sha/README.md",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .expect("应写入空 Catalog fixture");
+    archive
+        .write_all(b"# Repository without skills\n")
+        .expect("应写入 README");
+    archive
+        .finish()
+        .expect("应完成空 Catalog ZIP fixture")
+        .into_inner()
 }
 
 impl SourceTransport for RecordingTransport {

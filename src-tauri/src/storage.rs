@@ -70,6 +70,14 @@ pub enum StorageError {
     InvalidSourceCatalogMetadata(#[source] serde_json::Error),
     #[error("无法保存 GitHub Source：{0}")]
     SaveSource(#[source] rusqlite::Error),
+    #[error("无法保存 Source Catalog：{0}")]
+    SaveSourceCatalog(#[source] rusqlite::Error),
+    #[error("无法编码 Source Catalog metadata：{0}")]
+    SerializeSourceCatalogMetadata(#[source] serde_json::Error),
+    #[error("Source 已经不存在")]
+    SourceNotFound,
+    #[error("Source 状态已经变化，请重新加载来源")]
+    SourceCatalogStateChanged,
     #[error("Tracked Ref 变更 Plan 未签发或已经不存在")]
     SourceRefChangePlanNotFound,
     #[error("Tracked Ref 变更 Plan 已经使用，不能重复确认")]
@@ -354,6 +362,27 @@ pub struct NewGitHubSource<'a> {
 pub enum SaveGitHubSourceResult {
     Saved { source_id: String },
     RefChangeRequired { plan: SourceRefChangePlan },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGithubSource {
+    pub id: String,
+    pub canonical_identity: String,
+    pub owner: String,
+    pub repository: String,
+    pub display_name: String,
+    pub tracked_ref: String,
+}
+
+pub struct NewSourceCatalogMember<'a> {
+    pub id: &'a str,
+    pub relative_path: &'a str,
+    pub skill_name: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub content_fingerprint: Option<&'a str>,
+    pub selectable: bool,
+    pub validation_errors: &'a [String],
+    pub warnings: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -1217,6 +1246,161 @@ impl Storage {
             )
             .optional()
             .map_err(StorageError::ReadSources)
+    }
+
+    pub fn read_github_sources(&self) -> Result<Vec<StoredGithubSource>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, canonical_identity, owner, repository, display_name, tracked_ref
+                 FROM sources ORDER BY sort_order, id",
+            )
+            .map_err(StorageError::ReadSources)?;
+        let rows = statement
+            .query_map([], stored_github_source_from_row)
+            .map_err(StorageError::ReadSources)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadSources)
+    }
+
+    pub fn read_github_source(&self, source_id: &str) -> Result<StoredGithubSource, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT id, canonical_identity, owner, repository, display_name, tracked_ref
+                 FROM sources WHERE id = ?1",
+                [source_id],
+                stored_github_source_from_row,
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?
+            .ok_or(StorageError::SourceNotFound)
+    }
+
+    /// Catalog 成功结果整体替换；旧成员与 Source 状态不会在事务中间对外可见。
+    pub fn save_source_catalog_success(
+        &mut self,
+        source_id: &str,
+        expected_tracked_ref: &str,
+        commit_sha: &str,
+        fetched_at: i64,
+        members: &[NewSourceCatalogMember<'_>],
+    ) -> Result<(), StorageError> {
+        let encoded_members = members
+            .iter()
+            .map(|member| {
+                Ok((
+                    serde_json::to_string(member.validation_errors)
+                        .map_err(StorageError::SerializeSourceCatalogMetadata)?,
+                    serde_json::to_string(member.warnings)
+                        .map_err(StorageError::SerializeSourceCatalogMetadata)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSourceCatalog)?;
+        let (current_ref, current_generation) = transaction
+            .query_row(
+                "SELECT tracked_ref, catalog_generation FROM sources WHERE id = ?1",
+                [source_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveSourceCatalog)?
+            .ok_or(StorageError::SourceNotFound)?;
+        if current_ref != expected_tracked_ref {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        let next_generation = current_generation
+            .checked_add(1)
+            .ok_or(StorageError::SourceCatalogStateChanged)?;
+        transaction
+            .execute(
+                "DELETE FROM source_catalog_members WHERE source_id = ?1",
+                [source_id],
+            )
+            .map_err(StorageError::SaveSourceCatalog)?;
+        for (sort_order, (member, (validation_errors, warnings))) in
+            members.iter().zip(encoded_members.iter()).enumerate()
+        {
+            transaction
+                .execute(
+                    "INSERT INTO source_catalog_members (
+                        id, source_id, catalog_generation, relative_path,
+                        skill_name, description, content_fingerprint, selectable,
+                        validation_errors_json, warnings_json, sort_order
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        member.id,
+                        source_id,
+                        next_generation,
+                        member.relative_path,
+                        member.skill_name,
+                        member.description,
+                        member.content_fingerprint,
+                        member.selectable,
+                        validation_errors,
+                        warnings,
+                        sort_order as i64,
+                    ],
+                )
+                .map_err(StorageError::SaveSourceCatalog)?;
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE sources
+                 SET catalog_status = 'fresh', catalog_generation = ?2,
+                     catalog_commit_sha = ?3, catalog_fetched_at = ?4,
+                     last_reload_at = ?4, last_reload_error = NULL, updated_at = ?4
+                 WHERE id = ?1 AND tracked_ref = ?5",
+                params![
+                    source_id,
+                    next_generation,
+                    commit_sha,
+                    fetched_at,
+                    expected_tracked_ref,
+                ],
+            )
+            .map_err(StorageError::SaveSourceCatalog)?;
+        if changed != 1 {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveSourceCatalog)
+    }
+
+    /// Reload 失败只更新结果状态；最近一次成功目录和 commit 始终保留。
+    pub fn save_source_catalog_failure(
+        &mut self,
+        source_id: &str,
+        expected_tracked_ref: &str,
+        failed_at: i64,
+        error: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSourceCatalog)?;
+        let changed = transaction
+            .execute(
+                "UPDATE sources
+                 SET catalog_status = CASE
+                         WHEN catalog_generation > 0 THEN 'stale'
+                         ELSE 'unloaded'
+                     END,
+                     last_reload_at = ?3, last_reload_error = ?4, updated_at = ?3
+                 WHERE id = ?1 AND tracked_ref = ?2",
+                params![source_id, expected_tracked_ref, failed_at, error],
+            )
+            .map_err(StorageError::SaveSourceCatalog)?;
+        if changed != 1 {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveSourceCatalog)
     }
 
     /// 已验证 GitHub 输入要么复用 canonical Source，要么签发一次显式 Ref 变更确认。
@@ -5201,6 +5385,17 @@ fn read_install_candidates_from(
         });
     }
     Ok(candidates)
+}
+
+fn stored_github_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredGithubSource> {
+    Ok(StoredGithubSource {
+        id: row.get(0)?,
+        canonical_identity: row.get(1)?,
+        owner: row.get(2)?,
+        repository: row.get(3)?,
+        display_name: row.get(4)?,
+        tracked_ref: row.get(5)?,
+    })
 }
 
 fn read_source_catalog_members_from(

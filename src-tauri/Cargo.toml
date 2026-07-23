@@ -29,6 +29,8 @@ tauri-plugin-dialog = "2.7.2"
 thiserror = "2.0.19"
 uuid = { version = "1", features = ["v4"] }
 url = "2.5"
+# GitHub 归档只需要 ZIP 内建格式与 Deflate，避免引入其他压缩算法。
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

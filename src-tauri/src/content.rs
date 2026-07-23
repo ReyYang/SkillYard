@@ -16,9 +16,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const MAX_ENTRIES: usize = 20_000;
-const MAX_TOTAL_FILE_BYTES: u64 = 512 * 1_048_576;
-const MAX_SINGLE_FILE_BYTES: u64 = 100 * 1_048_576;
+pub(crate) const MAX_ENTRIES: usize = 20_000;
+pub(crate) const MAX_TOTAL_FILE_BYTES: u64 = 512 * 1_048_576;
+pub(crate) const MAX_SINGLE_FILE_BYTES: u64 = 100 * 1_048_576;
 const FINGERPRINT_VERSION: &[u8] = b"skillyard-single-skill-v1";
 const BUNDLE_FINGERPRINT_VERSION: &[u8] = b"skillyard-folder-bundle-v1";
 const EXECUTABLE_WARNING: &str = "内容包含脚本或可执行文件，请在挂载前确认风险";

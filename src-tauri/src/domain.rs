@@ -8,6 +8,9 @@ pub enum UiIntent {
     StartInitialScan,
     RefreshLocalInventory,
     OpenSourceDiscovery,
+    ReloadGitHubSource {
+        source_id: String,
+    },
     AddGitHubSource {
         input: String,
         tracked_ref: Option<String>,

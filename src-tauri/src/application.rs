@@ -1,16 +1,20 @@
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{
+    Arc, Mutex, TryLockError,
+    atomic::{AtomicBool, Ordering},
+};
 
 use thiserror::Error;
 
 use crate::{
     domain::{PlatformInfo, TakeoverPlanRequest, UiIntent, UiOutcome},
     github_source::{
-        GithubSourceError, ReqwestSourceTransport, SharedSourceTransport, parse_github_source,
-        resolve_github_source,
+        GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
+        fetch_github_catalog, parse_github_source, resolve_github_source,
     },
     lifecycle::{
-        LifecycleError, LifecycleFailpoint, acquire_lifecycle_lock, confirm_folder_install,
-        create_folder_install_plan, ensure_central_store_layout, recover_pending_transactions,
+        LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
+        confirm_folder_install, create_folder_install_plan, ensure_central_store_layout,
+        recover_pending_transactions,
     },
     mount_lifecycle::{
         MountLifecycleError, confirm_batch_mount_plan, confirm_mount_plan, create_batch_mount_plan,
@@ -21,7 +25,10 @@ use crate::{
     },
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
-    storage::{NewGitHubSource, SaveGitHubSourceResult, Storage, StorageError},
+    storage::{
+        NewGitHubSource, NewSourceCatalogMember, SaveGitHubSourceResult, Storage, StorageError,
+        StoredGithubSource,
+    },
     takeover::{
         TakeoverError, confirm_takeover_plan, create_takeover_plan,
         recover_pending_takeover_transactions,
@@ -66,6 +73,7 @@ pub struct SkillYardApplication {
     operation_gate: Mutex<()>,
     lifecycle_failpoint: LifecycleFailpoint,
     source_transport: Option<SharedSourceTransport>,
+    source_discovery_loaded: AtomicBool,
 }
 
 impl SkillYardApplication {
@@ -121,6 +129,7 @@ impl SkillYardApplication {
             operation_gate: Mutex::new(()),
             lifecycle_failpoint,
             source_transport,
+            source_discovery_loaded: AtomicBool::new(false),
         }
     }
 
@@ -144,6 +153,9 @@ impl SkillYardApplication {
             }
             UiIntent::OpenSourceDiscovery => {
                 self.with_write_operation(|| self.open_source_discovery())
+            }
+            UiIntent::ReloadGitHubSource { source_id } => {
+                self.with_write_operation(|| self.reload_github_source(source_id))
             }
             UiIntent::AddGitHubSource { input, tracked_ref } => {
                 self.with_write_operation(|| self.add_github_source(input, tracked_ref))
@@ -292,11 +304,121 @@ impl SkillYardApplication {
     fn open_source_discovery(&self) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_recovered_storage()?;
         ensure_onboarding_completed(&storage)?;
+        let should_reload = !self.source_discovery_loaded.load(Ordering::Acquire);
+        if should_reload {
+            let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+            lifecycle_lock.recheck(&self.paths)?;
+            for source in storage.read_github_sources()? {
+                self.reload_source_catalog(&mut storage, &source, &lifecycle_lock)?;
+                lifecycle_lock.recheck(&self.paths)?;
+            }
+        }
+        let sources = storage.read_source_summaries()?;
+        if should_reload {
+            self.source_discovery_loaded.store(true, Ordering::Release);
+        }
         Ok(UiOutcome::SourceDiscovery {
-            sources: storage.read_source_summaries()?,
+            sources,
             highlighted_source_id: None,
             highlighted_member_path: None,
         })
+    }
+
+    fn reload_github_source(&self, source_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let source = storage.read_github_source(&source_id)?;
+        self.reload_source_catalog(&mut storage, &source, &lifecycle_lock)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let sources = storage.read_source_summaries()?;
+        let highlighted_member_path = sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .and_then(|source| source.member_path_hint.clone());
+        Ok(UiOutcome::SourceDiscovery {
+            sources,
+            highlighted_source_id: Some(source_id),
+            highlighted_member_path,
+        })
+    }
+
+    fn reload_source_catalog(
+        &self,
+        storage: &mut Storage,
+        source: &StoredGithubSource,
+        lifecycle_lock: &LifecycleLock,
+    ) -> Result<(), ApplicationError> {
+        lifecycle_lock.recheck(&self.paths)?;
+        let fetched = self
+            .source_transport
+            .as_deref()
+            .ok_or(GithubSourceError::Network)
+            .and_then(|transport| {
+                fetch_github_catalog(
+                    transport,
+                    GithubCatalogTarget {
+                        owner: &source.owner,
+                        repository: &source.repository,
+                        canonical_identity: &source.canonical_identity,
+                        display_name: &source.display_name,
+                        tracked_ref: &source.tracked_ref,
+                    },
+                    &self.paths.staging_root(),
+                )
+            });
+        lifecycle_lock.recheck(&self.paths)?;
+        let completed_at = unix_timestamp_millis();
+        match fetched {
+            Ok(fetched) => {
+                let ids = fetched
+                    .candidates
+                    .iter()
+                    .map(|_| uuid::Uuid::new_v4().to_string())
+                    .collect::<Vec<_>>();
+                let relative_paths = fetched
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        candidate
+                            .relative_path
+                            .to_str()
+                            .map(str::to_owned)
+                            .ok_or(GithubSourceError::InvalidResponse)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let members = fetched
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| NewSourceCatalogMember {
+                        id: &ids[index],
+                        relative_path: &relative_paths[index],
+                        skill_name: candidate.name.as_deref(),
+                        description: candidate.description.as_deref(),
+                        content_fingerprint: candidate.fingerprint.as_deref(),
+                        selectable: candidate.selectable(),
+                        validation_errors: &candidate.validation_errors,
+                        warnings: &candidate.warnings,
+                    })
+                    .collect::<Vec<_>>();
+                storage.save_source_catalog_success(
+                    &source.id,
+                    &source.tracked_ref,
+                    &fetched.commit_sha,
+                    completed_at,
+                    &members,
+                )?;
+            }
+            Err(error) => storage.save_source_catalog_failure(
+                &source.id,
+                &source.tracked_ref,
+                completed_at,
+                &error.to_string(),
+            )?,
+        }
+        Ok(())
     }
 
     fn add_github_source(

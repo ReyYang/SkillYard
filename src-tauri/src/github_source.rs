@@ -1,6 +1,14 @@
-//! GitHub public Source 的最外层网络协议与确定性输入解析。
+//! GitHub public Source 的最外层网络协议、确定性输入解析与 Catalog 归档边界。
 
-use std::{io::Read, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions, Permissions},
+    io::{Read, Seek, SeekFrom, Write},
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use reqwest::{
     blocking::{Client, Response},
@@ -10,12 +18,20 @@ use reqwest::{
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
+use uuid::Uuid;
+use zip::{CompressionMethod, ZipArchive};
+
+use crate::content::{
+    ContentValidationError, DiscoveredBundleCandidate, MAX_ENTRIES, MAX_SINGLE_FILE_BYTES,
+    MAX_TOTAL_FILE_BYTES, validate_skill_bundle_folder,
+};
 
 /// 所有 GitHub 响应（包括 archive）都不能超过这个固定上限。
 pub const MAX_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "SkillYard/1.0";
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
+const STREAM_BUFFER_BYTES: usize = 8 * 1024;
 
 /// 可替换的 HTTP 请求，避免测试替换 GitHub 解析或 JSON 协议代码。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +129,36 @@ pub enum GithubSourceError {
     InvalidResponse,
     #[error("GitHub 仓库不是公开仓库")]
     PrivateRepository,
+    #[error("GitHub Catalog 临时区不可用")]
+    StagingUnavailable,
+    #[error("GitHub Catalog 临时内容清理失败")]
+    StagingCleanupFailed,
+    #[error("GitHub 返回了无效 ZIP archive")]
+    InvalidArchive,
+    #[error("GitHub archive 必须只有一个共同顶层目录")]
+    InvalidArchiveRoot,
+    #[error("GitHub archive 包含不安全路径：{path}")]
+    UnsafeArchivePath { path: String },
+    #[error("GitHub archive 包含重复规范化路径：{path}")]
+    DuplicateArchivePath { path: String },
+    #[error("GitHub archive 包含加密条目：{path}")]
+    EncryptedArchiveEntry { path: String },
+    #[error("GitHub archive 包含不支持的特殊条目：{path}")]
+    UnsupportedArchiveEntry { path: String },
+    #[error("GitHub archive 包含不支持的压缩格式：{path}")]
+    UnsupportedArchiveCompression { path: String },
+    #[error("GitHub archive 条目数超过固定上限 {limit}：已检测到 {actual}")]
+    ArchiveEntryLimitExceeded { limit: usize, actual: usize },
+    #[error("GitHub archive 普通文件总量超过固定上限 {limit} bytes：已检测到 {actual} bytes")]
+    ArchiveTotalSizeLimitExceeded { limit: u64, actual: u64 },
+    #[error("GitHub archive 普通文件超过固定单文件上限 {limit} bytes：{path} 为 {actual} bytes")]
+    ArchiveFileSizeLimitExceeded {
+        path: String,
+        limit: u64,
+        actual: u64,
+    },
+    #[error("GitHub Catalog 内容验证失败：{0}")]
+    ContentValidation(String),
 }
 
 /// 解析完输入、尚未联网的仓库定位信息。
@@ -135,6 +181,23 @@ pub struct ResolvedGithubSource {
     pub tracked_ref: String,
     pub commit: String,
     pub member_hint: Option<String>,
+}
+
+/// Catalog reload 只接收已经持久化并规范化的仓库 metadata。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GithubCatalogTarget<'a> {
+    pub owner: &'a str,
+    pub repository: &'a str,
+    pub canonical_identity: &'a str,
+    pub display_name: &'a str,
+    pub tracked_ref: &'a str,
+}
+
+/// 一次完整 Catalog 获取绑定的不可移动 commit 与候选 metadata。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchedGithubCatalog {
+    pub commit_sha: String,
+    pub candidates: Vec<DiscoveredBundleCandidate>,
 }
 
 /// `Arc<dyn SourceTransport>` 便于 application 只持有一个可替换的外部网络能力。
@@ -221,6 +284,634 @@ pub fn resolve_github_source(
     })
 }
 
+/// 重新验证持久化仓库 metadata，并把同一 Tracked Ref 固定到 SHA 后获取完整 Catalog。
+pub fn fetch_github_catalog(
+    transport: &dyn SourceTransport,
+    target: GithubCatalogTarget<'_>,
+    staging_root: &Path,
+) -> Result<FetchedGithubCatalog, GithubSourceError> {
+    validate_catalog_target(target)?;
+    let metadata_url = api_url(&["repos", target.owner, target.repository])?;
+    let metadata: RepositoryMetadata = read_json(transport, metadata_url)?;
+    if metadata.private {
+        return Err(GithubSourceError::PrivateRepository);
+    }
+    let (owner, repository) = parse_full_name(&metadata.full_name)?;
+    let remote_identity = format!(
+        "github:{}/{}",
+        owner.to_ascii_lowercase(),
+        repository.to_ascii_lowercase()
+    );
+    if remote_identity != target.canonical_identity {
+        // 1.0 不跟随仓库改名或重定向，避免一次 reload 静默改变 Source 身份。
+        return Err(GithubSourceError::InvalidResponse);
+    }
+
+    let commit_url = api_url(&["repos", &owner, &repository, "commits", target.tracked_ref])?;
+    let commit: CommitMetadata = read_json(transport, commit_url)?;
+    if !is_commit_sha(&commit.sha) {
+        return Err(GithubSourceError::InvalidResponse);
+    }
+
+    let temporary = CatalogTempTree::create(staging_root)?;
+    let result = fetch_catalog_into_temporary_tree(
+        transport,
+        &owner,
+        &repository,
+        target.repository,
+        &commit.sha,
+        &temporary.path,
+    );
+    let cleanup = temporary.cleanup();
+    match cleanup {
+        Ok(()) => result,
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_catalog_target(target: GithubCatalogTarget<'_>) -> Result<(), GithubSourceError> {
+    if !valid_name_segment(target.owner)
+        || !valid_repository_segment(target.repository)
+        || target.repository.ends_with(".git")
+    {
+        return Err(GithubSourceError::InvalidResponse);
+    }
+    validate_tracked_ref(target.tracked_ref)?;
+    let expected_identity = format!(
+        "github:{}/{}",
+        target.owner.to_ascii_lowercase(),
+        target.repository.to_ascii_lowercase()
+    );
+    let (display_owner, display_repository) = parse_full_name(target.display_name)?;
+    if target.canonical_identity != expected_identity
+        || !display_owner.eq_ignore_ascii_case(target.owner)
+        || !display_repository.eq_ignore_ascii_case(target.repository)
+    {
+        return Err(GithubSourceError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn fetch_catalog_into_temporary_tree(
+    transport: &dyn SourceTransport,
+    owner: &str,
+    repository: &str,
+    repository_root_name: &str,
+    commit_sha: &str,
+    temporary_root: &Path,
+) -> Result<FetchedGithubCatalog, GithubSourceError> {
+    let archive_url = api_url(&["repos", owner, repository, "zipball", commit_sha])?;
+    let archive_path = temporary_root.join("source.zip");
+    download_archive(transport, archive_url, &archive_path)?;
+
+    let archive_file =
+        File::open(&archive_path).map_err(|_| GithubSourceError::StagingUnavailable)?;
+    let mut archive =
+        ZipArchive::new(archive_file).map_err(|_| GithubSourceError::InvalidArchive)?;
+    let mut central_directory_file =
+        File::open(&archive_path).map_err(|_| GithubSourceError::StagingUnavailable)?;
+    let limits = ArchiveLimits::PRODUCTION;
+    let plan = preflight_archive(&mut archive, &mut central_directory_file, limits)?;
+    let repository_root = temporary_root.join(repository_root_name);
+    extract_archive(&mut archive, &plan, &repository_root, limits)?;
+
+    let canonical_repository_root =
+        fs::canonicalize(&repository_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+    let mut candidates = match validate_skill_bundle_folder(&canonical_repository_root) {
+        Ok(validated) => validated.candidates,
+        Err(ContentValidationError::NoSkillMetadataFound) => Vec::new(),
+        Err(error) => {
+            return Err(GithubSourceError::ContentValidation(
+                normalize_temporary_error(
+                    &error.to_string(),
+                    temporary_root,
+                    &canonical_repository_root,
+                    repository_root_name,
+                ),
+            ));
+        }
+    };
+    for candidate in &mut candidates {
+        for error in &mut candidate.validation_errors {
+            *error = normalize_temporary_error(
+                error,
+                temporary_root,
+                &canonical_repository_root,
+                repository_root_name,
+            );
+        }
+    }
+    Ok(FetchedGithubCatalog {
+        commit_sha: commit_sha.to_owned(),
+        candidates,
+    })
+}
+
+fn download_archive(
+    transport: &dyn SourceTransport,
+    url: Url,
+    archive_path: &Path,
+) -> Result<(), GithubSourceError> {
+    let mut response = transport
+        .get(SourceRequest {
+            url,
+            accept: GITHUB_ACCEPT.to_owned(),
+        })
+        .map_err(|_| GithubSourceError::Network)?;
+    if !(200..300).contains(&response.status) {
+        return Err(GithubSourceError::HttpStatus);
+    }
+    let mut archive_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(archive_path)
+        .map_err(|_| GithubSourceError::StagingUnavailable)?;
+    match copy_with_limit(&mut response.body, &mut archive_file, MAX_RESPONSE_BYTES) {
+        Ok(_) => archive_file
+            .flush()
+            .map_err(|_| GithubSourceError::StagingUnavailable),
+        Err(StreamCopyError::Read) => Err(GithubSourceError::InvalidResponse),
+        Err(StreamCopyError::Write) => Err(GithubSourceError::StagingUnavailable),
+        Err(StreamCopyError::LimitExceeded) => Err(GithubSourceError::ResponseTooLarge),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ArchiveLimits {
+    max_entries: usize,
+    max_total_file_bytes: u64,
+    max_single_file_bytes: u64,
+}
+
+impl ArchiveLimits {
+    const PRODUCTION: Self = Self {
+        max_entries: MAX_ENTRIES,
+        max_total_file_bytes: MAX_TOTAL_FILE_BYTES,
+        max_single_file_bytes: MAX_SINGLE_FILE_BYTES,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArchiveEntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Debug)]
+struct ArchiveEntryPlan {
+    index: usize,
+    relative_path: PathBuf,
+    kind: ArchiveEntryKind,
+    declared_size: u64,
+    permissions: u32,
+}
+
+fn preflight_archive(
+    archive: &mut ZipArchive<File>,
+    central_directory_file: &mut File,
+    limits: ArchiveLimits,
+) -> Result<Vec<ArchiveEntryPlan>, GithubSourceError> {
+    let entry_count = preflight_central_directory(
+        central_directory_file,
+        archive.central_directory_start(),
+        limits.max_entries,
+    )?;
+    if entry_count == 0 {
+        return Err(GithubSourceError::InvalidArchiveRoot);
+    }
+    if archive.len() != entry_count {
+        // zip crate 会按原始名称折叠完全重复的 central entry，数量不一致只能来自重复项。
+        return Err(GithubSourceError::DuplicateArchivePath {
+            path: "<duplicate-entry>".to_owned(),
+        });
+    }
+
+    let mut top_level = None::<String>;
+    let mut declared_total = 0_u64;
+    let mut kinds = BTreeMap::<PathBuf, ArchiveEntryKind>::new();
+    let mut plan = Vec::with_capacity(entry_count);
+    for index in 0..entry_count {
+        // raw 模式不会开始解压，因此所有路径、类型和声明大小都会在首次写出前检查。
+        let entry = archive
+            .by_index_raw(index)
+            .map_err(|_| GithubSourceError::InvalidArchive)?;
+        let entry_display = archive_entry_display(entry.name_raw());
+        if entry.encrypted() {
+            return Err(GithubSourceError::EncryptedArchiveEntry {
+                path: entry_display,
+            });
+        }
+        if !matches!(
+            entry.compression(),
+            CompressionMethod::Stored | CompressionMethod::Deflated
+        ) {
+            return Err(GithubSourceError::UnsupportedArchiveCompression {
+                path: entry_display,
+            });
+        }
+        let (components, name_is_directory) = strict_archive_components(entry.name_raw())?;
+        let (entry_top_level, stripped_components) = components
+            .split_first()
+            .ok_or(GithubSourceError::InvalidArchiveRoot)?;
+        if top_level
+            .as_ref()
+            .is_some_and(|expected| expected != entry_top_level)
+        {
+            return Err(GithubSourceError::InvalidArchiveRoot);
+        }
+        top_level.get_or_insert_with(|| entry_top_level.clone());
+
+        let kind = archive_entry_kind(entry.unix_mode(), name_is_directory, &entry_display)?;
+        if stripped_components.is_empty() && kind != ArchiveEntryKind::Directory {
+            return Err(GithubSourceError::InvalidArchiveRoot);
+        }
+        if kind == ArchiveEntryKind::Directory && entry.size() != 0 {
+            return Err(GithubSourceError::InvalidArchive);
+        }
+        if kind == ArchiveEntryKind::File {
+            if entry.size() > limits.max_single_file_bytes {
+                return Err(GithubSourceError::ArchiveFileSizeLimitExceeded {
+                    path: entry_display,
+                    limit: limits.max_single_file_bytes,
+                    actual: entry.size(),
+                });
+            }
+            declared_total = declared_total.checked_add(entry.size()).ok_or(
+                GithubSourceError::ArchiveTotalSizeLimitExceeded {
+                    limit: limits.max_total_file_bytes,
+                    actual: u64::MAX,
+                },
+            )?;
+            if declared_total > limits.max_total_file_bytes {
+                return Err(GithubSourceError::ArchiveTotalSizeLimitExceeded {
+                    limit: limits.max_total_file_bytes,
+                    actual: declared_total,
+                });
+            }
+        }
+
+        let relative_path = stripped_components.iter().collect::<PathBuf>();
+        if kinds.insert(relative_path.clone(), kind).is_some() {
+            return Err(GithubSourceError::DuplicateArchivePath {
+                path: archive_relative_display(&relative_path),
+            });
+        }
+        plan.push(ArchiveEntryPlan {
+            index,
+            relative_path,
+            kind,
+            declared_size: entry.size(),
+            permissions: archive_permissions(entry.unix_mode(), kind),
+        });
+    }
+
+    // 文件不能同时充当后续条目的父目录；这类冲突也必须在创建目录前拒绝。
+    for (path, kind) in &kinds {
+        let mut ancestor = path.parent();
+        while let Some(candidate) = ancestor {
+            if kinds.get(candidate) == Some(&ArchiveEntryKind::File) {
+                return Err(GithubSourceError::DuplicateArchivePath {
+                    path: archive_relative_display(path),
+                });
+            }
+            if candidate.as_os_str().is_empty() {
+                break;
+            }
+            ancestor = candidate.parent();
+        }
+        if path.as_os_str().is_empty() && *kind != ArchiveEntryKind::Directory {
+            return Err(GithubSourceError::InvalidArchiveRoot);
+        }
+    }
+    Ok(plan)
+}
+
+/// `zip` 会折叠完全同名的 central entry；最小化遍历原始 header 才能可靠计数并拒绝重复路径。
+fn preflight_central_directory(
+    file: &mut File,
+    central_directory_start: u64,
+    max_entries: usize,
+) -> Result<usize, GithubSourceError> {
+    const CENTRAL_ENTRY_SIGNATURE: u32 = 0x0201_4b50;
+    const CENTRAL_ENTRY_FIXED_BYTES_AFTER_SIGNATURE: usize = 42;
+    const CENTRAL_END_SIGNATURES: [u32; 4] = [0x0605_4b50, 0x0606_4b50, 0x0706_4b50, 0x0505_4b50];
+
+    file.seek(SeekFrom::Start(central_directory_start))
+        .map_err(|_| GithubSourceError::InvalidArchive)?;
+    let mut count = 0_usize;
+    let mut top_level = None::<String>;
+    let mut normalized_paths = BTreeMap::<PathBuf, ()>::new();
+    loop {
+        let mut signature_bytes = [0_u8; 4];
+        file.read_exact(&mut signature_bytes)
+            .map_err(|_| GithubSourceError::InvalidArchive)?;
+        let signature = u32::from_le_bytes(signature_bytes);
+        if signature != CENTRAL_ENTRY_SIGNATURE {
+            if count == 0 || !CENTRAL_END_SIGNATURES.contains(&signature) {
+                return Err(GithubSourceError::InvalidArchive);
+            }
+            return Ok(count);
+        }
+
+        count = count
+            .checked_add(1)
+            .ok_or(GithubSourceError::ArchiveEntryLimitExceeded {
+                limit: max_entries,
+                actual: usize::MAX,
+            })?;
+        if count > max_entries {
+            return Err(GithubSourceError::ArchiveEntryLimitExceeded {
+                limit: max_entries,
+                actual: count,
+            });
+        }
+        let mut fixed = [0_u8; CENTRAL_ENTRY_FIXED_BYTES_AFTER_SIGNATURE];
+        file.read_exact(&mut fixed)
+            .map_err(|_| GithubSourceError::InvalidArchive)?;
+        // 这三个长度位于固定 central header 的末段；实际名称仍交给统一严格路径解析。
+        let name_length = u16::from_le_bytes([fixed[24], fixed[25]]) as usize;
+        let extra_length = u16::from_le_bytes([fixed[26], fixed[27]]) as u64;
+        let comment_length = u16::from_le_bytes([fixed[28], fixed[29]]) as u64;
+        let mut raw_name = vec![0_u8; name_length];
+        file.read_exact(&mut raw_name)
+            .map_err(|_| GithubSourceError::InvalidArchive)?;
+        file.seek(SeekFrom::Current(
+            extra_length.saturating_add(comment_length) as i64,
+        ))
+        .map_err(|_| GithubSourceError::InvalidArchive)?;
+
+        let (components, _) = strict_archive_components(&raw_name)?;
+        let (entry_top_level, stripped_components) = components
+            .split_first()
+            .ok_or(GithubSourceError::InvalidArchiveRoot)?;
+        if top_level
+            .as_ref()
+            .is_some_and(|expected| expected != entry_top_level)
+        {
+            return Err(GithubSourceError::InvalidArchiveRoot);
+        }
+        top_level.get_or_insert_with(|| entry_top_level.clone());
+        let relative_path = stripped_components.iter().collect::<PathBuf>();
+        if normalized_paths.insert(relative_path.clone(), ()).is_some() {
+            return Err(GithubSourceError::DuplicateArchivePath {
+                path: archive_relative_display(&relative_path),
+            });
+        }
+    }
+}
+
+fn strict_archive_components(raw_name: &[u8]) -> Result<(Vec<String>, bool), GithubSourceError> {
+    let display = archive_entry_display(raw_name);
+    if raw_name.is_empty()
+        || raw_name.contains(&b'\0')
+        || raw_name.contains(&b'\\')
+        || raw_name.first() == Some(&b'/')
+    {
+        return Err(GithubSourceError::UnsafeArchivePath { path: display });
+    }
+    let name = std::str::from_utf8(raw_name)
+        .map_err(|_| GithubSourceError::UnsafeArchivePath { path: display })?;
+    if name.chars().any(char::is_control) {
+        return Err(GithubSourceError::UnsafeArchivePath {
+            path: archive_entry_display(raw_name),
+        });
+    }
+    let name_is_directory = name.ends_with('/');
+    let normalized_name = name.strip_suffix('/').unwrap_or(name);
+    let components = normalized_name.split('/').collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| component.is_empty() || matches!(*component, "." | ".."))
+        || components[0].as_bytes().get(1) == Some(&b':')
+    {
+        return Err(GithubSourceError::UnsafeArchivePath {
+            path: archive_entry_display(raw_name),
+        });
+    }
+    Ok((
+        components.into_iter().map(str::to_owned).collect(),
+        name_is_directory,
+    ))
+}
+
+fn archive_entry_kind(
+    unix_mode: Option<u32>,
+    name_is_directory: bool,
+    display: &str,
+) -> Result<ArchiveEntryKind, GithubSourceError> {
+    let declared_type = unix_mode.unwrap_or(0) & u32::from(libc::S_IFMT);
+    if declared_type == u32::from(libc::S_IFLNK) {
+        return Err(GithubSourceError::UnsupportedArchiveEntry {
+            path: display.to_owned(),
+        });
+    }
+    let expected_type = if name_is_directory {
+        u32::from(libc::S_IFDIR)
+    } else {
+        u32::from(libc::S_IFREG)
+    };
+    if declared_type != 0 && declared_type != expected_type {
+        return Err(GithubSourceError::UnsupportedArchiveEntry {
+            path: display.to_owned(),
+        });
+    }
+    Ok(if name_is_directory {
+        ArchiveEntryKind::Directory
+    } else {
+        ArchiveEntryKind::File
+    })
+}
+
+fn archive_permissions(unix_mode: Option<u32>, kind: ArchiveEntryKind) -> u32 {
+    unix_mode.map(|mode| mode & 0o777).unwrap_or(match kind {
+        ArchiveEntryKind::Directory => 0o755,
+        ArchiveEntryKind::File => 0o644,
+    })
+}
+
+fn extract_archive(
+    archive: &mut ZipArchive<File>,
+    plan: &[ArchiveEntryPlan],
+    repository_root: &Path,
+    limits: ArchiveLimits,
+) -> Result<(), GithubSourceError> {
+    fs::create_dir(repository_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+    let mut directory_permissions = Vec::<(PathBuf, u32)>::new();
+    let mut actual_total = 0_u64;
+    for planned in plan {
+        let destination = repository_root.join(&planned.relative_path);
+        match planned.kind {
+            ArchiveEntryKind::Directory => {
+                fs::create_dir_all(&destination)
+                    .map_err(|_| GithubSourceError::StagingUnavailable)?;
+                directory_permissions.push((destination, planned.permissions));
+            }
+            ArchiveEntryKind::File => {
+                let parent = destination
+                    .parent()
+                    .ok_or(GithubSourceError::InvalidArchive)?;
+                fs::create_dir_all(parent).map_err(|_| GithubSourceError::StagingUnavailable)?;
+                let mut destination_file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&destination)
+                    .map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::AlreadyExists {
+                            GithubSourceError::InvalidArchive
+                        } else {
+                            GithubSourceError::StagingUnavailable
+                        }
+                    })?;
+                let mut source = archive
+                    .by_index(planned.index)
+                    .map_err(|_| GithubSourceError::InvalidArchive)?;
+                let mut actual_file = 0_u64;
+                let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+                loop {
+                    let remaining_single = limits.max_single_file_bytes.saturating_sub(actual_file);
+                    let remaining_total = limits.max_total_file_bytes.saturating_sub(actual_total);
+                    let remaining_declared = planned.declared_size.saturating_sub(actual_file);
+                    let remaining = remaining_single
+                        .min(remaining_total)
+                        .min(remaining_declared);
+                    let probe = if remaining == 0 {
+                        1
+                    } else {
+                        remaining.min(STREAM_BUFFER_BYTES as u64) as usize
+                    };
+                    let count = source
+                        .read(&mut buffer[..probe])
+                        .map_err(|_| GithubSourceError::InvalidArchive)?;
+                    if count == 0 {
+                        break;
+                    }
+                    let next_file = actual_file.saturating_add(count as u64);
+                    let next_total = actual_total.saturating_add(count as u64);
+                    if next_file > limits.max_single_file_bytes {
+                        return Err(GithubSourceError::ArchiveFileSizeLimitExceeded {
+                            path: archive_relative_display(&planned.relative_path),
+                            limit: limits.max_single_file_bytes,
+                            actual: next_file,
+                        });
+                    }
+                    if next_total > limits.max_total_file_bytes {
+                        return Err(GithubSourceError::ArchiveTotalSizeLimitExceeded {
+                            limit: limits.max_total_file_bytes,
+                            actual: next_total,
+                        });
+                    }
+                    if next_file > planned.declared_size {
+                        return Err(GithubSourceError::InvalidArchive);
+                    }
+                    destination_file
+                        .write_all(&buffer[..count])
+                        .map_err(|_| GithubSourceError::StagingUnavailable)?;
+                    actual_file = next_file;
+                    actual_total = next_total;
+                }
+                if actual_file != planned.declared_size {
+                    return Err(GithubSourceError::InvalidArchive);
+                }
+                destination_file
+                    .flush()
+                    .map_err(|_| GithubSourceError::StagingUnavailable)?;
+                fs::set_permissions(&destination, Permissions::from_mode(planned.permissions))
+                    .map_err(|_| GithubSourceError::StagingUnavailable)?;
+            }
+        }
+    }
+
+    // 最后从深到浅恢复目录权限，避免只读父目录阻断仍在进行的安全展开。
+    directory_permissions.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
+    for (directory, permissions) in directory_permissions {
+        fs::set_permissions(directory, Permissions::from_mode(permissions))
+            .map_err(|_| GithubSourceError::StagingUnavailable)?;
+    }
+    Ok(())
+}
+
+fn archive_entry_display(raw_name: &[u8]) -> String {
+    match std::str::from_utf8(raw_name) {
+        Ok(name) => format!("{name:?}"),
+        Err(_) => format!("{raw_name:?}"),
+    }
+}
+
+fn archive_relative_display(path: &Path) -> String {
+    if path.as_os_str().is_empty() {
+        "<repository>".to_owned()
+    } else {
+        path.to_string_lossy().into_owned()
+    }
+}
+
+fn normalize_temporary_error(
+    error: &str,
+    temporary_root: &Path,
+    repository_root: &Path,
+    repository_name: &str,
+) -> String {
+    let mut normalized = error.replace(repository_root.to_string_lossy().as_ref(), repository_name);
+    if let Ok(original_repository_root) = temporary_root.join(repository_name).canonicalize() {
+        normalized = normalized.replace(
+            original_repository_root.to_string_lossy().as_ref(),
+            repository_name,
+        );
+    }
+    normalized = normalized.replace(temporary_root.to_string_lossy().as_ref(), "<temporary>");
+    if let Ok(canonical_temporary_root) = temporary_root.canonicalize() {
+        normalized = normalized.replace(
+            canonical_temporary_root.to_string_lossy().as_ref(),
+            "<temporary>",
+        );
+    }
+    normalized
+}
+
+struct CatalogTempTree {
+    path: PathBuf,
+    cleaned: bool,
+}
+
+impl CatalogTempTree {
+    fn create(staging_root: &Path) -> Result<Self, GithubSourceError> {
+        fs::create_dir_all(staging_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+        for _ in 0..8 {
+            let path = staging_root.join(format!(".github-catalog-{}", Uuid::new_v4()));
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    let temporary = Self {
+                        path,
+                        cleaned: false,
+                    };
+                    fs::set_permissions(&temporary.path, Permissions::from_mode(0o700))
+                        .map_err(|_| GithubSourceError::StagingUnavailable)?;
+                    return Ok(temporary);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(GithubSourceError::StagingUnavailable),
+            }
+        }
+        Err(GithubSourceError::StagingUnavailable)
+    }
+
+    fn cleanup(mut self) -> Result<(), GithubSourceError> {
+        fs::remove_dir_all(&self.path).map_err(|_| GithubSourceError::StagingCleanupFailed)?;
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+impl Drop for CatalogTempTree {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            // 显式清理会报告失败；Drop 只负责异常返回路径上的最后一次尽力清理。
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(
     transport: &dyn SourceTransport,
     url: Url,
@@ -241,19 +932,51 @@ fn read_json<T: for<'de> Deserialize<'de>>(
 /// 读取时累计计数，不能因为错误 Content-Length 或 chunked body 绕过资源限制。
 pub fn read_limited(body: &mut dyn Read) -> Result<Vec<u8>, GithubSourceError> {
     let mut output = Vec::new();
-    let mut buffer = [0_u8; 8192];
+    match copy_with_limit(body, &mut output, MAX_RESPONSE_BYTES) {
+        Ok(_) => Ok(output),
+        Err(StreamCopyError::Read | StreamCopyError::Write) => {
+            Err(GithubSourceError::InvalidResponse)
+        }
+        Err(StreamCopyError::LimitExceeded) => Err(GithubSourceError::ResponseTooLarge),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamCopyError {
+    Read,
+    Write,
+    LimitExceeded,
+}
+
+fn copy_with_limit(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    limit: u64,
+) -> Result<u64, StreamCopyError> {
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
     loop {
-        let count = body
-            .read(&mut buffer)
-            .map_err(|_| GithubSourceError::InvalidResponse)?;
+        // 达到上限后只探测下一字节，不能用一个完整 chunk 越过固定接收边界。
+        let remaining = limit.saturating_sub(copied);
+        let probe = if remaining == 0 {
+            1
+        } else {
+            remaining.min(STREAM_BUFFER_BYTES as u64) as usize
+        };
+        let count = reader
+            .read(&mut buffer[..probe])
+            .map_err(|_| StreamCopyError::Read)?;
         if count == 0 {
-            return Ok(output);
+            return Ok(copied);
         }
-        let next = output.len() as u64 + count as u64;
-        if next > MAX_RESPONSE_BYTES {
-            return Err(GithubSourceError::ResponseTooLarge);
+        let next = copied.saturating_add(count as u64);
+        if next > limit {
+            return Err(StreamCopyError::LimitExceeded);
         }
-        output.extend_from_slice(&buffer[..count]);
+        writer
+            .write_all(&buffer[..count])
+            .map_err(|_| StreamCopyError::Write)?;
+        copied = next;
     }
 }
 
@@ -464,7 +1187,14 @@ struct CommitMetadata {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, io::Cursor, sync::Mutex};
+    use std::{
+        collections::VecDeque,
+        io::{Cursor, Write},
+        sync::Mutex,
+    };
+
+    use tempfile::{NamedTempFile, tempdir};
+    use zip::{ZipWriter, write::SimpleFileOptions};
 
     use super::*;
 
@@ -581,6 +1311,298 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fetches_sha_archive_preserves_candidate_errors_and_cleans_staging() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let archive = zip_fixture(&[
+            (
+                "repository-sha/skills/alpha/SKILL.md",
+                "---\nname: alpha\ndescription: alpha catalog skill\n---\n",
+            ),
+            (
+                "repository-sha/skills/parent/SKILL.md",
+                "---\nname: parent\ndescription: parent catalog skill\n---\n",
+            ),
+            (
+                "repository-sha/skills/parent/child/SKILL.md",
+                "---\nname: child\ndescription: child catalog skill\n---\n",
+            ),
+        ]);
+        let transport = FixtureTransport::new([
+            fixture(
+                200,
+                r#"{"full_name":"Owner/Repo","default_branch":"main","private":false}"#,
+            ),
+            fixture(200, &format!(r#"{{"sha":"{sha}"}}"#)),
+            binary_fixture(200, archive),
+        ]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("catalog-staging");
+
+        let fetched = fetch_github_catalog(
+            &transport,
+            GithubCatalogTarget {
+                owner: "Owner",
+                repository: "Repo",
+                canonical_identity: "github:owner/repo",
+                display_name: "Owner/Repo",
+                tracked_ref: "main",
+            },
+            &staging,
+        )
+        .expect("有效 SHA archive 应返回 Catalog");
+
+        assert_eq!(fetched.commit_sha, sha);
+        assert_eq!(fetched.candidates.len(), 3);
+        assert!(
+            fetched
+                .candidates
+                .iter()
+                .any(|candidate| candidate.name.as_deref() == Some("alpha")
+                    && candidate.selectable())
+        );
+        let nested_errors = fetched
+            .candidates
+            .iter()
+            .flat_map(|candidate| &candidate.validation_errors)
+            .collect::<Vec<_>>();
+        assert!(!nested_errors.is_empty(), "嵌套成员错误必须保留在 metadata");
+        assert!(
+            nested_errors
+                .iter()
+                .all(|error| !error.contains(staging.to_string_lossy().as_ref()))
+        );
+        assert!(
+            nested_errors
+                .iter()
+                .any(|error| error.contains("Repo/skills"))
+        );
+        assert_eq!(
+            fs::read_dir(&staging)
+                .expect("staging 根应保留且可读")
+                .count(),
+            0,
+            "成功后不能保留 archive 或展开树"
+        );
+        let requests = transport.requests.lock().expect("应读取请求记录");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].url.path().ends_with(&format!("/zipball/{sha}")));
+    }
+
+    #[test]
+    fn valid_archive_without_skill_metadata_is_an_empty_catalog() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let transport = FixtureTransport::new([
+            fixture(
+                200,
+                r#"{"full_name":"Owner/Repo","default_branch":"main","private":false}"#,
+            ),
+            fixture(200, &format!(r#"{{"sha":"{sha}"}}"#)),
+            binary_fixture(
+                200,
+                zip_fixture(&[("repository-sha/README.md", "# repository\n")]),
+            ),
+        ]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("catalog-staging");
+
+        let fetched = fetch_github_catalog(
+            &transport,
+            GithubCatalogTarget {
+                owner: "Owner",
+                repository: "Repo",
+                canonical_identity: "github:owner/repo",
+                display_name: "Owner/Repo",
+                tracked_ref: "main",
+            },
+            &staging,
+        )
+        .expect("没有 SKILL.md 的合法仓库仍是成功 Catalog");
+
+        assert!(fetched.candidates.is_empty());
+        assert_eq!(fs::read_dir(staging).expect("staging 应可读").count(), 0);
+    }
+
+    #[test]
+    fn receive_limit_accepts_exact_bytes_and_rejects_the_next_byte() {
+        let mut exact_source = Cursor::new(b"12345".to_vec());
+        let mut exact_destination = Vec::new();
+        assert_eq!(
+            copy_with_limit(&mut exact_source, &mut exact_destination, 5),
+            Ok(5)
+        );
+        assert_eq!(exact_destination, b"12345");
+
+        let mut source = Cursor::new(b"123456".to_vec());
+        let mut destination = Vec::new();
+        assert_eq!(
+            copy_with_limit(&mut source, &mut destination, 5),
+            Err(StreamCopyError::LimitExceeded)
+        );
+        assert_eq!(destination, b"12345");
+        assert_eq!(source.position(), 6);
+    }
+
+    #[test]
+    fn strict_archive_paths_reject_every_forbidden_component_form() {
+        for path in [
+            b"/root/file".as_slice(),
+            b"C:/root/file".as_slice(),
+            b"root/../file".as_slice(),
+            b"root/./file".as_slice(),
+            b"root\\file".as_slice(),
+            b"root/\0file".as_slice(),
+        ] {
+            assert!(matches!(
+                strict_archive_components(path),
+                Err(GithubSourceError::UnsafeArchivePath { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn preflight_rejects_normalized_duplicates_encryption_and_special_types() {
+        let duplicate = normalized_duplicate_zip_fixture();
+        let (mut archive, mut central_directory) = open_fixture_archive(&duplicate);
+        assert!(matches!(
+            preflight_archive(
+                &mut archive,
+                &mut central_directory,
+                test_archive_limits(3, 10, 10),
+            ),
+            Err(GithubSourceError::DuplicateArchivePath { .. })
+        ));
+
+        let encrypted = archive_with_central_mode_or_flag(Some(0x0001), None);
+        let (mut archive, mut central_directory) = open_fixture_archive(&encrypted);
+        assert!(matches!(
+            preflight_archive(
+                &mut archive,
+                &mut central_directory,
+                test_archive_limits(1, 10, 10),
+            ),
+            Err(GithubSourceError::EncryptedArchiveEntry { .. })
+        ));
+
+        for special_type in [libc::S_IFLNK, libc::S_IFIFO] {
+            let special =
+                archive_with_central_mode_or_flag(None, Some(u32::from(special_type) | 0o777));
+            let (mut archive, mut central_directory) = open_fixture_archive(&special);
+            assert!(matches!(
+                preflight_archive(
+                    &mut archive,
+                    &mut central_directory,
+                    test_archive_limits(1, 10, 10),
+                ),
+                Err(GithubSourceError::UnsupportedArchiveEntry { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn archive_entry_limit_accepts_exact_count_and_rejects_the_next_entry() {
+        let exact = zip_fixture(&[("root/one.txt", "1"), ("root/two.txt", "2")]);
+        let limits = test_archive_limits(2, 10, 10);
+        let (mut archive, mut central_directory) = open_fixture_archive(&exact);
+        assert_eq!(
+            preflight_archive(&mut archive, &mut central_directory, limits)
+                .expect("恰好达到条目上限应成功")
+                .len(),
+            2
+        );
+
+        let over = zip_fixture(&[
+            ("root/one.txt", "1"),
+            ("root/two.txt", "2"),
+            ("root/three.txt", "3"),
+        ]);
+        let (mut archive, mut central_directory) = open_fixture_archive(&over);
+        assert_eq!(
+            preflight_archive(&mut archive, &mut central_directory, limits)
+                .expect_err("下一条目必须被拒绝"),
+            GithubSourceError::ArchiveEntryLimitExceeded {
+                limit: 2,
+                actual: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn expanded_total_limit_accepts_exact_bytes_and_rejects_the_next_declared_and_actual_byte() {
+        let exact = zip_fixture(&[("root/one.txt", "123"), ("root/two.txt", "456")]);
+        let strict = test_archive_limits(2, 6, 4);
+        let (mut archive, mut central_directory) = open_fixture_archive(&exact);
+        let plan = preflight_archive(&mut archive, &mut central_directory, strict)
+            .expect("恰好达到展开总量应成功");
+        let sandbox = tempdir().expect("应创建隔离目录");
+        extract_archive(&mut archive, &plan, &sandbox.path().join("Repo"), strict)
+            .expect("实际写出恰好达到展开总量也应成功");
+
+        let over = zip_fixture(&[("root/one.txt", "123"), ("root/two.txt", "4567")]);
+        let (mut archive, mut central_directory) = open_fixture_archive(&over);
+        assert_eq!(
+            preflight_archive(&mut archive, &mut central_directory, strict)
+                .expect_err("下一声明字节必须被拒绝"),
+            GithubSourceError::ArchiveTotalSizeLimitExceeded {
+                limit: 6,
+                actual: 7,
+            }
+        );
+
+        let relaxed = test_archive_limits(2, 7, 4);
+        let (mut archive, mut central_directory) = open_fixture_archive(&over);
+        let plan = preflight_archive(&mut archive, &mut central_directory, relaxed)
+            .expect("宽松预检应建立测试计划");
+        let sandbox = tempdir().expect("应创建隔离目录");
+        assert_eq!(
+            extract_archive(&mut archive, &plan, &sandbox.path().join("Repo"), strict,)
+                .expect_err("实际展开的下一字节必须被拒绝"),
+            GithubSourceError::ArchiveTotalSizeLimitExceeded {
+                limit: 6,
+                actual: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn single_file_limit_accepts_exact_bytes_and_rejects_the_next_declared_and_actual_byte() {
+        let exact = zip_fixture(&[("root/file.txt", "12345")]);
+        let strict = test_archive_limits(1, 10, 5);
+        let (mut archive, mut central_directory) = open_fixture_archive(&exact);
+        let plan = preflight_archive(&mut archive, &mut central_directory, strict)
+            .expect("恰好达到单文件上限应成功");
+        let sandbox = tempdir().expect("应创建隔离目录");
+        extract_archive(&mut archive, &plan, &sandbox.path().join("Repo"), strict)
+            .expect("实际写出恰好达到单文件上限也应成功");
+
+        let over = zip_fixture(&[("root/file.txt", "123456")]);
+        let (mut archive, mut central_directory) = open_fixture_archive(&over);
+        assert_eq!(
+            preflight_archive(&mut archive, &mut central_directory, strict)
+                .expect_err("下一声明字节必须被拒绝"),
+            GithubSourceError::ArchiveFileSizeLimitExceeded {
+                path: "\"root/file.txt\"".to_owned(),
+                limit: 5,
+                actual: 6,
+            }
+        );
+
+        let relaxed = test_archive_limits(1, 10, 6);
+        let (mut archive, mut central_directory) = open_fixture_archive(&over);
+        let plan = preflight_archive(&mut archive, &mut central_directory, relaxed)
+            .expect("宽松预检应建立测试计划");
+        let sandbox = tempdir().expect("应创建隔离目录");
+        assert_eq!(
+            extract_archive(&mut archive, &plan, &sandbox.path().join("Repo"), strict,)
+                .expect_err("实际单文件的下一字节必须被拒绝"),
+            GithubSourceError::ArchiveFileSizeLimitExceeded {
+                path: "file.txt".to_owned(),
+                limit: 5,
+                actual: 6,
+            }
+        );
+    }
+
     struct FixtureTransport {
         responses: Mutex<VecDeque<Result<SourceResponse, SourceTransportError>>>,
         requests: Mutex<Vec<SourceRequest>>,
@@ -609,10 +1631,85 @@ mod tests {
     }
 
     fn fixture(status: u16, json: &str) -> Result<SourceResponse, SourceTransportError> {
+        binary_fixture(status, json.as_bytes().to_vec())
+    }
+
+    fn binary_fixture(status: u16, body: Vec<u8>) -> Result<SourceResponse, SourceTransportError> {
         Ok(SourceResponse {
             status,
             final_url: Url::parse("https://api.github.com/fixture").expect("fixture URL 应合法"),
-            body: Box::new(Cursor::new(json.as_bytes().to_vec())),
+            body: Box::new(Cursor::new(body)),
         })
+    }
+
+    fn zip_fixture(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        for (path, contents) in entries {
+            archive
+                .start_file(*path, options)
+                .expect("应创建 ZIP entry");
+            archive
+                .write_all(contents.as_bytes())
+                .expect("应写入 ZIP 内容");
+        }
+        archive.finish().expect("应完成 ZIP fixture").into_inner()
+    }
+
+    fn normalized_duplicate_zip_fixture() -> Vec<u8> {
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().unix_permissions(0o644);
+        archive
+            .start_file("root/path", options)
+            .expect("应创建普通文件 entry");
+        archive.write_all(b"x").expect("应写入普通文件");
+        archive
+            .add_directory("root/path", options)
+            .expect("尾随斜杠形成不同原始名称");
+        archive.finish().expect("应完成 ZIP fixture").into_inner()
+    }
+
+    fn archive_with_central_mode_or_flag(
+        encrypted_flag: Option<u16>,
+        unix_mode: Option<u32>,
+    ) -> Vec<u8> {
+        let mut bytes = zip_fixture(&[("root/file.txt", "x")]);
+        let central = bytes
+            .windows(4)
+            .position(|window| window == [0x50, 0x4b, 0x01, 0x02])
+            .expect("fixture 应包含 central entry");
+        if let Some(flag) = encrypted_flag {
+            bytes[6..8].copy_from_slice(&flag.to_le_bytes());
+            bytes[central + 8..central + 10].copy_from_slice(&flag.to_le_bytes());
+        }
+        if let Some(mode) = unix_mode {
+            bytes[central + 38..central + 42].copy_from_slice(&(mode << 16).to_le_bytes());
+        }
+        bytes
+    }
+
+    fn open_fixture_archive(bytes: &[u8]) -> (ZipArchive<File>, File) {
+        let mut archive_file = NamedTempFile::new().expect("应创建临时 ZIP");
+        archive_file.write_all(bytes).expect("应写入临时 ZIP");
+        let archive_reader = archive_file.reopen().expect("应重新打开临时 ZIP");
+        let central_directory_reader = archive_reader.try_clone().expect("应复制临时 ZIP 句柄");
+        (
+            ZipArchive::new(archive_reader).expect("fixture 必须是有效 ZIP"),
+            central_directory_reader,
+        )
+    }
+
+    fn test_archive_limits(
+        max_entries: usize,
+        max_total_file_bytes: u64,
+        max_single_file_bytes: u64,
+    ) -> ArchiveLimits {
+        ArchiveLimits {
+            max_entries,
+            max_total_file_bytes,
+            max_single_file_bytes,
+        }
     }
 }
