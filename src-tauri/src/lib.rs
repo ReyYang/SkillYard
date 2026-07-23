@@ -5,6 +5,7 @@ mod commands;
 mod content;
 mod domain;
 mod git_management_evidence;
+mod github_source;
 mod lifecycle;
 mod mount_lifecycle;
 mod paths;
@@ -19,9 +20,15 @@ pub use domain::{
     LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
     MountOperation, MountPlan, MountPlanPurpose, MountScope, MountSummary, PlatformInfo,
     ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
-    SourceCatalogMemberSummary, SourceCatalogStatus, SourceSummary, SupportedAppId,
-    TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin,
-    TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest, UiIntent, UiOutcome,
+    SourceCatalogMemberSummary, SourceCatalogStatus, SourceRefChangePlan, SourceSummary,
+    SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
+    TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest,
+    UiIntent, UiOutcome,
+};
+pub use github_source::{
+    GithubSourceError, ReqwestSourceTransport, ResolvedGithubSource, SharedSourceTransport,
+    SourceRequest, SourceResponse, SourceTransport, SourceTransportError, parse_github_source,
+    resolve_github_source,
 };
 pub use lifecycle::LifecycleFailpoint;
 pub use paths::ApplicationPaths;

@@ -16,8 +16,8 @@ use crate::domain::{
     LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
     MountOperation, MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue,
     ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus,
-    SourceCatalogMemberSummary, SourceCatalogStatus, SourceSummary, SupportedAppId,
-    SupportedAppSummary, TakeoverPlan, UiOutcome,
+    SourceCatalogMemberSummary, SourceCatalogStatus, SourceRefChangePlan, SourceSummary,
+    SupportedAppId, SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -68,6 +68,16 @@ pub enum StorageError {
     UnknownSourceCatalogStatus(String),
     #[error("Source Catalog 成员 metadata 无法解析：{0}")]
     InvalidSourceCatalogMetadata(#[source] serde_json::Error),
+    #[error("无法保存 GitHub Source：{0}")]
+    SaveSource(#[source] rusqlite::Error),
+    #[error("Tracked Ref 变更 Plan 未签发或已经不存在")]
+    SourceRefChangePlanNotFound,
+    #[error("Tracked Ref 变更 Plan 已经使用，不能重复确认")]
+    SourceRefChangePlanConsumed,
+    #[error("Tracked Ref 变更 Plan 已过期，请重新添加来源")]
+    SourceRefChangePlanExpired,
+    #[error("Source 的 Tracked Ref 已经变化，请重新添加来源")]
+    SourceRefChangeStateChanged,
     #[error("无法保存首次扫描结果：{0}")]
     SaveInitialScan(#[source] rusqlite::Error),
     #[error("无法保存本机刷新结果：{0}")]
@@ -327,6 +337,23 @@ pub struct NewInstallCandidate<'a> {
     pub validation_errors: &'a [String],
     pub warnings: &'a [String],
     pub default_selected: bool,
+}
+
+pub struct NewGitHubSource<'a> {
+    pub id: &'a str,
+    pub canonical_identity: &'a str,
+    pub owner: &'a str,
+    pub repository: &'a str,
+    pub display_name: &'a str,
+    pub repository_url: &'a str,
+    pub tracked_ref: &'a str,
+    pub resolved_commit_sha: &'a str,
+    pub member_path_hint: Option<&'a str>,
+}
+
+pub enum SaveGitHubSourceResult {
+    Saved { source_id: String },
+    RefChangeRequired { plan: SourceRefChangePlan },
 }
 
 #[derive(Debug, Clone)]
@@ -1175,6 +1202,215 @@ impl Storage {
         }
         transaction.commit().map_err(StorageError::ReadSources)?;
         Ok(sources)
+    }
+
+    /// 无 ref 的重复入口沿用当前 Tracked Ref；首次登记才读取 GitHub default branch。
+    pub fn read_source_tracked_ref(
+        &self,
+        canonical_identity: &str,
+    ) -> Result<Option<String>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT tracked_ref FROM sources WHERE canonical_identity = ?1",
+                [canonical_identity],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)
+    }
+
+    /// 已验证 GitHub 输入要么复用 canonical Source，要么签发一次显式 Ref 变更确认。
+    pub fn save_or_prepare_github_source(
+        &mut self,
+        source: NewGitHubSource<'_>,
+        ref_change_plan_id: &str,
+        now: i64,
+        expires_at: i64,
+    ) -> Result<SaveGitHubSourceResult, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        let existing = transaction
+            .query_row(
+                "SELECT id, display_name, tracked_ref
+                 FROM sources WHERE canonical_identity = ?1",
+                [source.canonical_identity],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::SaveSource)?;
+
+        let result = if let Some((source_id, source_display_name, current_ref)) = existing {
+            if current_ref == source.tracked_ref {
+                let changed = transaction
+                    .execute(
+                        "UPDATE sources
+                         SET owner = ?2, repository = ?3, display_name = ?4,
+                             repository_url = ?5, member_path_hint = ?6, updated_at = ?7
+                         WHERE id = ?1 AND tracked_ref = ?8",
+                        params![
+                            source_id,
+                            source.owner,
+                            source.repository,
+                            source.display_name,
+                            source.repository_url,
+                            source.member_path_hint,
+                            now,
+                            current_ref,
+                        ],
+                    )
+                    .map_err(StorageError::SaveSource)?;
+                if changed != 1 {
+                    return Err(StorageError::SourceRefChangeStateChanged);
+                }
+                SaveGitHubSourceResult::Saved { source_id }
+            } else {
+                let plan = SourceRefChangePlan {
+                    id: ref_change_plan_id.to_owned(),
+                    source_id: source_id.clone(),
+                    source_display_name,
+                    current_ref: current_ref.clone(),
+                    candidate_ref: source.tracked_ref.to_owned(),
+                    candidate_commit_sha: source.resolved_commit_sha.to_owned(),
+                    member_path_hint: source.member_path_hint.map(str::to_owned),
+                    created_at: now,
+                    expires_at,
+                };
+                transaction
+                    .execute(
+                        "INSERT INTO source_ref_change_plans (
+                            id, source_id, current_ref, candidate_ref,
+                            candidate_commit_sha, member_path_hint,
+                            created_at, expires_at, status
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending')",
+                        params![
+                            plan.id,
+                            plan.source_id,
+                            plan.current_ref,
+                            plan.candidate_ref,
+                            plan.candidate_commit_sha,
+                            plan.member_path_hint,
+                            plan.created_at,
+                            plan.expires_at,
+                        ],
+                    )
+                    .map_err(StorageError::SaveSource)?;
+                SaveGitHubSourceResult::RefChangeRequired { plan }
+            }
+        } else {
+            let sort_order = transaction
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM sources",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(StorageError::SaveSource)?;
+            transaction
+                .execute(
+                    "INSERT INTO sources (
+                        id, kind, canonical_identity, owner, repository,
+                        display_name, repository_url, tracked_ref, member_path_hint,
+                        sort_order, created_at, updated_at
+                     ) VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                    params![
+                        source.id,
+                        source.canonical_identity,
+                        source.owner,
+                        source.repository,
+                        source.display_name,
+                        source.repository_url,
+                        source.tracked_ref,
+                        source.member_path_hint,
+                        sort_order,
+                        now,
+                    ],
+                )
+                .map_err(StorageError::SaveSource)?;
+            SaveGitHubSourceResult::Saved {
+                source_id: source.id.to_owned(),
+            }
+        };
+        transaction.commit().map_err(StorageError::SaveSource)?;
+        Ok(result)
+    }
+
+    pub fn confirm_source_ref_change(
+        &mut self,
+        plan_id: &str,
+        now: i64,
+    ) -> Result<String, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        let plan = transaction
+            .query_row(
+                "SELECT source_id, current_ref, candidate_ref, member_path_hint,
+                        expires_at, status
+                 FROM source_ref_change_plans WHERE id = ?1",
+                [plan_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::SaveSource)?
+            .ok_or(StorageError::SourceRefChangePlanNotFound)?;
+        let (source_id, current_ref, candidate_ref, member_path_hint, expires_at, status) = plan;
+        if status != "pending" {
+            return Err(StorageError::SourceRefChangePlanConsumed);
+        }
+        if expires_at <= now {
+            return Err(StorageError::SourceRefChangePlanExpired);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE sources
+                 SET tracked_ref = ?2,
+                     member_path_hint = ?3,
+                     catalog_status = CASE
+                         WHEN catalog_generation > 0 THEN 'stale'
+                         ELSE 'unloaded'
+                     END,
+                     last_reload_error = CASE
+                         WHEN catalog_generation > 0 THEN 'Tracked Ref 已切换，请重新加载来源'
+                         ELSE NULL
+                     END,
+                     updated_at = ?4
+                 WHERE id = ?1 AND tracked_ref = ?5",
+                params![source_id, candidate_ref, member_path_hint, now, current_ref,],
+            )
+            .map_err(StorageError::SaveSource)?;
+        if changed != 1 {
+            return Err(StorageError::SourceRefChangeStateChanged);
+        }
+        let consumed = transaction
+            .execute(
+                "UPDATE source_ref_change_plans
+                 SET status = 'consumed'
+                 WHERE id = ?1 AND status = 'pending'",
+                [plan_id],
+            )
+            .map_err(StorageError::SaveSource)?;
+        if consumed != 1 {
+            return Err(StorageError::SourceRefChangeStateChanged);
+        }
+        transaction.commit().map_err(StorageError::SaveSource)?;
+        Ok(source_id)
     }
 
     pub fn save_initial_scan(

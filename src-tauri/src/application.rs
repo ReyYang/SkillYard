@@ -1,9 +1,13 @@
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use thiserror::Error;
 
 use crate::{
     domain::{PlatformInfo, TakeoverPlanRequest, UiIntent, UiOutcome},
+    github_source::{
+        GithubSourceError, ReqwestSourceTransport, SharedSourceTransport, parse_github_source,
+        resolve_github_source,
+    },
     lifecycle::{
         LifecycleError, LifecycleFailpoint, acquire_lifecycle_lock, confirm_folder_install,
         create_folder_install_plan, ensure_central_store_layout, recover_pending_transactions,
@@ -17,12 +21,21 @@ use crate::{
     },
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
-    storage::{Storage, StorageError},
+    storage::{NewGitHubSource, SaveGitHubSourceResult, Storage, StorageError},
     takeover::{
         TakeoverError, confirm_takeover_plan, create_takeover_plan,
         recover_pending_takeover_transactions,
     },
 };
+
+const SOURCE_REF_PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
+
+fn default_source_transport() -> Option<SharedSourceTransport> {
+    // HTTP client 初始化失败也必须等到用户真正访问 Source 时作为普通错误呈现。
+    ReqwestSourceTransport::new()
+        .ok()
+        .map(|transport| Arc::new(transport) as SharedSourceTransport)
+}
 
 #[derive(Debug, Error)]
 pub enum ApplicationError {
@@ -34,6 +47,8 @@ pub enum ApplicationError {
     MountLifecycle(#[from] MountLifecycleError),
     #[error(transparent)]
     Takeover(#[from] TakeoverError),
+    #[error(transparent)]
+    GithubSource(#[from] GithubSourceError),
     #[error("首次扫描未完整完成：{0}")]
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
@@ -50,11 +65,17 @@ pub struct SkillYardApplication {
     platform: PlatformInfo,
     operation_gate: Mutex<()>,
     lifecycle_failpoint: LifecycleFailpoint,
+    source_transport: Option<SharedSourceTransport>,
 }
 
 impl SkillYardApplication {
     pub fn new(paths: ApplicationPaths, platform: PlatformInfo) -> Self {
-        Self::new_with_lifecycle_failpoint(paths, platform, LifecycleFailpoint::None)
+        Self::new_with_dependencies(
+            paths,
+            platform,
+            LifecycleFailpoint::None,
+            default_source_transport(),
+        )
     }
 
     /// 仅供崩溃恢复测试在精确阶段注入中断，生产入口始终使用 `None`。
@@ -64,12 +85,42 @@ impl SkillYardApplication {
         platform: PlatformInfo,
         lifecycle_failpoint: LifecycleFailpoint,
     ) -> Self {
+        Self::new_with_dependencies(
+            paths,
+            platform,
+            lifecycle_failpoint,
+            default_source_transport(),
+        )
+    }
+
+    /// Source 协议测试只替换最外层 HTTP 读取，GitHub 解析和持久化仍走生产入口。
+    #[doc(hidden)]
+    pub fn new_with_source_transport(
+        paths: ApplicationPaths,
+        platform: PlatformInfo,
+        source_transport: SharedSourceTransport,
+    ) -> Self {
+        Self::new_with_dependencies(
+            paths,
+            platform,
+            LifecycleFailpoint::None,
+            Some(source_transport),
+        )
+    }
+
+    fn new_with_dependencies(
+        paths: ApplicationPaths,
+        platform: PlatformInfo,
+        lifecycle_failpoint: LifecycleFailpoint,
+        source_transport: Option<SharedSourceTransport>,
+    ) -> Self {
         // SQLite 延迟到 intent 中打开，确保初始化失败能通过 UiError 呈现，而不是在窗口创建前 panic。
         Self {
             paths,
             platform,
             operation_gate: Mutex::new(()),
             lifecycle_failpoint,
+            source_transport,
         }
     }
 
@@ -93,6 +144,12 @@ impl SkillYardApplication {
             }
             UiIntent::OpenSourceDiscovery => {
                 self.with_write_operation(|| self.open_source_discovery())
+            }
+            UiIntent::AddGitHubSource { input, tracked_ref } => {
+                self.with_write_operation(|| self.add_github_source(input, tracked_ref))
+            }
+            UiIntent::ConfirmSourceRefChange { plan_id } => {
+                self.with_write_operation(|| self.confirm_source_ref_change(plan_id))
             }
             UiIntent::CreateFolderInstallPlan { input_path } => {
                 self.with_write_operation(|| self.create_folder_install_plan(input_path))
@@ -239,6 +296,88 @@ impl SkillYardApplication {
             sources: storage.read_source_summaries()?,
             highlighted_source_id: None,
             highlighted_member_path: None,
+        })
+    }
+
+    fn add_github_source(
+        &self,
+        input: String,
+        tracked_ref: Option<String>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let transport = self
+            .source_transport
+            .as_deref()
+            .ok_or(GithubSourceError::Network)?;
+        let parsed = parse_github_source(&input, tracked_ref.as_deref())?;
+        let canonical_identity_hint = format!(
+            "github:{}/{}",
+            parsed.owner.to_ascii_lowercase(),
+            parsed.repository.to_ascii_lowercase()
+        );
+        // 已有 Source 的无 ref 入口只验证当前 Tracked Ref，不能跟随远端 default branch 漂移。
+        let stored_ref = if parsed.tracked_ref.is_none() {
+            storage.read_source_tracked_ref(&canonical_identity_hint)?
+        } else {
+            None
+        };
+        let resolved = resolve_github_source(
+            transport,
+            &input,
+            parsed.tracked_ref.as_deref().or(stored_ref.as_deref()),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let now = unix_timestamp_millis();
+        let source_id = uuid::Uuid::new_v4().to_string();
+        let ref_change_plan_id = uuid::Uuid::new_v4().to_string();
+        let result = storage.save_or_prepare_github_source(
+            NewGitHubSource {
+                id: &source_id,
+                canonical_identity: &resolved.canonical_identity,
+                owner: &resolved.owner,
+                repository: &resolved.repository,
+                display_name: &resolved.display_name,
+                repository_url: resolved.repository_url.as_str(),
+                tracked_ref: &resolved.tracked_ref,
+                resolved_commit_sha: &resolved.commit,
+                member_path_hint: resolved.member_hint.as_deref(),
+            },
+            &ref_change_plan_id,
+            now,
+            now.saturating_add(SOURCE_REF_PLAN_TTL_MILLIS),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        match result {
+            SaveGitHubSourceResult::Saved { source_id } => Ok(UiOutcome::SourceDiscovery {
+                sources: storage.read_source_summaries()?,
+                highlighted_source_id: Some(source_id),
+                highlighted_member_path: resolved.member_hint,
+            }),
+            SaveGitHubSourceResult::RefChangeRequired { plan } => {
+                Ok(UiOutcome::SourceRefChangePlan { plan })
+            }
+        }
+    }
+
+    fn confirm_source_ref_change(&self, plan_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let source_id = storage.confirm_source_ref_change(&plan_id, unix_timestamp_millis())?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let sources = storage.read_source_summaries()?;
+        let highlighted_member_path = sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .and_then(|source| source.member_path_hint.clone());
+        Ok(UiOutcome::SourceDiscovery {
+            sources,
+            highlighted_source_id: Some(source_id),
+            highlighted_member_path,
         })
     }
 

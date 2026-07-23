@@ -22,6 +22,7 @@ impl From<ApplicationError> for UiError {
             ApplicationError::Lifecycle(_) => "lifecycleError",
             ApplicationError::MountLifecycle(_) => "mountError",
             ApplicationError::Takeover(_) => "takeoverError",
+            ApplicationError::GithubSource(_) => "sourceError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",

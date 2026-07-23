@@ -8,6 +8,13 @@ pub enum UiIntent {
     StartInitialScan,
     RefreshLocalInventory,
     OpenSourceDiscovery,
+    AddGitHubSource {
+        input: String,
+        tracked_ref: Option<String>,
+    },
+    ConfirmSourceRefChange {
+        plan_id: String,
+    },
     CreateFolderInstallPlan {
         input_path: String,
     },
@@ -534,6 +541,21 @@ pub struct SourceSummary {
     pub members: Vec<SourceCatalogMemberSummary>,
 }
 
+/// Tracked Ref 变更只冻结用户需要确认的 metadata，不创建文件系统事务。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRefChangePlan {
+    pub id: String,
+    pub source_id: String,
+    pub source_display_name: String,
+    pub current_ref: String,
+    pub candidate_ref: String,
+    pub candidate_commit_sha: String,
+    pub member_path_hint: Option<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScanRootKey {
@@ -798,6 +820,9 @@ pub enum UiOutcome {
         sources: Vec<SourceSummary>,
         highlighted_source_id: Option<String>,
         highlighted_member_path: Option<String>,
+    },
+    SourceRefChangePlan {
+        plan: SourceRefChangePlan,
     },
     FolderInstallPlan {
         plan: FolderInstallPlan,
