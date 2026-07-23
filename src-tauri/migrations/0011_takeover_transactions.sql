@@ -2,6 +2,11 @@
 CREATE TABLE takeover_transactions (
     id TEXT PRIMARY KEY,
     plan_id TEXT NOT NULL UNIQUE REFERENCES takeover_plans(id),
+    -- 事务在领域行创建前也必须能标识受影响对象，供 blocked 写入隔离使用。
+    bundle_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    -- 路径按绝对路径排序去重后保存；用于领域 Member 尚未创建时继续隔离写入。
+    reserved_paths_json TEXT NOT NULL,
     journal_path TEXT NOT NULL,
     phase TEXT NOT NULL CHECK (
         phase IN (
@@ -21,6 +26,10 @@ CREATE TABLE takeover_transactions (
 CREATE UNIQUE INDEX takeover_transaction_single_active
 ON takeover_transactions ((1))
 WHERE status = 'in_progress';
+
+CREATE INDEX takeover_transaction_blocked_member
+ON takeover_transactions (member_id)
+WHERE status = 'blocked';
 
 -- Takeover 与安装、单 Mount、Batch Mount 共用同一个产品级单写者边界。
 CREATE TRIGGER takeover_transaction_reject_active_writer

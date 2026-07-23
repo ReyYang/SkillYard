@@ -204,6 +204,8 @@ pub enum StorageError {
     ReadTakeoverPlan(#[source] rusqlite::Error),
     #[error("无法保存 Takeover 事务：{0}")]
     SaveTakeoverTransaction(#[source] rusqlite::Error),
+    #[error("无法读取 Takeover 事务：{0}")]
+    ReadTakeoverTransaction(#[source] rusqlite::Error),
     #[error("Takeover 事务不存在或当前状态不允许该操作：{0}")]
     TakeoverStateConflict(String),
     #[error("SQLite 中包含未知 Takeover 事务阶段：{0}")]
@@ -230,9 +232,24 @@ pub(crate) struct StoredTakeoverPlanRow {
 pub(crate) struct StoredTakeoverTransaction {
     pub id: String,
     pub plan_id: String,
+    pub bundle_id: String,
+    pub member_id: String,
+    pub reserved_paths: Vec<String>,
     pub journal_path: String,
     pub phase: String,
     pub status: String,
+}
+
+/// SQLite 行先保留 JSON 原文，离开 rusqlite 回调后再按 Takeover 领域约束解析。
+struct RawStoredTakeoverTransaction {
+    id: String,
+    plan_id: String,
+    bundle_id: String,
+    member_id: String,
+    reserved_paths_json: String,
+    journal_path: String,
+    phase: String,
+    status: String,
 }
 
 pub struct SavedLocalRefresh {
@@ -724,16 +741,28 @@ impl Storage {
             .ok_or(StorageError::TakeoverPlanNotFound)
     }
 
+    /// 开始时必须一次封存对象、路径与 Journal；拆成后续写入会留下未被隔离的窗口。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin_takeover_transaction(
         &mut self,
         plan_id: &str,
         transaction_id: &str,
+        bundle_id: &str,
+        member_id: &str,
+        reserved_paths: &[String],
         journal_path: &str,
         now: i64,
     ) -> Result<StoredTakeoverPlanRow, StorageError> {
-        if !is_single_path_component(transaction_id) || !is_normalized_relative_path(journal_path) {
+        if !is_single_path_component(transaction_id)
+            || !is_single_path_component(bundle_id)
+            || !is_single_path_component(member_id)
+            || !takeover_reserved_paths_are_valid(reserved_paths)
+            || !is_normalized_relative_path(journal_path)
+        {
             return Err(StorageError::InvalidTakeoverPlan);
         }
+        let reserved_paths_json =
+            serde_json::to_string(reserved_paths).map_err(|_| StorageError::InvalidTakeoverPlan)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -749,9 +778,18 @@ impl Storage {
         transaction
             .execute(
                 "INSERT INTO takeover_transactions (
-                    id, plan_id, journal_path, phase, status, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, 'journal_pending', 'in_progress', ?4, ?4)",
-                params![transaction_id, plan.id, journal_path, now],
+                    id, plan_id, bundle_id, member_id, reserved_paths_json, journal_path,
+                    phase, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'journal_pending', 'in_progress', ?7, ?7)",
+                params![
+                    transaction_id,
+                    plan.id,
+                    bundle_id,
+                    member_id,
+                    reserved_paths_json,
+                    journal_path,
+                    now
+                ],
             )
             .map_err(map_takeover_transaction_insert_error)?;
         let consumed = transaction
@@ -799,25 +837,24 @@ impl Storage {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveTakeoverTransaction)?;
-        let state = transaction
+        let raw_state = transaction
             .query_row(
-                "SELECT id, plan_id, journal_path, phase, status FROM takeover_transactions WHERE id = ?1",
+                "SELECT id, plan_id, bundle_id, member_id, reserved_paths_json,
+                        journal_path, phase, status
+                 FROM takeover_transactions WHERE id = ?1",
                 [transaction_id],
-                |row| {
-                    Ok(StoredTakeoverTransaction {
-                        id: row.get(0)?,
-                        plan_id: row.get(1)?,
-                        journal_path: row.get(2)?,
-                        phase: row.get(3)?,
-                        status: row.get(4)?,
-                    })
-                },
+                raw_takeover_transaction_from_row,
             )
             .optional()
             .map_err(StorageError::SaveTakeoverTransaction)?
             .ok_or_else(|| StorageError::TakeoverStateConflict(transaction_id.to_owned()))?;
+        let state = decode_takeover_transaction(raw_state)?;
+        let expected_reserved_paths = takeover_reserved_paths(plan)?;
         if state.id != transaction_id
             || state.plan_id != plan.id
+            || state.bundle_id != plan.bundle_id
+            || state.member_id != plan.member_id
+            || state.reserved_paths != expected_reserved_paths
             || !is_normalized_relative_path(&state.journal_path)
         {
             return Err(StorageError::TakeoverStateConflict(
@@ -951,6 +988,51 @@ impl Storage {
         transaction
             .commit()
             .map_err(StorageError::SaveTakeoverTransaction)
+    }
+
+    pub(crate) fn recoverable_takeover_transactions(
+        &self,
+    ) -> Result<Vec<StoredTakeoverTransaction>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, plan_id, bundle_id, member_id, reserved_paths_json,
+                        journal_path, phase, status
+                 FROM takeover_transactions
+                 ORDER BY created_at, id",
+            )
+            .map_err(StorageError::ReadTakeoverTransaction)?;
+        let rows = statement
+            .query_map([], raw_takeover_transaction_from_row)
+            .map_err(StorageError::ReadTakeoverTransaction)?;
+        let raw_stored = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadTakeoverTransaction)?;
+        let stored = raw_stored
+            .into_iter()
+            .map(decode_takeover_transaction)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for transaction in &stored {
+            if !is_single_path_component(&transaction.id)
+                || !is_single_path_component(&transaction.plan_id)
+                || !is_single_path_component(&transaction.bundle_id)
+                || !is_single_path_component(&transaction.member_id)
+                || !takeover_reserved_paths_are_valid(&transaction.reserved_paths)
+                || !is_normalized_relative_path(&transaction.journal_path)
+                || !matches!(
+                    transaction.status.as_str(),
+                    "in_progress" | "completed" | "aborted" | "blocked"
+                )
+                || !takeover_phase_and_status_are_consistent(
+                    &transaction.phase,
+                    &transaction.status,
+                )
+            {
+                return Err(StorageError::TakeoverStateConflict(transaction.id.clone()));
+            }
+        }
+        Ok(stored)
     }
 
     pub fn read_initial_scan(&self) -> Result<Option<UiOutcome>, StorageError> {
@@ -1252,7 +1334,7 @@ impl Storage {
         member_id: &str,
         target_path: &str,
     ) -> Result<bool, StorageError> {
-        batch_mount_object_is_blocked(&self.connection, member_id, target_path)
+        mount_object_is_blocked(&self.connection, member_id, target_path)
     }
 
     pub(crate) fn save_mount_plan(&mut self, plan: NewMountPlan<'_>) -> Result<(), StorageError> {
@@ -1668,7 +1750,7 @@ impl Storage {
                 return Err(StorageError::InvalidBatchMountPlan);
             }
             if item.disposition == BatchMountDisposition::Ready
-                && batch_mount_object_is_blocked(&transaction, item.member_id, item.target_path)?
+                && mount_object_is_blocked(&transaction, item.member_id, item.target_path)?
             {
                 return Err(StorageError::BatchMountObjectBlocked);
             }
@@ -2634,6 +2716,13 @@ impl Storage {
                     FROM batch_mount_transactions AS batch_tx
                     LEFT JOIN bundles AS bundle ON bundle.id = batch_tx.bundle_id
                     WHERE batch_tx.status = 'blocked'
+                    UNION ALL
+                    SELECT takeover_tx.id AS id,
+                           takeover_tx.plan_id AS display_name,
+                           COALESCE(takeover_tx.error_message, 'Takeover 事务状态无法自动判断') AS message,
+                           takeover_tx.created_at AS created_at
+                    FROM takeover_transactions AS takeover_tx
+                    WHERE takeover_tx.status = 'blocked'
                  ) ORDER BY created_at, id",
             )
             .map_err(StorageError::ReadRecoveryIssues)?;
@@ -2748,6 +2837,26 @@ fn previous_takeover_phase(phase: &str) -> Result<Option<&'static str>, StorageE
         "state_committed" => Ok(None),
         unknown => Err(StorageError::InvalidTakeoverPhase(unknown.to_owned())),
     }
+}
+
+fn takeover_phase_and_status_are_consistent(phase: &str, status: &str) -> bool {
+    // 恢复只接受 migration 定义的已知状态，避免将损坏记录解释为可重放事务。
+    let phase_is_known = matches!(
+        phase,
+        "journal_pending"
+            | "journal_ready"
+            | "candidate_ready"
+            | "current_activated"
+            | "origins_applied"
+            | "state_committed"
+    );
+    let terminal_state_is_consistent = match status {
+        "completed" => phase == "state_committed",
+        "in_progress" | "aborted" => phase != "state_committed",
+        "blocked" => true,
+        _ => false,
+    };
+    phase_is_known && terminal_state_is_consistent
 }
 
 fn update_mount_health_rows(
@@ -3032,7 +3141,7 @@ fn validate_mount_plan_state(
     {
         return Err(StorageError::InvalidMountPlan);
     }
-    if batch_mount_object_is_blocked(connection, member_id, target_path)? {
+    if mount_object_is_blocked(connection, member_id, target_path)? {
         return Err(StorageError::BatchMountObjectBlocked);
     }
     match (scope, project_id) {
@@ -3130,12 +3239,12 @@ fn validate_stored_mount_plan_state(
     )
 }
 
-fn batch_mount_object_is_blocked(
+fn mount_object_is_blocked(
     connection: &Connection,
     member_id: &str,
     target_path: &str,
 ) -> Result<bool, StorageError> {
-    connection
+    let batch_is_blocked = connection
         .query_row(
             "SELECT EXISTS(
                 SELECT 1
@@ -3150,7 +3259,41 @@ fn batch_mount_object_is_blocked(
             params![member_id, target_path],
             |row| row.get::<_, bool>(0),
         )
-        .map_err(StorageError::ReadBatchMountTransaction)
+        .map_err(StorageError::ReadBatchMountTransaction)?;
+    if batch_is_blocked {
+        return Ok(true);
+    }
+
+    // Takeover 的领域 Member 可能尚未创建，因此 blocked 隔离必须同时按路径判断。
+    let mut statement = connection
+        .prepare(
+            "SELECT id, member_id, reserved_paths_json
+             FROM takeover_transactions
+             WHERE status = 'blocked'",
+        )
+        .map_err(StorageError::ReadTakeoverTransaction)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(StorageError::ReadTakeoverTransaction)?;
+    for row in rows {
+        let (transaction_id, reserved_member_id, reserved_paths_json) =
+            row.map_err(StorageError::ReadTakeoverTransaction)?;
+        let reserved_paths = decode_takeover_reserved_paths(&transaction_id, &reserved_paths_json)?;
+        if reserved_member_id == member_id
+            || reserved_paths
+                .binary_search_by(|reserved| reserved.as_str().cmp(target_path))
+                .is_ok()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn validate_new_batch_mount_plan_shape(plan: &NewBatchMountPlan<'_>) -> Result<(), StorageError> {
@@ -3242,7 +3385,7 @@ fn validate_batch_ready_item_state(
     {
         return Err(StorageError::InvalidBatchMountPlan);
     }
-    if batch_mount_object_is_blocked(connection, &item.member_id, &item.target_path)? {
+    if mount_object_is_blocked(connection, &item.member_id, &item.target_path)? {
         return Err(StorageError::BatchMountObjectBlocked);
     }
     match item.scope {
@@ -4131,6 +4274,75 @@ fn is_single_path_component(value: &str) -> bool {
     let mut components = Path::new(value).components();
     matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none()
+}
+
+fn raw_takeover_transaction_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RawStoredTakeoverTransaction> {
+    Ok(RawStoredTakeoverTransaction {
+        id: row.get(0)?,
+        plan_id: row.get(1)?,
+        bundle_id: row.get(2)?,
+        member_id: row.get(3)?,
+        reserved_paths_json: row.get(4)?,
+        journal_path: row.get(5)?,
+        phase: row.get(6)?,
+        status: row.get(7)?,
+    })
+}
+
+fn decode_takeover_transaction(
+    raw: RawStoredTakeoverTransaction,
+) -> Result<StoredTakeoverTransaction, StorageError> {
+    let reserved_paths = decode_takeover_reserved_paths(&raw.id, &raw.reserved_paths_json)?;
+    Ok(StoredTakeoverTransaction {
+        id: raw.id,
+        plan_id: raw.plan_id,
+        bundle_id: raw.bundle_id,
+        member_id: raw.member_id,
+        reserved_paths,
+        journal_path: raw.journal_path,
+        phase: raw.phase,
+        status: raw.status,
+    })
+}
+
+fn decode_takeover_reserved_paths(
+    transaction_id: &str,
+    reserved_paths_json: &str,
+) -> Result<Vec<String>, StorageError> {
+    let reserved_paths = serde_json::from_str::<Vec<String>>(reserved_paths_json)
+        .map_err(|_| StorageError::TakeoverStateConflict(transaction_id.to_owned()))?;
+    if !takeover_reserved_paths_are_valid(&reserved_paths) {
+        return Err(StorageError::TakeoverStateConflict(
+            transaction_id.to_owned(),
+        ));
+    }
+    Ok(reserved_paths)
+}
+
+fn takeover_reserved_paths_are_valid(reserved_paths: &[String]) -> bool {
+    !reserved_paths.is_empty()
+        && reserved_paths
+            .iter()
+            .all(|path| is_normalized_absolute_path(path))
+        && reserved_paths.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+pub(crate) fn takeover_reserved_paths(plan: &TakeoverPlan) -> Result<Vec<String>, StorageError> {
+    // 来源和 Host 目标共同组成 Takeover 期间不可被其他生命周期操作占用的路径集合。
+    let reserved_paths = plan
+        .origins
+        .iter()
+        .map(|origin| origin.original_path.clone())
+        .chain(plan.targets.iter().map(|target| target.target_path.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !takeover_reserved_paths_are_valid(&reserved_paths) {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    Ok(reserved_paths)
 }
 
 fn read_takeover_plan_from(
@@ -5241,6 +5453,9 @@ mod tests {
             .begin_takeover_transaction(
                 &plan.id,
                 transaction_id,
+                &plan.bundle_id,
+                &plan.member_id,
+                &takeover_reserved_paths(plan).expect("测试 Plan 应产生合法保留路径"),
                 &format!("journals/{transaction_id}.json"),
                 200,
             )
@@ -5560,6 +5775,64 @@ mod tests {
     }
 
     #[test]
+    fn takeover_transaction_persists_and_validates_its_affected_object_and_paths() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let plan = takeover_plan_for(&storage, sandbox.path(), "transaction-subject");
+        begin_test_takeover(&mut storage, &plan, "takeover-txn-subject");
+
+        let transactions = storage
+            .recoverable_takeover_transactions()
+            .expect("应读取 Takeover 恢复对象");
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].bundle_id, plan.bundle_id);
+        assert_eq!(transactions[0].member_id, plan.member_id);
+        assert_eq!(
+            transactions[0].reserved_paths,
+            takeover_reserved_paths(&plan).expect("测试 Plan 应产生合法保留路径")
+        );
+
+        let mut mismatched = plan.clone();
+        mismatched.member_id = "different-member".to_owned();
+        assert!(matches!(
+            storage.finalize_takeover("takeover-txn-subject", &mismatched, 202),
+            Err(StorageError::TakeoverStateConflict(id)) if id == "takeover-txn-subject"
+        ));
+
+        let different_paths = serde_json::to_string(&vec![
+            sandbox
+                .path()
+                .join("different")
+                .to_string_lossy()
+                .into_owned(),
+        ])
+        .expect("不同保留路径应能编码为 JSON");
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_transactions SET reserved_paths_json = ?2 WHERE id = ?1",
+                params!["takeover-txn-subject", different_paths],
+            )
+            .expect("应能模拟 SQLite 中与 Plan 不一致的保留路径");
+        assert!(matches!(
+            storage.finalize_takeover("takeover-txn-subject", &plan, 203),
+            Err(StorageError::TakeoverStateConflict(id)) if id == "takeover-txn-subject"
+        ));
+
+        storage
+            .connection
+            .execute(
+                "UPDATE takeover_transactions SET reserved_paths_json = 'not-json' WHERE id = ?1",
+                ["takeover-txn-subject"],
+            )
+            .expect("应能模拟损坏的保留路径 JSON");
+        assert!(matches!(
+            storage.recoverable_takeover_transactions(),
+            Err(StorageError::TakeoverStateConflict(id)) if id == "takeover-txn-subject"
+        ));
+    }
+
+    #[test]
     fn takeover_migration_rejects_inconsistent_phase_and_status() {
         let sandbox = tempdir().expect("应创建隔离测试目录");
         let mut storage = open_test_storage(sandbox.path());
@@ -5574,6 +5847,10 @@ mod tests {
                 expires_at: plan.expires_at,
             })
             .expect("应保存约束测试 Plan");
+        let reserved_paths_json = serde_json::to_string(
+            &takeover_reserved_paths(&plan).expect("测试 Plan 应产生合法保留路径"),
+        )
+        .expect("保留路径应能编码为 JSON");
 
         for (id, phase, status) in [
             ("completed-too-early", "origins_applied", "completed"),
@@ -5581,9 +5858,19 @@ mod tests {
         ] {
             let result = storage.connection.execute(
                 "INSERT INTO takeover_transactions (
-                    id, plan_id, journal_path, phase, status, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1, 1)",
-                params![id, plan.id, format!("journals/{id}.json"), phase, status],
+                    id, plan_id, bundle_id, member_id, reserved_paths_json, journal_path,
+                    phase, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, 1)",
+                params![
+                    id,
+                    plan.id,
+                    plan.bundle_id,
+                    plan.member_id,
+                    reserved_paths_json,
+                    format!("journals/{id}.json"),
+                    phase,
+                    status
+                ],
             );
             assert!(result.is_err(), "SQLite 必须拒绝 {phase}/{status}");
         }
@@ -5592,10 +5879,13 @@ mod tests {
             .connection
             .execute(
                 "INSERT INTO takeover_transactions (
-                    id, plan_id, journal_path, phase, status, created_at, updated_at
-                 ) VALUES ('blocked-after-commit', ?1, 'journals/blocked.json',
-                           'state_committed', 'blocked', 1, 1)",
-                [&plan.id],
+                    id, plan_id, bundle_id, member_id, reserved_paths_json, journal_path,
+                    phase, status, created_at, updated_at
+                 ) VALUES (
+                    'blocked-after-commit', ?1, ?2, ?3, ?4, 'journals/blocked.json',
+                    'state_committed', 'blocked', 1, 1
+                 )",
+                params![plan.id, plan.bundle_id, plan.member_id, reserved_paths_json],
             )
             .expect("提交后的人工恢复必须可以保持 blocked");
     }

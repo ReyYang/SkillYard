@@ -1,7 +1,8 @@
 use std::{
-    fs,
+    env, fs,
     os::unix::fs::{MetadataExt, symlink},
-    path::Path,
+    path::{Path, PathBuf},
+    process::Command,
 };
 
 use rusqlite::Connection;
@@ -12,6 +13,12 @@ use skillyard_lib::{
     UiOutcome,
 };
 use tempfile::tempdir;
+
+const HARD_EXIT_TAKEOVER_WORKER: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_WORKER";
+const HARD_EXIT_TAKEOVER_DATA_ROOT: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_DATA_ROOT";
+const HARD_EXIT_TAKEOVER_HOME: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_HOME";
+const HARD_EXIT_TAKEOVER_PLAN_ID: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_PLAN_ID";
+const HARD_EXIT_TAKEOVER_POINT: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_POINT";
 
 #[test]
 fn single_existing_skill_produces_a_read_only_takeover_plan() {
@@ -174,6 +181,212 @@ fn user_selected_origins_form_one_identity_with_one_selected_content() {
     assert_eq!(file_identity(&codex_root), original_identities[0]);
     assert_eq!(file_identity(&claude_root), original_identities[1]);
     assert_eq!(file_identity(&copilot_root), original_identities[2]);
+}
+
+#[test]
+fn blocked_takeover_reserves_only_its_original_skill_for_plan_and_confirmation() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+    let beta_root = fixture.home.join(".codex/skills/beta");
+    write_skill(&beta_root, "beta", "不相关 Skill 仍可操作");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    let entries = match application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("本机刷新应发现新增的不相关 Skill")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("本机刷新应返回 Inventory"),
+    };
+    let alpha_id = observation_id_at(&entries, &fixture.skill_root);
+    let beta_id = observation_id_at(&entries, &beta_root);
+    let create_plan = |observation_id: &str| TakeoverPlanRequest {
+        observation_ids: vec![observation_id.to_owned()],
+        selected_observation_id: observation_id.to_owned(),
+        preserved_observation_ids: vec![observation_id.to_owned()],
+        shared_targets: Vec::new(),
+    };
+    let pending_same_origin = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: create_plan(&alpha_id),
+        })
+        .expect("blocked 发生前允许生成另一份只读 Plan")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    drop(application);
+
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "current-before-phase",
+    );
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "candidate-cleanup",
+    );
+    assert_eq!(
+        read_skill_file(&fixture.skill_root),
+        fixture.original_content
+    );
+    let candidate = only_takeover_candidate_content(&fixture.data_root);
+    fs::remove_dir_all(&candidate).expect("应替换待清理候选根目录");
+    fs::create_dir(&candidate).expect("应创建同名未知候选根目录");
+    fs::write(candidate.join("unknown.txt"), "等待人工处理").expect("应写入未知内容");
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        recovery_issues, ..
+    } = application
+        .handle(UiIntent::GetStartupState)
+        .expect("根目录身份变化应进入 blocked recovery")
+    else {
+        panic!("启动应返回 Inventory");
+    };
+    assert_eq!(recovery_issues.len(), 1);
+
+    application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: create_plan(&alpha_id),
+        })
+        .expect_err("blocked Takeover 必须阻止同一原 Skill 再次生成 Plan");
+    application
+        .handle(UiIntent::ConfirmTakeoverPlan {
+            plan_id: pending_same_origin.id,
+        })
+        .expect_err("Plan 生成后出现 blocked Takeover 时确认仍必须二次拒绝");
+
+    let unrelated = application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: create_plan(&beta_id),
+        })
+        .expect("不相关 Skill 仍应生成 Takeover Plan");
+    assert!(matches!(unrelated, UiOutcome::TakeoverPlan { .. }));
+}
+
+#[test]
+fn precommit_blocked_takeover_reserves_its_host_path_from_other_members() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应完成首次扫描");
+
+    let install_input = sandbox.path().join("managed-source/skills/alpha");
+    write_skill(&install_input, "alpha", "另一个已受管成员");
+    let install_plan = match application
+        .handle(UiIntent::CreateFolderInstallPlan {
+            input_path: path_text(&sandbox.path().join("managed-source")),
+        })
+        .expect("应生成本地安装 Plan")
+    {
+        UiOutcome::FolderInstallPlan { plan } => plan,
+        _ => panic!("应返回 Folder Install Plan"),
+    };
+    let selected = install_plan
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.selectable)
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect::<Vec<_>>();
+    let installed = application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: install_plan.id,
+            selected_candidate_ids: selected,
+        })
+        .expect("应安装另一个受管 alpha");
+    let UiOutcome::Inventory { entries, .. } = installed else {
+        panic!("安装后应返回 Inventory");
+    };
+    let managed_member_id = entries
+        .iter()
+        .find(|entry| {
+            entry.management_kind == ManagementKind::SkillYardManaged && entry.skill_name == "alpha"
+        })
+        .and_then(|entry| entry.member_id.clone())
+        .expect("应找到已受管 alpha member");
+
+    let takeover_root = home.join(".codex/skills/alpha");
+    write_skill(&takeover_root, "alpha", "等待接管的另一份内容");
+    let entries = match application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("应发现待接管 alpha")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("刷新应返回 Inventory"),
+    };
+    let observation_id = observation_id_at(&entries, &takeover_root);
+    let takeover_plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: TakeoverPlanRequest {
+                observation_ids: vec![observation_id.clone()],
+                selected_observation_id: observation_id.clone(),
+                preserved_observation_ids: vec![observation_id],
+                shared_targets: Vec::new(),
+            },
+        })
+        .expect("应生成待阻塞 Takeover Plan")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    drop(application);
+
+    run_hard_exit_takeover_worker(
+        &data_root,
+        &home,
+        &takeover_plan.id,
+        "origin-before-progress",
+    );
+    let recovery = only_takeover_artifact(takeover_root.parent().expect("应有 Host 根目录"));
+    fs::remove_dir_all(&recovery).expect("应替换 recovery 根目录");
+    write_skill(&recovery, "unknown", "等待人工处理");
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        recovery_issues, ..
+    } = application
+        .handle(UiIntent::GetStartupState)
+        .expect("未知 recovery 应形成 blocked Takeover")
+    else {
+        panic!("启动应返回 Inventory");
+    };
+    assert_eq!(recovery_issues.len(), 1);
+
+    application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: managed_member_id.clone(),
+            app_id: SupportedAppId::Codex,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect_err("blocked Takeover 的原始 Host 路径不能被另一个 member 占用");
+    let unrelated = application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: managed_member_id,
+            app_id: SupportedAppId::ClaudeCode,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect("不相关 Host 路径仍应生成 Mount Plan");
+    assert!(matches!(unrelated, UiOutcome::MountPlan { .. }));
 }
 
 #[test]
@@ -1163,6 +1376,609 @@ fn shared_target_failure_keeps_the_shared_entry_and_removes_new_mounts() {
 }
 
 #[test]
+fn journal_temp_synced_before_rename_is_discarded_and_takeover_rolls_back() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "journal-temp-before-rename",
+    );
+    let temporary = only_takeover_journal(&fixture.data_root);
+    assert!(
+        temporary
+            .file_name()
+            .expect("临时 Journal 应有文件名")
+            .to_string_lossy()
+            .starts_with(".takeover-")
+    );
+
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        recovery_issues, ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("未完成 rename 的 Journal 写入应自动撤销")
+    else {
+        panic!("恢复后应返回 Inventory");
+    };
+    assert!(recovery_issues.is_empty());
+    assert_eq!(
+        file_identity(&fixture.skill_root),
+        fixture.original_identity
+    );
+    assert_eq!(
+        read_skill_file(&fixture.skill_root),
+        fixture.original_content
+    );
+    assert_clean_takeover_artifacts(&fixture.data_root, &[&fixture.skill_root]);
+    assert_takeover_database_counts(&fixture.data_root, (0, 0, 0, 0));
+}
+
+#[test]
+fn malformed_journal_temp_is_blocked_and_preserved() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "journal-temp-before-rename",
+    );
+    let temporary = only_takeover_journal(&fixture.data_root);
+    fs::write(&temporary, b"unknown journal content").expect("应模拟未知临时 Journal");
+    let evidence = fs::read(&temporary).expect("应读取未知临时 Journal");
+
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        recovery_issues, ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("未知临时 Journal 只能阻塞相关事务")
+    else {
+        panic!("阻塞恢复后应返回 Inventory");
+    };
+    assert_eq!(recovery_issues.len(), 1);
+    assert_eq!(fs::read(&temporary).unwrap(), evidence);
+    assert_eq!(
+        file_identity(&fixture.skill_root),
+        fixture.original_identity
+    );
+}
+
+#[test]
+fn real_process_exits_before_takeover_commit_restore_each_original_state() {
+    for point in [
+        "transaction-only",
+        "journal-before-phase",
+        "staging-before-publish",
+        "candidate-before-phase",
+        "temporary-current-before-switch",
+        "current-before-phase",
+        "origin-before-progress",
+        "mount-stage-before-progress",
+        "origins-applied-before-state",
+    ] {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+
+        run_hard_exit_takeover_worker(&fixture.data_root, &fixture.home, &fixture.plan_id, point);
+
+        let reopened = SkillYardApplication::new(
+            ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home.clone()),
+            PlatformInfo::supported_for_test(),
+        );
+        let UiOutcome::Inventory {
+            entries,
+            mounts,
+            recovery_issues,
+            ..
+        } = reopened
+            .handle(UiIntent::GetStartupState)
+            .unwrap_or_else(|error| panic!("{point} 重启后应自动恢复：{error}"))
+        else {
+            panic!("恢复后应返回 Inventory");
+        };
+
+        assert!(recovery_issues.is_empty(), "{point} 不应需要人工恢复");
+        assert!(mounts.is_empty(), "{point} 不能留下 Mount 记录");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.management_kind != ManagementKind::SkillYardManaged),
+            "{point} 不能留下受管 Bundle"
+        );
+        assert_eq!(
+            file_identity(&fixture.skill_root),
+            fixture.original_identity,
+            "{point} 必须恢复原目录身份"
+        );
+        assert_eq!(
+            read_skill_file(&fixture.skill_root),
+            fixture.original_content,
+            "{point} 必须恢复原 Skill 内容"
+        );
+        assert!(!contains_entries(&fixture.data_root.join("bundles")));
+        assert_clean_takeover_artifacts(&fixture.data_root, &[&fixture.skill_root]);
+        assert_takeover_database_counts(&fixture.data_root, (0, 0, 0, 0));
+    }
+}
+
+#[test]
+fn takeover_rollback_remains_replayable_across_two_recovery_process_exits() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "origins-applied-before-state",
+    );
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "rollback-mount-before-progress",
+    );
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "rollback-origin-before-progress",
+    );
+
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        mounts,
+        recovery_issues,
+        ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("回滚恢复连续退出后仍应回到原状态")
+    else {
+        panic!("恢复后应返回 Inventory");
+    };
+    assert!(mounts.is_empty());
+    assert!(
+        recovery_issues.is_empty(),
+        "恢复不应进入人工处理：{recovery_issues:?}"
+    );
+    assert_eq!(
+        file_identity(&fixture.skill_root),
+        fixture.original_identity
+    );
+    assert_eq!(
+        read_skill_file(&fixture.skill_root),
+        fixture.original_content
+    );
+    assert!(!contains_entries(&fixture.data_root.join("bundles")));
+    assert_clean_takeover_artifacts(&fixture.data_root, &[&fixture.skill_root]);
+    assert_takeover_database_counts(&fixture.data_root, (0, 0, 0, 0));
+}
+
+#[test]
+fn takeover_candidate_cleanup_resumes_after_a_mid_tree_process_exit() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "current-before-phase",
+    );
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "candidate-cleanup",
+    );
+
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        mounts,
+        recovery_issues,
+        ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("候选递归清理中断后应继续回滚")
+    else {
+        panic!("恢复后应返回 Inventory");
+    };
+    assert!(mounts.is_empty());
+    assert!(
+        recovery_issues.is_empty(),
+        "恢复不应进入人工处理：{recovery_issues:?}"
+    );
+    assert_eq!(
+        file_identity(&fixture.skill_root),
+        fixture.original_identity
+    );
+    assert_eq!(
+        read_skill_file(&fixture.skill_root),
+        fixture.original_content
+    );
+    assert!(!contains_entries(&fixture.data_root.join("bundles")));
+    assert_clean_takeover_artifacts(&fixture.data_root, &[&fixture.skill_root]);
+    assert_takeover_database_counts(&fixture.data_root, (0, 0, 0, 0));
+}
+
+#[test]
+fn real_process_exit_after_shared_origin_move_restores_shared_entry_and_new_mounts() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let shared_root = home.join(".agents/skills/alpha");
+    let codex_target = home.join(".codex/skills/alpha");
+    let copilot_target = home.join(".copilot/skills/alpha");
+    write_skill(&shared_root, "alpha", "共享入口必须可恢复");
+    let original_identity = file_identity(&shared_root);
+    let original_content = read_skill_file(&shared_root);
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    let observation_id = match application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    {
+        UiOutcome::Inventory { entries, .. } => observation_id_at(&entries, &shared_root),
+        _ => panic!("首次扫描应返回 Inventory"),
+    };
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: TakeoverPlanRequest {
+                observation_ids: vec![observation_id.clone()],
+                selected_observation_id: observation_id.clone(),
+                preserved_observation_ids: Vec::new(),
+                shared_targets: vec![
+                    TakeoverSharedTargetRequest {
+                        shared_observation_id: observation_id.clone(),
+                        app_id: SupportedAppId::Codex,
+                    },
+                    TakeoverSharedTargetRequest {
+                        shared_observation_id: observation_id,
+                        app_id: SupportedAppId::GitHubCopilot,
+                    },
+                ],
+            },
+        })
+        .expect("应生成共享接管计划")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    drop(application);
+
+    run_hard_exit_takeover_worker(&data_root, &home, &plan.id, "origin-before-progress");
+
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        mounts,
+        recovery_issues,
+        ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("共享入口移动窗口应自动恢复")
+    else {
+        panic!("恢复后应返回 Inventory");
+    };
+    assert!(recovery_issues.is_empty());
+    assert!(mounts.is_empty());
+    assert_eq!(file_identity(&shared_root), original_identity);
+    assert_eq!(read_skill_file(&shared_root), original_content);
+    for target in [&codex_target, &copilot_target] {
+        assert!(
+            fs::symlink_metadata(target).is_err(),
+            "共享接管失败后不能留下新 Mount"
+        );
+    }
+    assert!(!contains_entries(&data_root.join("bundles")));
+    assert_clean_takeover_artifacts(&data_root, &[&shared_root]);
+    assert_takeover_database_counts(&data_root, (0, 0, 0, 0));
+}
+
+#[test]
+fn real_process_exit_after_takeover_state_commit_finishes_forward_cleanup() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "state-before-journal",
+    );
+
+    let paths = ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home.clone());
+    let reopened = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let first = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("SQLite 已提交后应保留新状态并完成清理");
+    assert_managed_takeover_state(&first, &fixture.skill_root, &fixture.expected_target);
+    assert_eq!(
+        read_skill_file(&fixture.skill_root),
+        fixture.original_content
+    );
+    assert_clean_takeover_artifacts(&fixture.data_root, &[&fixture.skill_root]);
+    assert_takeover_database_counts(&fixture.data_root, (1, 1, 0, 0));
+
+    let reopened_again = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let second = reopened_again
+        .handle(UiIntent::GetStartupState)
+        .expect("重复启动恢复必须幂等");
+    assert_managed_takeover_state(&second, &fixture.skill_root, &fixture.expected_target);
+}
+
+#[test]
+fn real_process_exit_during_committed_cleanup_continues_remaining_recoveries() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let codex_root = home.join(".codex/skills/alpha");
+    let claude_root = home.join(".claude/skills/alpha");
+    write_skill(&codex_root, "alpha", "最终统一使用的内容");
+    write_skill(&claude_root, "alpha", "清理中断时仍要保留");
+    let selected_content = read_skill_file(&codex_root);
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    let entries = match application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("首次扫描应返回 Inventory"),
+    };
+    let codex_id = observation_id_at(&entries, &codex_root);
+    let claude_id = observation_id_at(&entries, &claude_root);
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: TakeoverPlanRequest {
+                observation_ids: vec![codex_id.clone(), claude_id.clone()],
+                selected_observation_id: codex_id.clone(),
+                preserved_observation_ids: vec![codex_id, claude_id],
+                shared_targets: Vec::new(),
+            },
+        })
+        .expect("应生成多副本接管计划")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    drop(application);
+
+    run_hard_exit_takeover_worker(&data_root, &home, &plan.id, "first-recovery-removed");
+    assert!(
+        [&codex_root, &claude_root]
+            .iter()
+            .any(|root| has_takeover_artifact(root.parent().expect("应有 Skill 根目录"))),
+        "第一次清理后退出时应留下尚未处理的 recovery"
+    );
+
+    let paths = ApplicationPaths::for_home(data_root.clone(), home);
+    let reopened = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let first = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("重启应继续剩余清理");
+    assert_managed_takeover_state(&first, &codex_root, &plan.expected_target);
+    assert_managed_takeover_state(&first, &claude_root, &plan.expected_target);
+    assert_eq!(read_skill_file(&codex_root), selected_content);
+    assert_eq!(read_skill_file(&claude_root), selected_content);
+    assert_clean_takeover_artifacts(&data_root, &[&codex_root, &claude_root]);
+    assert_takeover_database_counts(&data_root, (1, 2, 0, 0));
+
+    let reopened_again = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let second = reopened_again
+        .handle(UiIntent::GetStartupState)
+        .expect("清理完成后的再次启动必须幂等");
+    assert_managed_takeover_state(&second, &codex_root, &plan.expected_target);
+    assert_managed_takeover_state(&second, &claude_root, &plan.expected_target);
+}
+
+#[test]
+fn committed_recovery_tree_cleanup_resumes_after_a_mid_tree_process_exit() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "recovery-removal-mid-tree",
+    );
+
+    let paths = ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home);
+    let reopened = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let first = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("旧副本递归清理中断后应继续向前完成");
+    assert_managed_takeover_state(&first, &fixture.skill_root, &fixture.expected_target);
+    assert_clean_takeover_artifacts(&fixture.data_root, &[&fixture.skill_root]);
+    assert_takeover_database_counts(&fixture.data_root, (1, 1, 0, 0));
+
+    let reopened_again = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let second = reopened_again
+        .handle(UiIntent::GetStartupState)
+        .expect("递归清理完成后的再次启动必须幂等");
+    assert_managed_takeover_state(&second, &fixture.skill_root, &fixture.expected_target);
+}
+
+#[test]
+fn real_process_exit_after_takeover_journal_removal_only_forgets_terminal_record() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "journal-removed",
+    );
+    assert!(!contains_entries(&fixture.data_root.join("journals")));
+    assert_takeover_database_counts(&fixture.data_root, (1, 1, 1, 1));
+
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home),
+        PlatformInfo::supported_for_test(),
+    );
+    let outcome = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("Journal 已删除后只需忘记终态事务");
+    assert_managed_takeover_state(&outcome, &fixture.skill_root, &fixture.expected_target);
+    assert_eq!(
+        read_skill_file(&fixture.skill_root),
+        fixture.original_content
+    );
+    assert_takeover_database_counts(&fixture.data_root, (1, 1, 0, 0));
+    assert_clean_takeover_artifacts(&fixture.data_root, &[&fixture.skill_root]);
+}
+
+#[test]
+fn unknown_replacement_in_precommit_recovery_is_blocked_and_preserved() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let fixture = prepare_hard_exit_takeover(sandbox.path(), "alpha");
+    run_hard_exit_takeover_worker(
+        &fixture.data_root,
+        &fixture.home,
+        &fixture.plan_id,
+        "origin-before-progress",
+    );
+
+    let host_parent = fixture.skill_root.parent().expect("应有 Host Skill 根目录");
+    let recovery = only_takeover_artifact(host_parent);
+    fs::remove_dir_all(&recovery).expect("应替换事务 recovery 以模拟外部修改");
+    write_skill(&recovery, "intruder", "不能被自动删除的未知内容");
+    let unknown_content = read_skill_file(&recovery);
+    let journal_path = only_takeover_journal(&fixture.data_root);
+    let journal_evidence = fs::read(&journal_path).expect("阻塞前应保留 Journal 证据");
+
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(fixture.data_root.clone(), fixture.home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        recovery_issues, ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("未知替换只能阻塞相关接管事务")
+    else {
+        panic!("阻塞恢复后应返回 Inventory");
+    };
+
+    assert_eq!(recovery_issues.len(), 1);
+    assert_eq!(read_skill_file(&recovery), unknown_content);
+    assert_eq!(
+        fs::read(&journal_path).expect("阻塞后必须保留 Journal"),
+        journal_evidence
+    );
+    assert!(
+        fs::symlink_metadata(&fixture.skill_root).is_err(),
+        "无法证明 recovery 归属时不能伪造恢复结果"
+    );
+    let connection =
+        Connection::open(fixture.data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let status = connection
+        .query_row("SELECT status FROM takeover_transactions", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .expect("应读取阻塞事务状态");
+    assert_eq!(status, "blocked");
+}
+
+/// 父测试通过精确过滤启动本测试；`_exit` 跳过析构，模拟真实应用进程中断。
+#[test]
+fn hard_exit_takeover_worker() {
+    if env::var_os(HARD_EXIT_TAKEOVER_WORKER).is_none() {
+        return;
+    }
+    let data_root = env::var_os(HARD_EXIT_TAKEOVER_DATA_ROOT).expect("子进程必须收到数据目录");
+    let home = env::var_os(HARD_EXIT_TAKEOVER_HOME).expect("子进程必须收到 home");
+    let plan_id = env::var(HARD_EXIT_TAKEOVER_PLAN_ID).expect("子进程必须收到 Takeover Plan ID");
+    let point = env::var(HARD_EXIT_TAKEOVER_POINT).expect("子进程必须收到 Takeover failpoint");
+    let failpoint = match point.as_str() {
+        "transaction-only" => LifecycleFailpoint::HardExitAfterTakeoverTransactionRecord,
+        "journal-temp-before-rename" => {
+            LifecycleFailpoint::HardExitAfterTakeoverJournalTempSyncedBeforeRename
+        }
+        "journal-before-phase" => {
+            LifecycleFailpoint::HardExitAfterTakeoverJournalWrittenBeforePhase
+        }
+        "staging-before-publish" => {
+            LifecycleFailpoint::HardExitAfterTakeoverCandidatePreparedBeforePublish
+        }
+        "candidate-before-phase" => {
+            LifecycleFailpoint::HardExitAfterTakeoverCandidatePublishedBeforePhase
+        }
+        "temporary-current-before-switch" => {
+            LifecycleFailpoint::HardExitAfterTakeoverTemporaryCurrentCreatedBeforeSwitch
+        }
+        "current-before-phase" => {
+            LifecycleFailpoint::HardExitAfterTakeoverCurrentSwitchedBeforePhase
+        }
+        "origin-before-progress" => {
+            LifecycleFailpoint::HardExitAfterTakeoverOriginMovedBeforeProgress
+        }
+        "mount-stage-before-progress" => {
+            LifecycleFailpoint::HardExitAfterTakeoverMountStagedBeforeProgress
+        }
+        "origins-applied-before-state" => {
+            LifecycleFailpoint::HardExitAfterTakeoverOriginsAppliedBeforeState
+        }
+        "state-before-journal" => {
+            LifecycleFailpoint::HardExitAfterTakeoverStateCommittedBeforeJournal
+        }
+        "first-recovery-removed" => {
+            LifecycleFailpoint::HardExitAfterFirstTakeoverRecoveryRemovedBeforeProgress
+        }
+        "journal-removed" => LifecycleFailpoint::HardExitAfterTakeoverJournalRemovedBeforeForget,
+        "rollback-mount-before-progress" => {
+            LifecycleFailpoint::HardExitAfterFirstTakeoverRollbackMountRemovedBeforeProgress
+        }
+        "rollback-origin-before-progress" => {
+            LifecycleFailpoint::HardExitAfterFirstTakeoverRollbackOriginRestoredBeforeProgress
+        }
+        "candidate-cleanup" => LifecycleFailpoint::HardExitDuringTakeoverCandidateCleanup,
+        "recovery-removal-mid-tree" => {
+            LifecycleFailpoint::HardExitDuringFirstTakeoverRecoveryRemoval
+        }
+        _ => panic!("子进程收到未知 Takeover failpoint"),
+    };
+    let application = SkillYardApplication::new_with_lifecycle_failpoint(
+        ApplicationPaths::for_home(data_root.into(), home.into()),
+        PlatformInfo::supported_for_test(),
+        failpoint,
+    );
+    if matches!(
+        point.as_str(),
+        "rollback-mount-before-progress" | "rollback-origin-before-progress" | "candidate-cleanup"
+    ) {
+        application
+            .handle(UiIntent::GetStartupState)
+            .expect("恢复 hard-exit failpoint 必须在返回前终止进程");
+    } else {
+        application
+            .handle(UiIntent::ConfirmTakeoverPlan { plan_id })
+            .expect("hard-exit failpoint 必须在返回前终止进程");
+    }
+}
+
+#[test]
 fn confirmation_rejects_a_host_ancestor_replaced_by_a_symlink() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
@@ -1206,6 +2022,192 @@ fn confirmation_rejects_a_host_ancestor_replaced_by_a_symlink() {
         .expect_err("Takeover 必须拒绝软链接祖先，不能沿路径写入");
     assert!(real_codex.join("skills/alpha").is_dir());
     assert!(!data_root.join("bundles").join(plan.bundle_id).exists());
+}
+
+struct TakeoverCrashFixture {
+    data_root: PathBuf,
+    home: PathBuf,
+    plan_id: String,
+    expected_target: String,
+    skill_root: PathBuf,
+    original_content: Vec<u8>,
+    original_identity: (u64, u64, u32),
+}
+
+fn prepare_hard_exit_takeover(base: &Path, skill_name: &str) -> TakeoverCrashFixture {
+    let home = base.join("home");
+    let data_root = base.join("application-support/SkillYard");
+    let skill_root = home.join(".codex/skills").join(skill_name);
+    write_skill(&skill_root, skill_name, "进程中断恢复测试");
+    let original_content = read_skill_file(&skill_root);
+    let original_identity = file_identity(&skill_root);
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    let observation_id = match application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    {
+        UiOutcome::Inventory { entries, .. } => observation_id_at(&entries, &skill_root),
+        _ => panic!("首次扫描应返回 Inventory"),
+    };
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: TakeoverPlanRequest {
+                observation_ids: vec![observation_id.clone()],
+                selected_observation_id: observation_id.clone(),
+                preserved_observation_ids: vec![observation_id],
+                shared_targets: Vec::new(),
+            },
+        })
+        .expect("应生成接管计划")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    drop(application);
+    TakeoverCrashFixture {
+        data_root,
+        home,
+        plan_id: plan.id,
+        expected_target: plan.expected_target,
+        skill_root,
+        original_content,
+        original_identity,
+    }
+}
+
+fn run_hard_exit_takeover_worker(data_root: &Path, home: &Path, plan_id: &str, point: &str) {
+    let status = Command::new(env::current_exe().expect("应找到当前测试二进制"))
+        .args(["--exact", "hard_exit_takeover_worker", "--nocapture"])
+        .env(HARD_EXIT_TAKEOVER_WORKER, "1")
+        .env(HARD_EXIT_TAKEOVER_DATA_ROOT, data_root)
+        .env(HARD_EXIT_TAKEOVER_HOME, home)
+        .env(HARD_EXIT_TAKEOVER_PLAN_ID, plan_id)
+        .env(HARD_EXIT_TAKEOVER_POINT, point)
+        .status()
+        .expect("应启动 Takeover hard-exit 子进程");
+    assert_eq!(status.code(), Some(93), "子进程必须在 failpoint 直接退出");
+}
+
+fn assert_managed_takeover_state(outcome: &UiOutcome, target: &Path, expected_target: &str) {
+    let UiOutcome::Inventory {
+        entries,
+        mounts,
+        recovery_issues,
+        ..
+    } = outcome
+    else {
+        panic!("应返回 Inventory");
+    };
+    assert!(
+        recovery_issues.is_empty(),
+        "恢复不应进入人工处理：{recovery_issues:?}"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+            .count(),
+        1
+    );
+    assert!(
+        mounts
+            .iter()
+            .any(|mount| mount.target_path == path_text(target))
+    );
+    assert_eq!(
+        fs::read_link(target).expect("接管完成后 Host 位置应为 Mount"),
+        Path::new(expected_target)
+    );
+}
+
+fn assert_takeover_database_counts(data_root: &Path, expected: (i64, i64, i64, i64)) {
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let counts = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM bundles),
+                    (SELECT COUNT(*) FROM mounts),
+                    (SELECT COUNT(*) FROM takeover_plans),
+                    (SELECT COUNT(*) FROM takeover_transactions)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("应读取 Takeover 领域记录数量");
+    assert_eq!(counts, expected);
+}
+
+fn assert_clean_takeover_artifacts(data_root: &Path, skill_roots: &[&Path]) {
+    assert!(!contains_entries(&data_root.join("staging")));
+    assert!(!contains_entries(&data_root.join("journals")));
+    for skill_root in skill_roots {
+        assert_no_takeover_artifacts(skill_root.parent().expect("应有 Host Skill 根目录"));
+    }
+}
+
+fn has_takeover_artifact(parent: &Path) -> bool {
+    fs::read_dir(parent).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".skillyard-takeover-")
+        })
+    })
+}
+
+fn only_takeover_artifact(parent: &Path) -> PathBuf {
+    let matches = fs::read_dir(parent)
+        .expect("应读取 Host Skill 根目录")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            (name.starts_with(".skillyard-takeover-")
+                && !name.starts_with(".skillyard-takeover-mount-"))
+            .then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "应只有一个待恢复的原 Skill");
+    matches.into_iter().next().expect("应存在 recovery")
+}
+
+fn only_takeover_journal(data_root: &Path) -> PathBuf {
+    let journals = fs::read_dir(data_root.join("journals"))
+        .expect("应读取 Takeover Journal 目录")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert_eq!(journals.len(), 1, "应只有一个 Takeover Journal");
+    journals
+        .into_iter()
+        .next()
+        .expect("应存在 Takeover Journal")
+}
+
+fn only_takeover_candidate_content(data_root: &Path) -> PathBuf {
+    let bundle = fs::read_dir(data_root.join("bundles"))
+        .expect("应读取受管 Bundle 根目录")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("应存在待回滚 Bundle");
+    let candidates = fs::read_dir(bundle.join("contents"))
+        .expect("应读取待回滚 contents")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(candidates.len(), 1, "应只有一个待清理候选根目录");
+    candidates.into_iter().next().expect("应存在候选内容")
 }
 
 fn write_skill(root: &Path, name: &str, description: &str) {

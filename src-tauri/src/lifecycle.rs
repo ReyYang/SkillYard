@@ -36,6 +36,13 @@ const PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
 const JOURNAL_VERSION: u32 = 1;
 const MAX_JOURNAL_BYTES: usize = 1024 * 1024;
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OwnedTreeCleanupManifest {
+    root_device: u64,
+    root_inode: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleFailpoint {
     None,
@@ -71,6 +78,23 @@ pub enum LifecycleFailpoint {
     AfterTakeoverMountStagedBeforeProgress,
     AfterFirstTakeoverOriginApplied,
     AfterFirstTakeoverTargetApplied,
+    HardExitAfterTakeoverTransactionRecord,
+    HardExitAfterTakeoverJournalTempSyncedBeforeRename,
+    HardExitAfterTakeoverJournalWrittenBeforePhase,
+    HardExitAfterTakeoverCandidatePreparedBeforePublish,
+    HardExitAfterTakeoverCandidatePublishedBeforePhase,
+    HardExitAfterTakeoverTemporaryCurrentCreatedBeforeSwitch,
+    HardExitAfterTakeoverCurrentSwitchedBeforePhase,
+    HardExitAfterTakeoverOriginMovedBeforeProgress,
+    HardExitAfterTakeoverMountStagedBeforeProgress,
+    HardExitAfterTakeoverOriginsAppliedBeforeState,
+    HardExitAfterTakeoverStateCommittedBeforeJournal,
+    HardExitAfterFirstTakeoverRecoveryRemovedBeforeProgress,
+    HardExitAfterTakeoverJournalRemovedBeforeForget,
+    HardExitAfterFirstTakeoverRollbackMountRemovedBeforeProgress,
+    HardExitAfterFirstTakeoverRollbackOriginRestoredBeforeProgress,
+    HardExitDuringTakeoverCandidateCleanup,
+    HardExitDuringFirstTakeoverRecoveryRemoval,
 }
 
 #[derive(Debug, Error)]
@@ -2083,7 +2107,12 @@ pub(crate) fn remove_empty_directory_at(
 ) -> Result<(), LifecycleError> {
     let child = match open_directory_at(parent, name) {
         Ok(child) => child,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            // 上次进程可能停在 unlink 与父目录 fsync 之间；重启时补齐持久化。
+            return parent
+                .sync_all()
+                .map_err(|source| io_error("同步已清理目录父级", path, source));
+        }
         Err(source) => return Err(io_error("安全打开待清理目录", path, source)),
     };
     if !read_entry_names_os_from_handle(&child)?.is_empty() {
@@ -2104,9 +2133,19 @@ pub(crate) fn remove_owned_tree_at(
     name: &OsStr,
     path: &Path,
 ) -> Result<(), LifecycleError> {
+    remove_owned_tree_at_with_hook(parent, name, path, &mut || {})
+}
+
+/// 测试钩子在每个目录项删除后运行，用来验证递归清理自身再次中断仍可重放。
+pub(crate) fn remove_owned_tree_at_with_hook(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    after_entry_removed: &mut impl FnMut(),
+) -> Result<(), LifecycleError> {
     let child = open_directory_at(parent, name)
         .map_err(|source| io_error("安全打开事务清理目标", path, source))?;
-    remove_owned_tree_contents(&child, path)?;
+    remove_owned_tree_contents(&child, path, after_entry_removed)?;
     drop(child);
     unlink_at(parent, name, true).map_err(|source| io_error("清理事务目录", path, source))?;
     parent
@@ -2114,7 +2153,121 @@ pub(crate) fn remove_owned_tree_at(
         .map_err(|source| io_error("同步事务目录父级", path, source))
 }
 
-fn remove_owned_tree_contents(directory: &File, path: &Path) -> Result<(), LifecycleError> {
+/// 删除意图持久化前封存事务根目录身份，防止恢复时删除同名替换目录。
+pub(crate) fn capture_owned_tree_cleanup_manifest(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<OwnedTreeCleanupManifest, LifecycleError> {
+    let root = open_directory_at(parent, name)
+        .map_err(|source| io_error("安全打开待封存清理目录", path, source))?;
+    let root_metadata = root
+        .metadata()
+        .map_err(|source| io_error("检查待封存清理目录", path, source))?;
+    if !root_metadata.is_dir() {
+        return Err(LifecycleError::RecoveryBlocked(format!(
+            "待清理根目录身份异常：{}",
+            path.display()
+        )));
+    }
+    Ok(OwnedTreeCleanupManifest {
+        root_device: root_metadata.dev(),
+        root_inode: root_metadata.ino(),
+    })
+}
+
+/// 清理中断后继续删除同一事务根；1.0 不追踪隐藏清理目录内每个剩余文件的变化。
+pub(crate) fn remove_owned_tree_at_with_manifest_and_hook(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    manifest: &OwnedTreeCleanupManifest,
+    after_entry_removed: &mut impl FnMut(),
+) -> Result<(), LifecycleError> {
+    validate_owned_tree_cleanup_manifest(manifest)?;
+    let root = match open_directory_at(parent, name) {
+        Ok(root) => root,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            // 缺失可能来自上次已完成但未 fsync 的删除，先同步再确认清理完成。
+            return parent
+                .sync_all()
+                .map_err(|source| io_error("同步已清理事务目录父级", path, source));
+        }
+        Err(source) => return Err(io_error("安全打开事务清理目标", path, source)),
+    };
+    let root_metadata = root
+        .metadata()
+        .map_err(|source| io_error("检查事务清理目标", path, source))?;
+    if root_metadata.dev() != manifest.root_device
+        || root_metadata.ino() != manifest.root_inode
+        || !root_metadata.is_dir()
+    {
+        return Err(LifecycleError::RecoveryBlocked(format!(
+            "事务清理根目录已被替换：{}",
+            path.display()
+        )));
+    }
+    remove_owned_tree_contents(&root, path, after_entry_removed)?;
+    ensure_visible_directory_identity(
+        parent,
+        name,
+        path,
+        manifest.root_device,
+        manifest.root_inode,
+    )?;
+    drop(root);
+    unlink_at(parent, name, true).map_err(|source| io_error("清理事务目录", path, source))?;
+    parent
+        .sync_all()
+        .map_err(|source| io_error("同步事务目录父级", path, source))
+}
+
+fn ensure_visible_directory_identity(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    expected_device: u64,
+    expected_inode: u64,
+) -> Result<(), LifecycleError> {
+    let visible = entry_metadata_at(parent, name)
+        .map_err(|source| io_error("重新检查事务清理目录", path, source))?
+        .ok_or_else(|| cleanup_entry_disappeared(path))?;
+    if visible.st_dev as u64 != expected_device
+        || visible.st_ino != expected_inode
+        || visible.st_mode & libc::S_IFMT != libc::S_IFDIR
+    {
+        return Err(cleanup_entry_changed(path));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_owned_tree_cleanup_manifest(
+    manifest: &OwnedTreeCleanupManifest,
+) -> Result<(), LifecycleError> {
+    if manifest.root_device == 0 || manifest.root_inode == 0 {
+        return Err(LifecycleError::RecoveryBlocked(
+            "待清理事务根目录身份无效".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn cleanup_entry_changed(path: &Path) -> LifecycleError {
+    LifecycleError::RecoveryBlocked(format!(
+        "待清理条目已被新增、替换或修改：{}",
+        path.display()
+    ))
+}
+
+fn cleanup_entry_disappeared(path: &Path) -> LifecycleError {
+    LifecycleError::RecoveryBlocked(format!("事务清理条目在检查期间消失：{}", path.display()))
+}
+
+fn remove_owned_tree_contents(
+    directory: &File,
+    path: &Path,
+    after_entry_removed: &mut impl FnMut(),
+) -> Result<(), LifecycleError> {
     // 复制会保留只读目录权限；事务清理前只放宽本次自有目录，确保正常中断可自动恢复。
     directory
         .set_permissions(fs::Permissions::from_mode(0o700))
@@ -2132,7 +2285,7 @@ fn remove_owned_tree_contents(directory: &File, path: &Path) -> Result<(), Lifec
         if metadata.st_mode & libc::S_IFMT == libc::S_IFDIR {
             let child = open_directory_at(directory, &name)
                 .map_err(|source| io_error("安全打开事务子目录", &child_path, source))?;
-            remove_owned_tree_contents(&child, &child_path)?;
+            remove_owned_tree_contents(&child, &child_path, after_entry_removed)?;
             drop(child);
             unlink_at(directory, &name, true)
                 .map_err(|source| io_error("清理事务子目录", &child_path, source))?;
@@ -2141,6 +2294,7 @@ fn remove_owned_tree_contents(directory: &File, path: &Path) -> Result<(), Lifec
             unlink_at(directory, &name, false)
                 .map_err(|source| io_error("清理事务文件", &child_path, source))?;
         }
+        after_entry_removed();
     }
     directory
         .sync_all()
@@ -2152,6 +2306,17 @@ pub(crate) fn write_atomic_at(
     name: &OsStr,
     path: &Path,
     bytes: &[u8],
+) -> Result<(), LifecycleError> {
+    write_atomic_at_with_after_temp_sync(parent, name, path, bytes, &mut || {})
+}
+
+/// 测试钩子精确位于临时文件持久化与原子 rename 之间，用于验证真实进程退出恢复。
+pub(crate) fn write_atomic_at_with_after_temp_sync(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    bytes: &[u8],
+    after_temp_sync: &mut impl FnMut(),
 ) -> Result<(), LifecycleError> {
     match entry_metadata_at(parent, name)
         .map_err(|source| io_error("检查原子写入目标", path, source))?
@@ -2177,6 +2342,7 @@ pub(crate) fn write_atomic_at(
             .map_err(|source| io_error("写入临时文件", &temporary_path, source))?;
         file.sync_all()
             .map_err(|source| io_error("同步临时文件", &temporary_path, source))?;
+        after_temp_sync();
         rename_at_replace(parent, &temporary_name, parent, name)
             .map_err(|source| io_error("原子替换文件", path, source))?;
         parent

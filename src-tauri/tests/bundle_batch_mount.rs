@@ -850,6 +850,224 @@ fn blocked_batch_reserves_related_members_and_targets_but_allows_unrelated_mount
 }
 
 #[test]
+fn blocked_takeover_reserves_its_member_but_allows_unrelated_mount_plans() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let harness = ready_harness(sandbox.path());
+    let bundle = install_bundle(
+        &harness,
+        "blocked-takeover-bundle",
+        &["reserved-skill", "free-skill"],
+    );
+    let UiOutcome::MountPlan { plan: mounted_plan } = harness
+        .application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: bundle.member("reserved-skill").id.clone(),
+            app_id: SupportedAppId::Codex,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect("阻塞前应创建已有 Mount")
+    else {
+        panic!("应返回单项 Mount Plan");
+    };
+    let mounted = harness
+        .application
+        .handle(UiIntent::ConfirmMountPlan {
+            plan_id: mounted_plan.id,
+        })
+        .expect("阻塞前应完成已有 Mount");
+    let mount_id = inventory_mounts(&mounted)
+        .iter()
+        .find(|mount| mount.member_id == bundle.member("reserved-skill").id)
+        .expect("应找到已创建 Mount")
+        .id
+        .clone();
+
+    insert_blocked_takeover(
+        &harness.data_root,
+        &bundle.id,
+        &bundle.member("reserved-skill").id,
+        &[Path::new(&mounted_plan.target_path)],
+    );
+
+    harness
+        .application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: bundle.member("reserved-skill").id.clone(),
+            app_id: SupportedAppId::ClaudeCode,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect_err("blocked Takeover 的同一 member 不能创建 Mount Plan");
+    harness
+        .application
+        .handle(UiIntent::CreateRemoveMountPlan {
+            mount_id: mount_id.clone(),
+        })
+        .expect_err("blocked Takeover 的同一 member 不能创建 Remove Plan");
+    harness
+        .application
+        .handle(UiIntent::CreateRepairMountPlan { mount_id })
+        .expect_err("blocked Takeover 的同一 member 不能创建 Repair Plan");
+
+    let plan = create_batch_plan(
+        &harness.application,
+        &bundle.id,
+        vec![
+            global_request(&bundle, "reserved-skill", SupportedAppId::GitHubCopilot),
+            global_request(&bundle, "free-skill", SupportedAppId::ClaudeCode),
+        ],
+    );
+    let reserved = plan_item(&plan, "reserved-skill", SupportedAppId::GitHubCopilot);
+    let free = plan_item(&plan, "free-skill", SupportedAppId::ClaudeCode);
+    assert_eq!(reserved.disposition, BatchMountDisposition::PathConflict);
+    assert!(!reserved.selectable);
+    assert!(reserved.conflict_reason.is_some());
+    assert_eq!(free.disposition, BatchMountDisposition::Ready);
+    assert!(free.selectable);
+
+    let mounted = confirm_batch_plan(&harness.application, &plan, vec![free.id.clone()]);
+    assert_link(
+        Path::new(&free.target_path),
+        &bundle.member("free-skill").expected_target,
+    );
+    assert_eq!(inventory_mounts(&mounted).len(), 2);
+}
+
+#[test]
+fn takeover_blocked_after_mount_plans_are_created_rejects_both_confirmations() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let harness = ready_harness(sandbox.path());
+    let bundle = install_bundle(&harness, "late-blocked-takeover", &["reserved-skill"]);
+    let UiOutcome::MountPlan { plan: single } = harness
+        .application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: bundle.member("reserved-skill").id.clone(),
+            app_id: SupportedAppId::Codex,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect("阻塞前应创建单项 Mount Plan")
+    else {
+        panic!("应返回单项 Mount Plan");
+    };
+    let batch = create_batch_plan(
+        &harness.application,
+        &bundle.id,
+        vec![global_request(
+            &bundle,
+            "reserved-skill",
+            SupportedAppId::ClaudeCode,
+        )],
+    );
+    let batch_item = plan_item(&batch, "reserved-skill", SupportedAppId::ClaudeCode);
+    assert!(batch_item.selectable);
+
+    insert_blocked_takeover(
+        &harness.data_root,
+        &bundle.id,
+        &bundle.member("reserved-skill").id,
+        &[Path::new(&single.target_path)],
+    );
+
+    harness
+        .application
+        .handle(UiIntent::ConfirmMountPlan { plan_id: single.id })
+        .expect_err("Plan 创建后出现 blocked Takeover 时，单项确认必须重新拒绝");
+    harness
+        .application
+        .handle(UiIntent::ConfirmBatchMountPlan {
+            plan_id: batch.id.clone(),
+            selected_item_ids: vec![batch_item.id.clone()],
+        })
+        .expect_err("Plan 创建后出现 blocked Takeover 时，Batch 确认必须重新拒绝");
+    assert_missing(Path::new(&single.target_path));
+    assert_missing(Path::new(&batch_item.target_path));
+    assert_eq!(mount_row_count(&harness.data_root), 0);
+}
+
+#[test]
+fn precommit_blocked_takeover_reserves_its_path_from_other_members() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let harness = ready_harness(sandbox.path());
+    let bundle = install_bundle(&harness, "takeover-path-collision", &["reserved-skill"]);
+    let UiOutcome::MountPlan { plan: reserved } = harness
+        .application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: bundle.member("reserved-skill").id.clone(),
+            app_id: SupportedAppId::Codex,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect("blocked 出现前应创建同路径 Plan")
+    else {
+        panic!("应返回单项 Mount Plan");
+    };
+    let UiOutcome::MountPlan { plan: unrelated } = harness
+        .application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: bundle.member("reserved-skill").id.clone(),
+            app_id: SupportedAppId::ClaudeCode,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect("blocked 出现前应创建无关路径 Plan")
+    else {
+        panic!("应返回单项 Mount Plan");
+    };
+
+    // precommit 时计划中的领域 Member 尚不存在，必须依靠事务保留路径而不是 Member ID。
+    insert_blocked_takeover(
+        &harness.data_root,
+        "planned-takeover-bundle",
+        "planned-takeover-member",
+        &[Path::new(&reserved.target_path)],
+    );
+
+    harness
+        .application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: bundle.member("reserved-skill").id.clone(),
+            app_id: SupportedAppId::Codex,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect_err("blocked Takeover 保留的路径不能被另一个 Member 建立 Plan");
+    harness
+        .application
+        .handle(UiIntent::ConfirmMountPlan {
+            plan_id: reserved.id,
+        })
+        .expect_err("Plan 创建后路径被 blocked Takeover 保留时，确认必须重新拒绝");
+
+    let batch = create_batch_plan(
+        &harness.application,
+        &bundle.id,
+        vec![global_request(
+            &bundle,
+            "reserved-skill",
+            SupportedAppId::Codex,
+        )],
+    );
+    let blocked = plan_item(&batch, "reserved-skill", SupportedAppId::Codex);
+    assert_eq!(blocked.disposition, BatchMountDisposition::PathConflict);
+    assert!(!blocked.selectable);
+
+    let mounted = harness
+        .application
+        .handle(UiIntent::ConfirmMountPlan {
+            plan_id: unrelated.id,
+        })
+        .expect("blocked Takeover 不能冻结同一 Member 的其他 Host 路径");
+    assert_link(
+        Path::new(&unrelated.target_path),
+        &bundle.member("reserved-skill").expected_target,
+    );
+    assert_eq!(inventory_mounts(&mounted).len(), 1);
+    assert_missing(Path::new(&reserved.target_path));
+}
+
+#[test]
 fn hard_exit_after_database_commit_keeps_the_complete_batch_and_finishes_cleanup() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (harness, plan) = prepared_recovery_batch(sandbox.path(), "after-state");
@@ -1428,6 +1646,49 @@ fn row_count(data_root: &Path, table: &str) -> i64 {
             row.get(0)
         })
         .expect("应读取测试表行数")
+}
+
+fn insert_blocked_takeover(
+    data_root: &Path,
+    bundle_id: &str,
+    member_id: &str,
+    reserved_paths: &[&Path],
+) {
+    // 测试夹具遵守生产协议：绝对路径必须排序、去重并作为同一事务行持久化。
+    let mut reserved_paths = reserved_paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    reserved_paths.sort();
+    reserved_paths.dedup();
+    let reserved_paths_json =
+        serde_json::to_string(&reserved_paths).expect("保留路径应能编码为 JSON");
+    let connection = Connection::open(database_path(data_root)).expect("应打开测试 SQLite");
+    connection
+        .execute(
+            "INSERT INTO takeover_plans (
+                id, payload_json, payload_sha256, status, created_at, expires_at
+             ) VALUES (
+                'blocked-takeover-plan', '{}',
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                'consumed', 1, 2
+             )",
+            [],
+        )
+        .expect("应创建 blocked Takeover 的 Plan 记录");
+    connection
+        .execute(
+            "INSERT INTO takeover_transactions (
+                id, plan_id, bundle_id, member_id, reserved_paths_json, journal_path,
+                phase, status, error_message, created_at, updated_at
+             ) VALUES (
+                'blocked-takeover-transaction', 'blocked-takeover-plan', ?1, ?2,
+                ?3, 'journals/blocked-takeover.json', 'state_committed', 'blocked',
+                '测试 blocked Takeover', 1, 1
+             )",
+            params![bundle_id, member_id, reserved_paths_json],
+        )
+        .expect("应创建 blocked Takeover 事务");
 }
 
 fn assert_directory_empty(path: &Path) {
