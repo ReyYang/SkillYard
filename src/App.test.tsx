@@ -1611,6 +1611,123 @@ describe("接管已有 Skill", () => {
 });
 
 describe("GitHub Source 安装", () => {
+  it("按完整来源分组展示 skills.sh 结果，不支持的来源不能进入安装", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createEntry()]));
+    vi.mocked(client.searchSkillsSh).mockResolvedValue({
+      type: "skillsShSearch",
+      query: "react",
+      sources: [
+        {
+          sourceInput: "vercel-labs/agent-skills",
+          supported: true,
+          members: [
+            {
+              skillId: "react-best-practices",
+              name: "React Best Practices",
+              installs: 20,
+            },
+            {
+              skillId: "react-native",
+              name: "React Native",
+              installs: 10,
+            },
+          ],
+        },
+        {
+          sourceInput: "react.dev",
+          supported: false,
+          members: [{ skillId: "react", name: "React", installs: 30 }],
+        },
+      ],
+    });
+    render(<App client={client} />);
+
+    await screen.findByRole("heading", { name: "Skill 清单" });
+    await user.click(screen.getByRole("button", { name: "安装 Skill" }));
+    await screen.findByRole("heading", { name: "安装 Skill" });
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 skills.sh" }),
+      "react",
+    );
+    await user.click(screen.getByRole("button", { name: "搜索 skills.sh" }));
+
+    expect(client.searchSkillsSh).toHaveBeenCalledWith("react");
+    expect(
+      await screen.findByRole("heading", {
+        name: "vercel-labs/agent-skills",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("React Best Practices")).toBeInTheDocument();
+    expect(screen.getByText("React Native")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "react.dev" })).toBeInTheDocument();
+    expect(screen.getByText("当前不是受支持的 GitHub Source")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "添加 vercel-labs/agent-skills Source",
+      }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "添加 react.dev Source" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("新搜索失败时清空旧结果，只显示本次错误", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createEntry()]));
+    vi.mocked(client.searchSkillsSh)
+      .mockResolvedValueOnce({
+        type: "skillsShSearch",
+        query: "react",
+        sources: [
+          {
+            sourceInput: "vercel-labs/agent-skills",
+            supported: true,
+            members: [
+              {
+                skillId: "react-best-practices",
+                name: "React Best Practices",
+                installs: 20,
+              },
+            ],
+          },
+        ],
+      })
+      .mockRejectedValueOnce({
+        code: "skillsShError",
+        message: "skills.sh 暂时不可用",
+      });
+    render(<App client={client} />);
+
+    await screen.findByRole("heading", { name: "Skill 清单" });
+    await user.click(screen.getByRole("button", { name: "安装 Skill" }));
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 skills.sh" }),
+      "react",
+    );
+    await user.click(screen.getByRole("button", { name: "搜索 skills.sh" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "vercel-labs/agent-skills",
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "搜索 skills.sh" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "skills.sh 暂时不可用",
+    );
+    expect(client.searchSkillsSh).toHaveBeenCalledTimes(2);
+    expect(
+      screen.queryByRole("region", { name: "skills.sh 搜索结果" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", {
+        name: "vercel-labs/agent-skills",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("只在用户点击安装后进入 Source Catalog，返回时保留原 Inventory", async () => {
     const user = userEvent.setup();
     const client = createClient(
@@ -2173,6 +2290,7 @@ function createClient(startup: UiOutcome): SkillYardClient {
     startInitialScan: vi.fn(),
     refreshLocalInventory: vi.fn(),
     openSourceDiscovery: vi.fn().mockResolvedValue(sourceDiscoveryOutcome()),
+    searchSkillsSh: vi.fn(),
     reloadGithubSource: vi.fn(),
     addGithubSource: vi.fn(),
     confirmSourceRefChange: vi.fn(),

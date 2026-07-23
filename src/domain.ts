@@ -234,6 +234,18 @@ export interface SourceRefChangePlan {
   expiresAt: number;
 }
 
+export interface SkillsShSearchMember {
+  skillId: string;
+  name: string;
+  installs: number;
+}
+
+export interface SkillsShSearchSource {
+  sourceInput: string;
+  supported: boolean;
+  members: SkillsShSearchMember[];
+}
+
 // Takeover 的全部选择在创建 Plan 时冻结；最终确认只再提交 Plan ID。
 export interface TakeoverPlanRequest {
   observationIds: string[];
@@ -326,6 +338,11 @@ export type UiOutcome =
   | {
       type: "sourceRefChangePlan";
       plan: SourceRefChangePlan;
+    }
+  | {
+      type: "skillsShSearch";
+      query: string;
+      sources: SkillsShSearchSource[];
     }
   | {
       type: "installPlan";

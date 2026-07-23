@@ -67,6 +67,20 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("open_source_discovery");
   });
 
+  it("搜索 skills.sh 时只提交用户查询", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "skillsShSearch",
+      query: "react",
+      sources: [],
+    });
+
+    await tauriSkillYardClient.searchSkillsSh(" react ");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("search_skills_sh", {
+      query: " react ",
+    });
+  });
+
   it("重新加载 GitHub Source 时只提交 sourceId", async () => {
     mocks.invoke.mockResolvedValue({
       type: "sourceDiscovery",

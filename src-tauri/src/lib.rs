@@ -10,6 +10,7 @@ mod lifecycle;
 mod mount_lifecycle;
 mod paths;
 mod scanner;
+mod skills_sh;
 mod storage;
 mod takeover;
 
@@ -20,10 +21,11 @@ pub use domain::{
     InventoryObservation, LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind,
     ManagementKind, MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope,
     MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode,
-    ScanRootKey, SkillMetadataStatus, SourceCatalogMemberSummary, SourceCatalogStatus,
-    SourceRefChangePlan, SourceSummary, SupportedAppId, TakeoverIdentityBasis,
-    TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin, TakeoverPlanRequest,
-    TakeoverPlanTarget, TakeoverSharedTargetRequest, UiIntent, UiOutcome,
+    ScanRootKey, SkillMetadataStatus, SkillsShSearchMember, SkillsShSearchSource,
+    SourceCatalogMemberSummary, SourceCatalogStatus, SourceRefChangePlan, SourceSummary,
+    SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
+    TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest,
+    UiIntent, UiOutcome,
 };
 pub use github_source::{
     GithubSourceError, ReqwestSourceTransport, ResolvedGithubSource, SharedSourceTransport,
@@ -51,6 +53,7 @@ pub fn run() {
             commands::start_initial_scan,
             commands::refresh_local_inventory,
             commands::open_source_discovery,
+            commands::search_skills_sh,
             commands::reload_github_source,
             commands::add_github_source,
             commands::confirm_source_ref_change,

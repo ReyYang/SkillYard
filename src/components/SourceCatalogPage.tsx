@@ -1,19 +1,33 @@
 import { useState, type FormEvent } from "react";
 
-import type { MountSummary, SourceSummary, UiOutcome } from "../domain";
+import type {
+  MountSummary,
+  SkillsShSearchSource,
+  SourceSummary,
+  UiOutcome,
+} from "../domain";
 
 type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
 
 interface SourceCatalogPageProps {
   outcome: SourceDiscoveryOutcome;
+  skillsShSearch: Extract<UiOutcome, { type: "skillsShSearch" }> | null;
   mounts: MountSummary[];
   operation:
-    | { type: "opening" | "adding" | "choosingFolder" | "confirmingRef" }
+    | {
+        type:
+          | "opening"
+          | "adding"
+          | "choosingFolder"
+          | "confirmingRef"
+          | "searchingSkillsSh";
+      }
     | { type: "reloading" | "planningInstall"; sourceId: string }
     | null;
   error: string | null;
   onBack(): void;
   onAddSource(input: string, trackedRef: string | null): void;
+  onSearchSkillsSh(query: string): void;
   onChooseFolder(): void;
   onReload(sourceId: string): void;
   onInstall(sourceId: string): void;
@@ -21,26 +35,37 @@ interface SourceCatalogPageProps {
 
 export function SourceCatalogPage({
   outcome,
+  skillsShSearch,
   mounts,
   operation,
   error,
   onBack,
   onAddSource,
+  onSearchSkillsSh,
   onChooseFolder,
   onReload,
   onInstall,
 }: SourceCatalogPageProps) {
   const [input, setInput] = useState("");
   const [trackedRef, setTrackedRef] = useState("");
+  const [skillsShQuery, setSkillsShQuery] = useState("");
   const isBusy = operation !== null;
   const isAddingSource = operation?.type === "adding";
   const isChoosingFolder = operation?.type === "choosingFolder";
+  const isSearchingSkillsSh = operation?.type === "searchingSkillsSh";
 
   const submitSource = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const normalizedInput = input.trim();
     if (!normalizedInput) return;
     onAddSource(normalizedInput, trackedRef.trim() || null);
+  };
+
+  const submitSkillsSh = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = skillsShQuery.trim();
+    if (query.length < 2) return;
+    onSearchSkillsSh(query);
   };
 
   return (
@@ -105,6 +130,44 @@ export function SourceCatalogPage({
         </button>
       </form>
 
+      <form
+        className="source-add-form"
+        aria-label="搜索 skills.sh"
+        onSubmit={submitSkillsSh}
+      >
+        <label>
+          <span>搜索 skills.sh</span>
+          <input
+            type="search"
+            value={skillsShQuery}
+            disabled={isBusy}
+            placeholder="例如 react、testing"
+            onChange={(event) => setSkillsShQuery(event.target.value)}
+          />
+        </label>
+        <button
+          className="secondary-action"
+          type="submit"
+          disabled={isBusy || skillsShQuery.trim().length < 2}
+        >
+          {isSearchingSkillsSh ? "正在搜索…" : "搜索 skills.sh"}
+        </button>
+      </form>
+
+      {skillsShSearch ? (
+        <section className="source-list" aria-label="skills.sh 搜索结果">
+          <h2>“{skillsShSearch.query}”的搜索结果</h2>
+          {skillsShSearch.sources.map((source) => (
+            <SkillsShResultCard
+              key={source.sourceInput}
+              source={source}
+              isBusy={isBusy}
+              onAddSource={() => onAddSource(source.sourceInput, null)}
+            />
+          ))}
+        </section>
+      ) : null}
+
       {error ? (
         <div className="inline-error" role="alert">
           <strong>Source 操作未完成</strong>
@@ -138,6 +201,53 @@ export function SourceCatalogPage({
         ))}
       </section>
     </main>
+  );
+}
+
+function SkillsShResultCard({
+  source,
+  isBusy,
+  onAddSource,
+}: {
+  source: SkillsShSearchSource;
+  isBusy: boolean;
+  onAddSource(): void;
+}) {
+  return (
+    <article className="source-card" aria-label={source.sourceInput}>
+      <header>
+        <div>
+          <span className="source-status">
+            {source.supported
+              ? "可添加为 GitHub Source"
+              : "当前不是受支持的 GitHub Source"}
+          </span>
+          <h2>{source.sourceInput}</h2>
+        </div>
+        {source.supported ? (
+          <button
+            className="primary-action"
+            type="button"
+            aria-label={`添加 ${source.sourceInput} Source`}
+            disabled={isBusy}
+            onClick={onAddSource}
+          >
+            添加 Source
+          </button>
+        ) : null}
+      </header>
+      <ul className="source-members">
+        {source.members.map((member) => (
+          <li key={member.skillId}>
+            <div>
+              <strong>{member.name}</strong>
+              <code>{member.skillId}</code>
+            </div>
+            <span>{member.installs.toLocaleString("zh-CN")} 次安装</span>
+          </li>
+        ))}
+      </ul>
+    </article>
   );
 }
 

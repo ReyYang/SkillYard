@@ -19,6 +19,9 @@ export interface SkillYardClient {
   openSourceDiscovery(): Promise<
     Extract<UiOutcome, { type: "sourceDiscovery" }>
   >;
+  searchSkillsSh(
+    query: string,
+  ): Promise<Extract<UiOutcome, { type: "skillsShSearch" }>>;
   reloadGithubSource(
     sourceId: string,
   ): Promise<Extract<UiOutcome, { type: "sourceDiscovery" }>>;
@@ -71,6 +74,11 @@ export const tauriSkillYardClient: SkillYardClient = {
   openSourceDiscovery: () =>
     invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
       "open_source_discovery",
+    ),
+  searchSkillsSh: (query) =>
+    invoke<Extract<UiOutcome, { type: "skillsShSearch" }>>(
+      "search_skills_sh",
+      { query },
     ),
   reloadGithubSource: (sourceId) =>
     invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(

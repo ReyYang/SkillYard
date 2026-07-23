@@ -38,10 +38,12 @@ type ViewState =
   | { status: "error"; message: string };
 
 type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
+type SkillsShSearchOutcome = Extract<UiOutcome, { type: "skillsShSearch" }>;
 
 type SourceOperation =
   | { type: "opening" }
   | { type: "adding" }
+  | { type: "searchingSkillsSh" }
   | { type: "choosingFolder" }
   | { type: "reloading"; sourceId: string }
   | { type: "planningInstall"; sourceId: string }
@@ -55,6 +57,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   // Inventory 保留为主界面基座；Source 页面只是临时路由，不覆盖已加载清单。
   const [sourceDiscovery, setSourceDiscovery] =
     useState<SourceDiscoveryOutcome | null>(null);
+  const [skillsShSearch, setSkillsShSearch] =
+    useState<SkillsShSearchOutcome | null>(null);
   const [sourceOperation, setSourceOperation] =
     useState<SourceOperation | null>(null);
   const [sourceError, setSourceError] = useState<string | null>(null);
@@ -150,7 +154,23 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const returnToInventory = () => {
     if (sourceOperation) return;
     setSourceError(null);
+    setSkillsShSearch(null);
     setSourceDiscovery(null);
+  };
+
+  const searchSkillsSh = async (query: string) => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "searchingSkillsSh" });
+    setSourceError(null);
+    try {
+      setSkillsShSearch(await client.searchSkillsSh(query));
+    } catch (error) {
+      // 搜索失败只影响发现结果，不改写 Source 或已安装内容。
+      setSkillsShSearch(null);
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
   };
 
   const rereadSourceAfterFailure = async (error: unknown) => {
@@ -190,6 +210,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       if (outcome.type === "sourceRefChangePlan") {
         setPendingSourceRefChange(outcome.plan);
       } else {
+        setSkillsShSearch(null);
         setSourceDiscovery(outcome);
       }
     } catch (error) {
@@ -630,6 +651,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     return (
       <SourceCatalogPage
         outcome={sourceDiscovery}
+        skillsShSearch={skillsShSearch}
         mounts={
           viewState.outcome.type === "inventory" ? viewState.outcome.mounts : []
         }
@@ -637,6 +659,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         error={sourceError}
         onBack={returnToInventory}
         onAddSource={addGithubSource}
+        onSearchSkillsSh={searchSkillsSh}
         onChooseFolder={chooseFolderInstallPlan}
         onReload={reloadGithubSource}
         onInstall={createGithubInstallPlan}

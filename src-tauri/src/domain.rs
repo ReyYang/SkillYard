@@ -8,6 +8,9 @@ pub enum UiIntent {
     StartInitialScan,
     RefreshLocalInventory,
     OpenSourceDiscovery,
+    SearchSkillsSh {
+        query: String,
+    },
     ReloadGitHubSource {
         source_id: String,
     },
@@ -582,6 +585,23 @@ pub struct SourceRefChangePlan {
     pub expires_at: i64,
 }
 
+/// `skills.sh` 只返回发现线索；可支持的分组仍会转换成普通 GitHub Source。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsShSearchSource {
+    pub source_input: String,
+    pub supported: bool,
+    pub members: Vec<SkillsShSearchMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsShSearchMember {
+    pub skill_id: String,
+    pub name: String,
+    pub installs: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScanRootKey {
@@ -847,6 +867,10 @@ pub enum UiOutcome {
         highlighted_source_id: Option<String>,
         highlighted_member_path: Option<String>,
     },
+    SkillsShSearch {
+        query: String,
+        sources: Vec<SkillsShSearchSource>,
+    },
     SourceRefChangePlan {
         plan: SourceRefChangePlan,
     },
@@ -989,6 +1013,40 @@ mod tests {
         let project_root =
             serde_json::to_value(ScanRootKey::GitHubCopilotProject).expect("应序列化扫描根");
         assert_eq!(project_root, "gitHubCopilotProject");
+    }
+
+    #[test]
+    fn skills_sh_search_outcome_uses_the_frontend_camel_case_contract() {
+        let outcome = UiOutcome::SkillsShSearch {
+            query: "react".to_owned(),
+            sources: vec![SkillsShSearchSource {
+                source_input: "vercel-labs/agent-skills".to_owned(),
+                supported: true,
+                members: vec![SkillsShSearchMember {
+                    skill_id: "react-best-practices".to_owned(),
+                    name: "React Best Practices".to_owned(),
+                    installs: 42,
+                }],
+            }],
+        };
+
+        let value = serde_json::to_value(outcome).expect("应序列化 skills.sh 搜索结果");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "skillsShSearch",
+                "query": "react",
+                "sources": [{
+                    "sourceInput": "vercel-labs/agent-skills",
+                    "supported": true,
+                    "members": [{
+                        "skillId": "react-best-practices",
+                        "name": "React Best Practices",
+                        "installs": 42
+                    }]
+                }]
+            })
+        );
     }
 
     #[test]

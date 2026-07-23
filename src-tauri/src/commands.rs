@@ -23,6 +23,7 @@ impl From<ApplicationError> for UiError {
             ApplicationError::MountLifecycle(_) => "mountError",
             ApplicationError::Takeover(_) => "takeoverError",
             ApplicationError::GithubSource(_) => "sourceError",
+            ApplicationError::SkillsSh(_) => "sourceError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",
@@ -64,6 +65,17 @@ pub fn open_source_discovery(
     match dispatch(&application, UiIntent::OpenSourceDiscovery)? {
         outcome @ UiOutcome::SourceDiscovery { .. } => Ok(outcome),
         _ => Err(invalid_outcome("SkillYard 没有返回 Source 列表")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn search_skills_sh(
+    application: State<'_, SkillYardApplication>,
+    query: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::SearchSkillsSh { query })? {
+        outcome @ UiOutcome::SkillsShSearch { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回 skills.sh 搜索结果")),
     }
 }
 

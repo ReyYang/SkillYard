@@ -25,6 +25,7 @@ use crate::{
     },
     paths::ApplicationPaths,
     scanner::{scan, scan_projects, scan_with_projects},
+    skills_sh::{SkillsShError, search_skills_sh},
     storage::{
         NewGitHubSource, NewSourceCatalogMember, SaveGitHubSourceResult, Storage, StorageError,
         StoredGithubSource,
@@ -56,6 +57,8 @@ pub enum ApplicationError {
     Takeover(#[from] TakeoverError),
     #[error(transparent)]
     GithubSource(#[from] GithubSourceError),
+    #[error(transparent)]
+    SkillsSh(#[from] SkillsShError),
     #[error("首次扫描未完整完成：{0}")]
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
@@ -153,6 +156,9 @@ impl SkillYardApplication {
             }
             UiIntent::OpenSourceDiscovery => {
                 self.with_write_operation(|| self.open_source_discovery())
+            }
+            UiIntent::SearchSkillsSh { query } => {
+                self.with_write_operation(|| self.search_skills_sh(query))
             }
             UiIntent::ReloadGitHubSource { source_id } => {
                 self.with_write_operation(|| self.reload_github_source(source_id))
@@ -328,6 +334,17 @@ impl SkillYardApplication {
             highlighted_source_id: None,
             highlighted_member_path: None,
         })
+    }
+
+    fn search_skills_sh(&self, query: String) -> Result<UiOutcome, ApplicationError> {
+        let storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let transport = self
+            .source_transport
+            .as_deref()
+            .ok_or(SkillsShError::Network)?;
+        let (query, sources) = search_skills_sh(transport, &query)?;
+        Ok(UiOutcome::SkillsShSearch { query, sources })
     }
 
     fn reload_github_source(&self, source_id: String) -> Result<UiOutcome, ApplicationError> {
