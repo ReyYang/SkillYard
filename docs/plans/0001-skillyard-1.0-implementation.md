@@ -324,6 +324,69 @@ Stage 3 能力按以下方式直接复用：
 - 超时、断流、空响应和资源超限不会改写旧 Catalog 或已有 Bundle。
 - GitHub 安装结束后不自动创建 Mount。
 
+### 完整技术实现图
+
+阶段 5 包含连续的两条纵向行为：先登记 canonical GitHub Source 并可靠维护 Catalog，再从 fresh Catalog 新装或补装 Bundle。两条行为共享同一套 Source、Bundle 和 Install Plan 领域模型，但文件系统职责不同。
+
+#### 输入与 GitHub 协议
+
+- canonical identity 固定为小写 `github:<owner>/<repository>`；展示名使用 GitHub metadata 返回的 canonical `owner/repository`。ref、成员路径、推荐入口和 URL 写法都不参与 identity。
+- 1.0 接受 `owner/repository`、`https://github.com/owner/repository`、可选 `.git` 后缀、`/tree/<ref>/<path>` 和 `/blob/<ref>/<path>/SKILL.md`。只接受公开 GitHub 的 HTTPS 地址；SSH、Gist、GitHub Enterprise 和任意网页返回稳定的不支持错误。
+- URL 中未提供 ref 时读取仓库 metadata 的真实 default branch。`tree` 或 `blob` URL 默认把 ref 解析为一个 URL segment；包含 `/` 的 branch 必须通过界面的独立 Tracked Ref 字段明确提供，Adapter 再用该 ref 前缀分离成员路径。这样覆盖正常使用，同时不通过多次远端试探猜测歧义 URL。
+- 独立字段和 URL 同时提供 ref 时二者必须一致，否则拒绝输入。成员路径只作为高亮提示。
+- GitHub Adapter 使用无认证 REST：仓库 metadata 验证公开性并取得 `full_name/default_branch`，commit endpoint 验证 Tracked Ref 并取得 SHA，archive 始终按固定 SHA 获取，不能按可能移动的 branch 下载。
+- 生产网络只发送固定 `User-Agent` 和 GitHub `Accept`，不读取 token、credential helper 或本机 Git 配置；不调用 `git`、`gh`、`npx` 等外部命令。
+
+#### 唯一持久化模型
+
+- `sources` 保存唯一仓库、展示名、Tracked Ref、最近 Catalog 成功信息和最近 reload 结果。四个初始 Source 只由 migration 插入一次，删除后不会在启动时复活。
+- `source_catalog_members` 保存最近一次成功发现的成员 metadata。成功 reload 在一个 SQLite 事务中整体替换；失败只写最近错误并把旧目录派生为 Stale，不清空旧成员和成功时间。
+- `source_bundle_links` 对 Source 和 Bundle 双向唯一，并保存新 Bundle 首次安装建立的 adopted commit；补装不推进该值。
+- `source_member_links` 保存 Catalog 成员路径与已安装 Skill Member 的关系。
+- Source metadata 与 Catalog 不创建 Filesystem Journal。Source 可以没有 Bundle；Catalog 也不是可离线安装的内容缓存。
+- 现有 `install_plans` 和 `lifecycle_transactions` 仍是唯一安装协议。它们原地增加本地或 GitHub 输入、全新或补装模式、Source/commit/Catalog generation、受管临时快照和预期旧 `current` 等字段；不得新增 GitHub 专用 Plan、Transaction 或 Journal。
+
+#### 获取、验证与 Catalog
+
+- `SourceTransport` 是唯一可替换的网络外边界，只返回真实 HTTP status、headers 和可读取 body。GitHub JSON、URL canonicalization、archive 处理、成员发现和校验全部使用生产代码。
+- HTTP body 流式写入应用控制的临时区，下一字节超过 100 MiB 时立即停止。Archive 在写出前拒绝绝对路径、`..`、规范化重复路径、symlink 和其他特殊类型，并同时限制 20,000 个条目、512 MiB 实际展开总量和 100 MiB 实际单文件大小。
+- Archive 必须具有一个共同顶层目录，剥离后再复用阶段 2 的严格 YAML、名称、重复名称、嵌套成员、特殊文件和脚本风险验证。
+- 合法 archive 中没有 `SKILL.md` 是 fresh empty Catalog；零字节、断流、损坏 JSON/ZIP 或危险 archive 是 reload failure。失败清理临时内容且不改变 Bundle。
+- 第一次进入发现页才自动 reload 当前 Source；同一应用会话之后再次进入只读取 SQLite，只有用户点击“重新加载来源”才再次联网。启动、首次扫描和 Local Refresh 始终为零 Source 请求。
+
+#### 唯一安装事务与生效点
+
+- 用户从 fresh Catalog 继续安装时，SkillYard 按 Catalog 固定 commit 再次获取并验证完整内容，生成受现有 Plan TTL 和前置条件约束的临时快照。Stale、无有效成员或全部成员已安装时不能签发空 Plan。
+- 全新安装默认选择所有有效成员，允许最终确认前取消。部分选择显示“不检查跨 Skill 依赖”的风险提示。已安装成员不可再次选择。
+- GitHub 与本地文件夹共用一张安装确认页、同一个确认 Intent、同一套候选复制、Journal、`current` 生效点和启动恢复逻辑。
+- 全新安装准备所选成员的完整候选，确认前不创建 Bundle；领域提交一次保存 Bundle、Members、Member Selection、Source 关联、成员映射和 adopted commit。Mount 数保持为零。
+- 补装把当前完整 Bundle 的已有成员与本次新增成员共同复制到一个候选。已有成员不从上游覆盖，已有 Mount 继续指向稳定成员路径；候选验证完成后只原子替换一次 `current`，再一次提交新增成员和映射，adopted commit 不变。
+- Journal 同时冻结可选的旧 `current` 和新的目标。恢复时，`current` 仍为旧目标或全新安装中不存在表示尚未生效，清理候选并保留旧状态；指向新目标表示继续完成领域提交和清理；指向第三个目标才进入人工恢复。
+- 成功提交后幂等删除旧内容和 Plan 临时快照，不把它们暴露为 Revision、历史版本或回滚点。
+
+#### 文件职责与依赖
+
+- `github_source.rs`：GitHub 输入解析、无认证协议、`SourceTransport`、archive 资源与路径安全、Catalog 获取。
+- `domain.rs` / `storage.rs`：Source 读模型、Catalog 状态、Tracked Ref 确认 Plan、唯一安装 Plan 的新增字段和原子领域提交。
+- `content.rs`：对 Catalog 复用成员发现与验证，并把四项固定资源限制提供给 archive 与复制路径。
+- `lifecycle.rs`：原地支持全新与补装两种模式；不建立第二个安装执行器。
+- `application.rs` / typed Tauri commands / TypeScript client：只暴露任务级 Source、Catalog 和安装 Intent，不暴露通用 HTTP、SQL 或文件操作。
+- 前端使用一个 Source Catalog 页面和一张通用安装确认页；主界面“安装 Skill”先进入仓库发现，本地文件夹入口保留在发现页中。
+- 直接依赖限定为 URL parser、同步 HTTPS client 和 ZIP/Deflate reader；不引入 Git client、GitHub SDK、认证框架、通用 Adapter registry 或异步运行时体系。
+
+### 阶段 5 切片
+
+1. **Source 基线与零启动网络**：migration 建立四个普通 Source；公开 seam 证明启动、扫描和刷新不联网，进入发现页才返回 Source 状态。
+2. **canonical 输入与 Tracked Ref**：四种常用输入去重；default branch、显式 ref 和 ref 切换均使用真实 GitHub 协议 fixture，切换失败不改旧状态。
+3. **Catalog 原子 reload**：真实 ZIP fixture 穿过生产 archive 和内容验证；成功整体替换，失败保留 Stale，资源和路径风险在写出边界被拒绝。
+4. **GitHub 全新安装**：fresh Catalog 生成通用 Plan，确认后创建一个 Source-backed Bundle、adopted commit 和零 Mount，并覆盖生效前后中断恢复。
+5. **已有 Bundle 补装**：完整候选只切换一次 `current`，保留已有成员和 Mount，不推进 adopted commit，并覆盖中断恢复。
+6. **typed IPC 与界面**：仓库发现、添加 Source、ref 确认、Stale 展示、通用安装确认和失败后重读最终状态形成真实用户流程。
+
+每个切片都从 `SkillYardApplication::handle` 的失败验收开始，使用文件型 SQLite、真实临时文件系统和真实协议格式 fixture；私有函数测试只补充 URL grammar、流式计数和 archive entry 等算法边界。普通回归不依赖 live GitHub。
+
+“功能完整”在本阶段表示上述登记、Catalog、新装、补装、原子恢复和 UI 主流程全部完成。1.0 不为低概率歧义和对抗场景扩张实现：不自动猜测含 `/` 的 branch URL，不实现认证限流规避、重试体系、断点续传、ETag、LFS/submodule 展开、仓库改名历史或用户主动追逐内部临时路径；这些输入要么返回稳定错误，要么沿用普通 Stale/前置条件失败语义。
+
 ## 阶段 6：其余安装入口
 
 ### 目标
