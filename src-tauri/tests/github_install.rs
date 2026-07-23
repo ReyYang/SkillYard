@@ -37,7 +37,7 @@ fn fresh_github_catalog_installs_one_unmounted_source_backed_bundle() {
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("第一个 Source 应加载 Fresh Catalog")
         .id;
 
@@ -124,7 +124,7 @@ fn fresh_github_catalog_installs_one_unmounted_source_backed_bundle() {
                 (SELECT COUNT(*) FROM bundles),
                 (SELECT COUNT(*) FROM skill_members),
                 (SELECT COUNT(*) FROM source_bundle_links
-                    WHERE source_id = ?1 AND adopted_commit_sha = ?2),
+                    WHERE source_id = ?1 AND adopted_marker = ?2),
                 (SELECT COUNT(*) FROM source_member_links WHERE source_id = ?1),
                 (SELECT COUNT(*) FROM mounts)",
             rusqlite::params![&source_id, commit],
@@ -143,7 +143,7 @@ fn fresh_github_catalog_installs_one_unmounted_source_backed_bundle() {
 }
 
 #[test]
-fn supplement_keeps_existing_content_mount_and_adopted_commit_while_adding_selected_members() {
+fn supplement_keeps_existing_content_mount_and_adopted_marker_while_adding_selected_members() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let transport = Arc::new(RecordingTransport::default());
     let (application, data_root, home) = ready_application(sandbox.path(), transport.clone());
@@ -157,7 +157,7 @@ fn supplement_keeps_existing_content_mount_and_adopted_commit_while_adding_selec
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit_a))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("第一个 Source 应加载 commit A")
         .id;
 
@@ -266,9 +266,9 @@ fn supplement_keeps_existing_content_mount_and_adopted_commit_while_adding_selec
 
     let connection =
         Connection::open(data_root.join("skillyard.sqlite3")).expect("应重新打开真实 SQLite");
-    let (new_current_target, adopted_commit, member_count, link_count, mount_count) = connection
+    let (new_current_target, adopted_marker, member_count, link_count, mount_count) = connection
         .query_row(
-            "SELECT bundle.current_target, link.adopted_commit_sha,
+            "SELECT bundle.current_target, link.adopted_marker,
                     (SELECT COUNT(*) FROM skill_members WHERE bundle_id = bundle.id),
                     (SELECT COUNT(*) FROM source_member_links WHERE source_id = link.source_id),
                     (SELECT COUNT(*) FROM mounts)
@@ -288,7 +288,7 @@ fn supplement_keeps_existing_content_mount_and_adopted_commit_while_adding_selec
         )
         .expect("应读取补装后的完整领域状态");
     assert_ne!(new_current_target, old_current_target);
-    assert_eq!(adopted_commit, commit_a, "补装不能推进更新基线");
+    assert_eq!(adopted_marker, commit_a, "补装不能推进更新基线");
     assert_eq!((member_count, link_count, mount_count), (2, 2, 1));
     assert!(
         !data_root
@@ -314,7 +314,7 @@ fn catalog_failures_keep_the_old_catalog_and_installed_bundle_unchanged() {
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应先建立 Fresh Catalog")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -358,7 +358,7 @@ fn catalog_failures_keep_the_old_catalog_and_installed_bundle_unchanged() {
             source.catalog_status,
             skillyard_lib::SourceCatalogStatus::Stale
         );
-        assert_eq!(source.catalog_commit_sha.as_deref(), Some(commit));
+        assert_eq!(source.catalog_marker.as_deref(), Some(commit));
         assert_eq!(source.bundle_id.as_deref(), Some(bundle_id.as_str()));
         assert_eq!(source.members.len(), 2);
         assert_eq!(
@@ -425,7 +425,7 @@ fn confirmed_tracked_ref_change_keeps_installed_content_and_mount_unchanged() {
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应先建立 Fresh Catalog")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -483,7 +483,7 @@ fn confirmed_tracked_ref_change_keeps_installed_content_and_mount_unchanged() {
         .find(|source| source.id == source_id)
         .expect("切换后 Source 应继续存在");
 
-    assert_eq!(source.tracked_ref, "next");
+    assert_eq!(source.tracked_ref.as_deref(), Some("next"));
     assert_eq!(source.bundle_id.as_deref(), Some(bundle_id.as_str()));
     assert_eq!(fs::read_link(&current_link).unwrap(), old_current_target);
     assert_eq!(fs::read_link(&mount_path).unwrap(), old_mount_target);
@@ -507,7 +507,7 @@ fn a_source_with_every_valid_member_installed_rejects_an_empty_supplement_withou
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -528,7 +528,10 @@ fn a_source_with_every_valid_member_installed_rejects_an_empty_supplement_withou
     let error = application
         .handle(UiIntent::CreateGithubInstallPlan { source_id })
         .expect_err("没有未安装成员时不能生成空补装 Plan");
-    assert!(error.to_string().contains("没有可补充安装"));
+    assert!(
+        error.to_string().contains("没有可安装的新 Skill"),
+        "实际错误：{error}"
+    );
     assert_eq!(transport.requests().len(), request_count);
     assert_eq!(staging_entry_count(&data_root), 0);
 }
@@ -548,7 +551,7 @@ fn changing_the_catalog_after_plan_creation_rejects_confirmation_before_a_transa
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit_a))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应建立 commit A Catalog")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -602,7 +605,7 @@ fn an_expired_github_plan_discards_its_snapshot_before_returning() {
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -653,7 +656,7 @@ fn startup_discards_an_expired_github_plan_without_reopening_its_confirmation() 
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -704,7 +707,7 @@ fn creating_a_new_plan_for_the_same_source_replaces_the_old_pending_snapshot() {
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -738,7 +741,7 @@ fn user_can_discard_a_pending_github_plan_and_its_snapshot() {
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -898,7 +901,7 @@ fn blocked_github_supplement_isolates_its_source_and_bundle_but_not_independent_
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit_a))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应加载 commit A")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -974,7 +977,10 @@ fn blocked_github_supplement_isolates_its_source_and_bundle_but_not_independent_
             source_id: source_id.clone(),
         })
         .expect_err("blocked Source 不能创建新的 supplement Plan");
-    assert!(source_error.to_string().contains("等待人工恢复"));
+    assert!(
+        source_error.to_string().contains("等待人工恢复"),
+        "实际错误：{source_error}"
+    );
     assert_eq!(
         transport.requests().len(),
         request_count,
@@ -1078,7 +1084,7 @@ fn prepare_github_create_hard_exit(base: &Path) -> PreparedHardExit {
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应加载 hard-exit Source")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));
@@ -1106,7 +1112,7 @@ fn prepare_github_supplement_hard_exit(base: &Path) -> (PreparedHardExit, String
     );
     let source_id = open_sources(&application)
         .into_iter()
-        .find(|source| source.catalog_commit_sha.as_deref() == Some(commit_a))
+        .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应加载 commit A")
         .id;
     transport.enqueue_bytes(200, &bundle_archive("alpha-original", true));

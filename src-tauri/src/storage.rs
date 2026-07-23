@@ -16,8 +16,8 @@ use crate::domain::{
     LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
     MountOperation, MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue,
     ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus,
-    SourceCatalogMemberSummary, SourceCatalogStatus, SourceRefChangePlan, SourceSummary,
-    SupportedAppId, SupportedAppSummary, TakeoverPlan, UiOutcome,
+    SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind, SourceRefChangePlan,
+    SourceSummary, SupportedAppId, SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -46,6 +46,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         13,
         include_str!("../migrations/0013_install_bundle_protocol.sql"),
     ),
+    (
+        14,
+        include_str!("../migrations/0014_general_source_install.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -70,10 +74,16 @@ pub enum StorageError {
     ReadSources(#[source] rusqlite::Error),
     #[error("SQLite 中包含未知 Source Catalog 状态：{0}")]
     UnknownSourceCatalogStatus(String),
+    #[error("SQLite 中包含未知 Source kind：{0}")]
+    UnknownSourceKind(String),
     #[error("Source Catalog 成员 metadata 无法解析：{0}")]
     InvalidSourceCatalogMetadata(#[source] serde_json::Error),
-    #[error("无法保存 GitHub Source：{0}")]
+    #[error("无法保存 Source：{0}")]
     SaveSource(#[source] rusqlite::Error),
+    #[error("Source 输入不符合 1.0 的来源协议")]
+    InvalidSourceDefinition,
+    #[error("Editable Local Source 的目录位置已变化；请从原路径继续使用")]
+    EditableLocalPathChanged,
     #[error("无法保存 Source Catalog：{0}")]
     SaveSourceCatalog(#[source] rusqlite::Error),
     #[error("无法编码 Source Catalog metadata：{0}")]
@@ -124,7 +134,7 @@ pub enum StorageError {
     InstallPlanExpired,
     #[error("安装 Plan 没有可保存的候选成员")]
     EmptyInstallPlanCandidates,
-    #[error("安装 Plan 不符合唯一的 folder/GitHub 安装协议")]
+    #[error("安装 Plan 不符合唯一的 folder/Source 安装协议")]
     InvalidInstallPlan,
     #[error("确认的成员选择不属于当前安装 Plan")]
     InvalidInstallSelection,
@@ -304,14 +314,14 @@ pub struct StoredInstallPlan {
     pub input_device: u64,
     pub input_inode: u64,
     pub input_fingerprint: String,
-    /// GitHub 快照路径直接指向 repository root，并始终相对 Central Store。
+    /// Source 快照路径直接指向已验证的内容根，并始终相对 Central Store。
     pub snapshot_relative_path: Option<String>,
     pub source_id: Option<String>,
     pub source_tracked_ref: Option<String>,
     pub source_catalog_generation: Option<i64>,
-    pub source_commit_sha: Option<String>,
+    pub source_marker: Option<String>,
     pub expected_current_target: Option<String>,
-    pub expected_adopted_commit_sha: Option<String>,
+    pub expected_adopted_marker: Option<String>,
     pub bundle_id: String,
     pub bundle_display_name: String,
     pub expires_at: i64,
@@ -347,9 +357,9 @@ pub struct NewInstallPlan<'a> {
     pub source_id: Option<&'a str>,
     pub source_tracked_ref: Option<&'a str>,
     pub source_catalog_generation: Option<i64>,
-    pub source_commit_sha: Option<&'a str>,
+    pub source_marker: Option<&'a str>,
     pub expected_current_target: Option<&'a str>,
-    pub expected_adopted_commit_sha: Option<&'a str>,
+    pub expected_adopted_marker: Option<&'a str>,
     pub bundle_id: &'a str,
     pub bundle_display_name: &'a str,
     pub warnings: &'a [String],
@@ -384,9 +394,9 @@ struct RawStoredInstallPlan {
     source_id: Option<String>,
     source_tracked_ref: Option<String>,
     source_catalog_generation: Option<i64>,
-    source_commit_sha: Option<String>,
+    source_marker: Option<String>,
     expected_current_target: Option<String>,
-    expected_adopted_commit_sha: Option<String>,
+    expected_adopted_marker: Option<String>,
     bundle_id: String,
     bundle_display_name: String,
     expires_at: i64,
@@ -399,7 +409,7 @@ pub struct NewGitHubSource<'a> {
     pub owner: &'a str,
     pub repository: &'a str,
     pub display_name: &'a str,
-    pub repository_url: &'a str,
+    pub locator: &'a str,
     pub tracked_ref: &'a str,
     pub resolved_commit_sha: &'a str,
     pub member_path_hint: Option<&'a str>,
@@ -422,20 +432,23 @@ pub struct StoredGithubSource {
 
 /// Lifecycle 组 Plan 时只接收同一个 SQLite 快照中的 Fresh Catalog 与本地关联状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredGithubInstallSource {
+pub struct StoredSourceInstallSource {
     pub id: String,
-    pub owner: String,
-    pub repository: String,
+    pub kind: String,
+    pub canonical_identity: String,
+    pub owner: Option<String>,
+    pub repository: Option<String>,
     pub display_name: String,
-    pub tracked_ref: String,
+    pub locator: String,
+    pub tracked_ref: Option<String>,
     pub catalog_generation: i64,
-    pub catalog_commit_sha: String,
-    pub catalog_members: Vec<StoredGithubInstallCatalogMember>,
-    pub bundle: Option<StoredGithubInstallBundle>,
+    pub catalog_marker: String,
+    pub catalog_members: Vec<StoredSourceInstallCatalogMember>,
+    pub bundle: Option<StoredSourceInstallBundle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredGithubInstallCatalogMember {
+pub struct StoredSourceInstallCatalogMember {
     pub id: String,
     pub relative_path: String,
     pub skill_name: Option<String>,
@@ -447,16 +460,16 @@ pub struct StoredGithubInstallCatalogMember {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredGithubInstallBundle {
+pub struct StoredSourceInstallBundle {
     pub id: String,
     pub display_name: String,
     pub current_target: String,
-    pub adopted_commit_sha: Option<String>,
-    pub members: Vec<StoredGithubInstallBundleMember>,
+    pub adopted_marker: Option<String>,
+    pub members: Vec<StoredSourceInstallBundleMember>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredGithubInstallBundleMember {
+pub struct StoredSourceInstallBundleMember {
     pub id: String,
     pub skill_name: String,
     pub description: String,
@@ -474,6 +487,26 @@ pub struct NewSourceCatalogMember<'a> {
     pub selectable: bool,
     pub validation_errors: &'a [String],
     pub warnings: &'a [String],
+}
+
+/// Archive、URL 与 Editable Local 在内容验证后一次性保存 Source 与 Fresh Catalog。
+pub struct NewManualSource<'a> {
+    pub id: &'a str,
+    pub kind: &'a str,
+    pub canonical_identity: &'a str,
+    pub display_name: &'a str,
+    pub locator: &'a str,
+    pub filesystem_device: Option<u64>,
+    pub filesystem_inode: Option<u64>,
+    pub catalog_marker: &'a str,
+    pub members: &'a [NewSourceCatalogMember<'a>],
+    pub saved_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedManualSource {
+    pub source_id: String,
+    pub catalog_generation: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1247,12 +1280,12 @@ impl Storage {
             .map_err(StorageError::ReadSources)?;
         let mut statement = transaction
             .prepare(
-                "SELECT source.id, source.canonical_identity, source.display_name,
-                        source.repository_url, source.tracked_ref, source.member_path_hint,
-                        source.catalog_status, source.catalog_commit_sha,
+                "SELECT source.id, source.kind, source.canonical_identity, source.display_name,
+                        source.locator, source.tracked_ref, source.member_path_hint,
+                        source.catalog_status, source.catalog_marker,
                         source.catalog_fetched_at, source.last_reload_at,
                         source.last_reload_error, source.catalog_generation,
-                        link.bundle_id, link.adopted_commit_sha
+                        link.bundle_id, link.adopted_marker
                  FROM sources AS source
                  LEFT JOIN source_bundle_links AS link ON link.source_id = source.id
                  ORDER BY source.sort_order, source.id",
@@ -1267,14 +1300,15 @@ impl Storage {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<i64>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, i64>(12)?,
                     row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
                 ))
             })
             .map_err(StorageError::ReadSources)?;
@@ -1286,37 +1320,41 @@ impl Storage {
         for row in rows {
             let (
                 id,
+                kind,
                 canonical_identity,
                 display_name,
-                repository_url,
+                locator,
                 tracked_ref,
                 member_path_hint,
                 catalog_status,
-                catalog_commit_sha,
+                catalog_marker,
                 catalog_fetched_at,
                 last_reload_at,
                 last_reload_error,
                 catalog_generation,
                 bundle_id,
-                adopted_commit_sha,
+                adopted_marker,
             ) = row;
+            let kind = SourceKind::from_str(&kind)
+                .ok_or_else(|| StorageError::UnknownSourceKind(kind.clone()))?;
             let catalog_status = SourceCatalogStatus::from_str(&catalog_status)
                 .ok_or_else(|| StorageError::UnknownSourceCatalogStatus(catalog_status.clone()))?;
             let members = read_source_catalog_members_from(&transaction, &id, catalog_generation)?;
             sources.push(SourceSummary {
                 id,
+                kind,
                 canonical_identity,
                 display_name,
-                repository_url,
+                locator,
                 tracked_ref,
                 member_path_hint,
                 catalog_status,
-                catalog_commit_sha,
+                catalog_marker,
                 catalog_fetched_at,
                 last_reload_at,
                 last_reload_error,
                 bundle_id,
-                adopted_commit_sha,
+                adopted_marker,
                 members,
             });
         }
@@ -1331,7 +1369,9 @@ impl Storage {
     ) -> Result<Option<String>, StorageError> {
         self.connection
             .query_row(
-                "SELECT tracked_ref FROM sources WHERE canonical_identity = ?1",
+                "SELECT tracked_ref
+                 FROM sources
+                 WHERE canonical_identity = ?1 AND kind = 'github'",
                 [canonical_identity],
                 |row| row.get(0),
             )
@@ -1344,7 +1384,9 @@ impl Storage {
             .connection
             .prepare(
                 "SELECT id, canonical_identity, owner, repository, display_name, tracked_ref
-                 FROM sources ORDER BY sort_order, id",
+                 FROM sources
+                 WHERE kind = 'github'
+                 ORDER BY sort_order, id",
             )
             .map_err(StorageError::ReadSources)?;
         let rows = statement
@@ -1358,7 +1400,7 @@ impl Storage {
         self.connection
             .query_row(
                 "SELECT id, canonical_identity, owner, repository, display_name, tracked_ref
-                 FROM sources WHERE id = ?1",
+                 FROM sources WHERE id = ?1 AND kind = 'github'",
                 [source_id],
                 stored_github_source_from_row,
             )
@@ -1367,16 +1409,16 @@ impl Storage {
             .ok_or(StorageError::SourceNotFound)
     }
 
-    pub fn read_github_install_source(
+    pub fn read_source_install_source(
         &mut self,
         source_id: &str,
-    ) -> Result<StoredGithubInstallSource, StorageError> {
+    ) -> Result<StoredSourceInstallSource, StorageError> {
         // Source、Catalog、Bundle 与成员关系必须来自同一个读快照。
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(StorageError::ReadSources)?;
-        let source = read_github_install_source_from(&transaction, source_id)?;
+        let source = read_source_install_source_from(&transaction, source_id)?;
         transaction.commit().map_err(StorageError::ReadSources)?;
         Ok(source)
     }
@@ -1407,7 +1449,9 @@ impl Storage {
             .map_err(StorageError::SaveSourceCatalog)?;
         let (current_ref, current_generation) = transaction
             .query_row(
-                "SELECT tracked_ref, catalog_generation FROM sources WHERE id = ?1",
+                "SELECT tracked_ref, catalog_generation
+                 FROM sources
+                 WHERE id = ?1 AND kind = 'github'",
                 [source_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
@@ -1456,9 +1500,9 @@ impl Storage {
             .execute(
                 "UPDATE sources
                  SET catalog_status = 'fresh', catalog_generation = ?2,
-                     catalog_commit_sha = ?3, catalog_fetched_at = ?4,
+                     catalog_marker = ?3, catalog_fetched_at = ?4,
                      last_reload_at = ?4, last_reload_error = NULL, updated_at = ?4
-                 WHERE id = ?1 AND tracked_ref = ?5",
+                 WHERE id = ?1 AND tracked_ref = ?5 AND kind = 'github'",
                 params![
                     source_id,
                     next_generation,
@@ -1476,7 +1520,7 @@ impl Storage {
             .map_err(StorageError::SaveSourceCatalog)
     }
 
-    /// Reload 失败只更新结果状态；最近一次成功目录和 commit 始终保留。
+    /// Reload 失败只更新结果状态；最近一次成功目录和 marker 始终保留。
     pub fn save_source_catalog_failure(
         &mut self,
         source_id: &str,
@@ -1496,7 +1540,7 @@ impl Storage {
                          ELSE 'unloaded'
                      END,
                      last_reload_at = ?3, last_reload_error = ?4, updated_at = ?3
-                 WHERE id = ?1 AND tracked_ref = ?2",
+                 WHERE id = ?1 AND tracked_ref = ?2 AND kind = 'github'",
                 params![source_id, expected_tracked_ref, failed_at, error],
             )
             .map_err(StorageError::SaveSourceCatalog)?;
@@ -1506,6 +1550,188 @@ impl Storage {
         transaction
             .commit()
             .map_err(StorageError::SaveSourceCatalog)
+    }
+
+    /// 手动来源在内容已验证后整体写入；相同 canonical identity 只刷新现有 Source。
+    pub fn save_manual_source_with_catalog(
+        &mut self,
+        source: NewManualSource<'_>,
+    ) -> Result<SavedManualSource, StorageError> {
+        validate_new_manual_source(&source)?;
+        let filesystem_device = source
+            .filesystem_device
+            .map(filesystem_identity_to_sql)
+            .transpose()?;
+        let filesystem_inode = source
+            .filesystem_inode
+            .map(filesystem_identity_to_sql)
+            .transpose()?;
+        let encoded_members = source
+            .members
+            .iter()
+            .map(|member| {
+                Ok((
+                    serde_json::to_string(member.validation_errors)
+                        .map_err(StorageError::SerializeSourceCatalogMetadata)?,
+                    serde_json::to_string(member.warnings)
+                        .map_err(StorageError::SerializeSourceCatalogMetadata)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        let existing = transaction
+            .query_row(
+                "SELECT id, kind, catalog_generation, locator
+                 FROM sources
+                 WHERE canonical_identity = ?1",
+                [source.canonical_identity],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::SaveSource)?;
+        let (source_id, catalog_generation) =
+            if let Some((source_id, stored_kind, current_generation, stored_locator)) = existing {
+                if stored_kind != source.kind {
+                    return Err(StorageError::InvalidSourceDefinition);
+                }
+                // Editable Local 的 inode 可跨重命名保持不变，但 1.0 尚未提供明确的重新关联流程。
+                if stored_kind == "editable_local" && stored_locator != source.locator {
+                    return Err(StorageError::EditableLocalPathChanged);
+                }
+                if bundle_or_source_write_is_blocked(&transaction, None, Some(&source_id))? {
+                    return Err(StorageError::ManagedObjectBlocked);
+                }
+                let next_generation = current_generation
+                    .checked_add(1)
+                    .ok_or(StorageError::SourceCatalogStateChanged)?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE sources
+                         SET display_name = ?2, locator = ?3,
+                             filesystem_device = ?4, filesystem_inode = ?5,
+                             updated_at = ?6
+                         WHERE id = ?1 AND kind = ?7",
+                        params![
+                            source_id,
+                            source.display_name,
+                            source.locator,
+                            filesystem_device,
+                            filesystem_inode,
+                            source.saved_at,
+                            source.kind,
+                        ],
+                    )
+                    .map_err(StorageError::SaveSource)?;
+                if changed != 1 {
+                    return Err(StorageError::SourceCatalogStateChanged);
+                }
+                (source_id, next_generation)
+            } else {
+                let sort_order = transaction
+                    .query_row(
+                        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM sources",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(StorageError::SaveSource)?;
+                transaction
+                    .execute(
+                        "INSERT INTO sources (
+                            id, kind, canonical_identity, owner, repository,
+                            display_name, locator, tracked_ref, member_path_hint,
+                            filesystem_device, filesystem_inode, sort_order,
+                            created_at, updated_at
+                         ) VALUES (
+                            ?1, ?2, ?3, NULL, NULL, ?4, ?5, NULL, NULL,
+                            ?6, ?7, ?8, ?9, ?9
+                         )",
+                        params![
+                            source.id,
+                            source.kind,
+                            source.canonical_identity,
+                            source.display_name,
+                            source.locator,
+                            filesystem_device,
+                            filesystem_inode,
+                            sort_order,
+                            source.saved_at,
+                        ],
+                    )
+                    .map_err(StorageError::SaveSource)?;
+                (source.id.to_owned(), 1)
+            };
+
+        transaction
+            .execute(
+                "DELETE FROM source_catalog_members WHERE source_id = ?1",
+                [&source_id],
+            )
+            .map_err(StorageError::SaveSourceCatalog)?;
+        for (sort_order, (member, (validation_errors, warnings))) in source
+            .members
+            .iter()
+            .zip(encoded_members.iter())
+            .enumerate()
+        {
+            transaction
+                .execute(
+                    "INSERT INTO source_catalog_members (
+                        id, source_id, catalog_generation, relative_path,
+                        skill_name, description, content_fingerprint, selectable,
+                        validation_errors_json, warnings_json, sort_order
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        member.id,
+                        source_id,
+                        catalog_generation,
+                        member.relative_path,
+                        member.skill_name,
+                        member.description,
+                        member.content_fingerprint,
+                        member.selectable,
+                        validation_errors,
+                        warnings,
+                        sort_order as i64,
+                    ],
+                )
+                .map_err(StorageError::SaveSourceCatalog)?;
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE sources
+                 SET catalog_status = 'fresh', catalog_generation = ?2,
+                     catalog_marker = ?3, catalog_fetched_at = ?4,
+                     last_reload_at = ?4, last_reload_error = NULL, updated_at = ?4
+                 WHERE id = ?1 AND kind = ?5",
+                params![
+                    source_id,
+                    catalog_generation,
+                    source.catalog_marker,
+                    source.saved_at,
+                    source.kind,
+                ],
+            )
+            .map_err(StorageError::SaveSourceCatalog)?;
+        if changed != 1 {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveSourceCatalog)?;
+        Ok(SavedManualSource {
+            source_id,
+            catalog_generation,
+        })
     }
 
     /// 已验证 GitHub 输入要么复用 canonical Source，要么签发一次显式 Ref 变更确认。
@@ -1523,7 +1749,7 @@ impl Storage {
         let existing = transaction
             .query_row(
                 "SELECT id, display_name, tracked_ref
-                 FROM sources WHERE canonical_identity = ?1",
+                 FROM sources WHERE canonical_identity = ?1 AND kind = 'github'",
                 [source.canonical_identity],
                 |row| {
                     Ok((
@@ -1542,14 +1768,14 @@ impl Storage {
                     .execute(
                         "UPDATE sources
                          SET owner = ?2, repository = ?3, display_name = ?4,
-                             repository_url = ?5, member_path_hint = ?6, updated_at = ?7
-                         WHERE id = ?1 AND tracked_ref = ?8",
+                             locator = ?5, member_path_hint = ?6, updated_at = ?7
+                         WHERE id = ?1 AND tracked_ref = ?8 AND kind = 'github'",
                         params![
                             source_id,
                             source.owner,
                             source.repository,
                             source.display_name,
-                            source.repository_url,
+                            source.locator,
                             source.member_path_hint,
                             now,
                             current_ref,
@@ -1605,7 +1831,7 @@ impl Storage {
                 .execute(
                     "INSERT INTO sources (
                         id, kind, canonical_identity, owner, repository,
-                        display_name, repository_url, tracked_ref, member_path_hint,
+                        display_name, locator, tracked_ref, member_path_hint,
                         sort_order, created_at, updated_at
                      ) VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
                     params![
@@ -1614,7 +1840,7 @@ impl Storage {
                         source.owner,
                         source.repository,
                         source.display_name,
-                        source.repository_url,
+                        source.locator,
                         source.tracked_ref,
                         source.member_path_hint,
                         sort_order,
@@ -1680,7 +1906,7 @@ impl Storage {
                          ELSE NULL
                      END,
                      updated_at = ?4
-                 WHERE id = ?1 AND tracked_ref = ?5",
+                 WHERE id = ?1 AND tracked_ref = ?5 AND kind = 'github'",
                 params![source_id, candidate_ref, member_path_hint, now, current_ref,],
             )
             .map_err(StorageError::SaveSource)?;
@@ -1956,7 +2182,7 @@ impl Storage {
         mount_object_is_blocked(&self.connection, member_id, target_path)
     }
 
-    pub(crate) fn github_install_object_is_blocked(
+    pub(crate) fn source_install_object_is_blocked(
         &self,
         source_id: &str,
         bundle_id: Option<&str>,
@@ -2809,8 +3035,8 @@ impl Storage {
                 "INSERT INTO install_plans (
                     id, kind, install_mode, input_path, input_device, input_inode,
                     input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
-                    source_catalog_generation, source_commit_sha, expected_current_target,
-                    expected_adopted_commit_sha, bundle_id, bundle_display_name,
+                    source_catalog_generation, source_marker, expected_current_target,
+                    expected_adopted_marker, bundle_id, bundle_display_name,
                     warnings_json, created_at, expires_at, status
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
@@ -2828,9 +3054,9 @@ impl Storage {
                     plan.source_id,
                     plan.source_tracked_ref,
                     plan.source_catalog_generation,
-                    plan.source_commit_sha,
+                    plan.source_marker,
                     plan.expected_current_target,
-                    plan.expected_adopted_commit_sha,
+                    plan.expected_adopted_marker,
                     plan.bundle_id,
                     plan.bundle_display_name,
                     warnings,
@@ -2890,7 +3116,7 @@ impl Storage {
             .prepare(
                 "SELECT id FROM install_plans
                  WHERE status = 'pending'
-                   AND kind = 'github_snapshot'
+                   AND kind = 'source_snapshot'
                    AND expires_at <= ?1
                  ORDER BY created_at, id",
             )
@@ -2908,7 +3134,7 @@ impl Storage {
             .collect()
     }
 
-    pub fn read_pending_github_install_plans_for_source(
+    pub fn read_pending_source_install_plans_for_source(
         &self,
         source_id: &str,
     ) -> Result<Vec<StoredInstallPlan>, StorageError> {
@@ -2917,7 +3143,7 @@ impl Storage {
             .prepare(
                 "SELECT id FROM install_plans
                  WHERE status = 'pending'
-                   AND kind = 'github_snapshot'
+                   AND kind = 'source_snapshot'
                    AND source_id = ?1
                  ORDER BY created_at, id",
             )
@@ -3378,7 +3604,7 @@ impl Storage {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT display_name, repository_url
+                "SELECT display_name, locator
                  FROM sources
                  ORDER BY sort_order, id",
             )
@@ -5037,6 +5263,55 @@ fn complete_mount_transaction(
     ensure_one_mount_row(changed, transaction_id)
 }
 
+fn validate_new_manual_source(source: &NewManualSource<'_>) -> Result<(), StorageError> {
+    let identity_is_valid = is_single_path_component(source.id)
+        && !source.canonical_identity.trim().is_empty()
+        && !source.display_name.trim().is_empty()
+        && !source.catalog_marker.trim().is_empty()
+        && !source.members.is_empty();
+    // canonical identity 必须能从来源类型的稳定事实重建，避免同一来源被重复登记。
+    let canonical_identity_is_valid = match source.kind {
+        "archive" => source.canonical_identity == format!("archive:{}", source.locator),
+        "direct_url" => source.canonical_identity == format!("direct-url:{}", source.locator),
+        "editable_local" => source
+            .filesystem_device
+            .zip(source.filesystem_inode)
+            .is_some_and(|(device, inode)| {
+                source.canonical_identity == format!("editable-local:{device}:{inode}")
+            }),
+        _ => false,
+    };
+    let location_is_valid = match source.kind {
+        "archive" => {
+            is_normalized_absolute_path(source.locator)
+                && source.filesystem_device.is_none()
+                && source.filesystem_inode.is_none()
+        }
+        "direct_url" => {
+            source.locator.starts_with("https://")
+                && !source.locator.chars().any(char::is_whitespace)
+                && source.filesystem_device.is_none()
+                && source.filesystem_inode.is_none()
+        }
+        "editable_local" => {
+            is_normalized_absolute_path(source.locator)
+                && source.filesystem_device.is_some()
+                && source.filesystem_inode.is_some()
+        }
+        _ => false,
+    };
+    let members_are_valid = source.members.iter().all(|member| {
+        is_single_path_component(member.id)
+            && (member.relative_path.is_empty()
+                || is_normalized_relative_path(member.relative_path))
+    });
+    if identity_is_valid && canonical_identity_is_valid && location_is_valid && members_are_valid {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidSourceDefinition)
+    }
+}
+
 fn validate_new_install_plan_contract(plan: &NewInstallPlan<'_>) -> Result<(), StorageError> {
     if plan.candidates.is_empty() {
         return Err(StorageError::EmptyInstallPlanCandidates);
@@ -5049,9 +5324,9 @@ fn validate_new_install_plan_contract(plan: &NewInstallPlan<'_>) -> Result<(), S
         plan.source_id,
         plan.source_tracked_ref,
         plan.source_catalog_generation,
-        plan.source_commit_sha,
+        plan.source_marker,
         plan.expected_current_target,
-        plan.expected_adopted_commit_sha,
+        plan.expected_adopted_marker,
         plan.id,
         plan.bundle_id,
         plan.bundle_display_name,
@@ -5085,9 +5360,9 @@ fn validate_stored_install_plan_contract(plan: &StoredInstallPlan) -> Result<(),
         plan.source_id.as_deref(),
         plan.source_tracked_ref.as_deref(),
         plan.source_catalog_generation,
-        plan.source_commit_sha.as_deref(),
+        plan.source_marker.as_deref(),
         plan.expected_current_target.as_deref(),
-        plan.expected_adopted_commit_sha.as_deref(),
+        plan.expected_adopted_marker.as_deref(),
         &plan.id,
         &plan.bundle_id,
         &plan.bundle_display_name,
@@ -5124,9 +5399,9 @@ fn validate_install_plan_shape(
     source_id: Option<&str>,
     source_tracked_ref: Option<&str>,
     source_catalog_generation: Option<i64>,
-    source_commit_sha: Option<&str>,
+    source_marker: Option<&str>,
     expected_current_target: Option<&str>,
-    expected_adopted_commit_sha: Option<&str>,
+    expected_adopted_marker: Option<&str>,
     plan_id: &str,
     bundle_id: &str,
     bundle_display_name: &str,
@@ -5137,31 +5412,31 @@ fn validate_install_plan_shape(
     let source_values_are_absent = source_id.is_none()
         && source_tracked_ref.is_none()
         && source_catalog_generation.is_none()
-        && source_commit_sha.is_none()
+        && source_marker.is_none()
         && expected_current_target.is_none()
-        && expected_adopted_commit_sha.is_none();
+        && expected_adopted_marker.is_none();
     let folder_is_valid = kind == "folder_snapshot"
         && install_mode == "create"
         && input_path.is_some_and(is_normalized_absolute_path)
         && snapshot_relative_path.is_none()
         && source_values_are_absent;
-    let github_source_is_valid = source_id.is_some_and(is_single_path_component)
-        && source_tracked_ref.is_some_and(|value| !value.is_empty())
+    let source_snapshot_is_valid = source_id.is_some_and(is_single_path_component)
+        && source_tracked_ref.is_none_or(|value| !value.is_empty())
         && source_catalog_generation.is_some_and(|generation| generation > 0)
-        && source_commit_sha.is_some_and(|value| !value.is_empty())
+        && source_marker.is_some_and(|value| !value.is_empty())
         && snapshot_relative_path.is_some_and(is_normalized_relative_path)
         && input_path.is_none();
-    let github_mode_is_valid = match install_mode {
-        "create" => expected_current_target.is_none() && expected_adopted_commit_sha.is_none(),
+    let source_mode_is_valid = match install_mode {
+        "create" => expected_current_target.is_none() && expected_adopted_marker.is_none(),
         "supplement" => {
             expected_current_target.is_some_and(is_safe_current_target)
-                && expected_adopted_commit_sha.is_none_or(|value| !value.is_empty())
+                && expected_adopted_marker.is_none_or(|value| !value.is_empty())
         }
         _ => false,
     };
     if common_is_valid
         && (folder_is_valid
-            || (kind == "github_snapshot" && github_source_is_valid && github_mode_is_valid))
+            || (kind == "source_snapshot" && source_snapshot_is_valid && source_mode_is_valid))
     {
         Ok(())
     } else {
@@ -5192,7 +5467,7 @@ fn valid_install_candidate_shape(
         && source_path_is_valid
         && (!selectable || metadata_is_complete)
         && (!preserve_existing
-            || (plan_kind == "github_snapshot"
+            || (plan_kind == "source_snapshot"
                 && install_mode == "supplement"
                 && !selectable
                 && default_selected
@@ -5222,10 +5497,10 @@ fn validate_install_plan_source_contract(
         .source_id
         .as_deref()
         .ok_or(StorageError::InvalidInstallPlan)?;
-    let source = read_github_install_source_from(connection, source_id)?;
-    if plan.source_tracked_ref.as_deref() != Some(source.tracked_ref.as_str())
+    let source = read_source_install_source_from(connection, source_id)?;
+    if plan.source_tracked_ref != source.tracked_ref
         || plan.source_catalog_generation != Some(source.catalog_generation)
-        || plan.source_commit_sha.as_deref() != Some(source.catalog_commit_sha.as_str())
+        || plan.source_marker.as_deref() != Some(source.catalog_marker.as_str())
     {
         return Err(StorageError::SourceCatalogStateChanged);
     }
@@ -5252,7 +5527,7 @@ fn validate_install_plan_source_contract(
             if bundle.id != plan.bundle_id
                 || bundle.display_name != plan.bundle_display_name
                 || Some(bundle.current_target.as_str()) != plan.expected_current_target.as_deref()
-                || bundle.adopted_commit_sha != plan.expected_adopted_commit_sha
+                || bundle.adopted_marker != plan.expected_adopted_marker
             {
                 return Err(StorageError::SourceBundleStateConflict);
             }
@@ -5261,12 +5536,12 @@ fn validate_install_plan_source_contract(
         }
         _ => return Err(StorageError::InvalidInstallPlan),
     };
-    validate_github_install_candidates(plan, &source.catalog_members, bundle)
+    validate_source_install_candidates(plan, &source.catalog_members, bundle)
 }
 
 fn validate_preserved_install_members(
     plan: &StoredInstallPlan,
-    bundle: &StoredGithubInstallBundle,
+    bundle: &StoredSourceInstallBundle,
 ) -> Result<(), StorageError> {
     let preserved = plan
         .candidates
@@ -5295,10 +5570,10 @@ fn validate_preserved_install_members(
     Ok(())
 }
 
-fn validate_github_install_candidates(
+fn validate_source_install_candidates(
     plan: &StoredInstallPlan,
-    catalog_members: &[StoredGithubInstallCatalogMember],
-    bundle: Option<&StoredGithubInstallBundle>,
+    catalog_members: &[StoredSourceInstallCatalogMember],
+    bundle: Option<&StoredSourceInstallBundle>,
 ) -> Result<(), StorageError> {
     let existing_paths = bundle
         .into_iter()
@@ -5918,8 +6193,8 @@ fn read_install_plan_from(
             "SELECT
                 id, kind, install_mode, input_path, input_device, input_inode,
                 input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
-                source_catalog_generation, source_commit_sha, expected_current_target,
-                expected_adopted_commit_sha, bundle_id, bundle_display_name, expires_at, status
+                source_catalog_generation, source_marker, expected_current_target,
+                expected_adopted_marker, bundle_id, bundle_display_name, expires_at, status
              FROM install_plans
              WHERE id = ?1",
             [plan_id],
@@ -5936,9 +6211,9 @@ fn read_install_plan_from(
                     source_id: row.get(8)?,
                     source_tracked_ref: row.get(9)?,
                     source_catalog_generation: row.get(10)?,
-                    source_commit_sha: row.get(11)?,
+                    source_marker: row.get(11)?,
                     expected_current_target: row.get(12)?,
-                    expected_adopted_commit_sha: row.get(13)?,
+                    expected_adopted_marker: row.get(13)?,
                     bundle_id: row.get(14)?,
                     bundle_display_name: row.get(15)?,
                     expires_at: row.get(16)?,
@@ -5968,9 +6243,9 @@ fn read_install_plan_from(
         source_id: row.source_id,
         source_tracked_ref: row.source_tracked_ref,
         source_catalog_generation: row.source_catalog_generation,
-        source_commit_sha: row.source_commit_sha,
+        source_marker: row.source_marker,
         expected_current_target: row.expected_current_target,
-        expected_adopted_commit_sha: row.expected_adopted_commit_sha,
+        expected_adopted_marker: row.expected_adopted_marker,
         bundle_id: row.bundle_id,
         bundle_display_name: row.bundle_display_name,
         expires_at: row.expires_at,
@@ -6057,26 +6332,29 @@ fn stored_github_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<St
     })
 }
 
-fn read_github_install_source_from(
+fn read_source_install_source_from(
     connection: &Connection,
     source_id: &str,
-) -> Result<StoredGithubInstallSource, StorageError> {
+) -> Result<StoredSourceInstallSource, StorageError> {
     let source = connection
         .query_row(
-            "SELECT owner, repository, display_name, tracked_ref, catalog_status,
-                    catalog_generation, catalog_commit_sha
+            "SELECT kind, canonical_identity, owner, repository, display_name,
+                    locator, tracked_ref, catalog_status, catalog_generation, catalog_marker
              FROM sources
-             WHERE id = ?1 AND kind = 'github'",
+             WHERE id = ?1",
             [source_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             },
         )
@@ -6084,30 +6362,40 @@ fn read_github_install_source_from(
         .map_err(StorageError::ReadSources)?
         .ok_or(StorageError::SourceNotFound)?;
     let (
+        kind,
+        canonical_identity,
         owner,
         repository,
         display_name,
+        locator,
         tracked_ref,
         catalog_status,
         catalog_generation,
-        catalog_commit_sha,
+        catalog_marker,
     ) = source;
-    let Some(catalog_commit_sha) = catalog_commit_sha else {
+    let Some(catalog_marker) = catalog_marker else {
         return Err(StorageError::SourceCatalogStateChanged);
     };
     if catalog_status != "fresh"
         || catalog_generation <= 0
-        || tracked_ref.is_empty()
-        || catalog_commit_sha.is_empty()
+        || catalog_marker.is_empty()
+        || (kind == "github"
+            && tracked_ref
+                .as_deref()
+                .is_none_or(|tracked_ref| tracked_ref.is_empty()))
+        || (kind == "github"
+            && (owner.as_deref().is_none_or(str::is_empty)
+                || repository.as_deref().is_none_or(str::is_empty)))
+        || (kind != "github" && (owner.is_some() || repository.is_some() || tracked_ref.is_some()))
     {
         return Err(StorageError::SourceCatalogStateChanged);
     }
 
     let catalog_members =
-        read_github_install_catalog_members_from(connection, source_id, catalog_generation)?;
+        read_source_install_catalog_members_from(connection, source_id, catalog_generation)?;
     let linked = connection
         .query_row(
-            "SELECT bundle_id, adopted_commit_sha
+            "SELECT bundle_id, adopted_marker
              FROM source_bundle_links
              WHERE source_id = ?1",
             [source_id],
@@ -6116,29 +6404,32 @@ fn read_github_install_source_from(
         .optional()
         .map_err(StorageError::ReadSources)?;
     let bundle = linked
-        .map(|(bundle_id, adopted_commit_sha)| {
-            read_github_install_bundle_from(connection, source_id, &bundle_id, adopted_commit_sha)
+        .map(|(bundle_id, adopted_marker)| {
+            read_source_install_bundle_from(connection, source_id, &bundle_id, adopted_marker)
         })
         .transpose()?;
 
-    Ok(StoredGithubInstallSource {
+    Ok(StoredSourceInstallSource {
         id: source_id.to_owned(),
+        kind,
+        canonical_identity,
         owner,
         repository,
         display_name,
+        locator,
         tracked_ref,
         catalog_generation,
-        catalog_commit_sha,
+        catalog_marker,
         catalog_members,
         bundle,
     })
 }
 
-fn read_github_install_catalog_members_from(
+fn read_source_install_catalog_members_from(
     connection: &Connection,
     source_id: &str,
     catalog_generation: i64,
-) -> Result<Vec<StoredGithubInstallCatalogMember>, StorageError> {
+) -> Result<Vec<StoredSourceInstallCatalogMember>, StorageError> {
     let mut statement = connection
         .prepare(
             "SELECT id, relative_path, skill_name, description, content_fingerprint,
@@ -6179,7 +6470,7 @@ fn read_github_install_catalog_members_from(
         {
             return Err(StorageError::SourceCatalogStateChanged);
         }
-        members.push(StoredGithubInstallCatalogMember {
+        members.push(StoredSourceInstallCatalogMember {
             id,
             relative_path,
             skill_name,
@@ -6195,12 +6486,12 @@ fn read_github_install_catalog_members_from(
     Ok(members)
 }
 
-fn read_github_install_bundle_from(
+fn read_source_install_bundle_from(
     connection: &Connection,
     source_id: &str,
     bundle_id: &str,
-    adopted_commit_sha: Option<String>,
-) -> Result<StoredGithubInstallBundle, StorageError> {
+    adopted_marker: Option<String>,
+) -> Result<StoredSourceInstallBundle, StorageError> {
     let bundle = connection
         .query_row(
             "SELECT display_name, managed_directory, current_target
@@ -6276,7 +6567,7 @@ fn read_github_install_bundle_from(
         {
             return Err(StorageError::SourceBundleStateConflict);
         }
-        members.push(StoredGithubInstallBundleMember {
+        members.push(StoredSourceInstallBundleMember {
             id,
             skill_name,
             description,
@@ -6296,11 +6587,11 @@ fn read_github_install_bundle_from(
     if members.is_empty() || source_link_count != members.len() as i64 {
         return Err(StorageError::SourceBundleStateConflict);
     }
-    Ok(StoredGithubInstallBundle {
+    Ok(StoredSourceInstallBundle {
         id: bundle_id.to_owned(),
         display_name,
         current_target,
-        adopted_commit_sha,
+        adopted_marker,
         members,
     })
 }
@@ -6604,22 +6895,22 @@ fn finalize_install_create_rows(
     for candidate in selected {
         persist_install_member(transaction, &plan.bundle_id, candidate, now)?;
     }
-    if plan.kind == "github_snapshot" {
+    if plan.kind == "source_snapshot" {
         let source_id = plan
             .source_id
             .as_deref()
             .ok_or(StorageError::InvalidInstallPlan)?;
-        let source_commit_sha = plan
-            .source_commit_sha
+        let source_marker = plan
+            .source_marker
             .as_deref()
             .ok_or(StorageError::InvalidInstallPlan)?;
         transaction
             .execute(
                 "INSERT INTO source_bundle_links (
-                    source_id, bundle_id, adopted_commit_sha, linked_at
+                    source_id, bundle_id, adopted_marker, linked_at
                  ) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(source_id) DO NOTHING",
-                params![source_id, plan.bundle_id, source_commit_sha, now],
+                params![source_id, plan.bundle_id, source_marker, now],
             )
             .map_err(StorageError::SaveManagedBundle)?;
         for candidate in selected {
@@ -6637,7 +6928,7 @@ fn finalize_install_supplement_rows(
     current_target: &str,
     now: i64,
 ) -> Result<(), StorageError> {
-    if plan.kind != "github_snapshot" {
+    if plan.kind != "source_snapshot" {
         return Err(StorageError::InvalidInstallPlan);
     }
     let source_id = plan
@@ -6650,7 +6941,7 @@ fn finalize_install_supplement_rows(
         .ok_or(StorageError::InvalidInstallPlan)?;
     let source_baseline = transaction
         .query_row(
-            "SELECT bundle_id, adopted_commit_sha
+            "SELECT bundle_id, adopted_marker
              FROM source_bundle_links
              WHERE source_id = ?1",
             [source_id],
@@ -6659,12 +6950,7 @@ fn finalize_install_supplement_rows(
         .optional()
         .map_err(StorageError::SaveManagedBundle)?
         .ok_or(StorageError::SourceBundleStateConflict)?;
-    if source_baseline
-        != (
-            plan.bundle_id.clone(),
-            plan.expected_adopted_commit_sha.clone(),
-        )
-    {
+    if source_baseline != (plan.bundle_id.clone(), plan.expected_adopted_marker.clone()) {
         return Err(StorageError::SourceBundleStateConflict);
     }
     let changed = transaction
@@ -6780,14 +7066,14 @@ fn ensure_source_install_state_matches(
         .source_id
         .as_deref()
         .ok_or(StorageError::InvalidInstallPlan)?;
-    let expected_adopted_commit_sha = if plan.install_mode == "create" {
-        plan.source_commit_sha.clone()
+    let expected_adopted_marker = if plan.install_mode == "create" {
+        plan.source_marker.clone()
     } else {
-        plan.expected_adopted_commit_sha.clone()
+        plan.expected_adopted_marker.clone()
     };
     let source_bundle = transaction
         .query_row(
-            "SELECT bundle_id, adopted_commit_sha
+            "SELECT bundle_id, adopted_marker
              FROM source_bundle_links
              WHERE source_id = ?1",
             [source_id],
@@ -6795,7 +7081,7 @@ fn ensure_source_install_state_matches(
         )
         .optional()
         .map_err(StorageError::SaveManagedBundle)?;
-    if source_bundle != Some((plan.bundle_id.clone(), expected_adopted_commit_sha)) {
+    if source_bundle != Some((plan.bundle_id.clone(), expected_adopted_marker)) {
         return Err(StorageError::ManagedStateConflict);
     }
     let link_count = transaction
@@ -7297,9 +7583,9 @@ mod tests {
                 source_id: None,
                 source_tracked_ref: None,
                 source_catalog_generation: None,
-                source_commit_sha: None,
+                source_marker: None,
                 expected_current_target: None,
-                expected_adopted_commit_sha: None,
+                expected_adopted_marker: None,
                 bundle_id,
                 bundle_display_name: bundle_id,
                 warnings: &[],
@@ -7382,7 +7668,7 @@ mod tests {
         storage
             .save_install_plan(NewInstallPlan {
                 id: plan_id,
-                kind: "github_snapshot",
+                kind: "source_snapshot",
                 install_mode: "create",
                 input_path: None,
                 input_device: 10,
@@ -7392,9 +7678,9 @@ mod tests {
                 source_id: Some(TEST_GITHUB_SOURCE_ID),
                 source_tracked_ref: Some("main"),
                 source_catalog_generation: Some(1),
-                source_commit_sha: Some(TEST_GITHUB_COMMIT_ONE),
+                source_marker: Some(TEST_GITHUB_COMMIT_ONE),
                 expected_current_target: None,
-                expected_adopted_commit_sha: None,
+                expected_adopted_marker: None,
                 bundle_id,
                 bundle_display_name: "anthropics/skills",
                 warnings: &[],
@@ -7441,7 +7727,7 @@ mod tests {
         storage
             .save_install_plan(NewInstallPlan {
                 id: plan_id,
-                kind: "github_snapshot",
+                kind: "source_snapshot",
                 install_mode: "supplement",
                 input_path: None,
                 input_device: 11,
@@ -7451,9 +7737,9 @@ mod tests {
                 source_id: Some(TEST_GITHUB_SOURCE_ID),
                 source_tracked_ref: Some("main"),
                 source_catalog_generation: Some(2),
-                source_commit_sha: Some(TEST_GITHUB_COMMIT_TWO),
+                source_marker: Some(TEST_GITHUB_COMMIT_TWO),
                 expected_current_target: Some(expected_current_target),
-                expected_adopted_commit_sha: Some(TEST_GITHUB_COMMIT_ONE),
+                expected_adopted_marker: Some(TEST_GITHUB_COMMIT_ONE),
                 bundle_id,
                 bundle_display_name: "anthropics/skills",
                 warnings: &[],
@@ -7592,9 +7878,9 @@ mod tests {
                 source_id: None,
                 source_tracked_ref: None,
                 source_catalog_generation: None,
-                source_commit_sha: None,
+                source_marker: None,
                 expected_current_target: None,
-                expected_adopted_commit_sha: None,
+                expected_adopted_marker: None,
                 bundle_id: &bundle_id,
                 bundle_display_name: &format!("Batch {suffix}"),
                 warnings: &[],
@@ -7723,7 +8009,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=13).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=14).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -7758,7 +8044,7 @@ mod tests {
     }
 
     #[test]
-    fn install_bundle_migration_rebuilds_the_canonical_protocol() {
+    fn general_source_migration_keeps_one_install_protocol() {
         let sandbox = tempdir().expect("应创建隔离测试目录");
         let storage = open_test_storage(sandbox.path());
         let install_columns = storage
@@ -7778,9 +8064,9 @@ mod tests {
             "source_id",
             "source_tracked_ref",
             "source_catalog_generation",
-            "source_commit_sha",
+            "source_marker",
             "expected_current_target",
-            "expected_adopted_commit_sha",
+            "expected_adopted_marker",
         ] {
             assert!(
                 install_columns.contains_key(column),
@@ -7790,7 +8076,7 @@ mod tests {
         assert_eq!(
             install_columns.get("input_path"),
             Some(&0),
-            "GitHub Plan 不应伪造本地输入路径"
+            "Source Plan 不应伪造本地输入路径"
         );
         for legacy_anchor in ["member_id", "skill_name", "skill_description"] {
             assert!(
@@ -7808,6 +8094,28 @@ mod tests {
             .collect::<Result<BTreeSet<_>, _>>()
             .expect("应收集候选 schema");
         assert!(candidate_columns.contains("preserve_existing"));
+
+        let source_columns = storage
+            .connection
+            .prepare("PRAGMA table_info(sources)")
+            .expect("应读取 Source schema")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("应查询 Source schema")
+            .collect::<Result<BTreeSet<_>, _>>()
+            .expect("应收集 Source schema");
+        for column in [
+            "locator",
+            "filesystem_device",
+            "filesystem_inode",
+            "catalog_marker",
+        ] {
+            assert!(
+                source_columns.contains(column),
+                "通用 Source 协议应包含 {column}"
+            );
+        }
+        assert!(!source_columns.contains("repository_url"));
+        assert!(!source_columns.contains("catalog_commit_sha"));
 
         let lifecycle_sql = storage
             .connection
@@ -7840,6 +8148,120 @@ mod tests {
                 .expect("应检查跨事务单写者约束");
             assert!(exists, "migration 应重建 {trigger}");
         }
+    }
+
+    #[test]
+    fn general_source_migration_preserves_pending_plans_and_lifecycle_rows() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let database = data_root.join("skillyard.sqlite3");
+        let connection = Connection::open(&database).expect("应创建 version 13 SQLite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("应建立 migration 表");
+        for (version, migration) in MIGRATIONS.iter().take(13) {
+            connection
+                .execute_batch(migration)
+                .expect("应建立 version 13 schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 1)",
+                    [version],
+                )
+                .expect("应记录旧 migration");
+        }
+        connection
+            .execute_batch(
+                "UPDATE sources
+                 SET catalog_status = 'fresh', catalog_generation = 1,
+                     catalog_commit_sha = 'commit-one', catalog_fetched_at = 10
+                 WHERE id = 'source-anthropics-skills';
+
+                 INSERT INTO install_plans (
+                    id, kind, install_mode, input_path, input_device, input_inode,
+                    input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
+                    source_catalog_generation, source_commit_sha, expected_current_target,
+                    expected_adopted_commit_sha, bundle_id, bundle_display_name,
+                    warnings_json, created_at, expires_at, status
+                 ) VALUES
+                    ('pending-plan', 'github_snapshot', 'create', NULL, 1, 2,
+                     'sha256:pending', 'staging/pending/source',
+                     'source-anthropics-skills', 'main', 1, 'commit-one', NULL, NULL,
+                     'pending-bundle', 'Pending Bundle', '[]', 10, 1000, 'pending'),
+                    ('active-plan', 'github_snapshot', 'create', NULL, 3, 4,
+                     'sha256:active', 'staging/active/source',
+                     'source-anthropics-skills', 'main', 1, 'commit-one', NULL, NULL,
+                     'active-bundle', 'Active Bundle', '[]', 11, 1000, 'consumed');
+
+                 INSERT INTO install_plan_candidates (
+                    plan_id, candidate_id, source_relative_path, skill_name,
+                    skill_description, content_fingerprint, selectable, preserve_existing,
+                    validation_errors_json, warnings_json, default_selected, selected, sort_order
+                 ) VALUES
+                    ('pending-plan', 'pending-member', 'skills/pending', 'pending',
+                     'Pending', 'sha256:pending', 1, 0, '[]', '[]', 1, 1, 0),
+                    ('active-plan', 'active-member', 'skills/active', 'active',
+                     'Active', 'sha256:active', 1, 0, '[]', '[]', 1, 1, 0);
+
+                 INSERT INTO lifecycle_transactions (
+                    id, kind, plan_id, bundle_id, member_id, journal_path,
+                    phase, status, created_at, updated_at
+                 ) VALUES (
+                    'active-transaction', 'install_bundle', 'active-plan',
+                    'active-bundle', 'active-member', 'journals/active.json',
+                    'journal_ready', 'in_progress', 12, 12
+                 );",
+            )
+            .expect("应写入迁移前的 Plan 与事务");
+        drop(connection);
+
+        let storage = Storage::open(&data_root, &database).expect("0014 应保留旧状态并完成迁移");
+        let pending = storage
+            .read_install_plan("pending-plan")
+            .expect("pending Plan 应可继续读取");
+        assert_eq!(pending.kind, "source_snapshot");
+        assert_eq!(pending.source_marker.as_deref(), Some("commit-one"));
+        let lifecycle = storage
+            .recoverable_lifecycle_transactions()
+            .expect("应读取迁移前的生命周期事务");
+        assert!(lifecycle.iter().any(|row| {
+            row.id == "active-transaction"
+                && row.plan_id == "active-plan"
+                && row.phase == "journal_ready"
+                && row.status == "in_progress"
+        }));
+        let source = storage
+            .connection
+            .query_row(
+                "SELECT locator, catalog_marker
+                 FROM sources
+                 WHERE id = 'source-anthropics-skills'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("GitHub Source 字段应精确映射");
+        assert_eq!(
+            source,
+            (
+                "https://github.com/anthropics/skills".to_owned(),
+                "commit-one".to_owned()
+            )
+        );
+        let foreign_key_issues = storage
+            .connection
+            .prepare("PRAGMA foreign_key_check")
+            .expect("应准备外键检查")
+            .query_map([], |_| Ok(()))
+            .expect("应执行外键检查")
+            .count();
+        assert_eq!(foreign_key_issues, 0);
     }
 
     #[test]
@@ -7924,8 +8346,8 @@ mod tests {
             "INSERT INTO install_plans (
                 id, kind, install_mode, input_path, input_device, input_inode,
                 input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
-                source_catalog_generation, source_commit_sha, expected_current_target,
-                expected_adopted_commit_sha, bundle_id, bundle_display_name,
+                source_catalog_generation, source_marker, expected_current_target,
+                expected_adopted_marker, bundle_id, bundle_display_name,
                 warnings_json, created_at, expires_at, status
              ) VALUES (
                 'mixed-plan', 'folder_snapshot', 'supplement', '/tmp/input', 1, 2,
@@ -7960,6 +8382,252 @@ mod tests {
     }
 
     #[test]
+    fn manual_source_reuses_identity_and_installs_through_source_snapshot() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let first_members = [NewSourceCatalogMember {
+            id: "manual-alpha-v1",
+            relative_path: "skills/alpha",
+            skill_name: Some("alpha"),
+            description: Some("Alpha Skill"),
+            content_fingerprint: Some("sha256:alpha-v1"),
+            selectable: true,
+            validation_errors: &[],
+            warnings: &[],
+        }];
+        let first = storage
+            .save_manual_source_with_catalog(NewManualSource {
+                id: "manual-source-one",
+                kind: "archive",
+                canonical_identity: "archive:/tmp/SuperPowers.skill",
+                display_name: "SuperPowers",
+                locator: "/tmp/SuperPowers.skill",
+                filesystem_device: None,
+                filesystem_inode: None,
+                catalog_marker: "sha256:archive-one",
+                members: &first_members,
+                saved_at: 100,
+            })
+            .expect("应保存大小写敏感的 Archive Source");
+        assert_eq!(first.catalog_generation, 1);
+
+        let second_members = [NewSourceCatalogMember {
+            id: "manual-alpha-v2",
+            relative_path: "skills/alpha",
+            skill_name: Some("alpha"),
+            description: Some("Alpha Skill"),
+            content_fingerprint: Some("sha256:alpha-v2"),
+            selectable: true,
+            validation_errors: &[],
+            warnings: &[],
+        }];
+        let second = storage
+            .save_manual_source_with_catalog(NewManualSource {
+                id: "ignored-new-id",
+                kind: "archive",
+                canonical_identity: "archive:/tmp/SuperPowers.skill",
+                display_name: "SuperPowers",
+                locator: "/tmp/SuperPowers.skill",
+                filesystem_device: None,
+                filesystem_inode: None,
+                catalog_marker: "sha256:archive-two",
+                members: &second_members,
+                saved_at: 200,
+            })
+            .expect("相同 identity 应刷新原 Source");
+        assert_eq!(second.source_id, first.source_id);
+        assert_eq!(second.catalog_generation, 2);
+
+        let source = storage
+            .read_source_install_source(&second.source_id)
+            .expect("手动来源应通过通用 Source reader 读取");
+        assert_eq!(source.kind, "archive");
+        assert_eq!(source.canonical_identity, "archive:/tmp/SuperPowers.skill");
+        assert_eq!(source.catalog_marker, "sha256:archive-two");
+        assert_eq!(source.catalog_members.len(), 1);
+        assert!(source.owner.is_none());
+        assert!(source.repository.is_none());
+        assert!(source.tracked_ref.is_none());
+
+        let candidates = [NewInstallCandidate {
+            candidate_id: "manual-alpha-v2",
+            source_relative_path: "skills/alpha",
+            skill_name: Some("alpha"),
+            skill_description: Some("Alpha Skill"),
+            content_fingerprint: Some("sha256:alpha-v2"),
+            selectable: true,
+            preserve_existing: false,
+            validation_errors: &[],
+            warnings: &[],
+            default_selected: true,
+        }];
+        storage
+            .save_install_plan(NewInstallPlan {
+                id: "manual-source-plan",
+                kind: "source_snapshot",
+                install_mode: "create",
+                input_path: None,
+                input_device: 10,
+                input_inode: 20,
+                input_fingerprint: "sha256:manual-snapshot",
+                snapshot_relative_path: Some("staging/manual-source-plan/source"),
+                source_id: Some(&source.id),
+                source_tracked_ref: None,
+                source_catalog_generation: Some(source.catalog_generation),
+                source_marker: Some(&source.catalog_marker),
+                expected_current_target: None,
+                expected_adopted_marker: None,
+                bundle_id: "manual-bundle",
+                bundle_display_name: "SuperPowers",
+                warnings: &[],
+                candidates: &candidates,
+                created_at: 210,
+                expires_at: 1_000,
+            })
+            .expect("手动来源应保存为同一种 source_snapshot Plan");
+        let plan = storage
+            .begin_install_transaction(
+                "manual-source-plan",
+                "manual-source-transaction",
+                "journals/manual-source.json",
+                300,
+            )
+            .expect("手动来源应开始唯一生命周期事务");
+        advance_to_candidate_ready(&mut storage, "manual-source-transaction");
+        storage
+            .finalize_install(
+                "manual-source-transaction",
+                &plan,
+                "bundles/manual-bundle",
+                "contents/manual-source-transaction",
+                "members/alpha",
+                400,
+            )
+            .expect("手动来源应原子保存 Source-Bundle 关联");
+        let linked = storage
+            .connection
+            .query_row(
+                "SELECT adopted_marker
+                 FROM source_bundle_links
+                 WHERE source_id = ?1",
+                [&source.id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("应保存采用的通用 marker");
+        assert_eq!(linked, "sha256:archive-two");
+    }
+
+    #[test]
+    fn blocked_manual_source_rejects_refresh_without_changing_metadata() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let mut storage = open_test_storage(sandbox.path());
+        let original_members = [NewSourceCatalogMember {
+            id: "blocked-alpha",
+            relative_path: "skills/alpha",
+            skill_name: Some("alpha"),
+            description: Some("Alpha Skill"),
+            content_fingerprint: Some("sha256:alpha-original"),
+            selectable: true,
+            validation_errors: &[],
+            warnings: &[],
+        }];
+        let saved = storage
+            .save_manual_source_with_catalog(NewManualSource {
+                id: "blocked-source",
+                kind: "archive",
+                canonical_identity: "archive:/tmp/Blocked.skill",
+                display_name: "Blocked Original",
+                locator: "/tmp/Blocked.skill",
+                filesystem_device: None,
+                filesystem_inode: None,
+                catalog_marker: "sha256:archive-original",
+                members: &original_members,
+                saved_at: 100,
+            })
+            .expect("应先保存待阻塞的 Source");
+        let candidates = [NewInstallCandidate {
+            candidate_id: "blocked-alpha",
+            source_relative_path: "skills/alpha",
+            skill_name: Some("alpha"),
+            skill_description: Some("Alpha Skill"),
+            content_fingerprint: Some("sha256:alpha-original"),
+            selectable: true,
+            preserve_existing: false,
+            validation_errors: &[],
+            warnings: &[],
+            default_selected: true,
+        }];
+        storage
+            .save_install_plan(NewInstallPlan {
+                id: "blocked-source-plan",
+                kind: "source_snapshot",
+                install_mode: "create",
+                input_path: None,
+                input_device: 10,
+                input_inode: 20,
+                input_fingerprint: "sha256:blocked-snapshot",
+                snapshot_relative_path: Some("staging/blocked-source-plan/source"),
+                source_id: Some(&saved.source_id),
+                source_tracked_ref: None,
+                source_catalog_generation: Some(saved.catalog_generation),
+                source_marker: Some("sha256:archive-original"),
+                expected_current_target: None,
+                expected_adopted_marker: None,
+                bundle_id: "blocked-bundle",
+                bundle_display_name: "Blocked Original",
+                warnings: &[],
+                candidates: &candidates,
+                created_at: 110,
+                expires_at: 1_000,
+            })
+            .expect("应保存 Source Plan");
+        storage
+            .begin_install_transaction(
+                "blocked-source-plan",
+                "blocked-source-transaction",
+                "journals/blocked-source.json",
+                120,
+            )
+            .expect("应开始 Source 生命周期事务");
+        storage
+            .block_lifecycle_transaction("blocked-source-transaction", "测试人工恢复阻塞", 130)
+            .expect("应把 Source 事务标记为 blocked");
+        let before = storage
+            .read_source_install_source(&saved.source_id)
+            .expect("阻塞前 metadata 应可读取");
+
+        let changed_members = [NewSourceCatalogMember {
+            id: "blocked-alpha-new",
+            relative_path: "skills/alpha",
+            skill_name: Some("alpha"),
+            description: Some("Changed Skill"),
+            content_fingerprint: Some("sha256:alpha-changed"),
+            selectable: true,
+            validation_errors: &[],
+            warnings: &[],
+        }];
+        let error = storage
+            .save_manual_source_with_catalog(NewManualSource {
+                id: "ignored-blocked-source",
+                kind: "archive",
+                canonical_identity: "archive:/tmp/Blocked.skill",
+                display_name: "Blocked Changed",
+                locator: "/tmp/Blocked.skill",
+                filesystem_device: None,
+                filesystem_inode: None,
+                catalog_marker: "sha256:archive-changed",
+                members: &changed_members,
+                saved_at: 200,
+            })
+            .expect_err("blocked Source 不能刷新 metadata");
+        assert!(matches!(error, StorageError::ManagedObjectBlocked));
+        let after = storage
+            .read_source_install_source(&saved.source_id)
+            .expect("被拒绝后原 metadata 应继续可读");
+        assert_eq!(after, before, "被阻塞的 Source 不能发生部分更新");
+    }
+
+    #[test]
     fn github_create_finalize_persists_one_source_backed_bundle() {
         let sandbox = tempdir().expect("应创建隔离测试目录");
         let mut storage = open_test_storage(sandbox.path());
@@ -7972,12 +8640,12 @@ mod tests {
             50,
         );
         let source = storage
-            .read_github_install_source(TEST_GITHUB_SOURCE_ID)
+            .read_source_install_source(TEST_GITHUB_SOURCE_ID)
             .expect("Fresh Catalog 应可组成安装输入");
-        assert_eq!(source.owner, "anthropics");
-        assert_eq!(source.repository, "skills");
+        assert_eq!(source.kind, "github");
+        assert_eq!(source.locator, "https://github.com/anthropics/skills");
         assert_eq!(source.catalog_generation, 1);
-        assert_eq!(source.catalog_commit_sha, TEST_GITHUB_COMMIT_ONE);
+        assert_eq!(source.catalog_marker, TEST_GITHUB_COMMIT_ONE);
         assert_eq!(source.catalog_members.len(), 2);
         assert_eq!(
             source.catalog_members[0].content_fingerprint.as_deref(),
@@ -8021,12 +8689,12 @@ mod tests {
             .expect("应原子提交 Source-backed Bundle");
 
         let source = storage
-            .read_github_install_source(TEST_GITHUB_SOURCE_ID)
+            .read_source_install_source(TEST_GITHUB_SOURCE_ID)
             .expect("应读取已关联 Source");
         let bundle = source.bundle.expect("create 应关联唯一 Bundle");
         assert_eq!(bundle.id, "github-bundle");
         assert_eq!(
-            bundle.adopted_commit_sha.as_deref(),
+            bundle.adopted_marker.as_deref(),
             Some(TEST_GITHUB_COMMIT_ONE)
         );
         assert_eq!(bundle.members.len(), 2);
@@ -8158,7 +8826,7 @@ mod tests {
         let state = storage
             .connection
             .query_row(
-                "SELECT bundle.current_target, link.adopted_commit_sha,
+                "SELECT bundle.current_target, link.adopted_marker,
                         (SELECT COUNT(*) FROM skill_members WHERE bundle_id = bundle.id),
                         (SELECT content_fingerprint FROM skill_members
                          WHERE id = 'catalog-alpha-v1')

@@ -1795,7 +1795,7 @@ describe("GitHub Source 安装", () => {
         id: "source-stale",
         canonicalIdentity: "github:example/stale",
         displayName: "example/stale",
-        repositoryUrl: "https://github.com/example/stale",
+        locator: "https://github.com/example/stale",
         catalogStatus: "stale",
         lastReloadError: "GitHub 暂时不可用",
       }),
@@ -1803,9 +1803,9 @@ describe("GitHub Source 安装", () => {
         id: "source-unloaded",
         canonicalIdentity: "github:example/unloaded",
         displayName: "example/unloaded",
-        repositoryUrl: "https://github.com/example/unloaded",
+        locator: "https://github.com/example/unloaded",
         catalogStatus: "unloaded",
-        catalogCommitSha: null,
+        catalogMarker: null,
         catalogFetchedAt: null,
         lastReloadError: "尚未成功加载",
         members: [],
@@ -1817,7 +1817,7 @@ describe("GitHub Source 安装", () => {
         id: "source-stale",
         canonicalIdentity: "github:example/stale",
         displayName: "example/stale",
-        repositoryUrl: "https://github.com/example/stale",
+        locator: "https://github.com/example/stale",
       }),
     ]);
     const client = createClient(inventoryOutcome([]));
@@ -1851,6 +1851,41 @@ describe("GitHub Source 安装", () => {
         { name: "安装 Bundle" },
       ),
     ).toBeEnabled();
+  });
+
+  it("本地 Source 只展示来源和已安装状态，不误显示 GitHub 操作", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([
+        createSource({
+          id: "source-archive",
+          kind: "archive",
+          canonicalIdentity: "archive:/tmp/superpowers.skill",
+          displayName: "superpowers",
+          locator: "/tmp/superpowers.skill",
+          trackedRef: null,
+          bundleId: "bundle-superpowers",
+          adoptedMarker: "archive-marker",
+          members: [
+            createSourceMember({ installedMemberId: "member-brainstorming" }),
+          ],
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    const card = screen.getByRole("article", { name: "superpowers" });
+    expect(within(card).getByText("/tmp/superpowers.skill")).toBeInTheDocument();
+    expect(within(card).getByText("已安装 · 未挂载")).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: "重新加载来源" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: "补装 Skill" }),
+    ).not.toBeInTheDocument();
   });
 
   it("添加同一 Source 的不同 Ref 时先确认，确认后再显示新 Ref", async () => {
@@ -1936,7 +1971,7 @@ describe("GitHub Source 安装", () => {
         id: "source-new",
         canonicalIdentity: "github:example/new-skills",
         displayName: "example/new-skills",
-        repositoryUrl: "https://github.com/example/new-skills",
+        locator: "https://github.com/example/new-skills",
       }),
     ]);
     const client = createClient(inventoryOutcome([]));
@@ -1997,6 +2032,64 @@ describe("GitHub Source 安装", () => {
     expect(
       screen.getByRole("heading", { name: "安装 Skill" }),
     ).toBeInTheDocument();
+  });
+
+  it("ZIP、直接 URL 和个人编辑目录都进入同一张安装确认页", async () => {
+    const user = userEvent.setup();
+    const archiveClient = createClient(inventoryOutcome([]));
+    vi.mocked(archiveClient.chooseArchiveInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        inputKind: "archive",
+        inputPath: "/tmp/superpowers.skill",
+      }),
+    );
+    const archiveView = render(<App client={archiveClient} />);
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(
+      screen.getByRole("button", { name: "从 ZIP / .skill 安装" }),
+    );
+    expect(screen.getByLabelText("安装影响预览")).toHaveTextContent(
+      "/tmp/superpowers.skill",
+    );
+    archiveView.unmount();
+
+    const urlClient = createClient(inventoryOutcome([]));
+    vi.mocked(urlClient.createUrlInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        inputKind: "directUrl",
+        inputPath: "https://example.com/skills.zip",
+      }),
+    );
+    const urlView = render(<App client={urlClient} />);
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.type(
+      screen.getByLabelText("ZIP / .skill 直接 URL"),
+      "https://example.com/skills.zip",
+    );
+    await user.click(screen.getByRole("button", { name: "准备安装" }));
+    expect(urlClient.createUrlInstallPlan).toHaveBeenCalledWith(
+      "https://example.com/skills.zip",
+    );
+    expect(screen.getByLabelText("安装影响预览")).toHaveTextContent(
+      "https://example.com/skills.zip",
+    );
+    urlView.unmount();
+
+    const editableClient = createClient(inventoryOutcome([]));
+    vi.mocked(editableClient.chooseEditableLocalInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        inputKind: "editableLocal",
+        inputPath: "/tmp/my-skills",
+      }),
+    );
+    render(<App client={editableClient} />);
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(
+      screen.getByRole("button", { name: "从个人编辑目录安装" }),
+    );
+    expect(screen.getByLabelText("安装影响预览")).toHaveTextContent(
+      "/tmp/my-skills",
+    );
   });
 
   it("Plan 放弃失败时保留确认页，不能把清理失败伪装成返回成功", async () => {
@@ -2060,7 +2153,7 @@ describe("GitHub Source 安装", () => {
     const user = userEvent.setup();
     const supplementSource = createSource({
       bundleId: "bundle-1",
-      adoptedCommitSha: "commit-old",
+      adoptedMarker: "commit-old",
       members: [
         createSourceMember({ installedMemberId: "member-existing" }),
         createSourceMember({
@@ -2234,18 +2327,19 @@ function sourceDiscoveryOutcome(
 function createSource(overrides: Partial<SourceSummary> = {}): SourceSummary {
   return {
     id: "source-1",
+    kind: "github",
     canonicalIdentity: "github:anthropics/skills",
     displayName: "anthropics/skills",
-    repositoryUrl: "https://github.com/anthropics/skills",
+    locator: "https://github.com/anthropics/skills",
     trackedRef: "main",
     memberPathHint: null,
     catalogStatus: "fresh",
-    catalogCommitSha: "commit-1",
+    catalogMarker: "commit-1",
     catalogFetchedAt: 1,
     lastReloadAt: 1,
     lastReloadError: null,
     bundleId: null,
-    adoptedCommitSha: null,
+    adoptedMarker: null,
     members: [createSourceMember()],
     ...overrides,
   };
@@ -2295,8 +2389,11 @@ function createClient(startup: UiOutcome): SkillYardClient {
     addGithubSource: vi.fn(),
     confirmSourceRefChange: vi.fn(),
     createGithubInstallPlan: vi.fn(),
+    createUrlInstallPlan: vi.fn(),
     discardInstallPlan: vi.fn().mockResolvedValue(undefined),
     chooseFolderInstallPlan: vi.fn(),
+    chooseArchiveInstallPlan: vi.fn(),
+    chooseEditableLocalInstallPlan: vi.fn(),
     confirmInstallPlan: vi.fn(),
     chooseAndRegisterProject: vi.fn(),
     createTakeoverPlan: vi.fn(),

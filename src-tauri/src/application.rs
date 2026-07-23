@@ -13,8 +13,10 @@ use crate::{
     },
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock, confirm_install,
-        create_folder_install_plan, create_github_install_plan, discard_install_plan,
-        ensure_central_store_layout, recover_pending_transactions, write_notice_from_storage,
+        create_archive_install_plan, create_editable_local_install_plan,
+        create_folder_install_plan, create_github_install_plan, create_url_install_plan,
+        discard_install_plan, ensure_central_store_layout, recover_pending_transactions,
+        write_notice_from_storage,
     },
     mount_lifecycle::{
         MountLifecycleError, confirm_batch_mount_plan, confirm_mount_plan, create_batch_mount_plan,
@@ -171,6 +173,15 @@ impl SkillYardApplication {
             }
             UiIntent::CreateFolderInstallPlan { input_path } => {
                 self.with_write_operation(|| self.create_folder_install_plan(input_path))
+            }
+            UiIntent::CreateArchiveInstallPlan { input_path } => {
+                self.with_write_operation(|| self.create_archive_install_plan(input_path))
+            }
+            UiIntent::CreateUrlInstallPlan { url } => {
+                self.with_write_operation(|| self.create_url_install_plan(url))
+            }
+            UiIntent::CreateEditableLocalInstallPlan { input_path } => {
+                self.with_write_operation(|| self.create_editable_local_install_plan(input_path))
             }
             UiIntent::CreateGithubInstallPlan { source_id } => {
                 self.with_write_operation(|| self.create_github_install_plan(source_id))
@@ -485,7 +496,7 @@ impl SkillYardApplication {
                 owner: &resolved.owner,
                 repository: &resolved.repository,
                 display_name: &resolved.display_name,
-                repository_url: resolved.repository_url.as_str(),
+                locator: resolved.repository_url.as_str(),
                 tracked_ref: &resolved.tracked_ref,
                 resolved_commit_sha: &resolved.commit,
                 member_path_hint: resolved.member_hint.as_deref(),
@@ -566,6 +577,65 @@ impl SkillYardApplication {
             &mut storage,
             transport,
             &source_id,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::InstallPlan { plan })
+    }
+
+    fn create_archive_install_plan(
+        &self,
+        input_path: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_archive_install_plan(
+            &self.paths,
+            &lifecycle_lock,
+            &mut storage,
+            std::path::Path::new(&input_path),
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::InstallPlan { plan })
+    }
+
+    fn create_url_install_plan(&self, url: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let transport = self
+            .source_transport
+            .as_deref()
+            .ok_or_else(|| LifecycleError::SourceInput("Source 下载失败".to_owned()))?;
+        let plan = create_url_install_plan(
+            &self.paths,
+            &lifecycle_lock,
+            &mut storage,
+            transport,
+            &url,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::InstallPlan { plan })
+    }
+
+    fn create_editable_local_install_plan(
+        &self,
+        input_path: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_editable_local_install_plan(
+            &self.paths,
+            &lifecycle_lock,
+            &mut storage,
+            std::path::Path::new(&input_path),
             unix_timestamp_millis(),
         )?;
         lifecycle_lock.recheck(&self.paths)?;

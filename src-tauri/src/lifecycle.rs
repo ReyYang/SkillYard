@@ -21,18 +21,23 @@ use uuid::Uuid;
 
 use crate::{
     content::{
-        BundleCopyBudget, ContentValidationError, copy_single_skill_tree_into_open_directory,
-        validate_single_skill_folder, validate_skill_bundle_folder,
+        BundleCopyBudget, ContentValidationError, ValidatedSkillBundle,
+        copy_single_skill_tree_into_open_directory, validate_single_skill_folder,
+        validate_skill_bundle_folder,
     },
-    domain::{InstallCandidate, InstallInputKind, InstallMode, InstallPlan},
+    domain::{InstallCandidate, InstallInputKind, InstallMode, InstallPlan, SourceKind},
     github_source::{
         GithubCatalogTarget, GithubSourceError, SourceTransport, prepare_github_install_snapshot,
     },
     paths::ApplicationPaths,
+    source_input::{
+        PreparedSourceKind, PreparedSourceSnapshot, SourceInputError, prepare_archive_source,
+        prepare_direct_url_source, prepare_editable_local_source,
+    },
     storage::{
-        NewInstallCandidate, NewInstallPlan, Storage, StorageError,
-        StoredGithubInstallCatalogMember, StoredInstallCandidate, StoredInstallPlan,
-        StoredLifecycleTransaction,
+        NewInstallCandidate, NewInstallPlan, NewManualSource, NewSourceCatalogMember, Storage,
+        StorageError, StoredInstallCandidate, StoredInstallPlan, StoredLifecycleTransaction,
+        StoredSourceInstallCatalogMember, StoredSourceInstallSource,
     },
 };
 
@@ -109,12 +114,14 @@ pub enum LifecycleError {
     Content(#[from] ContentValidationError),
     #[error(transparent)]
     GithubSource(#[from] GithubSourceError),
+    #[error("{0}")]
+    SourceInput(String),
     #[error("文件夹路径包含无法保存的字符：{0}")]
     NonUnicodePath(String),
     #[error("安装 Plan 的前置状态已经变化，请重新生成安装计划")]
     PlanPreconditionChanged,
-    #[error("当前 GitHub Source 没有可补充安装的有效 Skill")]
-    NoInstallableGithubMembers,
+    #[error("当前 Source 没有可安装的新 Skill")]
+    NoInstallableSourceMembers,
     #[error("安装目标已经存在，不能覆盖：{0}")]
     TargetOccupied(String),
     #[error("Central Store 路径不安全：{0}")]
@@ -138,6 +145,13 @@ pub enum LifecycleError {
     RecoveryBlocked(String),
     #[error("测试模拟中断：{0}")]
     SimulatedInterruption(&'static str),
+}
+
+impl From<SourceInputError> for LifecycleError {
+    fn from(error: SourceInputError) -> Self {
+        // SourceInputError 保持模块私有，只把稳定的中文产品错误带到公开 seam。
+        Self::SourceInput(error.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -399,9 +413,9 @@ pub fn create_folder_install_plan(
         source_id: None,
         source_tracked_ref: None,
         source_catalog_generation: None,
-        source_commit_sha: None,
+        source_marker: None,
         expected_current_target: None,
-        expected_adopted_commit_sha: None,
+        expected_adopted_marker: None,
         bundle_id: &bundle_id,
         bundle_display_name: &bundle_display_name,
         warnings: &warnings,
@@ -433,64 +447,239 @@ pub fn create_github_install_plan(
     now: i64,
 ) -> Result<InstallPlan, LifecycleError> {
     lifecycle_lock.recheck(paths)?;
-    let source = storage.read_github_install_source(source_id)?;
-    if storage.github_install_object_is_blocked(
-        &source.id,
-        source.bundle.as_ref().map(|bundle| bundle.id.as_str()),
-    )? {
-        return Err(StorageError::ManagedObjectBlocked.into());
+    let source = storage.read_source_install_source(source_id)?;
+    let owner = source
+        .owner
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or(StorageError::SourceCatalogStateChanged)?;
+    let repository = source
+        .repository
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or(StorageError::SourceCatalogStateChanged)?;
+    let tracked_ref = source
+        .tracked_ref
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or(StorageError::SourceCatalogStateChanged)?;
+    if source.kind != SourceKind::Github.as_str() {
+        return Err(StorageError::SourceCatalogStateChanged.into());
     }
-    let superseded = storage.read_pending_github_install_plans_for_source(source_id)?;
-    discard_pending_install_plans(paths, lifecycle_lock, storage, &superseded)?;
-    let installed_paths = source
-        .bundle
-        .as_ref()
-        .map(|bundle| {
-            bundle
-                .members
-                .iter()
-                .map(|member| member.source_relative_path.as_str())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    if !source
-        .catalog_members
-        .iter()
-        .any(|member| member.selectable && !installed_paths.contains(member.relative_path.as_str()))
-    {
-        return Err(LifecycleError::NoInstallableGithubMembers);
-    }
+    let installed_paths = preflight_source_install(paths, lifecycle_lock, storage, &source)?;
     let plan_id = Uuid::new_v4().to_string();
     let canonical_identity = format!(
         "github:{}/{}",
-        source.owner.to_ascii_lowercase(),
-        source.repository.to_ascii_lowercase()
+        owner.to_ascii_lowercase(),
+        repository.to_ascii_lowercase()
     );
+    if source.canonical_identity != canonical_identity {
+        return Err(StorageError::SourceCatalogStateChanged.into());
+    }
     let snapshot = prepare_github_install_snapshot(
         transport,
         GithubCatalogTarget {
-            owner: &source.owner,
-            repository: &source.repository,
+            owner,
+            repository,
             canonical_identity: &canonical_identity,
             display_name: &source.display_name,
-            tracked_ref: &source.tracked_ref,
+            tracked_ref,
         },
-        &source.catalog_commit_sha,
+        &source.catalog_marker,
         &paths.staging_root(),
         &plan_id,
     )?;
     let validated = validate_skill_bundle_folder(snapshot.repository_root())?;
-    if !github_catalog_matches_snapshot(&source.catalog_members, &validated.candidates)? {
+    let input_path = format!("https://github.com/{owner}/{repository}");
+    let plan = create_source_install_plan_from_prepared_snapshot(
+        paths,
+        lifecycle_lock,
+        storage,
+        source,
+        &plan_id,
+        validated,
+        snapshot.repository_root(),
+        installed_paths,
+        InstallInputKind::Github,
+        input_path,
+        now,
+    )?;
+    snapshot.persist();
+    Ok(plan)
+}
+
+/// 本地归档只负责生成受控快照；Source、Plan 与确认都复用唯一生命周期。
+pub fn create_archive_install_plan(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    input: &Path,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    let plan_id = Uuid::new_v4().to_string();
+    let prepared = prepare_archive_source(input, &paths.staging_root(), &plan_id)?;
+    create_manual_source_install_plan(
+        paths,
+        lifecycle_lock,
+        storage,
+        prepared,
+        plan_id,
+        InstallInputKind::Archive,
+        now,
+    )
+}
+
+/// 直接 URL 与本地归档的差异只在快照准备阶段。
+pub fn create_url_install_plan(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    transport: &dyn SourceTransport,
+    url: &str,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    let plan_id = Uuid::new_v4().to_string();
+    let prepared = prepare_direct_url_source(transport, url, &paths.staging_root(), &plan_id)?;
+    create_manual_source_install_plan(
+        paths,
+        lifecycle_lock,
+        storage,
+        prepared,
+        plan_id,
+        InstallInputKind::DirectUrl,
+        now,
+    )
+}
+
+/// Editable Local 保留原目录，只把本次确认使用的完整内容复制到 Plan 快照。
+pub fn create_editable_local_install_plan(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    input: &Path,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    let plan_id = Uuid::new_v4().to_string();
+    let prepared = prepare_editable_local_source(input, &paths.staging_root(), &plan_id)?;
+    create_manual_source_install_plan(
+        paths,
+        lifecycle_lock,
+        storage,
+        prepared,
+        plan_id,
+        InstallInputKind::EditableLocal,
+        now,
+    )
+}
+
+fn create_manual_source_install_plan(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    prepared: PreparedSourceSnapshot,
+    plan_id: String,
+    input_kind: InstallInputKind,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let validated = validate_skill_bundle_folder(prepared.content_root())?;
+    let member_ids = validated
+        .candidates
+        .iter()
+        .map(|_| Uuid::new_v4().to_string())
+        .collect::<Vec<_>>();
+    let relative_paths = validated
+        .candidates
+        .iter()
+        .map(|candidate| path_to_string(&candidate.relative_path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let members = validated
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| NewSourceCatalogMember {
+            id: &member_ids[index],
+            relative_path: &relative_paths[index],
+            skill_name: candidate.name.as_deref(),
+            description: candidate.description.as_deref(),
+            content_fingerprint: candidate.fingerprint.as_deref(),
+            selectable: candidate.selectable(),
+            validation_errors: &candidate.validation_errors,
+            warnings: &candidate.warnings,
+        })
+        .collect::<Vec<_>>();
+    let filesystem_identity = prepared.filesystem_identity();
+    let source_kind = match prepared.kind() {
+        PreparedSourceKind::Archive => SourceKind::Archive,
+        PreparedSourceKind::DirectUrl => SourceKind::DirectUrl,
+        PreparedSourceKind::EditableLocal => SourceKind::EditableLocal,
+    };
+    let saved = storage.save_manual_source_with_catalog(NewManualSource {
+        id: &Uuid::new_v4().to_string(),
+        kind: source_kind.as_str(),
+        canonical_identity: prepared.canonical_identity(),
+        display_name: prepared.display_name(),
+        locator: prepared.locator(),
+        filesystem_device: filesystem_identity.map(|identity| identity.device),
+        filesystem_inode: filesystem_identity.map(|identity| identity.inode),
+        catalog_marker: prepared.marker(),
+        members: &members,
+        saved_at: now,
+    })?;
+    lifecycle_lock.recheck(paths)?;
+    // Source 在确认页出现前已经是持久管理关系；即使用户放弃安装，也要立即同步说明文件。
+    write_notice_from_storage(paths, lifecycle_lock.root(), storage)?;
+    lifecycle_lock.recheck(paths)?;
+    let source = storage.read_source_install_source(&saved.source_id)?;
+    if source.catalog_generation != saved.catalog_generation {
+        return Err(StorageError::SourceCatalogStateChanged.into());
+    }
+    let installed_paths = preflight_source_install(paths, lifecycle_lock, storage, &source)?;
+    let input_path = prepared.locator().to_owned();
+    let snapshot_input_root = prepared.content_root().to_path_buf();
+    let plan = create_source_install_plan_from_prepared_snapshot(
+        paths,
+        lifecycle_lock,
+        storage,
+        source,
+        &plan_id,
+        validated,
+        &snapshot_input_root,
+        installed_paths,
+        input_kind,
+        input_path,
+        now,
+    )?;
+    prepared.persist();
+    Ok(plan)
+}
+
+/// 所有 Source 输入最终只在这里生成 source_snapshot Plan。
+#[allow(clippy::too_many_arguments)]
+fn create_source_install_plan_from_prepared_snapshot(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    source: StoredSourceInstallSource,
+    plan_id: &str,
+    validated: ValidatedSkillBundle,
+    snapshot_input_root: &Path,
+    installed_paths: BTreeSet<String>,
+    input_kind: InstallInputKind,
+    input_path: String,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    if !source_catalog_matches_snapshot(&source.catalog_members, &validated.candidates)? {
         return Err(LifecycleError::PlanPreconditionChanged);
     }
     let input_metadata = fs::symlink_metadata(&validated.canonical_root)
-        .map_err(|source| io_error("读取 GitHub 安装快照", &validated.canonical_root, source))?;
+        .map_err(|source| io_error("读取 Source 安装快照", &validated.canonical_root, source))?;
     let snapshot_relative_path = path_to_string(
-        snapshot
-            .repository_root()
+        snapshot_input_root
             .strip_prefix(paths.data_root())
             .map_err(|_| {
-                LifecycleError::UnsafeCentralStore(snapshot.repository_root().display().to_string())
+                LifecycleError::UnsafeCentralStore(snapshot_input_root.display().to_string())
             })?,
     )?;
 
@@ -516,7 +705,7 @@ pub fn create_github_install_plan(
             continue;
         }
         drafts.push(InstallPlanCandidateDraft {
-            // 新成员沿用当前 Catalog ID；领域提交时同一个 ID 成为本地 Member ID。
+            // Catalog ID 在确认后成为本地 Member ID，避免额外的映射层。
             candidate_id: member.id.clone(),
             source_relative_path: member.relative_path.clone(),
             skill_name: member.skill_name.clone(),
@@ -529,13 +718,6 @@ pub fn create_github_install_plan(
             default_selected: member.selectable,
         });
     }
-    if !drafts
-        .iter()
-        .any(|candidate| candidate.selectable && !candidate.preserve_existing)
-    {
-        return Err(LifecycleError::NoInstallableGithubMembers);
-    }
-
     let bundle_id = source
         .bundle
         .as_ref()
@@ -580,8 +762,8 @@ pub fn create_github_install_plan(
         InstallMode::Supplement => "supplement",
     };
     storage.save_install_plan(NewInstallPlan {
-        id: &plan_id,
-        kind: "github_snapshot",
+        id: plan_id,
+        kind: "source_snapshot",
         install_mode,
         input_path: None,
         input_device: input_metadata.dev(),
@@ -589,17 +771,17 @@ pub fn create_github_install_plan(
         input_fingerprint: &validated.fingerprint,
         snapshot_relative_path: Some(&snapshot_relative_path),
         source_id: Some(&source.id),
-        source_tracked_ref: Some(&source.tracked_ref),
+        source_tracked_ref: source.tracked_ref.as_deref(),
         source_catalog_generation: Some(source.catalog_generation),
-        source_commit_sha: Some(&source.catalog_commit_sha),
+        source_marker: Some(&source.catalog_marker),
         expected_current_target: source
             .bundle
             .as_ref()
             .map(|bundle| bundle.current_target.as_str()),
-        expected_adopted_commit_sha: source
+        expected_adopted_marker: source
             .bundle
             .as_ref()
-            .and_then(|bundle| bundle.adopted_commit_sha.as_deref()),
+            .and_then(|bundle| bundle.adopted_marker.as_deref()),
         bundle_id: &bundle_id,
         bundle_display_name: &bundle_display_name,
         warnings: &warnings,
@@ -607,7 +789,6 @@ pub fn create_github_install_plan(
         created_at: now,
         expires_at: now.saturating_add(PLAN_TTL_MILLIS),
     })?;
-    snapshot.persist();
 
     let candidates = drafts
         .into_iter()
@@ -632,10 +813,10 @@ pub fn create_github_install_plan(
         })
         .collect();
     Ok(InstallPlan {
-        id: plan_id,
-        input_kind: InstallInputKind::Github,
+        id: plan_id.to_owned(),
+        input_kind,
         mode,
-        input_path: format!("https://github.com/{}/{}", source.owner, source.repository),
+        input_path,
         bundle_display_name,
         candidates,
         warnings,
@@ -645,8 +826,44 @@ pub fn create_github_install_plan(
     })
 }
 
-fn github_catalog_matches_snapshot(
-    catalog: &[StoredGithubInstallCatalogMember],
+fn preflight_source_install(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    source: &StoredSourceInstallSource,
+) -> Result<BTreeSet<String>, LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    if storage.source_install_object_is_blocked(
+        &source.id,
+        source.bundle.as_ref().map(|bundle| bundle.id.as_str()),
+    )? {
+        return Err(StorageError::ManagedObjectBlocked.into());
+    }
+    let superseded = storage.read_pending_source_install_plans_for_source(&source.id)?;
+    discard_pending_install_plans(paths, lifecycle_lock, storage, &superseded)?;
+    let installed_paths = source
+        .bundle
+        .as_ref()
+        .map(|bundle| {
+            bundle
+                .members
+                .iter()
+                .map(|member| member.source_relative_path.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if !source
+        .catalog_members
+        .iter()
+        .any(|member| member.selectable && !installed_paths.contains(member.relative_path.as_str()))
+    {
+        return Err(LifecycleError::NoInstallableSourceMembers);
+    }
+    Ok(installed_paths)
+}
+
+fn source_catalog_matches_snapshot(
+    catalog: &[StoredSourceInstallCatalogMember],
     discovered: &[crate::content::DiscoveredBundleCandidate],
 ) -> Result<bool, LifecycleError> {
     if catalog.len() != discovered.len() {
@@ -1210,8 +1427,8 @@ fn verify_plan_snapshot(
     )?;
     let candidates_match = match plan.kind.as_str() {
         "folder_snapshot" => stored_candidates_match(&plan.candidates, &validated.candidates)?,
-        "github_snapshot" => {
-            stored_github_plan_candidates_match(&plan.candidates, &validated.candidates)?
+        "source_snapshot" => {
+            stored_source_plan_candidates_match(&plan.candidates, &validated.candidates)?
         }
         _ => false,
     };
@@ -1237,7 +1454,7 @@ fn install_plan_input_root(
             .as_deref()
             .map(PathBuf::from)
             .ok_or(LifecycleError::PlanPreconditionChanged),
-        "github_snapshot" => plan
+        "source_snapshot" => plan
             .snapshot_relative_path
             .as_deref()
             .ok_or(LifecycleError::PlanPreconditionChanged)
@@ -1380,12 +1597,12 @@ fn validate_stored_plan_identifiers(plan: &StoredInstallPlan) -> Result<(), Life
                 && plan.snapshot_relative_path.is_none()
                 && plan.source_id.is_none()
                 && plan.expected_current_target.is_none() => {}
-        ("github_snapshot", "create")
+        ("source_snapshot", "create")
             if plan.input_path.is_none()
                 && plan.snapshot_relative_path.is_some()
                 && plan.source_id.is_some()
                 && plan.expected_current_target.is_none() => {}
-        ("github_snapshot", "supplement")
+        ("source_snapshot", "supplement")
             if plan.input_path.is_none()
                 && plan.snapshot_relative_path.is_some()
                 && plan.source_id.is_some()
@@ -1431,7 +1648,7 @@ fn stored_candidates_match(
     Ok(true)
 }
 
-fn stored_github_plan_candidates_match(
+fn stored_source_plan_candidates_match(
     stored: &[StoredInstallCandidate],
     discovered: &[crate::content::DiscoveredBundleCandidate],
 ) -> Result<bool, LifecycleError> {
@@ -3319,9 +3536,9 @@ mod tests {
             source_id: None,
             source_tracked_ref: None,
             source_catalog_generation: None,
-            source_commit_sha: None,
+            source_marker: None,
             expected_current_target: None,
-            expected_adopted_commit_sha: None,
+            expected_adopted_marker: None,
             bundle_id: "bundle".to_owned(),
             bundle_display_name: "Bundle".to_owned(),
             expires_at: i64::MAX,

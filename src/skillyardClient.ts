@@ -38,8 +38,11 @@ export interface SkillYardClient {
     planId: string,
   ): Promise<Extract<UiOutcome, { type: "sourceDiscovery" }>>;
   createGithubInstallPlan(sourceId: string): Promise<InstallPlan>;
+  createUrlInstallPlan(url: string): Promise<InstallPlan>;
   discardInstallPlan(planId: string): Promise<void>;
   chooseFolderInstallPlan(): Promise<InstallPlan | null>;
+  chooseArchiveInstallPlan(): Promise<InstallPlan | null>;
+  chooseEditableLocalInstallPlan(): Promise<InstallPlan | null>;
   confirmInstallPlan(
     planId: string,
     selectedCandidateIds: string[],
@@ -99,10 +102,16 @@ export const tauriSkillYardClient: SkillYardClient = {
     ),
   createGithubInstallPlan: (sourceId) =>
     invoke<InstallPlan>("create_github_install_plan", { sourceId }),
+  createUrlInstallPlan: (url) =>
+    invoke<InstallPlan>("create_url_install_plan", { url }),
   discardInstallPlan: (planId) =>
     invoke<void>("discard_install_plan", { planId }),
   chooseFolderInstallPlan: () =>
     invoke<InstallPlan | null>("choose_folder_install_plan"),
+  chooseArchiveInstallPlan: () =>
+    invoke<InstallPlan | null>("choose_archive_install_plan"),
+  chooseEditableLocalInstallPlan: () =>
+    invoke<InstallPlan | null>("choose_editable_local_install_plan"),
   confirmInstallPlan: (planId, selectedCandidateIds) =>
     invoke<UiOutcome>("confirm_install_plan", {
       planId,

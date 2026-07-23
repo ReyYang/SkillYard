@@ -31,7 +31,7 @@ export function InstallPlanPage({
     selectedCandidateIds.length > 0 &&
     selectedCandidateIds.length < selectableCount;
   const isBusy = isInstalling || isDiscarding;
-  const isGithubSource = plan.inputKind === "github";
+  const isSourceBacked = plan.inputKind !== "localFolder";
 
   const toggleCandidate = (candidateId: string) => {
     setSelectedCandidateIds((current) =>
@@ -48,8 +48,8 @@ export function InstallPlanPage({
       <p className="lead">
         {plan.mode === "supplement"
           ? "确认后只新增当前未安装的 Skill；已有 Skill 内容和 Mount 不会被覆盖。"
-          : isGithubSource
-            ? "确认后，SkillYard 会采用刚刚验证的 GitHub 内容快照。"
+          : isSourceBacked
+            ? "确认后，SkillYard 会采用刚刚验证的内容快照；原文件、目录或远端内容不会被移动或改写。"
             : "确认后，SkillYard 会把所选文件夹复制到自己的 Central Store。原文件夹不会被移动或修改。"}
         安装开始后不能取消；如果应用意外退出，下次启动会自动恢复。
       </p>
@@ -57,7 +57,7 @@ export function InstallPlanPage({
       <section className="install-plan" aria-label="安装影响预览">
         <PlanRow label="Bundle" value={plan.bundleDisplayName} />
         <PlanRow
-          label={isGithubSource ? "Source" : "原文件夹"}
+          label={isSourceBacked ? "Source" : "原文件夹"}
           value={plan.inputPath}
           code
         />

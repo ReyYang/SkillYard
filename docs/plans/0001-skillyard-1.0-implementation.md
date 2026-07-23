@@ -404,6 +404,27 @@ Stage 3 能力按以下方式直接复用：
 - 所有入口复用成员发现、Safe Skill Content、资源限制、Plan、事务和“已安装、未挂载”结果。
 - 非 GitHub 输入格式和 canonical identity 形成封闭支持清单，未列出的格式不在实现中自动扩张。
 
+### 1.0 封闭输入协议
+
+- `skills.sh` 使用其当前公开页面调用的 `GET https://skills.sh/api/search?q=<query>` JSON 协议，只读取 `source`、`skillId`、`name` 和 `installs`。结果按 `source` 分组；只有能严格解析为 GitHub `owner/repository` 的分组可以继续进入阶段 5，域名型或其他结果只显示为不支持。它不创建 `skills_sh` Source，不调用 `npx skills`，端点失败也不改写本地 Source 或 Bundle。
+- `.skill` 按 cc-switch 已核验行为定义为 ZIP 容器的扩展名别名，不是单文件 Markdown 或新的 package 格式。ZIP 与 `.skill` 都只支持 Stored 或 Deflate 条目，并复用同一个归档安全实现。
+- 本地归档只接受扩展名为 `.zip` 或 `.skill` 的普通文件。canonical identity 使用规范化绝对路径；同一路径重复导入复用 Source，不依据内容相同自动合并不同路径。Source 另存最近采用的 artifact digest，因此后续手动替换内容不会改变 Source identity。
+- 直接 URL 只接受无 user-info、无 fragment、路径以 `.zip` 或 `.skill` 结尾的 HTTPS URL。query 作为资源定位的一部分保留；最多跟随五次 HTTPS 重定向，非 GitHub 请求只能留在原 host。最终响应必须仍满足该边界并能被 ZIP parser 验证。canonical identity 使用规范化后的完整 URL。
+- 普通本地目录继续使用阶段 2 已有的一次性快照入口，不创建 Source。只有用户明确选择 Editable Local Source 时才登记来源；其 identity 由登记时目录的 filesystem identity 产生，路径和最近采用的内容指纹独立保存，后续移动路径必须走同一 Source 的明确重新关联流程。
+- 普通归档允许两种根布局：全部条目位于唯一 wrapper 目录时剥离 wrapper；否则保留归档根。因此根级 `SKILL.md`、一个带外层目录的 Skill，以及多个顶层 Skill 目录都能进入同一成员发现逻辑。GitHub archive 仍强制唯一 wrapper。
+- 1.0 不再声明其他“官方 index／manifest”格式；只有上面的 `skills.sh` 映射属于已支持的远程发现协议。新增 manifest 必须在后续版本明确加入封闭清单，不能由运行时猜测。
+
+### 文件职责与切片
+
+- `skills_sh.rs` 只把搜索响应整理成 canonical GitHub Source 分组；它不保存 Source，也不参与安装事务。
+- `source_archive.rs` 是 ZIP、`.skill`、GitHub archive 和直接 URL 下载内容唯一共用的安全展开实现；GitHub 强制 wrapper，其他归档允许可选 wrapper。
+- `source_input.rs` 只把本地归档、直接 URL 和 Editable Local 目录转换为经过验证的临时内容快照与 canonical Source identity；它不保存 Bundle，也不执行生命周期事务。
+- `domain.rs` / `storage.rs` 原地扩充现有 Source kind、locator、内容指纹和 Install Plan 输入，不建立第二套 Source 或安装表。
+- `application.rs` 只把 typed intent 接入正式应用写入门；`lifecycle.rs` 负责把所有来源快照转换成同一套成员候选，并继续作为唯一的 Bundle `current`、Journal 和恢复执行器。
+- typed Tauri commands / TypeScript client 分别提供搜索、原生归档选择器、直接 URL 和显式 Editable Local 入口；四者最终进入同一张安装确认页。
+
+本阶段依次交付四个切片：先完成无持久化副作用的 `skills.sh` 搜索；再提取并回归唯一归档安全核心；随后以同一 Source/Plan/Journal 完成本地归档、直接 URL 和 Editable Local 安装；最后补齐 typed IPC、原生选择器和统一 UI。每个安装入口都必须从公开 seam 证明确认前零 Bundle 写入、确认后生成同构且未挂载的 Bundle，并在重启后保持一致。
+
 ### 不包含
 
 - 给已接管 Bundle 补充 Source、Bundle 归并和真正的更新执行。

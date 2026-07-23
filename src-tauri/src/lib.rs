@@ -11,6 +11,8 @@ mod mount_lifecycle;
 mod paths;
 mod scanner;
 mod skills_sh;
+mod source_archive;
+mod source_input;
 mod storage;
 mod takeover;
 
@@ -22,8 +24,8 @@ pub use domain::{
     ManagementKind, MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope,
     MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode,
     ScanRootKey, SkillMetadataStatus, SkillsShSearchMember, SkillsShSearchSource,
-    SourceCatalogMemberSummary, SourceCatalogStatus, SourceRefChangePlan, SourceSummary,
-    SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
+    SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind, SourceRefChangePlan,
+    SourceSummary, SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
     TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest,
     UiIntent, UiOutcome,
 };
@@ -59,6 +61,9 @@ pub fn run() {
             commands::confirm_source_ref_change,
             commands::create_github_install_plan,
             commands::choose_folder_install_plan,
+            commands::choose_archive_install_plan,
+            commands::create_url_install_plan,
+            commands::choose_editable_local_install_plan,
             commands::confirm_install_plan,
             commands::discard_install_plan,
             commands::choose_and_register_project,

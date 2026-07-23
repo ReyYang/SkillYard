@@ -45,6 +45,9 @@ type SourceOperation =
   | { type: "adding" }
   | { type: "searchingSkillsSh" }
   | { type: "choosingFolder" }
+  | { type: "choosingArchive" }
+  | { type: "choosingEditable" }
+  | { type: "planningUrl" }
   | { type: "reloading"; sourceId: string }
   | { type: "planningInstall"; sourceId: string }
   | { type: "confirmingRef" };
@@ -247,6 +250,50 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     try {
       const plan = await client.chooseFolderInstallPlan();
       if (plan) setPendingInstallPlan(plan);
+    } catch (error) {
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const chooseArchiveInstallPlan = async () => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "choosingArchive" });
+    setSourceError(null);
+    setInstallError(null);
+    try {
+      const plan = await client.chooseArchiveInstallPlan();
+      if (plan) setPendingInstallPlan(plan);
+    } catch (error) {
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const chooseEditableLocalInstallPlan = async () => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "choosingEditable" });
+    setSourceError(null);
+    setInstallError(null);
+    try {
+      const plan = await client.chooseEditableLocalInstallPlan();
+      if (plan) setPendingInstallPlan(plan);
+    } catch (error) {
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const createUrlInstallPlan = async (url: string) => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "planningUrl" });
+    setSourceError(null);
+    setInstallError(null);
+    try {
+      setPendingInstallPlan(await client.createUrlInstallPlan(url));
     } catch (error) {
       setSourceError(formatError(error));
     } finally {
@@ -661,6 +708,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         onAddSource={addGithubSource}
         onSearchSkillsSh={searchSkillsSh}
         onChooseFolder={chooseFolderInstallPlan}
+        onChooseArchive={chooseArchiveInstallPlan}
+        onChooseEditable={chooseEditableLocalInstallPlan}
+        onInstallUrl={createUrlInstallPlan}
         onReload={reloadGithubSource}
         onInstall={createGithubInstallPlan}
       />

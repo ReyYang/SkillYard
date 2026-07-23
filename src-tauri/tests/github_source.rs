@@ -45,13 +45,13 @@ fn recommended_github_sources_exist_without_creating_bundles_and_survive_restart
     assert_eq!(
         first
             .iter()
-            .map(|source| (source.display_name.as_str(), source.tracked_ref.as_str()))
+            .map(|source| (source.display_name.as_str(), source.tracked_ref.as_deref()))
             .collect::<Vec<_>>(),
         vec![
-            ("anthropics/skills", "main"),
-            ("ComposioHQ/awesome-claude-skills", "master"),
-            ("cexll/myclaude", "master"),
-            ("JimLiu/baoyu-skills", "main"),
+            ("anthropics/skills", Some("main")),
+            ("ComposioHQ/awesome-claude-skills", Some("master")),
+            ("cexll/myclaude", Some("master")),
+            ("JimLiu/baoyu-skills", Some("main")),
         ]
     );
     assert!(first.iter().all(|source| {
@@ -86,7 +86,7 @@ fn recommended_github_sources_exist_without_creating_bundles_and_survive_restart
             .map(|source| (
                 source.id.as_str(),
                 source.display_name.as_str(),
-                source.tracked_ref.as_str(),
+                source.tracked_ref.as_deref(),
             ))
             .collect::<Vec<_>>(),
         first
@@ -94,7 +94,7 @@ fn recommended_github_sources_exist_without_creating_bundles_and_survive_restart
             .map(|source| (
                 source.id.as_str(),
                 source.display_name.as_str(),
-                source.tracked_ref.as_str(),
+                source.tracked_ref.as_deref(),
             ))
             .collect::<Vec<_>>(),
         "重启后的网络失败不能改变已登记 Source 的稳定身份"
@@ -170,7 +170,7 @@ fn common_inputs_reuse_one_canonical_source_and_default_branch_comes_from_github
         .expect("应保存 canonical Source");
     let source_id = added.id.clone();
     assert_eq!(added.display_name, "Acme/Toolkit");
-    assert_eq!(added.tracked_ref, "trunk");
+    assert_eq!(added.tracked_ref.as_deref(), Some("trunk"));
     assert!(added.bundle_id.is_none());
     let notice = fs::read_to_string(
         sandbox
@@ -189,8 +189,9 @@ fn common_inputs_reuse_one_canonical_source_and_default_branch_comes_from_github
             .iter()
             .find(|source| source.id == source_id)
             .expect("无 ref 的重复入口应复用 Source")
-            .tracked_ref,
-        "trunk",
+            .tracked_ref
+            .as_deref(),
+        Some("trunk"),
         "仓库 default branch 变化不能建议漂移已有 Tracked Ref"
     );
 
@@ -328,8 +329,9 @@ fn a_different_tracked_ref_requires_confirmation_before_source_changes() {
             .iter()
             .find(|source| source.canonical_identity == "github:anthropics/skills")
             .expect("原 Source 应继续存在")
-            .tracked_ref,
-        "main"
+            .tracked_ref
+            .as_deref(),
+        Some("main")
     );
 
     transport.enqueue_public_repository("anthropics/skills", "main");
@@ -353,8 +355,9 @@ fn a_different_tracked_ref_requires_confirmation_before_source_changes() {
             .iter()
             .find(|source| source.id == plan.source_id)
             .expect("原 Source 应存在")
-            .tracked_ref,
-        "main"
+            .tracked_ref
+            .as_deref(),
+        Some("main")
     );
 
     let confirmed = application
@@ -369,7 +372,7 @@ fn a_different_tracked_ref_requires_confirmation_before_source_changes() {
         .iter()
         .find(|source| source.id == plan.source_id)
         .expect("切换后 Source 应继续存在");
-    assert_eq!(source.tracked_ref, "next");
+    assert_eq!(source.tracked_ref.as_deref(), Some("next"));
     assert_eq!(source.member_path_hint.as_deref(), Some("skills/example"));
     assert_eq!(source.catalog_status, SourceCatalogStatus::Unloaded);
     assert!(source.bundle_id.is_none());
@@ -381,7 +384,7 @@ fn a_different_tracked_ref_requires_confirmation_before_source_changes() {
         .iter()
         .find(|source| source.id == plan.source_id)
         .expect("重启后应保留同一个 Source");
-    assert_eq!(source.tracked_ref, "next");
+    assert_eq!(source.tracked_ref.as_deref(), Some("next"));
     assert_eq!(source.member_path_hint.as_deref(), Some("skills/example"));
 
     let replay = restarted
@@ -402,7 +405,7 @@ fn first_discovery_reloads_every_catalog_once_and_restart_preserves_failed_catal
     assert_eq!(transport.request_count(), 12);
     assert!(first.iter().all(|source| {
         source.catalog_status == SourceCatalogStatus::Fresh
-            && source.catalog_commit_sha.is_some()
+            && source.catalog_marker.is_some()
             && source.members.len() == 2
             && source.members.iter().all(|member| member.selectable)
     }));
@@ -480,9 +483,12 @@ fn dangerous_reload_keeps_the_old_catalog_and_valid_empty_archive_replaces_it() 
     transport.enqueue_seed_catalogs(&catalog_archive());
     let first = open_source_discovery(&application);
     let source_id = first[0].id.clone();
-    let tracked_ref = first[0].tracked_ref.clone();
+    let tracked_ref = first[0]
+        .tracked_ref
+        .clone()
+        .expect("GitHub Source 应保存 Tracked Ref");
     let old_commit = first[0]
-        .catalog_commit_sha
+        .catalog_marker
         .clone()
         .expect("首次 Catalog 应保存 commit");
 
@@ -495,10 +501,7 @@ fn dangerous_reload_keeps_the_old_catalog_and_valid_empty_archive_replaces_it() 
         .find(|source| source.id == source_id)
         .expect("失败后 Source 应继续存在");
     assert_eq!(source.catalog_status, SourceCatalogStatus::Stale);
-    assert_eq!(
-        source.catalog_commit_sha.as_deref(),
-        Some(old_commit.as_str())
-    );
+    assert_eq!(source.catalog_marker.as_deref(), Some(old_commit.as_str()));
     assert_eq!(source.members.len(), 2);
     assert!(source.last_reload_error.is_some());
 
@@ -513,7 +516,7 @@ fn dangerous_reload_keeps_the_old_catalog_and_valid_empty_archive_replaces_it() 
     assert_eq!(source.catalog_status, SourceCatalogStatus::Fresh);
     assert!(source.members.is_empty());
     assert_eq!(
-        source.catalog_commit_sha.as_deref(),
+        source.catalog_marker.as_deref(),
         Some("ffffffffffffffffffffffffffffffffffffffff")
     );
     assert_eq!(
@@ -534,7 +537,7 @@ fn catalog_database_failure_rolls_back_the_complete_previous_snapshot() {
     let first = open_source_discovery(&application);
     let source_id = first[0].id.clone();
     let old_commit = first[0]
-        .catalog_commit_sha
+        .catalog_marker
         .clone()
         .expect("首次 Catalog 应保存 commit");
 
@@ -572,10 +575,7 @@ fn catalog_database_failure_rolls_back_the_complete_previous_snapshot() {
         .find(|source| source.id == source_id)
         .expect("回滚后原 Source 应存在");
     assert_eq!(source.catalog_status, SourceCatalogStatus::Fresh);
-    assert_eq!(
-        source.catalog_commit_sha.as_deref(),
-        Some(old_commit.as_str())
-    );
+    assert_eq!(source.catalog_marker.as_deref(), Some(old_commit.as_str()));
     assert_eq!(source.members.len(), 2);
 }
 

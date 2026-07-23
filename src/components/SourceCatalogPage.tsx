@@ -19,6 +19,9 @@ interface SourceCatalogPageProps {
           | "opening"
           | "adding"
           | "choosingFolder"
+          | "choosingArchive"
+          | "choosingEditable"
+          | "planningUrl"
           | "confirmingRef"
           | "searchingSkillsSh";
       }
@@ -29,6 +32,9 @@ interface SourceCatalogPageProps {
   onAddSource(input: string, trackedRef: string | null): void;
   onSearchSkillsSh(query: string): void;
   onChooseFolder(): void;
+  onChooseArchive(): void;
+  onChooseEditable(): void;
+  onInstallUrl(url: string): void;
   onReload(sourceId: string): void;
   onInstall(sourceId: string): void;
 }
@@ -43,15 +49,22 @@ export function SourceCatalogPage({
   onAddSource,
   onSearchSkillsSh,
   onChooseFolder,
+  onChooseArchive,
+  onChooseEditable,
+  onInstallUrl,
   onReload,
   onInstall,
 }: SourceCatalogPageProps) {
   const [input, setInput] = useState("");
   const [trackedRef, setTrackedRef] = useState("");
   const [skillsShQuery, setSkillsShQuery] = useState("");
+  const [directUrl, setDirectUrl] = useState("");
   const isBusy = operation !== null;
   const isAddingSource = operation?.type === "adding";
   const isChoosingFolder = operation?.type === "choosingFolder";
+  const isChoosingArchive = operation?.type === "choosingArchive";
+  const isChoosingEditable = operation?.type === "choosingEditable";
+  const isPlanningUrl = operation?.type === "planningUrl";
   const isSearchingSkillsSh = operation?.type === "searchingSkillsSh";
 
   const submitSource = (event: FormEvent<HTMLFormElement>) => {
@@ -68,6 +81,12 @@ export function SourceCatalogPage({
     onSearchSkillsSh(query);
   };
 
+  const submitDirectUrl = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const url = directUrl.trim();
+    if (url) onInstallUrl(url);
+  };
+
   return (
     <main className="source-shell">
       <header className="source-header">
@@ -75,7 +94,8 @@ export function SourceCatalogPage({
           <p className="eyebrow">SKILLYARD · SOURCE CATALOG</p>
           <h1>安装 Skill</h1>
           <p className="lead">
-            Source 是远端仓库，安装后会在本机形成由 SkillYard 管理的 Bundle，默认不会挂载到任何应用。
+            从 GitHub、归档、直接 URL 或个人编辑目录安装。内容进入
+            SkillYard 后默认不会挂载到任何应用。
           </p>
         </div>
         <div className="source-header-actions">
@@ -94,6 +114,22 @@ export function SourceCatalogPage({
             onClick={onChooseFolder}
           >
             {isChoosingFolder ? "正在选择…" : "从本地文件夹安装"}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isBusy}
+            onClick={onChooseArchive}
+          >
+            {isChoosingArchive ? "正在选择…" : "从 ZIP / .skill 安装"}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isBusy}
+            onClick={onChooseEditable}
+          >
+            {isChoosingEditable ? "正在选择…" : "从个人编辑目录安装"}
           </button>
         </div>
       </header>
@@ -127,6 +163,30 @@ export function SourceCatalogPage({
           disabled={isBusy || !input.trim()}
         >
           {isAddingSource ? "正在验证…" : "添加 Source"}
+        </button>
+      </form>
+
+      <form
+        className="source-add-form"
+        aria-label="从直接 URL 安装"
+        onSubmit={submitDirectUrl}
+      >
+        <label>
+          <span>ZIP / .skill 直接 URL</span>
+          <input
+            type="url"
+            value={directUrl}
+            disabled={isBusy}
+            placeholder="https://example.com/skills.zip"
+            onChange={(event) => setDirectUrl(event.target.value)}
+          />
+        </label>
+        <button
+          className="secondary-action"
+          type="submit"
+          disabled={isBusy || !directUrl.trim()}
+        >
+          {isPlanningUrl ? "正在下载…" : "准备安装"}
         </button>
       </form>
 
@@ -273,7 +333,9 @@ function SourceCard({
   const available = source.members.filter(
     (member) => member.selectable && !member.installedMemberId,
   );
-  const canInstall = source.catalogStatus === "fresh" && available.length > 0;
+  const isGithub = source.kind === "github";
+  const canInstall =
+    isGithub && source.catalogStatus === "fresh" && available.length > 0;
   const statusLabel =
     source.catalogStatus === "fresh"
       ? "目录已加载"
@@ -289,8 +351,10 @@ function SourceCard({
             {statusLabel}
           </span>
           <h2>{source.displayName}</h2>
-          <code>{source.repositoryUrl}</code>
-          <code>Tracked Ref: {source.trackedRef}</code>
+          <code>{source.locator}</code>
+          {source.trackedRef ? (
+            <code>Tracked Ref: {source.trackedRef}</code>
+          ) : null}
           {source.catalogFetchedAt !== null ? (
             <small className="source-catalog-time">
               上次成功加载：{formatCatalogTime(source.catalogFetchedAt)}
@@ -298,26 +362,30 @@ function SourceCard({
           ) : null}
         </div>
         <div className="source-card-actions">
-          <button
-            className="secondary-action"
-            type="button"
-            disabled={isBusy}
-            onClick={onReload}
-          >
-            {isReloading ? "正在重新加载…" : "重新加载来源"}
-          </button>
-          <button
-            className="primary-action"
-            type="button"
-            disabled={isBusy || !canInstall}
-            onClick={onInstall}
-          >
-            {isPlanning
-              ? "正在准备…"
-              : source.bundleId
-                ? "补装 Skill"
-                : "安装 Bundle"}
-          </button>
+          {isGithub ? (
+            <>
+              <button
+                className="secondary-action"
+                type="button"
+                disabled={isBusy}
+                onClick={onReload}
+              >
+                {isReloading ? "正在重新加载…" : "重新加载来源"}
+              </button>
+              <button
+                className="primary-action"
+                type="button"
+                disabled={isBusy || !canInstall}
+                onClick={onInstall}
+              >
+                {isPlanning
+                  ? "正在准备…"
+                  : source.bundleId
+                    ? "补装 Skill"
+                    : "安装 Bundle"}
+              </button>
+            </>
+          ) : null}
         </div>
       </header>
 

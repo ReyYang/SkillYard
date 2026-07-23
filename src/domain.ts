@@ -167,7 +167,12 @@ export interface BatchMountPlan {
 
 export interface InstallPlan {
   id: string;
-  inputKind: "localFolder" | "github";
+  inputKind:
+    | "localFolder"
+    | "github"
+    | "archive"
+    | "directUrl"
+    | "editableLocal";
   mode: "create" | "supplement";
   inputPath: string;
   bundleDisplayName: string;
@@ -191,6 +196,11 @@ export interface InstallCandidate {
 }
 
 export type SourceCatalogStatus = "unloaded" | "fresh" | "stale";
+export type SourceKind =
+  | "github"
+  | "archive"
+  | "directUrl"
+  | "editableLocal";
 
 export interface SourceCatalogMemberSummary {
   id: string;
@@ -206,18 +216,20 @@ export interface SourceCatalogMemberSummary {
 
 export interface SourceSummary {
   id: string;
+  kind: SourceKind;
   canonicalIdentity: string;
   displayName: string;
-  repositoryUrl: string;
-  trackedRef: string;
+  locator: string;
+  trackedRef: string | null;
   memberPathHint: string | null;
   catalogStatus: SourceCatalogStatus;
-  catalogCommitSha: string | null;
+  // marker 仅说明本地采用的来源基线，不是用户可见版本。
+  catalogMarker: string | null;
   catalogFetchedAt: number | null;
   lastReloadAt: number | null;
   lastReloadError: string | null;
   bundleId: string | null;
-  adoptedCommitSha: string | null;
+  adoptedMarker: string | null;
   members: SourceCatalogMemberSummary[];
 }
 

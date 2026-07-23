@@ -452,6 +452,25 @@ pub fn validate_skill_bundle_folder(
     })
 }
 
+/// 将完整 Bundle 目录复制到新位置，并在复制前后核对同一份安全文件树。
+///
+/// 这个入口不会筛选 Skill 成员；调用方可先用 `validate_skill_bundle_folder`
+/// 生成候选，再把原始 Bundle 的仓库级文件与全部成员一起保存为 Plan 快照。
+pub fn copy_skill_bundle_tree(
+    source: &Path,
+    destination: &Path,
+) -> Result<String, ContentValidationError> {
+    let inspected = inspect_directory_tree(
+        source,
+        ContentLimits::PRODUCTION,
+        BUNDLE_FINGERPRINT_VERSION,
+    )?;
+    let fingerprint = inspected.fingerprint.clone();
+    let destination_parent = prepare_destination(&inspected.canonical_root, destination)?;
+    copy_inspected_directory_tree(inspected, destination_parent)?;
+    Ok(fingerprint)
+}
+
 #[cfg(test)]
 pub fn copy_single_skill_tree(
     source: &Path,
@@ -513,7 +532,13 @@ fn copy_validated_tree(
     let mut created = create_destination_root(&destination_parent)?;
 
     let copy_result = (|| {
-        copy_validated_entries(&validated, &destination_parent, &mut created)?;
+        copy_directory_entries(
+            &validated.skill.canonical_root,
+            validated.root_permissions,
+            &validated.entries,
+            &destination_parent,
+            &mut created,
+        )?;
         after_entries_copied();
 
         let source_after =
@@ -540,6 +565,64 @@ fn copy_validated_tree(
     if let Err(original) = copy_result {
         if let Err(cleanup) =
             cleanup_created_destination(&destination_parent, &mut created, &validated.entries)
+        {
+            return Err(ContentValidationError::CopyCleanupFailed {
+                path: display_path(&destination_parent.root_path),
+                original: original.to_string(),
+                cleanup: cleanup.to_string(),
+            });
+        }
+        return Err(original);
+    }
+
+    Ok(())
+}
+
+fn copy_inspected_directory_tree(
+    inspected: InspectedDirectoryTree,
+    destination_parent: DestinationParent,
+) -> Result<(), ContentValidationError> {
+    let mut created = create_destination_root(&destination_parent)?;
+
+    let copy_result = (|| {
+        copy_directory_entries(
+            &inspected.canonical_root,
+            inspected.root_permissions,
+            &inspected.entries,
+            &destination_parent,
+            &mut created,
+        )?;
+
+        let source_after = inspect_directory_tree(
+            &inspected.canonical_root,
+            ContentLimits::PRODUCTION,
+            BUNDLE_FINGERPRINT_VERSION,
+        )?;
+        if !same_directory_snapshot(&inspected, &source_after) {
+            return Err(ContentValidationError::SourceChanged(display_path(
+                &inspected.canonical_root,
+            )));
+        }
+
+        ensure_destination_path_identity(&destination_parent, &created)?;
+        let destination_after = inspect_directory_tree(
+            &destination_parent.root_path,
+            ContentLimits::PRODUCTION,
+            BUNDLE_FINGERPRINT_VERSION,
+        )?;
+        ensure_destination_path_identity(&destination_parent, &created)?;
+        if destination_after.fingerprint != inspected.fingerprint {
+            return Err(ContentValidationError::CopyVerificationFailed(
+                display_path(&destination_parent.root_path),
+            ));
+        }
+
+        Ok(())
+    })();
+
+    if let Err(original) = copy_result {
+        if let Err(cleanup) =
+            cleanup_created_destination(&destination_parent, &mut created, &inspected.entries)
         {
             return Err(ContentValidationError::CopyCleanupFailed {
                 path: display_path(&destination_parent.root_path),
@@ -1258,7 +1341,6 @@ fn hash_regular_file(
     Ok((captured, prefix.as_slice() == b"#!"))
 }
 
-#[cfg(test)]
 fn prepare_destination(
     canonical_source: &Path,
     destination: &Path,
@@ -1394,12 +1476,14 @@ fn create_destination_root(
     })
 }
 
-fn copy_validated_entries(
-    validated: &ValidatedTree,
+fn copy_directory_entries(
+    canonical_source_root: &Path,
+    root_permissions: u32,
+    entries: &[TreeEntry],
     destination_parent: &DestinationParent,
     destination: &mut CreatedDestination,
 ) -> Result<(), ContentValidationError> {
-    for entry in &validated.entries {
+    for entry in entries {
         if entry.kind != EntryKind::Directory {
             continue;
         }
@@ -1425,11 +1509,11 @@ fn copy_validated_entries(
             .insert(entry.relative_path.clone(), child_handle);
     }
 
-    for entry in &validated.entries {
+    for entry in entries {
         if entry.kind != EntryKind::File {
             continue;
         }
-        let source = validated.skill.canonical_root.join(&entry.relative_path);
+        let source = canonical_source_root.join(&entry.relative_path);
         let (parent_relative, name) = relative_parent_and_name(&entry.relative_path)?;
         let parent_handle = destination
             .directories
@@ -1440,7 +1524,7 @@ fn copy_validated_entries(
                 ))
             })?;
         copy_regular_file(
-            &validated.skill.canonical_root,
+            canonical_source_root,
             &source,
             parent_handle,
             name,
@@ -1450,7 +1534,7 @@ fn copy_validated_entries(
     }
 
     // 目录权限最后应用，避免只读目录阻止其余普通文件安全写入。
-    for entry in validated.entries.iter().rev() {
+    for entry in entries.iter().rev() {
         if entry.kind == EntryKind::Directory {
             let handle = destination
                 .directories
@@ -1470,11 +1554,7 @@ fn copy_validated_entries(
     let root_handle = destination.root_handle.as_ref().ok_or_else(|| {
         ContentValidationError::CopyVerificationFailed(display_path(&destination_parent.root_path))
     })?;
-    set_file_permissions(
-        root_handle,
-        validated.root_permissions,
-        &destination_parent.root_path,
-    )?;
+    set_file_permissions(root_handle, root_permissions, &destination_parent.root_path)?;
     for handle in destination.directories.values().rev() {
         handle.sync_all().map_err(|source| {
             io_error("同步复制目标目录", &destination_parent.root_path, source)
@@ -1632,6 +1712,16 @@ fn remove_known_tree_entries(
 fn same_source_snapshot(before: &ValidatedTree, after: &ValidatedTree) -> bool {
     before.skill.canonical_root == after.skill.canonical_root
         && before.skill.fingerprint == after.skill.fingerprint
+        && before.root_identity == after.root_identity
+        && before.entries == after.entries
+}
+
+fn same_directory_snapshot(
+    before: &InspectedDirectoryTree,
+    after: &InspectedDirectoryTree,
+) -> bool {
+    before.canonical_root == after.canonical_root
+        && before.fingerprint == after.fingerprint
         && before.root_identity == after.root_identity
         && before.entries == after.entries
 }
@@ -1886,6 +1976,65 @@ mod tests {
                 .fingerprint,
             validated.fingerprint
         );
+    }
+
+    #[test]
+    fn copies_a_complete_safe_bundle_without_dropping_repository_files() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let source = sandbox.path().join("bundle");
+        let first = source.join("skills/alpha");
+        let second = source.join("skills/beta");
+        fs::create_dir_all(&first).expect("应创建第一个成员目录");
+        fs::create_dir_all(&second).expect("应创建第二个成员目录");
+        fs::write(
+            first.join("SKILL.md"),
+            "---\nname: alpha\ndescription: 第一个 Skill\n---\n",
+        )
+        .expect("应写入第一个 metadata");
+        fs::write(
+            second.join("SKILL.md"),
+            "---\nname: beta\ndescription: 第二个 Skill\n---\n",
+        )
+        .expect("应写入第二个 metadata");
+        fs::write(source.join("README.md"), "完整仓库说明").expect("应写入仓库级文件");
+        let destination = sandbox.path().join("snapshot");
+
+        let fingerprint =
+            copy_skill_bundle_tree(&source, &destination).expect("安全 Bundle 应完整复制");
+
+        assert_eq!(
+            fingerprint,
+            validate_skill_bundle_folder(&source)
+                .expect("来源仍应可验证")
+                .fingerprint
+        );
+        assert_eq!(
+            validate_skill_bundle_folder(&destination)
+                .expect("目标仍应是相同 Bundle")
+                .fingerprint,
+            fingerprint
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("README.md")).expect("仓库级文件应保留"),
+            "完整仓库说明"
+        );
+    }
+
+    #[test]
+    fn complete_bundle_copy_rejects_a_symlink_and_leaves_no_destination() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let source = sandbox.path().join("bundle");
+        write_valid_skill(&source);
+        symlink("SKILL.md", source.join("linked.md")).expect("应创建不安全软链接");
+        let destination = sandbox.path().join("snapshot");
+
+        assert!(matches!(
+            copy_skill_bundle_tree(&source, &destination),
+            Err(ContentValidationError::UnsafeEntry {
+                kind: "软链接", ..
+            })
+        ));
+        assert!(!destination.exists());
     }
 
     #[test]

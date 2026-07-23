@@ -229,8 +229,10 @@ code {
 .source-header-actions,
 .source-card-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.7rem;
   align-items: center;
+  justify-content: flex-end;
 }
 
 .source-add-form {

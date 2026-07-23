@@ -163,6 +163,28 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("choose_folder_install_plan");
   });
 
+  it("归档、直接 URL 和 Editable Local 都使用封闭任务命令", async () => {
+    mocks.invoke.mockResolvedValue(null);
+
+    await tauriSkillYardClient.chooseArchiveInstallPlan();
+    await tauriSkillYardClient.createUrlInstallPlan(
+      "https://example.com/skills.zip",
+    );
+    await tauriSkillYardClient.chooseEditableLocalInstallPlan();
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      1,
+      "choose_archive_install_plan",
+    );
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "create_url_install_plan", {
+      url: "https://example.com/skills.zip",
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      3,
+      "choose_editable_local_install_plan",
+    );
+  });
+
   it("确认时只把 opaque Plan 与候选 ID 交回 Rust", async () => {
     mocks.invoke.mockResolvedValue({
       type: "inventory",

@@ -24,6 +24,15 @@ pub enum UiIntent {
     CreateFolderInstallPlan {
         input_path: String,
     },
+    CreateArchiveInstallPlan {
+        input_path: String,
+    },
+    CreateUrlInstallPlan {
+        url: String,
+    },
+    CreateEditableLocalInstallPlan {
+        input_path: String,
+    },
     CreateGithubInstallPlan {
         source_id: String,
     },
@@ -494,6 +503,9 @@ pub struct InstallPlan {
 pub enum InstallInputKind {
     LocalFolder,
     Github,
+    Archive,
+    DirectUrl,
+    EditableLocal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -526,6 +538,37 @@ pub enum SourceCatalogStatus {
     Stale,
 }
 
+/// Source kind 决定内容的取得方式，但不会改变统一的 Bundle 安装生命周期。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceKind {
+    Github,
+    Archive,
+    DirectUrl,
+    EditableLocal,
+}
+
+impl SourceKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Archive => "archive",
+            Self::DirectUrl => "direct_url",
+            Self::EditableLocal => "editable_local",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "github" => Some(Self::Github),
+            "archive" => Some(Self::Archive),
+            "direct_url" => Some(Self::DirectUrl),
+            "editable_local" => Some(Self::EditableLocal),
+            _ => None,
+        }
+    }
+}
+
 impl SourceCatalogStatus {
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
@@ -555,18 +598,20 @@ pub struct SourceCatalogMemberSummary {
 #[serde(rename_all = "camelCase")]
 pub struct SourceSummary {
     pub id: String,
+    pub kind: SourceKind,
     pub canonical_identity: String,
     pub display_name: String,
-    pub repository_url: String,
-    pub tracked_ref: String,
+    pub locator: String,
+    pub tracked_ref: Option<String>,
     pub member_path_hint: Option<String>,
     pub catalog_status: SourceCatalogStatus,
-    pub catalog_commit_sha: Option<String>,
+    /// marker 只用于确认来源内容基线，不向用户承诺版本或回滚历史。
+    pub catalog_marker: Option<String>,
     pub catalog_fetched_at: Option<i64>,
     pub last_reload_at: Option<i64>,
     pub last_reload_error: Option<String>,
     pub bundle_id: Option<String>,
-    pub adopted_commit_sha: Option<String>,
+    pub adopted_marker: Option<String>,
     pub members: Vec<SourceCatalogMemberSummary>,
 }
 

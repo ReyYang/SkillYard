@@ -169,6 +169,87 @@ pub fn choose_folder_install_plan(
     }
 }
 
+/// Archive 路径只由 Rust 原生文件选择器签发，并把可见格式限制为 1.0 支持的容器。
+#[tauri::command(async)]
+pub fn choose_archive_install_plan(
+    app: AppHandle,
+    application: State<'_, SkillYardApplication>,
+) -> Result<Option<InstallPlan>, UiError> {
+    let Some(archive) = app
+        .dialog()
+        .file()
+        .set_title("选择 Skill Bundle 归档")
+        .add_filter("Skill Bundle", &["zip", "skill"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = archive.into_path().map_err(|error| UiError {
+        code: "dialogError",
+        message: format!("无法读取所选归档：{error}"),
+    })?;
+    let input_path = path.to_str().ok_or_else(|| UiError {
+        code: "invalidPath",
+        message: "所选归档名称包含 SkillYard 1.0 无法保存的字符".to_owned(),
+    })?;
+    match dispatch(
+        &application,
+        UiIntent::CreateArchiveInstallPlan {
+            input_path: input_path.to_owned(),
+        },
+    )? {
+        UiOutcome::InstallPlan { plan } => Ok(Some(plan)),
+        _ => Err(invalid_outcome("SkillYard 没有生成归档安装确认信息")),
+    }
+}
+
+/// URL 是非文件系统输入，可以由 typed command 直接传入唯一应用 seam。
+#[tauri::command(async)]
+pub fn create_url_install_plan(
+    application: State<'_, SkillYardApplication>,
+    url: String,
+) -> Result<InstallPlan, UiError> {
+    match dispatch(&application, UiIntent::CreateUrlInstallPlan { url })? {
+        UiOutcome::InstallPlan { plan } => Ok(plan),
+        _ => Err(invalid_outcome("SkillYard 没有生成 URL 安装确认信息")),
+    }
+}
+
+/// Editable Local 路径同样只能由原生目录选择器签发。
+#[tauri::command(async)]
+pub fn choose_editable_local_install_plan(
+    app: AppHandle,
+    application: State<'_, SkillYardApplication>,
+) -> Result<Option<InstallPlan>, UiError> {
+    let Some(folder) = app
+        .dialog()
+        .file()
+        .set_title("选择持续由你编辑的 Skill Bundle 文件夹")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let path = folder.into_path().map_err(|error| UiError {
+        code: "dialogError",
+        message: format!("无法读取所选 Editable Local 文件夹：{error}"),
+    })?;
+    let input_path = path.to_str().ok_or_else(|| UiError {
+        code: "invalidPath",
+        message: "所选文件夹名称包含 SkillYard 1.0 无法保存的字符".to_owned(),
+    })?;
+    match dispatch(
+        &application,
+        UiIntent::CreateEditableLocalInstallPlan {
+            input_path: input_path.to_owned(),
+        },
+    )? {
+        UiOutcome::InstallPlan { plan } => Ok(Some(plan)),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有生成 Editable Local 安装确认信息",
+        )),
+    }
+}
+
 #[tauri::command(async)]
 pub fn confirm_install_plan(
     application: State<'_, SkillYardApplication>,
