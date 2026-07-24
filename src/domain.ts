@@ -29,6 +29,19 @@ export interface ManagementEvidence {
   subjectPath: string;
 }
 
+export interface InstallationChain {
+  kind: "lockV3";
+  recordPath: string;
+  source: string;
+  sourceType: string;
+  sourceLocator: string;
+  skillPath: string | null;
+  trackedRef: string | null;
+  contentMarker: string;
+  installedAt: string;
+  updatedAt: string;
+}
+
 export interface InventoryObservation {
   id: string;
   skillName: string;
@@ -50,6 +63,8 @@ export interface InventoryObservation {
     | "projectManaged";
   // 当前仅由已登记 Project 的 Git HEAD 确定性证据产生。
   managementEvidence?: ManagementEvidence | null;
+  // lock v3 只证明这份安装记录，不证明具体由哪个外部 CLI 执行。
+  installationChain: InstallationChain | null;
   // 受管安装由 Rust 投影真实 Bundle；扫描观察保持这些关系为空。
   bundleId?: string | null;
   bundleDisplayName?: string | null;
@@ -488,6 +503,7 @@ export interface TakeoverPlan {
   skillName: string;
   skillDescription: string;
   sourceDisplayName: string | null;
+  installationChain: InstallationChain | null;
   managedDirectory: string;
   contentDirectory: string;
   expectedTarget: string;

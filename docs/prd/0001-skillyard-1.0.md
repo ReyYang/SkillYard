@@ -323,7 +323,7 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 - Local Refresh 扫描 Supported App 的固定 global、已登记 project 和只读证据目录，并更新 Inventory、Management Evidence 和 Mount 健康。
 - 所有权分类只依赖内建规则、确定性本地证据和用户确认，不使用名称相似、目录邻近或 AI 推断。
 - 能够用确定性证据识别的 Codex 插件、Agent 内置 Skill 和明确由项目仓库维护的 Skill 只读展示，生命周期操作交回原管理方。
-- 外部安装工具的 receipt、lock、manifest 或其他可核验证据记录为 Installation Chain，但工具本身不会被 SkillYard 执行。
+- 1.0 只自动读取已经核验的 lock v3 作为 Installation Chain；保存其中的 Source URL／路径和上游 Skill 路径等事实，但不猜测具体执行工具，也不把它直接登记为可更新 Source。Lark 专属状态、GitHub frontmatter 和其他 receipt／manifest 格式留到后续版本。
 
 ### Source Adapter 与发现
 

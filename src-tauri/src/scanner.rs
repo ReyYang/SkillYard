@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     fs::File,
     io::Read,
@@ -12,12 +12,14 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        InventoryLocationKind, InventoryObservation, ManagementKind, ScanIssue, ScanIssueCode,
-        ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SupportedAppId, SupportedAppSummary,
+        InstallationChain, InventoryLocationKind, InventoryObservation, ManagementKind, ScanIssue,
+        ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SupportedAppId,
+        SupportedAppSummary,
     },
     git_management_evidence::{
         ManagementEvidenceError, ManagementEvidenceInspection, inspect_git_head_management,
     },
+    installation_chain::read_lock_v3_installation_chains,
     paths::ApplicationPaths,
     storage::StoredProject,
 };
@@ -61,6 +63,11 @@ pub struct ScanResult {
     pub issues: Vec<ScanIssue>,
 }
 
+struct ScanContext<'a> {
+    excluded_skill_roots: &'a BTreeSet<PathBuf>,
+    installation_chains: &'a BTreeMap<String, InstallationChain>,
+}
+
 /// 扫描每个固定根目录并分别记录结果，单个根失败不会伪装成空目录。
 pub fn scan(paths: &ApplicationPaths) -> ScanResult {
     scan_excluding(paths, &BTreeSet::new())
@@ -71,6 +78,11 @@ pub fn scan_excluding(
     paths: &ApplicationPaths,
     excluded_skill_roots: &BTreeSet<PathBuf>,
 ) -> ScanResult {
+    let installation_chains = read_lock_v3_installation_chains(paths);
+    let context = ScanContext {
+        excluded_skill_roots,
+        installation_chains: &installation_chains,
+    };
     let mut entries = Vec::new();
     let mut supported_apps = Vec::new();
     let mut successful_roots = Vec::new();
@@ -97,7 +109,7 @@ pub fn scan_excluding(
             vec![app.id],
             None,
             None,
-            excluded_skill_roots,
+            &context,
         ) {
             Ok(root_entries) => {
                 entries.extend(root_entries);
@@ -114,7 +126,7 @@ pub fn scan_excluding(
         vec![SupportedAppId::Codex, SupportedAppId::GitHubCopilot],
         None,
         None,
-        excluded_skill_roots,
+        &context,
     ) {
         Ok(root_entries) => {
             entries.extend(root_entries);
@@ -157,6 +169,11 @@ pub fn scan_projects(
     projects: &[StoredProject],
     excluded_skill_roots: &BTreeSet<PathBuf>,
 ) -> ScanResult {
+    let installation_chains = read_lock_v3_installation_chains(paths);
+    let context = ScanContext {
+        excluded_skill_roots,
+        installation_chains: &installation_chains,
+    };
     let mut result = ScanResult {
         entries: Vec::new(),
         supported_apps: Vec::new(),
@@ -183,7 +200,7 @@ pub fn scan_projects(
                 project_observers(app.id),
                 Some(&project.id),
                 Some(project_path),
-                excluded_skill_roots,
+                &context,
             ) {
                 Ok(entries) => {
                     result.entries.extend(entries);
@@ -205,7 +222,7 @@ pub fn scan_projects(
             vec![SupportedAppId::Codex, SupportedAppId::GitHubCopilot],
             Some(&project.id),
             Some(project_path),
-            excluded_skill_roots,
+            &context,
         ) {
             Ok(entries) => {
                 result.entries.extend(entries);
@@ -243,7 +260,7 @@ fn scan_optional_root(
     observed_by: Vec<SupportedAppId>,
     project_id: Option<&str>,
     project_root: Option<&Path>,
-    excluded_skill_roots: &BTreeSet<PathBuf>,
+    context: &ScanContext<'_>,
 ) -> Result<Vec<InventoryObservation>, ScanError> {
     if !path_exists(path)? {
         return Ok(Vec::new());
@@ -272,7 +289,7 @@ fn scan_optional_root(
     let mut observations = Vec::new();
     for child in children {
         let skill_root = child.path();
-        if excluded_skill_roots.contains(&skill_root) {
+        if context.excluded_skill_roots.contains(&skill_root) {
             continue;
         }
         let file_type = child.file_type().map_err(|source| ScanError::ReadRoot {
@@ -322,6 +339,7 @@ fn scan_optional_root(
             None => (ManagementKind::TakeoverCandidate, None),
         };
         let root_string = skill_root.to_string_lossy().into_owned();
+        let installation_chain = context.installation_chains.get(&skill_name).cloned();
         observations.push(InventoryObservation {
             id: format!("{}:{root_string}", location_kind.as_str()),
             skill_name,
@@ -337,6 +355,7 @@ fn scan_optional_root(
             stale: false,
             management_kind,
             management_evidence,
+            installation_chain,
         });
     }
 

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use crate::domain::{ScanRootKey, SupportedAppId};
 
@@ -18,11 +21,29 @@ pub(crate) struct SupportedAppPathConfig {
 pub struct ApplicationPaths {
     data_root: PathBuf,
     home: PathBuf,
+    skill_lock_path: PathBuf,
 }
 
 impl ApplicationPaths {
     pub fn for_home(data_root: PathBuf, home: PathBuf) -> Self {
-        Self { data_root, home }
+        let skill_lock_path = home.join(".agents/.skill-lock.json");
+        Self {
+            data_root,
+            home,
+            skill_lock_path,
+        }
+    }
+
+    /// 正式 App 遵循 lock v3 的 XDG state 优先级；隔离测试仍使用传入 home 的默认位置。
+    pub(crate) fn for_current_user(data_root: PathBuf, home: PathBuf) -> Self {
+        let mut paths = Self::for_home(data_root, home);
+        if let Some(state_home) = env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            paths.skill_lock_path = state_home.join("skills/.skill-lock.json");
+        }
+        paths
     }
 
     pub(crate) fn data_root(&self) -> &Path {
@@ -96,5 +117,9 @@ impl ApplicationPaths {
 
     pub(crate) fn shared_read_only_root(&self) -> PathBuf {
         self.home.join(".agents/skills")
+    }
+
+    pub(crate) fn skill_lock_path(&self) -> &Path {
+        &self.skill_lock_path
     }
 }

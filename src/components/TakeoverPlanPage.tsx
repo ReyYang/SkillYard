@@ -1,4 +1,5 @@
 import type {
+  InstallationChain,
   SupportedAppId,
   TakeoverPlan,
   TakeoverPlanOrigin,
@@ -39,13 +40,9 @@ export function TakeoverPlanPage({
           value={plan.sourceDisplayName ?? "没有更新来源"}
         />
         <PlanRow
-          label="安装线索"
-          // 1.0 只展示后端已确认的来源；没有证据时明确未知，不能猜测外部 CLI。
-          value={
-            plan.sourceDisplayName
-              ? `已确认来源：${plan.sourceDisplayName}`
-              : "未发现可靠的安装命令或来源记录"
-          }
+          label="Installation Chain"
+          // Source 不能代替安装履历；lock 也不能被推断成具体外部 CLI。
+          value={installationChainLabel(plan.installationChain)}
         />
         <PlanRow
           label="采用内容"
@@ -165,6 +162,12 @@ function PlanRow({
       {code ? <code title={value}>{value}</code> : <strong>{value}</strong>}
     </div>
   );
+}
+
+function installationChainLabel(chain: InstallationChain | null): string {
+  if (!chain) return "未发现可核验的安装记录";
+  const memberPath = chain.skillPath ? ` · ${chain.skillPath}` : "";
+  return `lock v3 · ${chain.source}${memberPath}`;
 }
 
 function originLabel(origin: TakeoverPlanOrigin): string {

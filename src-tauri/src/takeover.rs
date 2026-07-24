@@ -468,6 +468,11 @@ pub(crate) fn create_takeover_plan(
         skill_name,
         skill_description,
         source_display_name: None,
+        installation_chain: selected
+            .observation
+            .installation_chain
+            .clone()
+            .map(Box::new),
         managed_directory: path_text(&managed_directory)?,
         content_directory: path_text(&content_directory)?,
         expected_target: expected_target_text,

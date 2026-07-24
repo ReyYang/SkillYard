@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 /// UI 只能通过这个封闭枚举表达业务意图，不能传入任意文件操作。
@@ -252,6 +254,7 @@ pub struct TakeoverPlan {
     pub skill_name: String,
     pub skill_description: String,
     pub source_display_name: Option<String>,
+    pub installation_chain: Option<Box<InstallationChain>>,
     pub managed_directory: String,
     pub content_directory: String,
     pub expected_target: String,
@@ -485,6 +488,63 @@ pub enum ManagementEvidenceKind {
     GitHeadTracked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallationChainKind {
+    LockV3,
+}
+
+impl InstallationChainKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::LockV3 => "lock_v3",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "lock_v3" => Some(Self::LockV3),
+            _ => None,
+        }
+    }
+}
+
+/// Installation Chain 只保存收据能够证明的事实，不把 lock 推断成具体 CLI 执行者。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallationChain {
+    pub kind: InstallationChainKind,
+    pub record_path: String,
+    pub source: String,
+    pub source_type: String,
+    pub source_locator: String,
+    pub skill_path: Option<String>,
+    pub tracked_ref: Option<String>,
+    pub content_marker: String,
+    pub installed_at: String,
+    pub updated_at: String,
+}
+
+impl InstallationChain {
+    pub(crate) fn is_valid(&self) -> bool {
+        Path::new(&self.record_path).is_absolute()
+            && !self.source.trim().is_empty()
+            && !self.source_type.trim().is_empty()
+            && !self.source_locator.trim().is_empty()
+            && self
+                .skill_path
+                .as_deref()
+                .is_none_or(|path| !path.trim().is_empty())
+            && self
+                .tracked_ref
+                .as_deref()
+                .is_none_or(|tracked_ref| !tracked_ref.trim().is_empty())
+            && !self.content_marker.trim().is_empty()
+            && !self.installed_at.trim().is_empty()
+            && !self.updated_at.trim().is_empty()
+    }
+}
+
 impl ManagementEvidenceKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -529,6 +589,7 @@ pub struct InventoryObservation {
     pub stale: bool,
     pub management_kind: ManagementKind,
     pub management_evidence: Option<ManagementEvidence>,
+    pub installation_chain: Option<InstallationChain>,
 }
 
 /// 主界面读模型合并扫描事实和受管领域记录，但两者仍分别持久化。
@@ -549,6 +610,7 @@ pub struct InventoryItem {
     pub stale: bool,
     pub management_kind: ManagementKind,
     pub management_evidence: Option<ManagementEvidence>,
+    pub installation_chain: Option<InstallationChain>,
     pub bundle_id: Option<String>,
     /// 受管条目公开稳定 Member ID；扫描观察保持为空，前端不能解析展示 ID。
     pub member_id: Option<String>,

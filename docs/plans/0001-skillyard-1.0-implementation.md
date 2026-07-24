@@ -678,6 +678,13 @@ Editable Local 重新关联
   -> 展示相关对象、Rust 判定原因和 Central Store 保护提示
   -> 只提供返回清单与打开固定 Central Store
   -> 不提供未定义的强制采用、删除 Journal 或解除阻塞动作
+
+Installation Chain
+  -> Local Refresh 只读解析官方默认位置或 XDG state 位置的 lock v3
+  -> 只接受完整的 v3 记录，并按协议中的 Skill Name 关联扫描观察
+  -> Inventory 与 Takeover Plan 展示 lock、Source URL／路径和上游 Skill 路径
+  -> 不根据 lock 猜测具体由 `skills`、`gh skill` 或 Lark CLI 执行
+  -> 接管确认时随 Skill Member 原子保存，之后不受外部 lock 删除影响
 ```
 
 模型和边界固定如下：
@@ -689,6 +696,8 @@ Editable Local 重新关联
 - 生命周期事务期间允许使用缓存的已提交 Inventory 进行搜索、筛选和查看 Mount／Source 详情；不能发起安装、接管、挂载、更新、删除、Local Refresh、Update Check 或 Source Reload。
 - Finder 入口只调用固定的 `open_central_store` command；Rust 使用 Tauri Opener 打开 `ApplicationPaths::data_root()`，前端不能提供路径，也不获得通用文件系统或 shell 权限。
 - “重置应用”只清除当前前端导航、搜索筛选、临时错误和窗口内选择，并重新读取 Startup State。1.0 当前没有持久化偏好或窗口状态，因此不新增设置存储；SQLite、Journal、Source Catalog、Bundle、`current` 和 Mount 均不能被清理。
+- Installation Chain 只有一套当前模型：扫描观察、Takeover Plan 和受管 Skill Member 使用同一份 lock v3 事实。Source 关联仍由现有 Source 模型负责，不能把 lock 中的来源字符串直接伪装成已经登记且可更新的 Source。
+- lock v3 只是一份可核验的本地收据协议，不是执行者证明。1.0 保存记录位置、Source 类型、Source URL／路径、上游 Skill 路径、ref、内容 marker 与时间；不解析 Lark 专属状态、GitHub frontmatter 或其他 receipt 格式。
 - Stage 10 建立 167 条 User Story 到自动化、`[MAC-CONTRACT]` 或 `[HUMAN]` 证据的映射。已有公开 seam 测试继续作为证据，只为真实缺口补测试，不重复实现前九阶段。
 
 ### 1.0 完成条件

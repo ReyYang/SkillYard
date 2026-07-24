@@ -4,6 +4,7 @@ import type {
   BundleUpdateAction,
   BundleUpdateSummary,
   BundleUpdateStatus,
+  InstallationChain,
   InventoryObservation,
   MountSummary,
   SupportedAppId,
@@ -733,6 +734,11 @@ function SkillCard({
       <code title={entry.skillRoot}>{entry.skillRoot}</code>
       <div className="skill-meta">
         <span>{entry.sourceDisplayName ?? "来源未知"}</span>
+        {entry.installationChain ? (
+          <span title={entry.installationChain.recordPath}>
+            {`Installation Chain: ${installationChainLabel(entry.installationChain)}`}
+          </span>
+        ) : null}
         {entry.observedBy.map((app) => (
           <span key={app}>{supportedAppLabel(app)}</span>
         ))}
@@ -791,6 +797,11 @@ function mountLabel(mount: MountSummary): string {
   return mount.scope === "global"
     ? `${appName} · 全局`
     : `${appName} · ${mount.projectDisplayName ?? "已登记项目"}`;
+}
+
+function installationChainLabel(chain: InstallationChain): string {
+  const memberPath = chain.skillPath ? ` · ${chain.skillPath}` : "";
+  return `lock v3 · ${chain.source}${memberPath}`;
 }
 
 function mountHealthLabel(health: MountSummary["health"]): string {
@@ -860,6 +871,8 @@ function matchesQuery(entry: InventoryObservation, query: string): boolean {
     entry.declaredName,
     entry.bundleDisplayName,
     entry.sourceDisplayName,
+    entry.installationChain?.source,
+    entry.installationChain?.skillPath,
     entry.projectDisplayName,
     ...entry.observedBy.map(supportedAppLabel),
   ]

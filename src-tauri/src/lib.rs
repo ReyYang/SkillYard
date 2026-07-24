@@ -7,6 +7,7 @@ mod content;
 mod domain;
 mod git_management_evidence;
 mod github_source;
+mod installation_chain;
 mod lifecycle;
 mod mount_lifecycle;
 mod paths;
@@ -26,18 +27,18 @@ pub use domain::{
     BundleUpdateBatchPlanItemDisposition, BundleUpdateBatchResult, BundleUpdateBatchResultItem,
     BundleUpdateBatchResultItemStatus, BundleUpdateBatchResultStatus, BundleUpdateImpact,
     BundleUpdateStatus, BundleUpdateSummary, EditableLocalRelinkMember, EditableLocalRelinkPlan,
-    InstallCandidate, InstallInputKind, InstallMode, InstallPlan, InventoryItem,
-    InventoryLocationKind, InventoryObservation, LocalRefreshSummary, ManagementEvidence,
-    ManagementEvidenceKind, ManagementKind, MergeContentChoice, MountHealth, MountOperation,
-    MountPlan, MountPlanPurpose, MountScope, MountSummary, PlatformInfo, ProjectSummary,
-    RecoveryIssue, RemovalBundleSummary, RemovalKind, RemovalMemberSummary, RemovalPlan,
-    RemovalPreservedSource, ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus,
-    SkillsShSearchMember, SkillsShSearchSource, SourceAssociationConflict, SourceAssociationMember,
-    SourceAssociationMemberChoice, SourceAssociationMode, SourceAssociationPlan,
-    SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind, SourceMemberMappingChoice,
-    SourceRefChangePlan, SourceSummary, SupportedAppId, TakeoverIdentityBasis,
-    TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin, TakeoverPlanRequest,
-    TakeoverPlanTarget, TakeoverSharedTargetRequest, UiIntent, UiOutcome,
+    InstallCandidate, InstallInputKind, InstallMode, InstallPlan, InstallationChain,
+    InstallationChainKind, InventoryItem, InventoryLocationKind, InventoryObservation,
+    LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind,
+    MergeContentChoice, MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope,
+    MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, RemovalBundleSummary, RemovalKind,
+    RemovalMemberSummary, RemovalPlan, RemovalPreservedSource, ScanIssue, ScanIssueCode,
+    ScanRootKey, SkillMetadataStatus, SkillsShSearchMember, SkillsShSearchSource,
+    SourceAssociationConflict, SourceAssociationMember, SourceAssociationMemberChoice,
+    SourceAssociationMode, SourceAssociationPlan, SourceCatalogMemberSummary, SourceCatalogStatus,
+    SourceKind, SourceMemberMappingChoice, SourceRefChangePlan, SourceSummary, SupportedAppId,
+    TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin,
+    TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest, UiIntent, UiOutcome,
 };
 pub use github_source::{
     GithubSourceError, ReqwestSourceTransport, ResolvedGithubSource, SharedSourceTransport,
@@ -53,7 +54,7 @@ pub fn run() {
     let home = dirs::home_dir().expect("当前用户必须有可访问的 home 目录");
     let data_root = home.join("Library/Application Support/SkillYard");
     let application = SkillYardApplication::new(
-        ApplicationPaths::for_home(data_root, home),
+        ApplicationPaths::for_current_user(data_root, home),
         PlatformInfo::current(),
     );
 

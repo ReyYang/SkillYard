@@ -13,13 +13,13 @@ use thiserror::Error;
 
 use crate::domain::{
     BatchMountDisposition, BundleUpdateAction, BundleUpdateStatus, BundleUpdateSummary,
-    EditableLocalRelinkMember, EditableLocalRelinkPlan, InventoryItem, InventoryLocationKind,
-    InventoryObservation, LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind,
-    ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope, MountSummary,
-    ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey,
-    SkillMetadataStatus, SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind,
-    SourceRefChangePlan, SourceSummary, SupportedAppId, SupportedAppSummary, TakeoverPlan,
-    UiOutcome,
+    EditableLocalRelinkMember, EditableLocalRelinkPlan, InstallationChain, InstallationChainKind,
+    InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
+    ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth, MountOperation,
+    MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue, ScanIssue,
+    ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SourceCatalogMemberSummary,
+    SourceCatalogStatus, SourceKind, SourceRefChangePlan, SourceSummary, SupportedAppId,
+    SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -73,6 +73,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         21,
         include_str!("../migrations/0021_editable_local_relink.sql"),
+    ),
+    (
+        22,
+        include_str!("../migrations/0022_installation_chain.sql"),
     ),
 ];
 
@@ -160,6 +164,10 @@ pub enum StorageError {
     UnknownManagementKind(String),
     #[error("SQLite 中包含未知管理证据类型：{0}")]
     UnknownManagementEvidenceKind(String),
+    #[error("SQLite 中包含未知 Installation Chain 类型：{0}")]
+    UnknownInstallationChainKind(String),
+    #[error("SQLite 中的 Installation Chain 记录不完整")]
+    InvalidInstallationChain,
     #[error("SQLite 中包含未知扫描问题类型：{0}")]
     UnknownScanIssueCode(String),
     #[error("SQLite 中包含非法刷新统计值：{0}")]
@@ -1762,6 +1770,10 @@ impl Storage {
                     params![plan.member_id, plan.bundle_id, plan.skill_name, plan.skill_description, stable_relative_path, fingerprint, now],
                 )
                 .map_err(StorageError::SaveTakeoverTransaction)?;
+            if let Some(chain) = &plan.installation_chain {
+                insert_member_installation_chain(&transaction, &plan.member_id, chain)
+                    .map_err(StorageError::SaveTakeoverTransaction)?;
+            }
             transaction
                 .execute(
                     "INSERT INTO member_selections (bundle_id, member_id, selected_at) VALUES (?1, ?2, ?3)",
@@ -10110,6 +10122,10 @@ fn validate_takeover_domain_contract(
         || plan.bundle_display_name.trim().is_empty()
         || plan.skill_description.trim().is_empty()
         || plan.source_display_name.is_some()
+        || plan
+            .installation_chain
+            .as_ref()
+            .is_some_and(|chain| !chain.is_valid())
         || selected.len() != 1
         || selected[0].content_fingerprint.is_empty()
         || origin_ids.len() != plan.origins.len()
@@ -10146,6 +10162,7 @@ fn ensure_takeover_domain_matches(
 ) -> Result<(), StorageError> {
     let member = read_managed_member_from(transaction, data_root, &plan.member_id)?
         .ok_or(StorageError::InvalidTakeoverPlan)?;
+    let installation_chain = read_member_installation_chain_from(transaction, &plan.member_id)?;
     let bundle = transaction
         .query_row(
             "SELECT display_name, managed_directory, current_target,
@@ -10176,6 +10193,7 @@ fn ensure_takeover_domain_matches(
         || member.skill_name != plan.skill_name
         || member.content_fingerprint != fingerprint
         || member.expected_target != plan.expected_target
+        || installation_chain.as_ref() != plan.installation_chain.as_deref()
         || bundle.0 != plan.bundle_display_name
         || bundle.1 != member.managed_directory
         || bundle.2 != member.current_target
@@ -10297,6 +10315,7 @@ fn read_inventory_entries_from(
             management_kind: ManagementKind::from_str(&management_kind)
                 .ok_or_else(|| StorageError::UnknownManagementKind(management_kind.clone()))?,
             management_evidence: None,
+            installation_chain: None,
         });
     }
 
@@ -10327,6 +10346,7 @@ fn read_inventory_entries_from(
                 subject_path,
             });
         }
+        entry.installation_chain = read_observation_installation_chain_from(connection, &entry.id)?;
         let mut app_statement = connection
             .prepare(
                 "SELECT app_id FROM inventory_observation_apps WHERE observation_id = ?1 ORDER BY app_id",
@@ -10344,6 +10364,90 @@ fn read_inventory_entries_from(
         }
     }
     Ok(entries)
+}
+
+type InstallationChainRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+);
+
+fn read_observation_installation_chain_from(
+    connection: &Connection,
+    observation_id: &str,
+) -> Result<Option<InstallationChain>, StorageError> {
+    read_installation_chain_query(
+        connection,
+        "SELECT kind, record_path, source, source_type, source_locator, skill_path,
+                tracked_ref, content_marker, installed_at, updated_at
+         FROM inventory_installation_chains WHERE observation_id = ?1",
+        observation_id,
+    )
+}
+
+fn read_member_installation_chain_from(
+    connection: &Connection,
+    member_id: &str,
+) -> Result<Option<InstallationChain>, StorageError> {
+    read_installation_chain_query(
+        connection,
+        "SELECT kind, record_path, source, source_type, source_locator, skill_path,
+                tracked_ref, content_marker, installed_at, updated_at
+         FROM member_installation_chains WHERE member_id = ?1",
+        member_id,
+    )
+}
+
+fn read_installation_chain_query(
+    connection: &Connection,
+    query: &str,
+    owner_id: &str,
+) -> Result<Option<InstallationChain>, StorageError> {
+    let row = connection
+        .query_row(query, [owner_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+            ))
+        })
+        .optional()
+        .map_err(StorageError::ReadInventory)?;
+    row.map(decode_installation_chain).transpose()
+}
+
+fn decode_installation_chain(row: InstallationChainRow) -> Result<InstallationChain, StorageError> {
+    let chain = InstallationChain {
+        kind: InstallationChainKind::from_str(&row.0)
+            .ok_or_else(|| StorageError::UnknownInstallationChainKind(row.0.clone()))?,
+        record_path: row.1,
+        source: row.2,
+        source_type: row.3,
+        source_locator: row.4,
+        skill_path: row.5,
+        tracked_ref: row.6,
+        content_marker: row.7,
+        installed_at: row.8,
+        updated_at: row.9,
+    };
+    if !chain.is_valid() {
+        return Err(StorageError::InvalidInstallationChain);
+    }
+    Ok(chain)
 }
 
 fn read_scan_issues_from(connection: &Connection) -> Result<Vec<ScanIssue>, StorageError> {
@@ -11514,6 +11618,7 @@ fn inventory_item_from_observation(
         stale: observation.stale,
         management_kind: observation.management_kind,
         management_evidence: observation.management_evidence,
+        installation_chain: observation.installation_chain,
         bundle_id: None,
         member_id: None,
         bundle_display_name: None,
@@ -11575,6 +11680,7 @@ fn read_managed_entries_from(
             &current_target,
             &stable_relative_path,
         )?;
+        let installation_chain = read_member_installation_chain_from(connection, &member_id)?;
         let skill_root = data_root
             .join(&managed_directory)
             .join("current")
@@ -11594,6 +11700,7 @@ fn read_managed_entries_from(
             stale: false,
             management_kind: ManagementKind::SkillYardManaged,
             management_evidence: None,
+            installation_chain,
             bundle_id: Some(bundle_id),
             member_id: Some(member_id),
             bundle_display_name: Some(bundle_display_name),
@@ -12310,6 +12417,60 @@ fn ensure_managed_state_matches(
     Ok(())
 }
 
+fn insert_inventory_installation_chain(
+    transaction: &Transaction<'_>,
+    observation_id: &str,
+    chain: &InstallationChain,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO inventory_installation_chains (
+            observation_id, kind, record_path, source, source_type, source_locator,
+            skill_path, tracked_ref, content_marker, installed_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            observation_id,
+            chain.kind.as_str(),
+            chain.record_path,
+            chain.source,
+            chain.source_type,
+            chain.source_locator,
+            chain.skill_path,
+            chain.tracked_ref,
+            chain.content_marker,
+            chain.installed_at,
+            chain.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_member_installation_chain(
+    transaction: &Transaction<'_>,
+    member_id: &str,
+    chain: &InstallationChain,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO member_installation_chains (
+            member_id, kind, record_path, source, source_type, source_locator,
+            skill_path, tracked_ref, content_marker, installed_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            member_id,
+            chain.kind.as_str(),
+            chain.record_path,
+            chain.source,
+            chain.source_type,
+            chain.source_locator,
+            chain.skill_path,
+            chain.tracked_ref,
+            chain.content_marker,
+            chain.installed_at,
+            chain.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
 fn replace_inventory_rows(
     transaction: &Transaction<'_>,
     entries: &[InventoryObservation],
@@ -12365,6 +12526,9 @@ fn replace_inventory_rows(
                     evidence.subject_path
                 ],
             )?;
+        }
+        if let Some(chain) = &entry.installation_chain {
+            insert_inventory_installation_chain(transaction, &entry.id, chain)?;
         }
     }
 
@@ -12528,6 +12692,7 @@ fn observation_changed(previous: &InventoryObservation, current: &InventoryObser
         || previous.root_key != current.root_key
         || previous.project_id != current.project_id
         || previous.management_kind != current.management_kind
+        || previous.installation_chain != current.installation_chain
 }
 
 fn refresh_count(value: i64) -> Result<usize, StorageError> {
@@ -12582,6 +12747,7 @@ mod tests {
             skill_name: skill_name.clone(),
             skill_description: "接管持久化测试 Skill".to_owned(),
             source_display_name: None,
+            installation_chain: None,
             managed_directory: managed_directory.to_string_lossy().into_owned(),
             content_directory: content_directory.to_string_lossy().into_owned(),
             expected_target: expected_target.to_string_lossy().into_owned(),
@@ -13318,7 +13484,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=21).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=22).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -13329,6 +13495,8 @@ mod tests {
             "batch_mount_transactions",
             "batch_mount_transaction_items",
             "inventory_management_evidence",
+            "inventory_installation_chains",
+            "member_installation_chains",
             "takeover_plans",
             "takeover_transactions",
             "source_association_plans",

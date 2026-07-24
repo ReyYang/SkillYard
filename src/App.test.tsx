@@ -3068,7 +3068,23 @@ describe("接管已有 Skill", () => {
     let finishTakeover: ((outcome: UiOutcome) => void) | undefined;
     const initial = inventoryOutcome([createEntry({ id: "origin-1" })]);
     const client = createClient(initial);
-    vi.mocked(client.createTakeoverPlan).mockResolvedValue(createTakeoverPlan());
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(
+      createTakeoverPlan({
+        sourceDisplayName: "已登记 Source",
+        installationChain: {
+          kind: "lockV3",
+          recordPath: "/tmp/.agents/.skill-lock.json",
+          source: "owner/repository",
+          sourceType: "github",
+          sourceLocator: "https://github.com/owner/repository.git",
+          skillPath: "skills/example/SKILL.md",
+          trackedRef: "main",
+          contentMarker: "0123456789abcdef0123456789abcdef01234567",
+          installedAt: "2026-07-01T00:00:00.000Z",
+          updatedAt: "2026-07-02T00:00:00.000Z",
+        },
+      }),
+    );
     vi.mocked(client.confirmTakeoverPlan).mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -3084,9 +3100,13 @@ describe("接管已有 Skill", () => {
 
     const preview = screen.getByRole("region", { name: "接管影响预览" });
     expect(preview).toHaveTextContent("example-bundle");
-    expect(preview).toHaveTextContent("没有更新来源");
-    expect(preview).toHaveTextContent("安装线索");
-    expect(preview).toHaveTextContent("未发现可靠的安装命令或来源记录");
+    expect(preview).toHaveTextContent("已登记 Source");
+    expect(preview).toHaveTextContent("Installation Chain");
+    expect(preview).toHaveTextContent(
+      "lock v3 · owner/repository · skills/example/SKILL.md",
+    );
+    expect(preview).not.toHaveTextContent("skills CLI");
+    expect(preview).not.toHaveTextContent("gh skill");
     expect(preview).toHaveTextContent("/tmp/example");
     expect(preview).toHaveTextContent("/tmp/.codex/skills/example");
     expect(client.confirmTakeoverPlan).not.toHaveBeenCalled();
@@ -5295,6 +5315,7 @@ function createTakeoverPlan(
     skillName: "example",
     skillDescription: "test skill",
     sourceDisplayName: null,
+    installationChain: null,
     managedDirectory: "/tmp/central/bundles/bundle-takeover",
     contentDirectory:
       "/tmp/central/bundles/bundle-takeover/contents/content-takeover",
@@ -5349,6 +5370,7 @@ function createEntry(
     projectId: null,
     stale: false,
     managementKind: "takeoverCandidate",
+    installationChain: null,
     ...overrides,
   };
 }

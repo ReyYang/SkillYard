@@ -7,10 +7,10 @@ use std::{
 
 use rusqlite::Connection;
 use skillyard_lib::{
-    ApplicationPaths, InventoryLocationKind, LifecycleFailpoint, ManagementKind, MountHealth,
-    MountScope, PlatformInfo, SkillYardApplication, SupportedAppId, TakeoverIdentityBasis,
-    TakeoverOriginDisposition, TakeoverPlanRequest, TakeoverSharedTargetRequest, UiIntent,
-    UiOutcome,
+    ApplicationPaths, InstallationChainKind, InventoryLocationKind, LifecycleFailpoint,
+    ManagementKind, MountHealth, MountScope, PlatformInfo, SkillYardApplication, SupportedAppId,
+    TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlanRequest,
+    TakeoverSharedTargetRequest, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -94,6 +94,121 @@ fn single_existing_skill_produces_a_read_only_takeover_plan() {
         fs::read(skill_root.join("SKILL.md")).expect("Plan 后应读取原 Skill 内容"),
         original_content,
         "生成 Plan 不能修改原 Skill 内容"
+    );
+}
+
+#[test]
+fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let skill_root = home.join(".codex/skills/alpha");
+    write_skill(&skill_root, "alpha", "接管安装履历");
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    let entries = match application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("首次扫描应返回 Inventory"),
+    };
+    let observation_id = entries
+        .iter()
+        .find(|entry| entry.skill_root == path_text(&skill_root))
+        .expect("应发现待接管 Skill")
+        .id
+        .clone();
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.id == observation_id)
+            .expect("应保留扫描观察")
+            .installation_chain
+            .is_none(),
+        "没有 lock 时不能猜测 Installation Chain"
+    );
+
+    write_global_lock_v3(&home, "alpha");
+    let entries = match application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("刷新本机应读取新增的 lock v3")
+    {
+        UiOutcome::Inventory {
+            entries,
+            last_local_refresh: Some(summary),
+            ..
+        } => {
+            assert_eq!(summary.changed, 1, "新增安装履历属于本机观察变化");
+            entries
+        }
+        _ => panic!("刷新本机应返回 Inventory 和刷新摘要"),
+    };
+    let observed = entries
+        .iter()
+        .find(|entry| entry.id == observation_id)
+        .expect("刷新后应保留同一观察");
+    let installation_chain = observed
+        .installation_chain
+        .as_ref()
+        .expect("扫描观察应携带 lock v3 安装履历");
+    assert_eq!(installation_chain.kind, InstallationChainKind::LockV3);
+    assert_eq!(installation_chain.source, "owner/repository");
+    assert_eq!(
+        installation_chain.skill_path.as_deref(),
+        Some("skills/alpha/SKILL.md")
+    );
+
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: TakeoverPlanRequest {
+                observation_ids: vec![observed.id.clone()],
+                selected_observation_id: observed.id.clone(),
+                preserved_observation_ids: vec![observed.id.clone()],
+                shared_targets: Vec::new(),
+            },
+        })
+        .expect("应生成带安装履历的接管计划")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    assert_eq!(
+        plan.installation_chain.as_deref(),
+        Some(installation_chain),
+        "接管计划必须封存扫描时的安装履历"
+    );
+    assert!(
+        plan.source_display_name.is_none(),
+        "lock 来源不能冒充已经登记且可更新的 Source"
+    );
+    application
+        .handle(UiIntent::ConfirmTakeoverPlan { plan_id: plan.id })
+        .expect("接管应成功");
+    drop(application);
+
+    let restarted = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    let entries = match restarted
+        .handle(UiIntent::GetStartupState)
+        .expect("重启后应读取受管状态")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("重启后应返回 Inventory"),
+    };
+    let managed = entries
+        .iter()
+        .find(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+        .expect("接管后应存在受管 Skill");
+    assert_eq!(
+        managed.installation_chain.as_ref(),
+        Some(installation_chain),
+        "外部 lock 后续不再控制已保存的安装履历"
     );
 }
 
@@ -2217,6 +2332,32 @@ fn write_skill(root: &Path, name: &str, description: &str) {
         format!("---\nname: {name}\ndescription: {description}\n---\n# {name}\n"),
     )
     .expect("应写入有效 Skill");
+}
+
+fn write_global_lock_v3(home: &Path, skill_name: &str) {
+    let lock_directory = home.join(".agents");
+    fs::create_dir_all(&lock_directory).expect("应创建 lock 目录");
+    fs::write(
+        lock_directory.join(".skill-lock.json"),
+        format!(
+            r#"{{
+  "version": 3,
+  "skills": {{
+    "{skill_name}": {{
+      "source": "owner/repository",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/owner/repository.git",
+      "ref": "main",
+      "skillPath": "skills/{skill_name}/SKILL.md",
+      "skillFolderHash": "0123456789abcdef0123456789abcdef01234567",
+      "installedAt": "2026-07-01T00:00:00.000Z",
+      "updatedAt": "2026-07-02T00:00:00.000Z"
+    }}
+  }}
+}}"#
+        ),
+    )
+    .expect("应写入 lock v3");
 }
 
 fn read_skill_file(root: &Path) -> Vec<u8> {
