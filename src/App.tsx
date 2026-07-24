@@ -173,6 +173,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [recoveryOpenError, setRecoveryOpenError] = useState<string | null>(
     null,
   );
+  const [isResettingApplication, setIsResettingApplication] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [inventoryPresentationKey, setInventoryPresentationKey] = useState(0);
 
   const activeRemovalPlan =
     pendingRemovalPlan ??
@@ -253,6 +256,16 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     return null;
   })() satisfies CurrentOperationSummary | null;
   const hasCurrentOperation = currentOperation !== null;
+  const isInventoryWriteBlocked =
+    isResettingApplication ||
+    isRefreshing ||
+    isCheckingUpdates ||
+    preparingBundleUpdateId !== null ||
+    checkingEditableBundleId !== null ||
+    isPreparingBundleUpdateBatch ||
+    isAddingProject ||
+    removalOperation !== null ||
+    sourceOperation?.type === "opening";
 
   const openCentralStore = async () => {
     if (isOpeningCentralStore) return;
@@ -752,6 +765,53 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     setSourceError(null);
     setSkillsShSearch(null);
     setSourceDiscovery(null);
+  };
+
+  const resetApplication = async () => {
+    if (isInventoryWriteBlocked) return;
+
+    setIsResettingApplication(true);
+    setResetError(null);
+    // 1.0 没有持久化偏好；重置只丢弃当前窗口中的临时展示状态。
+    setIsBrowsingCommittedInventory(false);
+    setSourceDiscovery(null);
+    setSkillsShSearch(null);
+    setPendingSourceRefChange(null);
+    setPendingEditableLocalRelink(null);
+    setSourceAssociationBundleId(null);
+    setPendingSourceAssociationPlan(null);
+    setPendingInstallPlan(null);
+    setTakeoverObservationId(null);
+    setPendingTakeoverPlan(null);
+    setManagedMemberId(null);
+    setPendingMountPlan(null);
+    setBatchMountBundleId(null);
+    setPendingBatchMountPlan(null);
+    setPendingRemovalPlan(null);
+    setSelectedRecoveryIssueId(null);
+    setRefreshError(null);
+    setUpdateError(null);
+    setBundleUpdateBatchError(null);
+    setSourceError(null);
+    setSourceAssociationError(null);
+    setInstallError(null);
+    setProjectError(null);
+    setTakeoverError(null);
+    setMountError(null);
+    setRemovalError(null);
+    setRecoveryOpenError(null);
+    setInventoryPresentationKey((current) => current + 1);
+
+    try {
+      // 重新读取唯一持久状态，证明重置不会伪造或删除托管数据。
+      const outcome = await client.getStartupState();
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      // 读取失败时保留上一次清单，避免把临时错误误表现成数据被重置。
+      setResetError(formatError(error));
+    } finally {
+      setIsResettingApplication(false);
+    }
   };
 
   const searchSkillsSh = async (query: string) => {
@@ -1275,6 +1335,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       removingProjectId={null}
       isOpeningInstaller={false}
       isAddingProject={false}
+      isResettingApplication={false}
       refreshError={null}
       updateError={null}
       installError={null}
@@ -1283,6 +1344,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       mountError={null}
       takeoverError={null}
       sourceAssociationError={null}
+      resetError={null}
       onRefresh={() => undefined}
       onCheckUpdates={() => undefined}
       onUpdateBundle={() => undefined}
@@ -1293,6 +1355,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onRemoveProject={() => undefined}
       onInstall={() => undefined}
       onAddProject={() => undefined}
+      onResetApplication={() => undefined}
       onAssociateSource={() => undefined}
       onOpenRecovery={() => undefined}
       onTakeover={() => undefined}
@@ -1672,22 +1735,15 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
 
   return (
     <InventoryPage
+      key={inventoryPresentationKey}
       outcome={viewState.outcome}
       // 任一主界面写操作进行中时统一冻结其他写入口；搜索和筛选仍可使用。
-      isWriteBlocked={
-        isRefreshing ||
-        isCheckingUpdates ||
-        preparingBundleUpdateId !== null ||
-        checkingEditableBundleId !== null ||
-        isPreparingBundleUpdateBatch ||
-        isAddingProject ||
-        removalOperation !== null ||
-        sourceOperation?.type === "opening"
-      }
+      isWriteBlocked={isInventoryWriteBlocked}
       isRefreshing={isRefreshing}
       isCheckingUpdates={isCheckingUpdates}
       isOpeningInstaller={sourceOperation?.type === "opening"}
       isAddingProject={isAddingProject}
+      isResettingApplication={isResettingApplication}
       refreshError={refreshError}
       updateError={updateError}
       installError={installError ?? sourceError}
@@ -1696,6 +1752,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       mountError={mountError}
       takeoverError={takeoverError}
       sourceAssociationError={sourceAssociationError}
+      resetError={resetError}
       onRefresh={refreshLocalInventory}
       onCheckUpdates={checkBundleUpdates}
       preparingBundleUpdateId={preparingBundleUpdateId}
@@ -1725,6 +1782,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       }
       onInstall={openSourceDiscovery}
       onAddProject={chooseAndRegisterProject}
+      onResetApplication={resetApplication}
       onAssociateSource={openSourceAssociation}
       onOpenRecovery={(issueId) => {
         setRecoveryOpenError(null);

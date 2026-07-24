@@ -117,6 +117,40 @@ describe("本机清单", () => {
     expect(client.refreshLocalInventory).not.toHaveBeenCalled();
   });
 
+  it("重置应用只清除窗口状态和临时错误，并重新读取原托管状态", async () => {
+    const user = userEvent.setup();
+    const startup = inventoryOutcome([
+      createEntry({ skillName: "saved-after-reset" }),
+    ]);
+    const client = createClient(startup);
+    vi.mocked(client.refreshLocalInventory).mockRejectedValue(
+      new Error("临时刷新失败"),
+    );
+    render(<App client={client} />);
+
+    await screen.findByText("saved-after-reset");
+    await user.click(screen.getByRole("button", { name: "刷新本机" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("临时刷新失败");
+
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 Skill" }),
+      "不存在",
+    );
+    expect(screen.queryByText("saved-after-reset")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "重置应用" }));
+
+    expect(await screen.findByText("saved-after-reset")).toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toHaveValue(
+      "",
+    );
+    expect(screen.queryByText("临时刷新失败")).toBeNull();
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(client.confirmInstallPlan).not.toHaveBeenCalled();
+    expect(client.confirmRemovalPlan).not.toHaveBeenCalled();
+    expect(client.confirmMountPlan).not.toHaveBeenCalled();
+  });
+
   it("只在用户点击后检查 Bundle 更新，并在检查期间冻结写入口", async () => {
     const user = userEvent.setup();
     let finishCheck:

@@ -25,6 +25,7 @@ interface InventoryPageProps {
   removingProjectId: string | null;
   isOpeningInstaller: boolean;
   isAddingProject: boolean;
+  isResettingApplication: boolean;
   refreshError: string | null;
   updateError: string | null;
   installError: string | null;
@@ -33,6 +34,7 @@ interface InventoryPageProps {
   mountError: string | null;
   takeoverError: string | null;
   sourceAssociationError: string | null;
+  resetError: string | null;
   onRefresh(): void;
   onCheckUpdates(): void;
   onUpdateBundle(bundleId: string): void;
@@ -43,6 +45,7 @@ interface InventoryPageProps {
   onRemoveProject(projectId: string): void;
   onInstall(): void;
   onAddProject(): void;
+  onResetApplication(): void;
   onAssociateSource(bundleId: string): void;
   onOpenRecovery(issueId: string): void;
   onTakeover(observationId: string): void;
@@ -69,6 +72,7 @@ export function InventoryPage({
   removingProjectId,
   isOpeningInstaller,
   isAddingProject,
+  isResettingApplication,
   refreshError,
   updateError,
   installError,
@@ -77,6 +81,7 @@ export function InventoryPage({
   mountError,
   takeoverError,
   sourceAssociationError,
+  resetError,
   onRefresh,
   onCheckUpdates,
   onUpdateBundle,
@@ -87,6 +92,7 @@ export function InventoryPage({
   onRemoveProject,
   onInstall,
   onAddProject,
+  onResetApplication,
   onAssociateSource,
   onOpenRecovery,
   onTakeover,
@@ -188,6 +194,14 @@ export function InventoryPage({
             onClick={onRefresh}
           >
             {isRefreshing ? "正在刷新本机…" : "刷新本机"}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isWriteBlocked || isResettingApplication}
+            onClick={onResetApplication}
+          >
+            {isResettingApplication ? "正在重置…" : "重置应用"}
           </button>
         </div>
       </header>
@@ -335,6 +349,13 @@ export function InventoryPage({
         <div className="inline-error" role="alert">
           <strong>来源操作未完成</strong>
           <span>{sourceAssociationError}</span>
+        </div>
+      ) : null}
+
+      {resetError ? (
+        <div className="inline-error" role="alert">
+          <strong>重置未完成</strong>
+          <span>{resetError}</span>
         </div>
       ) : null}
 
