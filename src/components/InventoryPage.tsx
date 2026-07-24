@@ -16,6 +16,7 @@ type ManagementFilter = "all" | "managed" | "takeover" | "other";
 interface InventoryPageProps {
   outcome: InventoryOutcome;
   isWriteBlocked: boolean;
+  allowReadOnlyDetails: boolean;
   isRefreshing: boolean;
   isCheckingUpdates: boolean;
   preparingBundleUpdateId: string | null;
@@ -66,6 +67,7 @@ const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
 export function InventoryPage({
   outcome,
   isWriteBlocked,
+  allowReadOnlyDetails,
   isRefreshing,
   isCheckingUpdates,
   preparingBundleUpdateId,
@@ -420,6 +422,7 @@ export function InventoryPage({
             entries={group.entries}
             mounts={outcome.mounts}
             actionsDisabled={isWriteBlocked}
+            allowReadOnlyDetails={allowReadOnlyDetails}
             onManageMount={onManageMount}
             batchMountBundleId={group.bundleId}
             onBatchMount={onBatchMount}
@@ -481,6 +484,7 @@ function InventorySection({
   entries,
   mounts = [],
   actionsDisabled = false,
+  allowReadOnlyDetails = false,
   onManageMount,
   batchMountBundleId,
   onBatchMount,
@@ -501,6 +505,7 @@ function InventorySection({
   entries: InventoryObservation[];
   mounts?: MountSummary[];
   actionsDisabled?: boolean;
+  allowReadOnlyDetails?: boolean;
   onManageMount?(memberId: string): void;
   batchMountBundleId?: string | null;
   onBatchMount?(bundleId: string): void;
@@ -594,6 +599,7 @@ function InventorySection({
               (mount) => mount.memberId === entry.memberId,
             )}
             actionsDisabled={actionsDisabled}
+            allowReadOnlyDetails={allowReadOnlyDetails}
             onManageMount={onManageMount}
             onTakeover={onTakeover}
           />
@@ -702,12 +708,14 @@ function SkillCard({
   entry,
   mounts,
   actionsDisabled,
+  allowReadOnlyDetails,
   onManageMount,
   onTakeover,
 }: {
   entry: InventoryObservation;
   mounts: MountSummary[];
   actionsDisabled: boolean;
+  allowReadOnlyDetails: boolean;
   onManageMount?(memberId: string): void;
   onTakeover?(observationId: string): void;
 }) {
@@ -753,7 +761,7 @@ function SkillCard({
           <button
             className="compact-action"
             type="button"
-            disabled={actionsDisabled}
+            disabled={actionsDisabled && !allowReadOnlyDetails}
             onClick={() => onManageMount?.(entry.memberId!)}
           >
             管理挂载

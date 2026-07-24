@@ -12,6 +12,7 @@ interface MountManagementPageProps {
   supportedApps: SupportedAppSummary[];
   projects: ProjectSummary[];
   mounts: MountSummary[];
+  readOnly: boolean;
   isPlanning: boolean;
   error: string | null;
   onBack(): void;
@@ -38,6 +39,7 @@ export function MountManagementPage({
   supportedApps,
   projects,
   mounts,
+  readOnly,
   isPlanning,
   error,
   onBack,
@@ -54,6 +56,11 @@ export function MountManagementPage({
           ? `${entry.bundleDisplayName}: ${entry.skillName}`
           : entry.skillName}
       </p>
+      {readOnly ? (
+        <p className="recovery-notice" role="status">
+          当前操作进行中，只展示已提交的挂载状态。
+        </p>
+      ) : null}
 
       {error ? (
         <div className="inline-error" role="alert">
@@ -108,7 +115,7 @@ export function MountManagementPage({
                       className="compact-action"
                       type="button"
                       hidden={mount.health !== "missing"}
-                      disabled={isPlanning}
+                      disabled={readOnly || isPlanning}
                       onClick={() => onRepair(mount.id)}
                     >
                       {`修复 ${mountDestinationLabel(mount)}挂载`}
@@ -116,7 +123,7 @@ export function MountManagementPage({
                     <button
                       className="danger-outline-action"
                       type="button"
-                      disabled={isPlanning}
+                      disabled={readOnly || isPlanning}
                       onClick={() => onRemove(mount.id)}
                     >
                       {`移除 ${mountDestinationLabel(mount)}挂载`}
@@ -132,7 +139,9 @@ export function MountManagementPage({
                 className="mount-target"
                 type="button"
                 aria-label={`挂载到 ${app.displayName} 全局`}
-                disabled={isPlanning || hasGlobalMount || hasProjectMount}
+                disabled={
+                  readOnly || isPlanning || hasGlobalMount || hasProjectMount
+                }
                 onClick={() => onCreate(app.id, "global", null)}
               >
                 <strong>{`挂载到 ${app.displayName} 全局`}</strong>
@@ -149,7 +158,9 @@ export function MountManagementPage({
                     className="mount-target"
                     type="button"
                     aria-label={`挂载到 ${app.displayName} 项目 ${project.displayName}`}
-                    disabled={isPlanning || hasGlobalMount || alreadyMounted}
+                    disabled={
+                      readOnly || isPlanning || hasGlobalMount || alreadyMounted
+                    }
                     onClick={() => onCreate(app.id, "project", project.id)}
                   >
                     <strong>{`挂载到项目 ${project.displayName}`}</strong>
@@ -190,7 +201,7 @@ export function MountManagementPage({
           disabled={isPlanning}
           onClick={onBack}
         >
-          {projects.length === 0 ? "返回添加项目" : "返回清单"}
+          {readOnly || projects.length > 0 ? "返回清单" : "返回添加项目"}
         </button>
       </div>
     </main>

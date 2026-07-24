@@ -1728,7 +1728,22 @@ describe("本机清单", () => {
     expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "管理挂载" })).toBeDisabled();
+    const mountDetails = screen.getByRole("button", { name: "管理挂载" });
+    expect(mountDetails).toBeEnabled();
+    await user.click(mountDetails);
+
+    expect(screen.getByRole("heading", { name: "管理挂载" })).toBeInTheDocument();
+    expect(
+      screen.getByText("当前操作进行中，只展示已提交的挂载状态。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "挂载到 Codex 全局" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回清单" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
 
     await user.type(
       screen.getByRole("searchbox", { name: "搜索 Skill" }),

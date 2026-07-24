@@ -84,6 +84,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     useState<InventoryOutcome | null>(null);
   const [isBrowsingCommittedInventory, setIsBrowsingCommittedInventory] =
     useState(false);
+  const [readOnlyManagedMemberId, setReadOnlyManagedMemberId] = useState<
+    string | null
+  >(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
@@ -303,7 +306,10 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   }, [viewState]);
 
   useEffect(() => {
-    if (!hasCurrentOperation) setIsBrowsingCommittedInventory(false);
+    if (!hasCurrentOperation) {
+      setIsBrowsingCommittedInventory(false);
+      setReadOnlyManagedMemberId(null);
+    }
   }, [hasCurrentOperation]);
 
   const startInitialScan = async () => {
@@ -774,6 +780,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     setResetError(null);
     // 1.0 没有持久化偏好；重置只丢弃当前窗口中的临时展示状态。
     setIsBrowsingCommittedInventory(false);
+    setReadOnlyManagedMemberId(null);
     setSourceDiscovery(null);
     setSkillsShSearch(null);
     setPendingSourceRefChange(null);
@@ -1326,6 +1333,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     <InventoryPage
       outcome={committedInventory}
       isWriteBlocked
+      allowReadOnlyDetails
       isRefreshing={false}
       isCheckingUpdates={false}
       preparingBundleUpdateId={null}
@@ -1362,13 +1370,37 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onAssociateSource={() => undefined}
       onOpenRecovery={() => undefined}
       onTakeover={() => undefined}
-      onManageMount={() => undefined}
+      onManageMount={setReadOnlyManagedMemberId}
       onBatchMount={() => undefined}
     />
   ) : null;
 
+  const readOnlyManagedEntry = readOnlyManagedMemberId
+    ? committedInventory?.entries.find(
+        (entry) =>
+          entry.managementKind === "skillYardManaged" &&
+          entry.memberId === readOnlyManagedMemberId,
+      ) ?? null
+    : null;
+  const readOnlyMountDetails =
+    committedInventory && readOnlyManagedEntry ? (
+      <MountManagementPage
+        entry={readOnlyManagedEntry}
+        supportedApps={committedInventory.supportedApps}
+        projects={committedInventory.projects}
+        mounts={committedInventory.mounts}
+        readOnly
+        isPlanning={false}
+        error={null}
+        onBack={() => setReadOnlyManagedMemberId(null)}
+        onCreate={() => undefined}
+        onRemove={() => undefined}
+        onRepair={() => undefined}
+      />
+    ) : null;
+
   const renderOperationSurface = (content: ReactNode) => {
-    const showReadOnlyInventory =
+    const showReadOnlyContent =
       currentOperation !== null &&
       isBrowsingCommittedInventory &&
       readOnlyInventory !== null;
@@ -1380,12 +1412,20 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
             detail={currentOperation.detail}
             canBrowse={readOnlyInventory !== null}
             isBrowsing={isBrowsingCommittedInventory}
-            onBrowse={() => setIsBrowsingCommittedInventory(true)}
-            onReturn={() => setIsBrowsingCommittedInventory(false)}
+            onBrowse={() => {
+              setReadOnlyManagedMemberId(null);
+              setIsBrowsingCommittedInventory(true);
+            }}
+            onReturn={() => {
+              setReadOnlyManagedMemberId(null);
+              setIsBrowsingCommittedInventory(false);
+            }}
           />
         ) : null}
         <div className="current-operation-content">
-          {showReadOnlyInventory ? readOnlyInventory : content}
+          {showReadOnlyContent
+            ? (readOnlyMountDetails ?? readOnlyInventory)
+            : content}
         </div>
       </div>
     );
@@ -1723,6 +1763,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         supportedApps={viewState.outcome.supportedApps}
         projects={viewState.outcome.projects}
         mounts={viewState.outcome.mounts}
+        readOnly={false}
         isPlanning={isPlanningMount}
         error={mountError}
         onBack={() => {
@@ -1742,6 +1783,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       outcome={viewState.outcome}
       // 任一主界面写操作进行中时统一冻结其他写入口；搜索和筛选仍可使用。
       isWriteBlocked={isInventoryWriteBlocked}
+      allowReadOnlyDetails={false}
       isRefreshing={isRefreshing}
       isCheckingUpdates={isCheckingUpdates}
       isOpeningInstaller={sourceOperation?.type === "opening"}
