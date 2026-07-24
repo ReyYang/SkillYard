@@ -3103,7 +3103,7 @@ describe("接管已有 Skill", () => {
     expect(preview).toHaveTextContent("已登记 Source");
     expect(preview).toHaveTextContent("Installation Chain");
     expect(preview).toHaveTextContent(
-      "lock v3 · owner/repository · skills/example/SKILL.md",
+      "lock v3 · https://github.com/owner/repository.git · skills/example/SKILL.md",
     );
     expect(preview).not.toHaveTextContent("skills CLI");
     expect(preview).not.toHaveTextContent("gh skill");

@@ -19,7 +19,8 @@ struct LockV3Entry {
     source: String,
     source_type: String,
     source_url: String,
-    #[serde(rename = "ref")]
+    // Vercel skills 使用 ref，GitHub CLI 的兼容 v3 收据使用 pinnedRef。
+    #[serde(rename = "ref", alias = "pinnedRef")]
     tracked_ref: Option<String>,
     skill_path: Option<String>,
     skill_folder_hash: String,

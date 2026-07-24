@@ -339,7 +339,12 @@ fn scan_optional_root(
             None => (ManagementKind::TakeoverCandidate, None),
         };
         let root_string = skill_root.to_string_lossy().into_owned();
-        let installation_chain = context.installation_chains.get(&skill_name).cloned();
+        // 当前读取的是全局 lock；不能把同名证据附给项目仓库中的独立 Skill。
+        let installation_chain = project_id
+            .is_none()
+            .then(|| context.installation_chains.get(&skill_name))
+            .flatten()
+            .cloned();
         observations.push(InventoryObservation {
             id: format!("{}:{root_string}", location_kind.as_str()),
             skill_name,

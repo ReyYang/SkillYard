@@ -682,6 +682,7 @@ Editable Local 重新关联
 Installation Chain
   -> Local Refresh 只读解析官方默认位置或 XDG state 位置的 lock v3
   -> 只接受完整的 v3 记录，并按协议中的 Skill Name 关联扫描观察
+  -> 全局 lock 只关联全局或共享目录，不能附给项目目录中的同名 Skill
   -> Inventory 与 Takeover Plan 展示 lock、Source URL／路径和上游 Skill 路径
   -> 不根据 lock 猜测具体由 `skills`、`gh skill` 或 Lark CLI 执行
   -> 接管确认时随 Skill Member 原子保存，之后不受外部 lock 删除影响

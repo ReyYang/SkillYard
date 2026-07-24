@@ -167,7 +167,7 @@ function PlanRow({
 function installationChainLabel(chain: InstallationChain | null): string {
   if (!chain) return "未发现可核验的安装记录";
   const memberPath = chain.skillPath ? ` · ${chain.skillPath}` : "";
-  return `lock v3 · ${chain.source}${memberPath}`;
+  return `lock v3 · ${chain.sourceLocator}${memberPath}`;
 }
 
 function originLabel(origin: TakeoverPlanOrigin): string {

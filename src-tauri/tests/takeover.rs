@@ -103,7 +103,17 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
     let home = sandbox.path().join("home");
     let data_root = sandbox.path().join("application-support/SkillYard");
     let skill_root = home.join(".codex/skills/alpha");
+    let project_root = sandbox.path().join("project");
+    let project_skill_root = project_root.join(".codex/skills/alpha");
     write_skill(&skill_root, "alpha", "接管安装履历");
+    write_skill(
+        &project_skill_root,
+        "alpha",
+        "同名项目 Skill 没有全局安装履历",
+    );
+    let project_skill_root = fs::canonicalize(&project_root)
+        .expect("应解析 Project")
+        .join(".codex/skills/alpha");
 
     let application = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root.clone(), home.clone()),
@@ -131,6 +141,16 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
             .is_none(),
         "没有 lock 时不能猜测 Installation Chain"
     );
+    let project_entries = match application
+        .handle(UiIntent::RegisterProject {
+            root_path: path_text(&project_root),
+        })
+        .expect("应登记包含同名 Skill 的 Project")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("登记 Project 后应返回 Inventory"),
+    };
+    let project_observation_id = observation_id_at(&project_entries, &project_skill_root);
 
     write_global_lock_v3(&home, "alpha");
     let entries = match application
@@ -161,6 +181,20 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
         installation_chain.skill_path.as_deref(),
         Some("skills/alpha/SKILL.md")
     );
+    assert_eq!(
+        installation_chain.tracked_ref.as_deref(),
+        Some("release-2026-07"),
+        "GitHub CLI 的 pinnedRef 必须保存为同一 tracked ref"
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.id == project_observation_id)
+            .expect("刷新后应保留项目观察")
+            .installation_chain
+            .is_none(),
+        "全局 lock 不能附给项目目录中的同名 Skill"
+    );
 
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
@@ -188,6 +222,7 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
     application
         .handle(UiIntent::ConfirmTakeoverPlan { plan_id: plan.id })
         .expect("接管应成功");
+    fs::remove_file(home.join(".agents/.skill-lock.json")).expect("应删除外部 lock");
     drop(application);
 
     let restarted = SkillYardApplication::new(
@@ -2347,7 +2382,7 @@ fn write_global_lock_v3(home: &Path, skill_name: &str) {
       "source": "owner/repository",
       "sourceType": "github",
       "sourceUrl": "https://github.com/owner/repository.git",
-      "ref": "main",
+      "pinnedRef": "release-2026-07",
       "skillPath": "skills/{skill_name}/SKILL.md",
       "skillFolderHash": "0123456789abcdef0123456789abcdef01234567",
       "installedAt": "2026-07-01T00:00:00.000Z",

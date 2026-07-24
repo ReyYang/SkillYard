@@ -801,7 +801,7 @@ function mountLabel(mount: MountSummary): string {
 
 function installationChainLabel(chain: InstallationChain): string {
   const memberPath = chain.skillPath ? ` · ${chain.skillPath}` : "";
-  return `lock v3 · ${chain.source}${memberPath}`;
+  return `lock v3 · ${chain.sourceLocator}${memberPath}`;
 }
 
 function mountHealthLabel(health: MountSummary["health"]): string {
@@ -872,6 +872,7 @@ function matchesQuery(entry: InventoryObservation, query: string): boolean {
     entry.bundleDisplayName,
     entry.sourceDisplayName,
     entry.installationChain?.source,
+    entry.installationChain?.sourceLocator,
     entry.installationChain?.skillPath,
     entry.projectDisplayName,
     ...entry.observedBy.map(supportedAppLabel),
