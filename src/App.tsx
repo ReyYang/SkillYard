@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
 import { BundleMountPage } from "./components/BundleMountPage";
 import { BundleUpdateBatchPage } from "./components/BundleUpdateBatchPage";
+import { CurrentOperationBanner } from "./components/CurrentOperationBanner";
 import { EditableLocalRelinkPage } from "./components/EditableLocalRelinkPage";
 import { InventoryPage } from "./components/InventoryPage";
 import { InstallPlanPage } from "./components/InstallPlanPage";
@@ -50,6 +51,12 @@ type ViewState =
 
 type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
 type SkillsShSearchOutcome = Extract<UiOutcome, { type: "skillsShSearch" }>;
+type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
+
+interface CurrentOperationSummary {
+  title: string;
+  detail: string;
+}
 
 type SourceOperation =
   | { type: "opening" }
@@ -72,6 +79,10 @@ type RemovalOperation =
 
 export function App({ client = tauriSkillYardClient }: AppProps) {
   const [viewState, setViewState] = useState<ViewState>({ status: "loading" });
+  const [committedInventory, setCommittedInventory] =
+    useState<InventoryOutcome | null>(null);
+  const [isBrowsingCommittedInventory, setIsBrowsingCommittedInventory] =
+    useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
@@ -167,6 +178,73 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     viewState.outcome.type === "editableLocalRelinkPlan"
       ? viewState.outcome.plan
       : null);
+  const currentOperation = (() => {
+    if (isConfirmingBundleUpdateBatch) {
+      return {
+        title: "正在更新所选 Bundle",
+        detail: "已确认的 Bundle 会依次完成，当前操作不能取消。",
+      };
+    }
+    if (removalOperation?.type === "confirming") {
+      const title =
+        activeRemovalPlan?.kind === "bundle"
+          ? "正在删除 Bundle"
+          : activeRemovalPlan?.kind === "project"
+            ? "正在移除项目"
+            : "正在删除 Source";
+      return {
+        title,
+        detail: "SkillYard 正在完成已确认的影响范围，当前操作不能取消。",
+      };
+    }
+    if (isConfirmingSourceAssociation) {
+      return {
+        title: "正在保存来源关联",
+        detail: "关联或归并会作为一个完整操作完成，当前操作不能取消。",
+      };
+    }
+    if (sourceOperation?.type === "confirmingRelink") {
+      return {
+        title: "正在重新关联 Source 路径",
+        detail: "只更新来源位置，不会替换正在使用的 Skill 内容。",
+      };
+    }
+    if (sourceOperation?.type === "confirmingRef") {
+      return {
+        title: "正在更改 Source 分支",
+        detail: "只更新后续来源基线，不会替换正在使用的 Skill 内容。",
+      };
+    }
+    if (isConfirmingTakeover) {
+      return {
+        title: "正在接管 Skill",
+        detail: "文件迁移、受管内容和 Mount 会作为一个完整操作完成。",
+      };
+    }
+    if (isInstalling) {
+      return {
+        title:
+          pendingInstallPlan?.mode === "update"
+            ? "正在更新 Bundle"
+            : "正在安装 Bundle",
+        detail: "确认后的文件系统操作不能取消，SkillYard 会自动完成或恢复。",
+      };
+    }
+    if (isConfirmingMount) {
+      return {
+        title: "正在修改 Mount",
+        detail: "目标路径与登记状态会作为一个完整操作完成。",
+      };
+    }
+    if (isConfirmingBatchMount) {
+      return {
+        title: "正在批量挂载 Bundle",
+        detail: "所选 Mount 会作为一个完整操作完成，当前操作不能取消。",
+      };
+    }
+    return null;
+  })() satisfies CurrentOperationSummary | null;
+  const hasCurrentOperation = currentOperation !== null;
 
   useEffect(() => {
     let active = true;
@@ -182,6 +260,17 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       active = false;
     };
   }, [client]);
+
+  useEffect(() => {
+    if (viewState.status === "ready" && viewState.outcome.type === "inventory") {
+      // 事务期间只展示最近一次完整提交的 read model，不能混入正在写入的中间状态。
+      setCommittedInventory(viewState.outcome);
+    }
+  }, [viewState]);
+
+  useEffect(() => {
+    if (!hasCurrentOperation) setIsBrowsingCommittedInventory(false);
+  }, [hasCurrentOperation]);
 
   const startInitialScan = async () => {
     if (isScanning) return;
@@ -1152,6 +1241,68 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
+  const readOnlyInventory = committedInventory ? (
+    <InventoryPage
+      outcome={committedInventory}
+      isWriteBlocked
+      isRefreshing={false}
+      isCheckingUpdates={false}
+      preparingBundleUpdateId={null}
+      checkingEditableBundleId={null}
+      isPreparingBundleUpdateBatch={false}
+      removingBundleId={null}
+      removingProjectId={null}
+      isOpeningInstaller={false}
+      isAddingProject={false}
+      refreshError={null}
+      updateError={null}
+      installError={null}
+      projectError={null}
+      removalError={null}
+      mountError={null}
+      takeoverError={null}
+      sourceAssociationError={null}
+      onRefresh={() => undefined}
+      onCheckUpdates={() => undefined}
+      onUpdateBundle={() => undefined}
+      onChooseBundleReplacement={() => undefined}
+      onCheckEditableLocalBundle={() => undefined}
+      onUpdateAll={() => undefined}
+      onRemoveBundle={() => undefined}
+      onRemoveProject={() => undefined}
+      onInstall={() => undefined}
+      onAddProject={() => undefined}
+      onAssociateSource={() => undefined}
+      onTakeover={() => undefined}
+      onManageMount={() => undefined}
+      onBatchMount={() => undefined}
+    />
+  ) : null;
+
+  const renderOperationSurface = (content: ReactNode) => {
+    const showReadOnlyInventory =
+      currentOperation !== null &&
+      isBrowsingCommittedInventory &&
+      readOnlyInventory !== null;
+    return (
+      <div className="current-operation-frame">
+        {currentOperation ? (
+          <CurrentOperationBanner
+            title={currentOperation.title}
+            detail={currentOperation.detail}
+            canBrowse={readOnlyInventory !== null}
+            isBrowsing={isBrowsingCommittedInventory}
+            onBrowse={() => setIsBrowsingCommittedInventory(true)}
+            onReturn={() => setIsBrowsingCommittedInventory(false)}
+          />
+        ) : null}
+        <div className="current-operation-content">
+          {showReadOnlyInventory ? readOnlyInventory : content}
+        </div>
+      </div>
+    );
+  };
+
   if (viewState.status === "loading") {
     return (
       <main className="state-page" aria-label="SkillYard 正在启动">
@@ -1173,7 +1324,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     viewState.outcome.type === "bundleUpdateBatchPlan" ||
     viewState.outcome.type === "bundleUpdateBatchResult"
   ) {
-    return (
+    return renderOperationSurface(
       <BundleUpdateBatchPage
         outcome={viewState.outcome}
         isConfirming={isConfirmingBundleUpdateBatch}
@@ -1183,11 +1334,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         onDiscard={discardBundleUpdateBatchPlan}
         onConfirm={confirmBundleUpdateBatchPlan}
         onAcknowledge={acknowledgeBundleUpdateBatchResult}
-      />
+      />,
     );
   }
   if (activeRemovalPlan) {
-    return (
+    return renderOperationSurface(
       <RemovalPlanPage
         key={activeRemovalPlan.id}
         plan={activeRemovalPlan}
@@ -1196,11 +1347,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         error={removalError}
         onDiscard={discardRemovalPlan}
         onConfirm={confirmRemovalPlan}
-      />
+      />,
     );
   }
   if (pendingSourceAssociationPlan) {
-    return (
+    return renderOperationSurface(
       <SourceAssociationPlanPage
         plan={pendingSourceAssociationPlan}
         isConfirming={isConfirmingSourceAssociation}
@@ -1208,11 +1359,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         error={sourceAssociationError}
         onBack={discardSourceAssociationPlan}
         onConfirm={confirmSourceAssociationPlan}
-      />
+      />,
     );
   }
   if (activeEditableLocalRelink) {
-    return (
+    return renderOperationSurface(
       <EditableLocalRelinkPage
         plan={activeEditableLocalRelink}
         isConfirming={sourceOperation?.type === "confirmingRelink"}
@@ -1220,11 +1371,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         error={sourceError}
         onDiscard={discardEditableLocalRelink}
         onConfirm={confirmEditableLocalRelink}
-      />
+      />,
     );
   }
   if (pendingSourceRefChange) {
-    return (
+    return renderOperationSurface(
       <SourceRefChangePage
         plan={pendingSourceRefChange}
         isConfirming={sourceOperation?.type === "confirmingRef"}
@@ -1234,21 +1385,21 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           setPendingSourceRefChange(null);
         }}
         onConfirm={confirmSourceRefChange}
-      />
+      />,
     );
   }
   if (pendingTakeoverPlan) {
-    return (
+    return renderOperationSurface(
       <TakeoverPlanPage
         plan={pendingTakeoverPlan}
         isConfirming={isConfirmingTakeover}
         onBack={() => setPendingTakeoverPlan(null)}
         onConfirm={confirmTakeover}
-      />
+      />,
     );
   }
   if (pendingInstallPlan) {
-    return (
+    return renderOperationSurface(
       <InstallPlanPage
         plan={pendingInstallPlan}
         isInstalling={isInstalling}
@@ -1256,27 +1407,27 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         error={installError}
         onCancel={discardInstallPlan}
         onConfirm={confirmInstall}
-      />
+      />,
     );
   }
   if (pendingMountPlan) {
-    return (
+    return renderOperationSurface(
       <MountPlanPage
         plan={pendingMountPlan}
         isConfirming={isConfirmingMount}
         onBack={() => setPendingMountPlan(null)}
         onConfirm={confirmMount}
-      />
+      />,
     );
   }
   if (pendingBatchMountPlan) {
-    return (
+    return renderOperationSurface(
       <BatchMountPlanPage
         plan={pendingBatchMountPlan}
         isConfirming={isConfirmingBatchMount}
         onBack={() => setPendingBatchMountPlan(null)}
         onConfirm={confirmBatchMount}
-      />
+      />,
     );
   }
   if (viewState.outcome.type === "onboardingRequired") {

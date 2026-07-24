@@ -1620,10 +1620,18 @@ describe("本机清单", () => {
     expect(screen.getByText("SKILL.md YAML frontmatter 无法解析")).toBeInTheDocument();
   });
 
-  it("确认期间禁止取消或重复提交，成功后显示受管 Bundle", async () => {
+  it("确认期间不可取消，但可以只读浏览最近一次已提交清单", async () => {
     const user = userEvent.setup();
     let finishInstall: ((outcome: UiOutcome) => void) | undefined;
-    const client = createClient(inventoryOutcome([]));
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          id: "managed:saved",
+          skillName: "saved",
+          declaredName: "saved",
+        }),
+      ]),
+    );
     vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(createInstallPlan());
     vi.mocked(client.confirmInstallPlan).mockImplementation(
       () =>
@@ -1640,8 +1648,38 @@ describe("本机清单", () => {
     ]);
     expect(screen.getByRole("button", { name: "正在安全安装…" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    expect(screen.getByLabelText("当前操作")).toHaveTextContent(
+      "正在安装 Bundle",
+    );
     await user.click(screen.getByRole("button", { name: "正在安全安装…" }));
     expect(client.confirmInstallPlan).toHaveBeenCalledTimes(1);
+
+    await user.click(
+      screen.getByRole("button", { name: "浏览已提交清单" }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("example-bundle: saved")).toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "管理挂载" })).toBeDisabled();
+
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 Skill" }),
+      "saved",
+    );
+    expect(screen.getByText("example-bundle: saved")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "返回当前操作" }),
+    );
+    expect(screen.getByLabelText("安装影响预览")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
 
     await act(async () => {
       finishInstall?.(
