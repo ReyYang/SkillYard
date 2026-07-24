@@ -1261,6 +1261,7 @@ pub enum UiOutcome {
         last_local_refresh: Option<LocalRefreshSummary>,
         scan_issues: Vec<ScanIssue>,
         recovery_issues: Vec<RecoveryIssue>,
+        recovered_interrupted_operation: bool,
         projects: Vec<ProjectSummary>,
         mounts: Vec<MountSummary>,
         bundle_updates: Vec<BundleUpdateSummary>,
@@ -1313,6 +1314,19 @@ impl UiOutcome {
         Self::OnboardingRequired {
             supported_apps: supported_app_summaries(),
         }
+    }
+
+    /// 普通恢复提示只属于本次启动结果；人工恢复存在时不能同时报告恢复成功。
+    pub(crate) fn with_recovered_interrupted_operation(mut self, recovered: bool) -> Self {
+        if let Self::Inventory {
+            recovery_issues,
+            recovered_interrupted_operation,
+            ..
+        } = &mut self
+        {
+            *recovered_interrupted_operation = recovered && recovery_issues.is_empty();
+        }
+        self
     }
 }
 
@@ -1418,15 +1432,18 @@ mod tests {
                 bundle_display_name: "example".to_owned(),
                 message: "需要人工恢复".to_owned(),
             }],
+            recovered_interrupted_operation: false,
             projects: Vec::new(),
             mounts: Vec::new(),
             bundle_updates: Vec::new(),
-        };
+        }
+        .with_recovered_interrupted_operation(true);
 
         let value = serde_json::to_value(outcome).expect("应序列化 UI 状态");
         assert_eq!(value["type"], "inventory");
         assert_eq!(value["scanCompletedAt"], 10);
         assert_eq!(value["recoveryIssues"][0]["bundleDisplayName"], "example");
+        assert_eq!(value["recoveredInterruptedOperation"], false);
         assert_eq!(value["bundleUpdates"], serde_json::json!([]));
         assert!(value.get("scan_completed_at").is_none());
         assert!(value.get("recovery_issues").is_none());

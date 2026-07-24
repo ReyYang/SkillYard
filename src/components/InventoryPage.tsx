@@ -220,6 +220,12 @@ export function InventoryPage({
         </div>
       </header>
 
+      {outcome.recoveredInterruptedOperation ? (
+        <p className="recovery-notice" role="status">
+          已恢复上次中断的操作
+        </p>
+      ) : null}
+
       {outcome.projects.length > 0 ? (
         <section className="registered-projects" aria-label="已登记项目">
           <header>

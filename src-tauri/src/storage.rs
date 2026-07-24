@@ -1963,6 +1963,7 @@ impl Storage {
             last_local_refresh,
             scan_issues,
             recovery_issues,
+            recovered_interrupted_operation: false,
             projects,
             mounts,
             bundle_updates,
@@ -6049,6 +6050,41 @@ impl Storage {
             .map_err(StorageError::ReadLifecycleTransaction)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::ReadLifecycleTransaction)
+    }
+
+    /// 启动提示只关心恢复器即将重放的普通事务；pending Plan 和 blocked 状态不算恢复成功。
+    pub(crate) fn has_pending_recovery_work(&self) -> Result<bool, StorageError> {
+        if self
+            .recoverable_lifecycle_transactions()?
+            .iter()
+            .any(|transaction| transaction.status != "blocked")
+            || self
+                .recoverable_source_association_transactions()?
+                .iter()
+                .any(|transaction| transaction.status != "blocked")
+            || self
+                .recoverable_mount_transactions()?
+                .iter()
+                .any(|transaction| transaction.status != "blocked")
+            || self
+                .recoverable_batch_mount_transactions()?
+                .iter()
+                .any(|transaction| transaction.status != "blocked")
+            || self
+                .recoverable_takeover_transactions()?
+                .iter()
+                .any(|transaction| transaction.status != "blocked")
+            || self
+                .recoverable_removal_transactions()?
+                .iter()
+                .any(|transaction| transaction.status != "blocked")
+        {
+            return Ok(true);
+        }
+
+        Ok(self
+            .read_open_bundle_update_batch()?
+            .is_some_and(|batch| batch.status == "running"))
     }
 
     pub fn managed_bundle_notice_rows(

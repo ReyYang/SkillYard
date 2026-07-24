@@ -519,6 +519,8 @@ export type UiOutcome =
       lastLocalRefresh: LocalRefreshSummary | null;
       scanIssues: ScanIssue[];
       recoveryIssues: RecoveryIssue[];
+      // 只表示本次启动已自动完成普通恢复，不持久化为历史通知。
+      recoveredInterruptedOperation: boolean;
       projects: ProjectSummary[];
       mounts: MountSummary[];
       // 更新状态属于 Bundle read model，前端不能根据 Source marker 自行推断。

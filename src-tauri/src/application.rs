@@ -355,7 +355,8 @@ impl SkillYardApplication {
     }
 
     fn get_startup_state(&self) -> Result<UiOutcome, ApplicationError> {
-        let mut storage = self.open_recovered_storage()?;
+        let (mut storage, recovered_interrupted_operation) =
+            self.open_recovered_storage_with_notice()?;
         if storage.read_initial_scan()?.is_some() {
             if let Some(plan) = read_open_removal_plan(&storage)? {
                 return Ok(UiOutcome::RemovalPlan { plan });
@@ -374,7 +375,10 @@ impl SkillYardApplication {
             lifecycle_lock.recheck(&self.paths)?;
             return storage
                 .read_initial_scan()?
-                .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"));
+                .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+                .map(|outcome| {
+                    outcome.with_recovered_interrupted_operation(recovered_interrupted_operation)
+                });
         }
 
         Ok(UiOutcome::onboarding_required())
@@ -436,6 +440,7 @@ impl SkillYardApplication {
             last_local_refresh: Some(saved.summary),
             scan_issues: result.issues,
             recovery_issues: saved.recovery_issues,
+            recovered_interrupted_operation: false,
             projects: saved.projects,
             mounts: saved.mounts,
             bundle_updates: storage.read_bundle_update_summaries()?,
@@ -1389,9 +1394,14 @@ impl SkillYardApplication {
     }
 
     fn open_recovered_storage(&self) -> Result<Storage, ApplicationError> {
+        self.open_recovered_storage_with_notice()
+            .map(|(storage, _)| storage)
+    }
+
+    fn open_recovered_storage_with_notice(&self) -> Result<(Storage, bool), ApplicationError> {
         let mut storage = self.open_storage()?;
-        self.recover_storage(&mut storage)?;
-        Ok(storage)
+        let recovered_interrupted_operation = self.recover_storage(&mut storage)?;
+        Ok((storage, recovered_interrupted_operation))
     }
 
     fn open_storage(&self) -> Result<Storage, ApplicationError> {
@@ -1400,7 +1410,8 @@ impl SkillYardApplication {
         Ok(storage)
     }
 
-    fn recover_storage(&self, storage: &mut Storage) -> Result<(), ApplicationError> {
+    fn recover_storage(&self, storage: &mut Storage) -> Result<bool, ApplicationError> {
+        let recovered_interrupted_operation = storage.has_pending_recovery_work()?;
         recover_pending_transactions(&self.paths, storage, unix_timestamp_millis())?;
         recover_pending_source_association_transactions(
             &self.paths,
@@ -1428,7 +1439,7 @@ impl SkillYardApplication {
             unix_timestamp_millis(),
             self.lifecycle_failpoint,
         )?;
-        Ok(())
+        Ok(recovered_interrupted_operation)
     }
 }
 

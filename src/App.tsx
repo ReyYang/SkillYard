@@ -1335,6 +1335,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       removingProjectId={null}
       isOpeningInstaller={false}
       isAddingProject={false}
+      isOpeningCentralStore={false}
       isResettingApplication={false}
       refreshError={null}
       updateError={null}
@@ -1344,6 +1345,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       mountError={null}
       takeoverError={null}
       sourceAssociationError={null}
+      centralStoreError={null}
       resetError={null}
       onRefresh={() => undefined}
       onCheckUpdates={() => undefined}
@@ -1355,6 +1357,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onRemoveProject={() => undefined}
       onInstall={() => undefined}
       onAddProject={() => undefined}
+      onOpenCentralStore={() => undefined}
       onResetApplication={() => undefined}
       onAssociateSource={() => undefined}
       onOpenRecovery={() => undefined}

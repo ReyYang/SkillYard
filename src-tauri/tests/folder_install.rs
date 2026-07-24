@@ -633,6 +633,17 @@ fn multi_member_interruption_before_current_recovers_to_zero_members() {
     assert!(!contains_entries(&data_root.join("bundles")));
     assert!(!contains_entries(&data_root.join("staging")));
     assert!(!contains_entries(&data_root.join("journals")));
+
+    let UiOutcome::Inventory {
+        recovered_interrupted_operation,
+        ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("恢复提示不应写成持久历史")
+    else {
+        panic!("再次读取仍应返回 Inventory");
+    };
+    assert!(!recovered_interrupted_operation);
 }
 
 #[test]
@@ -810,9 +821,15 @@ fn interruption_after_temporary_current_creation_is_cleaned_automatically() {
         .handle(UiIntent::GetStartupState)
         .expect("重启应清理尚未生效的临时 current");
 
-    let UiOutcome::Inventory { entries, .. } = outcome else {
+    let UiOutcome::Inventory {
+        entries,
+        recovered_interrupted_operation,
+        ..
+    } = outcome
+    else {
         panic!("恢复后应返回 Inventory");
     };
+    assert!(recovered_interrupted_operation);
     assert!(
         !entries
             .iter()

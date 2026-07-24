@@ -163,6 +163,20 @@ describe("本机清单", () => {
     expect(client.openCentralStore).toHaveBeenCalledTimes(1);
   });
 
+  it("启动自动恢复成功后只显示简单提示", async () => {
+    const recovered = inventoryOutcome([createManagedEntry()], null, {
+      recoveredInterruptedOperation: true,
+    });
+    const client = createClient(recovered);
+
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByText("已恢复上次中断的操作"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/选择旧版|选择新版/)).toBeNull();
+  });
+
   it("只在用户点击后检查 Bundle 更新，并在检查期间冻结写入口", async () => {
     const user = userEvent.setup();
     let finishCheck:
@@ -5154,6 +5168,7 @@ function inventoryOutcome(
     lastLocalRefresh,
     scanIssues: [],
     recoveryIssues: [],
+    recoveredInterruptedOperation: false,
     projects: [],
     mounts: [],
     bundleUpdates: [],
