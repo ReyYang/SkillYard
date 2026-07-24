@@ -44,6 +44,7 @@ interface InventoryPageProps {
   onInstall(): void;
   onAddProject(): void;
   onAssociateSource(bundleId: string): void;
+  onOpenRecovery(issueId: string): void;
   onTakeover(observationId: string): void;
   onManageMount(memberId: string): void;
   onBatchMount(bundleId: string): void;
@@ -87,6 +88,7 @@ export function InventoryPage({
   onInstall,
   onAddProject,
   onAssociateSource,
+  onOpenRecovery,
   onTakeover,
   onManageMount,
   onBatchMount,
@@ -239,6 +241,15 @@ export function InventoryPage({
               <li key={issue.id}>
                 <strong>{issue.bundleDisplayName}</strong>
                 <span>{issue.message}</span>
+                <button
+                  className="compact-action"
+                  type="button"
+                  aria-label={`查看 ${issue.bundleDisplayName} 的恢复说明`}
+                  disabled={isWriteBlocked}
+                  onClick={() => onOpenRecovery(issue.id)}
+                >
+                  查看说明
+                </button>
               </li>
             ))}
           </ul>

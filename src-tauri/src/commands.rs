@@ -1,6 +1,7 @@
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     BatchMountPlan, BatchMountRequest, EditableLocalRelinkPlan, InstallPlan, MergeContentChoice,
@@ -46,6 +47,27 @@ pub fn get_startup_state(
     application: State<'_, SkillYardApplication>,
 ) -> Result<UiOutcome, UiError> {
     dispatch(&application, UiIntent::GetStartupState)
+}
+
+/// 前端不能提交路径；Finder 只能打开当前应用实例固定的 Central Store。
+#[tauri::command(async)]
+pub fn open_central_store(
+    app: AppHandle,
+    application: State<'_, SkillYardApplication>,
+) -> Result<(), UiError> {
+    let path = application
+        .central_store_path()
+        .to_str()
+        .ok_or_else(|| UiError {
+            code: "invalidPath",
+            message: "Central Store 路径包含 Finder 无法打开的字符".to_owned(),
+        })?;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|error| UiError {
+            code: "openPathError",
+            message: format!("无法在 Finder 中打开 Central Store：{error}"),
+        })
 }
 
 #[tauri::command(async)]

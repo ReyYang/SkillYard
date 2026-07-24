@@ -59,9 +59,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(application)
         .invoke_handler(tauri::generate_handler![
             commands::get_startup_state,
+            commands::open_central_store,
             commands::start_initial_scan,
             commands::refresh_local_inventory,
             commands::check_bundle_updates,

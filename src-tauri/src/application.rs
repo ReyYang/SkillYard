@@ -119,6 +119,11 @@ impl SkillYardApplication {
         )
     }
 
+    /// Finder 入口只暴露固定的持久用户内容目录，不接受前端路径。
+    pub(crate) fn central_store_path(&self) -> &Path {
+        self.paths.data_root()
+    }
+
     /// 仅供崩溃恢复测试在精确阶段注入中断，生产入口始终使用 `None`。
     #[doc(hidden)]
     pub fn new_with_lifecycle_failpoint(
@@ -1453,6 +1458,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn finder_entry_is_fixed_to_the_application_data_root() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        let application = SkillYardApplication::new(
+            ApplicationPaths::for_home(data_root.clone(), sandbox.path().join("home")),
+            PlatformInfo::supported_for_test(),
+        );
+
+        assert_eq!(application.central_store_path(), data_root);
+    }
 
     #[test]
     fn a_second_write_intent_is_rejected_while_the_operation_gate_is_held() {

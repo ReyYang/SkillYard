@@ -29,6 +29,7 @@ type RemovalPlanOutcome = Extract<UiOutcome, { type: "removalPlan" }>;
 
 export interface SkillYardClient {
   getStartupState(): Promise<UiOutcome>;
+  openCentralStore(): Promise<void>;
   startInitialScan(): Promise<UiOutcome>;
   refreshLocalInventory(): Promise<UiOutcome>;
   checkBundleUpdates(): Promise<InventoryOutcome>;
@@ -124,6 +125,7 @@ export interface SkillYardClient {
 // 前端只知道任务级命令；文件夹路径由 Rust 原生选择器产生，不开放通用文件能力。
 export const tauriSkillYardClient: SkillYardClient = {
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),
+  openCentralStore: () => invoke<void>("open_central_store"),
   startInitialScan: () => invoke<UiOutcome>("start_initial_scan"),
   refreshLocalInventory: () => invoke<UiOutcome>("refresh_local_inventory"),
   checkBundleUpdates: () =>

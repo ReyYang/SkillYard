@@ -22,6 +22,14 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("get_startup_state");
   });
 
+  it("打开 Central Store 时不允许前端提交路径", async () => {
+    mocks.invoke.mockResolvedValue(undefined);
+
+    await tauriSkillYardClient.openCentralStore();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("open_central_store");
+  });
+
   it("只通过任务级命令开始首次扫描", async () => {
     mocks.invoke.mockResolvedValue({
       type: "inventory",

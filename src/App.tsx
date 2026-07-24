@@ -10,6 +10,7 @@ import { InstallPlanPage } from "./components/InstallPlanPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
+import { RecoveryPage } from "./components/RecoveryPage";
 import { RemovalPlanPage } from "./components/RemovalPlanPage";
 import { SourceAssociationPlanPage } from "./components/SourceAssociationPlanPage";
 import { SourceAssociationSelectionPage } from "./components/SourceAssociationSelectionPage";
@@ -165,6 +166,13 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [removalOperation, setRemovalOperation] =
     useState<RemovalOperation | null>(null);
   const [removalError, setRemovalError] = useState<string | null>(null);
+  const [selectedRecoveryIssueId, setSelectedRecoveryIssueId] = useState<
+    string | null
+  >(null);
+  const [isOpeningCentralStore, setIsOpeningCentralStore] = useState(false);
+  const [recoveryOpenError, setRecoveryOpenError] = useState<string | null>(
+    null,
+  );
 
   const activeRemovalPlan =
     pendingRemovalPlan ??
@@ -245,6 +253,19 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     return null;
   })() satisfies CurrentOperationSummary | null;
   const hasCurrentOperation = currentOperation !== null;
+
+  const openCentralStore = async () => {
+    if (isOpeningCentralStore) return;
+    setRecoveryOpenError(null);
+    setIsOpeningCentralStore(true);
+    try {
+      await client.openCentralStore();
+    } catch (error) {
+      setRecoveryOpenError(formatError(error));
+    } finally {
+      setIsOpeningCentralStore(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -1273,6 +1294,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onInstall={() => undefined}
       onAddProject={() => undefined}
       onAssociateSource={() => undefined}
+      onOpenRecovery={() => undefined}
       onTakeover={() => undefined}
       onManageMount={() => undefined}
       onBatchMount={() => undefined}
@@ -1449,6 +1471,27 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           Silicon Mac。
         </p>
       </main>
+    );
+  }
+
+  const selectedRecoveryIssue =
+    selectedRecoveryIssueId && viewState.outcome.type === "inventory"
+      ? viewState.outcome.recoveryIssues.find(
+          (issue) => issue.id === selectedRecoveryIssueId,
+        )
+      : null;
+  if (selectedRecoveryIssue) {
+    return (
+      <RecoveryPage
+        issue={selectedRecoveryIssue}
+        isOpeningCentralStore={isOpeningCentralStore}
+        error={recoveryOpenError}
+        onBack={() => {
+          setRecoveryOpenError(null);
+          setSelectedRecoveryIssueId(null);
+        }}
+        onOpenCentralStore={openCentralStore}
+      />
     );
   }
 
@@ -1683,6 +1726,10 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onInstall={openSourceDiscovery}
       onAddProject={chooseAndRegisterProject}
       onAssociateSource={openSourceAssociation}
+      onOpenRecovery={(issueId) => {
+        setRecoveryOpenError(null);
+        setSelectedRecoveryIssueId(issueId);
+      }}
       onTakeover={openTakeover}
       onManageMount={openMountManager}
       onBatchMount={openBatchMount}

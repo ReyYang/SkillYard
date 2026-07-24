@@ -2734,7 +2734,8 @@ describe("本机清单", () => {
     }
   });
 
-  it("人工恢复只提示相关 Bundle，同时保留其他清单浏览", async () => {
+  it("人工恢复只提供说明和固定 Central Store 入口，同时保留其他清单", async () => {
+    const user = userEvent.setup();
     const client = createClient({
       ...inventoryOutcome([createEntry({ skillName: "still-readable" })]),
       recoveryIssues: [
@@ -2752,6 +2753,26 @@ describe("本机清单", () => {
     expect(recovery).toHaveTextContent("只停止修改相关 Bundle");
     expect(screen.getByText("still-readable")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "安装 Skill" })).toBeEnabled();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "查看 damaged-bundle 的恢复说明",
+      }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "需要人工检查文件" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("current 指向未知状态")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /强制|删除|解除/ })).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", { name: "打开 Central Store" }),
+    );
+    expect(client.openCentralStore).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    expect(screen.getByText("still-readable")).toBeInTheDocument();
   });
 });
 
@@ -4978,6 +4999,7 @@ function createEditableLocalRelinkPlan(
 function createClient(startup: UiOutcome): SkillYardClient {
   return {
     getStartupState: vi.fn().mockResolvedValue(startup),
+    openCentralStore: vi.fn().mockResolvedValue(undefined),
     startInitialScan: vi.fn(),
     refreshLocalInventory: vi.fn(),
     checkBundleUpdates: vi.fn(),
