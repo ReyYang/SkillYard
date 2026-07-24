@@ -653,6 +653,44 @@ Bundle Cascading Delete
 - `[HUMAN]` 审阅关键危险确认、人工恢复页面和跨应用可见性提示是否容易理解。
 - `[HUMAN]` 使用一份真实 Bundle 完成最终日常流程体验，不以这一步替代任何自动化正确性断言。
 
+### 完整技术实现图
+
+Stage 10 只补齐九个阶段组合使用后的产品缺口，不新增第二套生命周期状态机、进度协议或恢复协议。
+
+```text
+Editable Local 重新关联
+  -> 原生目录选择器取得候选路径
+  -> 只读识别同一 device/inode 与候选 Skill 内容
+  -> 持久化 metadata-only Relink Plan
+  -> 用户确认
+  -> 一个 SQLite 事务更新 Source locator、展示名和检查状态
+  -> current、Member、Mount 与受管内容保持不变
+
+生命周期确认
+  -> 继续调用前九阶段唯一的确认入口
+  -> 前端从现有确认 Promise 推导“当前操作”
+  -> 默认显示不可取消的操作页
+  -> 用户可切换到最近一次已提交 Inventory 只读浏览
+  -> 全局提示可返回当前操作；全部写入口和主动刷新保持不可执行
+
+阻塞恢复
+  -> Inventory 中的 RecoveryIssue 进入专用只读页面
+  -> 展示相关对象、Rust 判定原因和 Central Store 保护提示
+  -> 只提供返回清单与打开固定 Central Store
+  -> 不提供未定义的强制采用、删除 Journal 或解除阻塞动作
+```
+
+模型和边界固定如下：
+
+- Editable Local Relink 只支持同一台 Mac、同一文件系统内保留 device/inode 的移动或重命名。跨文件系统复制、重新创建目录以及仅名称或内容相似的路径在 1.0 中拒绝，不能自动认作同一 Source。
+- Relink Plan 封存 Source ID、旧路径、候选规范路径、文件系统身份、候选内容 marker 和可展示成员；确认时重新检查同一事实。它只修改 Source metadata，并把关联 Bundle 标为“尚未检查”；采用候选内容仍需之后单独执行 Editable Local Check 与完整 Bundle Update。
+- Relink 使用独立的持久化 Plan 表和应用级写入门，但不创建 Lifecycle Transaction 或 Filesystem Journal，因为确认不修改 Central Store 内容、Mount 或项目路径。
+- “当前操作”不保存百分比、阶段或预计时间。应用只使用已有确认调用的开始与结束状态；后端单写门和现有 Journal 仍是唯一并发与恢复依据。
+- 生命周期事务期间允许使用缓存的已提交 Inventory 进行搜索、筛选和查看 Mount／Source 详情；不能发起安装、接管、挂载、更新、删除、Local Refresh、Update Check 或 Source Reload。
+- Finder 入口只调用固定的 `open_central_store` command；Rust 使用 Tauri Opener 打开 `ApplicationPaths::data_root()`，前端不能提供路径，也不获得通用文件系统或 shell 权限。
+- “重置应用”只清除当前前端导航、搜索筛选、临时错误和窗口内选择，并重新读取 Startup State。1.0 当前没有持久化偏好或窗口状态，因此不新增设置存储；SQLite、Journal、Source Catalog、Bundle、`current` 和 Mount 均不能被清理。
+- Stage 10 建立 168 条 User Story 到自动化、`[MAC-CONTRACT]` 或 `[HUMAN]` 证据的映射。已有公开 seam 测试继续作为证据，只为真实缺口补测试，不重复实现前九阶段。
+
 ### 1.0 完成条件
 
 - 十个阶段的阶段验收全部通过。
