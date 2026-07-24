@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
 import { BundleMountPage } from "./components/BundleMountPage";
 import { BundleUpdateBatchPage } from "./components/BundleUpdateBatchPage";
+import { EditableLocalRelinkPage } from "./components/EditableLocalRelinkPage";
 import { InventoryPage } from "./components/InventoryPage";
 import { InstallPlanPage } from "./components/InstallPlanPage";
 import { MountManagementPage } from "./components/MountManagementPage";
@@ -18,6 +19,7 @@ import { TakeoverSelectionPage } from "./components/TakeoverSelectionPage";
 import type {
   BatchMountPlan,
   BatchMountRequest,
+  EditableLocalRelinkPlan,
   InstallPlan,
   MountPlan,
   MountScope,
@@ -59,7 +61,10 @@ type SourceOperation =
   | { type: "planningUrl" }
   | { type: "reloading"; sourceId: string }
   | { type: "planningInstall"; sourceId: string }
-  | { type: "confirmingRef" };
+  | { type: "choosingRelink"; sourceId: string }
+  | { type: "confirmingRef" }
+  | { type: "confirmingRelink" }
+  | { type: "discardingRelink" };
 
 type RemovalOperation =
   | { type: "planning"; kind: RemovalKind; targetId: string }
@@ -101,6 +106,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [pendingSourceRefChange, setPendingSourceRefChange] =
     useState<SourceRefChangePlan | null>(null);
+  const [pendingEditableLocalRelink, setPendingEditableLocalRelink] =
+    useState<EditableLocalRelinkPlan | null>(null);
   const [sourceAssociationBundleId, setSourceAssociationBundleId] = useState<
     string | null
   >(null);
@@ -152,6 +159,12 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     pendingRemovalPlan ??
     (viewState.status === "ready" &&
     viewState.outcome.type === "removalPlan"
+      ? viewState.outcome.plan
+      : null);
+  const activeEditableLocalRelink =
+    pendingEditableLocalRelink ??
+    (viewState.status === "ready" &&
+    viewState.outcome.type === "editableLocalRelinkPlan"
       ? viewState.outcome.plan
       : null);
 
@@ -730,6 +743,58 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
+  const chooseEditableLocalRelink = async (sourceId: string) => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "choosingRelink", sourceId });
+    setSourceError(null);
+    try {
+      const plan = await client.chooseEditableLocalRelinkPlan(sourceId);
+      if (plan) setPendingEditableLocalRelink(plan);
+    } catch (error) {
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const confirmEditableLocalRelink = async () => {
+    if (!activeEditableLocalRelink || sourceOperation) return;
+    setSourceOperation({ type: "confirmingRelink" });
+    setSourceError(null);
+    try {
+      const outcome = await client.confirmEditableLocalRelinkPlan(
+        activeEditableLocalRelink.id,
+      );
+      setPendingEditableLocalRelink(null);
+      setSourceDiscovery(outcome);
+      const inventory = await client.getStartupState();
+      setViewState({ status: "ready", outcome: inventory });
+    } catch (error) {
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
+  const discardEditableLocalRelink = async () => {
+    if (!activeEditableLocalRelink || sourceOperation) return;
+    setSourceOperation({ type: "discardingRelink" });
+    setSourceError(null);
+    try {
+      const outcome = await client.discardEditableLocalRelinkPlan(
+        activeEditableLocalRelink.id,
+      );
+      setPendingEditableLocalRelink(null);
+      setSourceDiscovery(outcome);
+      const inventory = await client.getStartupState();
+      setViewState({ status: "ready", outcome: inventory });
+    } catch (error) {
+      setSourceError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
   const chooseFolderInstallPlan = async () => {
     if (sourceOperation) return;
     setSourceOperation({ type: "choosingFolder" });
@@ -1146,6 +1211,18 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       />
     );
   }
+  if (activeEditableLocalRelink) {
+    return (
+      <EditableLocalRelinkPage
+        plan={activeEditableLocalRelink}
+        isConfirming={sourceOperation?.type === "confirmingRelink"}
+        isDiscarding={sourceOperation?.type === "discardingRelink"}
+        error={sourceError}
+        onDiscard={discardEditableLocalRelink}
+        onConfirm={confirmEditableLocalRelink}
+      />
+    );
+  }
   if (pendingSourceRefChange) {
     return (
       <SourceRefChangePage
@@ -1288,6 +1365,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         onInstallUrl={createUrlInstallPlan}
         onReload={reloadGithubSource}
         onInstall={createGithubInstallPlan}
+        onRelink={chooseEditableLocalRelink}
         onRemoveSource={(sourceId) =>
           createRemovalPlan("source", sourceId)
         }

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   BatchMountPlan,
   BatchMountRequest,
+  EditableLocalRelinkPlan,
   InstallPlan,
   MountPlan,
   MountScope,
@@ -65,6 +66,15 @@ export interface SkillYardClient {
     >
   >;
   confirmSourceRefChange(
+    planId: string,
+  ): Promise<Extract<UiOutcome, { type: "sourceDiscovery" }>>;
+  chooseEditableLocalRelinkPlan(
+    sourceId: string,
+  ): Promise<EditableLocalRelinkPlan | null>;
+  confirmEditableLocalRelinkPlan(
+    planId: string,
+  ): Promise<Extract<UiOutcome, { type: "sourceDiscovery" }>>;
+  discardEditableLocalRelinkPlan(
     planId: string,
   ): Promise<Extract<UiOutcome, { type: "sourceDiscovery" }>>;
   createSourceAssociationPlan(
@@ -167,6 +177,21 @@ export const tauriSkillYardClient: SkillYardClient = {
   confirmSourceRefChange: (planId) =>
     invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
       "confirm_source_ref_change",
+      { planId },
+    ),
+  chooseEditableLocalRelinkPlan: (sourceId) =>
+    invoke<EditableLocalRelinkPlan | null>(
+      "choose_editable_local_relink_plan",
+      { sourceId },
+    ),
+  confirmEditableLocalRelinkPlan: (planId) =>
+    invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
+      "confirm_editable_local_relink_plan",
+      { planId },
+    ),
+  discardEditableLocalRelinkPlan: (planId) =>
+    invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
+      "discard_editable_local_relink_plan",
       { planId },
     ),
   createSourceAssociationPlan: (bundleId, sourceId, memberChoices) =>

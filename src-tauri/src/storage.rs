@@ -13,12 +13,13 @@ use thiserror::Error;
 
 use crate::domain::{
     BatchMountDisposition, BundleUpdateAction, BundleUpdateStatus, BundleUpdateSummary,
-    InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
-    ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth, MountOperation,
-    MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue, ScanIssue,
-    ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SourceCatalogMemberSummary,
-    SourceCatalogStatus, SourceKind, SourceRefChangePlan, SourceSummary, SupportedAppId,
-    SupportedAppSummary, TakeoverPlan, UiOutcome,
+    EditableLocalRelinkMember, EditableLocalRelinkPlan, InventoryItem, InventoryLocationKind,
+    InventoryObservation, LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind,
+    ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope, MountSummary,
+    ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey,
+    SkillMetadataStatus, SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind,
+    SourceRefChangePlan, SourceSummary, SupportedAppId, SupportedAppSummary, TakeoverPlan,
+    UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -69,6 +70,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0019_bundle_update_batches.sql"),
     ),
     (20, include_str!("../migrations/0020_removals.sql")),
+    (
+        21,
+        include_str!("../migrations/0021_editable_local_relink.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -123,6 +128,18 @@ pub enum StorageError {
     SourceRefChangePlanExpired,
     #[error("Source 的 Tracked Ref 已经变化，请重新添加来源")]
     SourceRefChangeStateChanged,
+    #[error("Editable Local 重新关联 Plan 未签发或已经不存在")]
+    EditableLocalRelinkPlanNotFound,
+    #[error("Editable Local 重新关联 Plan 已经使用，不能重复确认")]
+    EditableLocalRelinkPlanConsumed,
+    #[error("Editable Local 重新关联 Plan 已过期，请重新选择目录")]
+    EditableLocalRelinkPlanExpired,
+    #[error("Editable Local Source 或候选目录已经变化，请重新选择目录")]
+    EditableLocalRelinkStateChanged,
+    #[error("无法编码 Editable Local 重新关联成员：{0}")]
+    SerializeEditableLocalRelinkMetadata(#[source] serde_json::Error),
+    #[error("无法解析 Editable Local 重新关联成员：{0}")]
+    InvalidEditableLocalRelinkMetadata(#[source] serde_json::Error),
     #[error("无法保存首次扫描结果：{0}")]
     SaveInitialScan(#[source] rusqlite::Error),
     #[error("无法保存本机刷新结果：{0}")]
@@ -590,6 +607,32 @@ pub struct NewGitHubSource<'a> {
 pub enum SaveGitHubSourceResult {
     Saved { source_id: String },
     RefChangeRequired { plan: SourceRefChangePlan },
+}
+
+/// Storage 会用完整 Source 快照签发 metadata-only Relink Plan。
+pub(crate) struct NewEditableLocalRelinkPlan<'a> {
+    pub id: &'a str,
+    pub source: &'a StoredSourceInstallSource,
+    pub candidate_path: &'a str,
+    pub candidate_display_name: &'a str,
+    pub candidate_marker: &'a str,
+    pub members: &'a [EditableLocalRelinkMember],
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+/// 确认阶段会重新读取候选目录，并与这里封存的事实逐项核对。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredEditableLocalRelinkPlan {
+    pub public: EditableLocalRelinkPlan,
+    pub expected_canonical_identity: String,
+    pub expected_device: u64,
+    pub expected_inode: u64,
+    pub expected_catalog_generation: i64,
+    pub expected_catalog_marker: String,
+    pub expected_bundle_id: Option<String>,
+    pub candidate_marker: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3431,6 +3474,377 @@ impl Storage {
         }
         transaction.commit().map_err(StorageError::SaveSource)?;
         Ok(source_id)
+    }
+
+    pub(crate) fn create_editable_local_relink_plan(
+        &mut self,
+        new_plan: NewEditableLocalRelinkPlan<'_>,
+    ) -> Result<EditableLocalRelinkPlan, StorageError> {
+        let source = new_plan.source;
+        let expected_device = source
+            .filesystem_device
+            .map(filesystem_identity_to_sql)
+            .transpose()?
+            .ok_or(StorageError::InvalidSourceDefinition)?;
+        let expected_inode = source
+            .filesystem_inode
+            .map(filesystem_identity_to_sql)
+            .transpose()?
+            .ok_or(StorageError::InvalidSourceDefinition)?;
+        if source.kind != SourceKind::EditableLocal.as_str()
+            || source.catalog_generation <= 0
+            || source.catalog_marker.is_empty()
+            || new_plan.candidate_path.is_empty()
+            || !Path::new(new_plan.candidate_path).is_absolute()
+            || new_plan.candidate_path == source.locator
+            || new_plan.candidate_display_name.is_empty()
+            || new_plan.candidate_marker.is_empty()
+            || new_plan.members.is_empty()
+            || new_plan.created_at < 0
+            || new_plan.expires_at <= new_plan.created_at
+        {
+            return Err(StorageError::InvalidSourceDefinition);
+        }
+        let candidate_members_json = serde_json::to_string(new_plan.members)
+            .map_err(StorageError::SerializeEditableLocalRelinkMetadata)?;
+        let expected_bundle_id = source.bundle.as_ref().map(|bundle| bundle.id.clone());
+        let expected_bundle_display_name = source
+            .bundle
+            .as_ref()
+            .map(|bundle| bundle.display_name.clone());
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        if bundle_or_source_write_is_blocked(
+            &transaction,
+            expected_bundle_id.as_deref(),
+            Some(&source.id),
+        )? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
+        let stored_source = transaction
+            .query_row(
+                "SELECT kind, canonical_identity, display_name, locator,
+                        filesystem_device, filesystem_inode,
+                        catalog_generation, catalog_marker
+                 FROM sources
+                 WHERE id = ?1",
+                [&source.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::SaveSource)?
+            .ok_or(StorageError::SourceNotFound)?;
+        let expected_source = (
+            source.kind.clone(),
+            source.canonical_identity.clone(),
+            source.display_name.clone(),
+            source.locator.clone(),
+            Some(expected_device),
+            Some(expected_inode),
+            source.catalog_generation,
+            Some(source.catalog_marker.clone()),
+        );
+        if stored_source != expected_source {
+            return Err(StorageError::EditableLocalRelinkStateChanged);
+        }
+        let stored_bundle = transaction
+            .query_row(
+                "SELECT link.bundle_id, bundle.display_name
+                 FROM source_bundle_links AS link
+                 JOIN bundles AS bundle ON bundle.id = link.bundle_id
+                 WHERE link.source_id = ?1",
+                [&source.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveSource)?;
+        if stored_bundle
+            != expected_bundle_id
+                .clone()
+                .zip(expected_bundle_display_name.clone())
+        {
+            return Err(StorageError::EditableLocalRelinkStateChanged);
+        }
+
+        // 桌面端一次只能确认一项 metadata 变更，新计划会明确替代旧的未确认计划。
+        transaction
+            .execute(
+                "UPDATE editable_local_relink_plans
+                 SET status = 'consumed'
+                 WHERE status = 'pending'",
+                [],
+            )
+            .map_err(StorageError::SaveSource)?;
+        transaction
+            .execute(
+                "INSERT INTO editable_local_relink_plans (
+                    id, source_id, expected_canonical_identity,
+                    expected_source_display_name, expected_locator,
+                    expected_device, expected_inode, expected_catalog_generation,
+                    expected_catalog_marker, expected_bundle_id,
+                    expected_bundle_display_name, candidate_path,
+                    candidate_display_name, candidate_marker,
+                    candidate_members_json, created_at, expires_at, status
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                    ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, 'pending'
+                 )",
+                params![
+                    new_plan.id,
+                    source.id,
+                    source.canonical_identity,
+                    source.display_name,
+                    source.locator,
+                    expected_device,
+                    expected_inode,
+                    source.catalog_generation,
+                    source.catalog_marker,
+                    expected_bundle_id,
+                    expected_bundle_display_name,
+                    new_plan.candidate_path,
+                    new_plan.candidate_display_name,
+                    new_plan.candidate_marker,
+                    candidate_members_json,
+                    new_plan.created_at,
+                    new_plan.expires_at,
+                ],
+            )
+            .map_err(StorageError::SaveSource)?;
+        transaction.commit().map_err(StorageError::SaveSource)?;
+        Ok(EditableLocalRelinkPlan {
+            id: new_plan.id.to_owned(),
+            source_id: source.id.clone(),
+            source_display_name: source.display_name.clone(),
+            current_path: source.locator.clone(),
+            candidate_path: new_plan.candidate_path.to_owned(),
+            candidate_display_name: new_plan.candidate_display_name.to_owned(),
+            bundle_display_name: source
+                .bundle
+                .as_ref()
+                .map(|bundle| bundle.display_name.clone()),
+            members: new_plan.members.to_vec(),
+            created_at: new_plan.created_at,
+            expires_at: new_plan.expires_at,
+        })
+    }
+
+    pub(crate) fn read_open_editable_local_relink_plan(
+        &self,
+        now: i64,
+    ) -> Result<Option<EditableLocalRelinkPlan>, StorageError> {
+        let stored = self
+            .connection
+            .query_row(
+                EDITABLE_LOCAL_RELINK_PLAN_SELECT,
+                params![now],
+                stored_editable_local_relink_plan_from_row,
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?;
+        stored
+            .map(validate_stored_editable_local_relink_plan)
+            .transpose()
+            .map(|plan| plan.map(|plan| plan.public))
+    }
+
+    pub(crate) fn read_editable_local_relink_plan(
+        &self,
+        plan_id: &str,
+        now: i64,
+    ) -> Result<StoredEditableLocalRelinkPlan, StorageError> {
+        let stored = self
+            .connection
+            .query_row(
+                EDITABLE_LOCAL_RELINK_PLAN_BY_ID_SELECT,
+                [plan_id],
+                stored_editable_local_relink_plan_from_row,
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?
+            .ok_or(StorageError::EditableLocalRelinkPlanNotFound)?;
+        let stored = validate_stored_editable_local_relink_plan(stored)?;
+        if stored.status != "pending" {
+            return Err(StorageError::EditableLocalRelinkPlanConsumed);
+        }
+        if stored.public.expires_at <= now {
+            return Err(StorageError::EditableLocalRelinkPlanExpired);
+        }
+        Ok(stored)
+    }
+
+    pub(crate) fn confirm_editable_local_relink_plan(
+        &mut self,
+        expected: &StoredEditableLocalRelinkPlan,
+        observed_candidate_path: &str,
+        observed_candidate_display_name: &str,
+        observed_candidate_marker: &str,
+        now: i64,
+    ) -> Result<String, StorageError> {
+        if observed_candidate_path != expected.public.candidate_path
+            || observed_candidate_display_name != expected.public.candidate_display_name
+            || observed_candidate_marker != expected.candidate_marker
+        {
+            return Err(StorageError::EditableLocalRelinkStateChanged);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        let stored = transaction
+            .query_row(
+                EDITABLE_LOCAL_RELINK_PLAN_BY_ID_SELECT,
+                [&expected.public.id],
+                stored_editable_local_relink_plan_from_row,
+            )
+            .optional()
+            .map_err(StorageError::SaveSource)?
+            .ok_or(StorageError::EditableLocalRelinkPlanNotFound)?;
+        let stored = validate_stored_editable_local_relink_plan(stored)?;
+        if &stored != expected {
+            return Err(StorageError::EditableLocalRelinkStateChanged);
+        }
+        if stored.status != "pending" {
+            return Err(StorageError::EditableLocalRelinkPlanConsumed);
+        }
+        if stored.public.expires_at <= now {
+            return Err(StorageError::EditableLocalRelinkPlanExpired);
+        }
+        if bundle_or_source_write_is_blocked(
+            &transaction,
+            stored.expected_bundle_id.as_deref(),
+            Some(&stored.public.source_id),
+        )? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
+        let expected_device = filesystem_identity_to_sql(stored.expected_device)?;
+        let expected_inode = filesystem_identity_to_sql(stored.expected_inode)?;
+        let changed = transaction
+            .execute(
+                "UPDATE sources
+                 SET display_name = ?2, locator = ?3, updated_at = ?4
+                 WHERE id = ?1
+                   AND kind = 'editable_local'
+                   AND canonical_identity = ?5
+                   AND display_name = ?6
+                   AND locator = ?7
+                   AND filesystem_device = ?8
+                   AND filesystem_inode = ?9
+                   AND catalog_generation = ?10
+                   AND catalog_marker = ?11",
+                params![
+                    stored.public.source_id,
+                    observed_candidate_display_name,
+                    observed_candidate_path,
+                    now,
+                    stored.expected_canonical_identity,
+                    stored.public.source_display_name,
+                    stored.public.current_path,
+                    expected_device,
+                    expected_inode,
+                    stored.expected_catalog_generation,
+                    stored.expected_catalog_marker,
+                ],
+            )
+            .map_err(StorageError::SaveSource)?;
+        if changed != 1 {
+            return Err(StorageError::EditableLocalRelinkStateChanged);
+        }
+        match &stored.expected_bundle_id {
+            Some(bundle_id) => {
+                let changed = transaction
+                    .execute(
+                        "UPDATE source_bundle_links
+                         SET update_check_status = 'not_checked',
+                             update_checked_marker = NULL,
+                             update_checked_at = NULL,
+                             update_check_error = NULL
+                         WHERE source_id = ?1 AND bundle_id = ?2",
+                        params![stored.public.source_id, bundle_id],
+                    )
+                    .map_err(StorageError::SaveSource)?;
+                if changed != 1 {
+                    return Err(StorageError::EditableLocalRelinkStateChanged);
+                }
+            }
+            None => {
+                let has_bundle = transaction
+                    .query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM source_bundle_links WHERE source_id = ?1
+                         )",
+                        [&stored.public.source_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(StorageError::SaveSource)?;
+                if has_bundle {
+                    return Err(StorageError::EditableLocalRelinkStateChanged);
+                }
+            }
+        }
+        let consumed = transaction
+            .execute(
+                "UPDATE editable_local_relink_plans
+                 SET status = 'consumed'
+                 WHERE id = ?1 AND status = 'pending'",
+                [&stored.public.id],
+            )
+            .map_err(StorageError::SaveSource)?;
+        if consumed != 1 {
+            return Err(StorageError::EditableLocalRelinkStateChanged);
+        }
+        transaction.commit().map_err(StorageError::SaveSource)?;
+        Ok(stored.public.source_id)
+    }
+
+    pub(crate) fn discard_editable_local_relink_plan(
+        &mut self,
+        plan_id: &str,
+    ) -> Result<String, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        let state = transaction
+            .query_row(
+                "SELECT source_id, status
+                 FROM editable_local_relink_plans
+                 WHERE id = ?1",
+                [plan_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveSource)?
+            .ok_or(StorageError::EditableLocalRelinkPlanNotFound)?;
+        if state.1 != "pending" {
+            return Err(StorageError::EditableLocalRelinkPlanConsumed);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE editable_local_relink_plans
+                 SET status = 'consumed'
+                 WHERE id = ?1 AND status = 'pending'",
+                [plan_id],
+            )
+            .map_err(StorageError::SaveSource)?;
+        if changed != 1 {
+            return Err(StorageError::EditableLocalRelinkStateChanged);
+        }
+        transaction.commit().map_err(StorageError::SaveSource)?;
+        Ok(state.0)
     }
 
     pub fn save_initial_scan(
@@ -10905,6 +11319,146 @@ fn sqlite_bool(value: i64) -> Result<bool, StorageError> {
     }
 }
 
+const EDITABLE_LOCAL_RELINK_PLAN_SELECT: &str = "
+    SELECT
+        id, source_id, expected_canonical_identity,
+        expected_source_display_name, expected_locator,
+        expected_device, expected_inode, expected_catalog_generation,
+        expected_catalog_marker, expected_bundle_id,
+        expected_bundle_display_name, candidate_path,
+        candidate_display_name, candidate_marker,
+        candidate_members_json, created_at, expires_at, status
+    FROM editable_local_relink_plans
+    WHERE status = 'pending' AND expires_at > ?1
+    ORDER BY created_at, id
+    LIMIT 1
+";
+
+const EDITABLE_LOCAL_RELINK_PLAN_BY_ID_SELECT: &str = "
+    SELECT
+        id, source_id, expected_canonical_identity,
+        expected_source_display_name, expected_locator,
+        expected_device, expected_inode, expected_catalog_generation,
+        expected_catalog_marker, expected_bundle_id,
+        expected_bundle_display_name, candidate_path,
+        candidate_display_name, candidate_marker,
+        candidate_members_json, created_at, expires_at, status
+    FROM editable_local_relink_plans
+    WHERE id = ?1
+";
+
+#[derive(Debug)]
+struct RawStoredEditableLocalRelinkPlan {
+    id: String,
+    source_id: String,
+    expected_canonical_identity: String,
+    expected_source_display_name: String,
+    expected_locator: String,
+    expected_device: i64,
+    expected_inode: i64,
+    expected_catalog_generation: i64,
+    expected_catalog_marker: String,
+    expected_bundle_id: Option<String>,
+    expected_bundle_display_name: Option<String>,
+    candidate_path: String,
+    candidate_display_name: String,
+    candidate_marker: String,
+    candidate_members_json: String,
+    created_at: i64,
+    expires_at: i64,
+    status: String,
+}
+
+fn stored_editable_local_relink_plan_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RawStoredEditableLocalRelinkPlan> {
+    Ok(RawStoredEditableLocalRelinkPlan {
+        id: row.get(0)?,
+        source_id: row.get(1)?,
+        expected_canonical_identity: row.get(2)?,
+        expected_source_display_name: row.get(3)?,
+        expected_locator: row.get(4)?,
+        expected_device: row.get(5)?,
+        expected_inode: row.get(6)?,
+        expected_catalog_generation: row.get(7)?,
+        expected_catalog_marker: row.get(8)?,
+        expected_bundle_id: row.get(9)?,
+        expected_bundle_display_name: row.get(10)?,
+        candidate_path: row.get(11)?,
+        candidate_display_name: row.get(12)?,
+        candidate_marker: row.get(13)?,
+        candidate_members_json: row.get(14)?,
+        created_at: row.get(15)?,
+        expires_at: row.get(16)?,
+        status: row.get(17)?,
+    })
+}
+
+fn validate_stored_editable_local_relink_plan(
+    raw: RawStoredEditableLocalRelinkPlan,
+) -> Result<StoredEditableLocalRelinkPlan, StorageError> {
+    let expected_device = filesystem_identity_from_sql(raw.expected_device)?;
+    let expected_inode = filesystem_identity_from_sql(raw.expected_inode)?;
+    let members =
+        serde_json::from_str::<Vec<EditableLocalRelinkMember>>(&raw.candidate_members_json)
+            .map_err(StorageError::InvalidEditableLocalRelinkMetadata)?;
+    let bundle_pair_is_valid = matches!(
+        (&raw.expected_bundle_id, &raw.expected_bundle_display_name),
+        (Some(id), Some(name)) if !id.is_empty() && !name.is_empty()
+    ) || (raw.expected_bundle_id.is_none()
+        && raw.expected_bundle_display_name.is_none());
+    let members_are_valid = !members.is_empty()
+        && members.iter().all(|member| {
+            (member.relative_path.is_empty() || is_normalized_relative_path(&member.relative_path))
+                && member
+                    .skill_name
+                    .as_deref()
+                    .is_none_or(|name| !name.is_empty())
+        });
+    if raw.id.is_empty()
+        || raw.source_id.is_empty()
+        || raw.expected_source_display_name.is_empty()
+        || raw.candidate_display_name.is_empty()
+        || raw.expected_catalog_generation <= 0
+        || raw.expected_catalog_marker.is_empty()
+        || raw.candidate_marker.is_empty()
+        || raw.created_at < 0
+        || raw.expires_at <= raw.created_at
+        || !matches!(raw.status.as_str(), "pending" | "consumed")
+        || raw.expected_locator == raw.candidate_path
+        || !is_normalized_absolute_path(&raw.expected_locator)
+        || !is_normalized_absolute_path(&raw.candidate_path)
+        || raw.expected_canonical_identity
+            != format!("editable-local:{expected_device}:{expected_inode}")
+        || !bundle_pair_is_valid
+        || !members_are_valid
+    {
+        return Err(StorageError::EditableLocalRelinkStateChanged);
+    }
+    Ok(StoredEditableLocalRelinkPlan {
+        public: EditableLocalRelinkPlan {
+            id: raw.id,
+            source_id: raw.source_id,
+            source_display_name: raw.expected_source_display_name,
+            current_path: raw.expected_locator,
+            candidate_path: raw.candidate_path,
+            candidate_display_name: raw.candidate_display_name,
+            bundle_display_name: raw.expected_bundle_display_name,
+            members,
+            created_at: raw.created_at,
+            expires_at: raw.expires_at,
+        },
+        expected_canonical_identity: raw.expected_canonical_identity,
+        expected_device,
+        expected_inode,
+        expected_catalog_generation: raw.expected_catalog_generation,
+        expected_catalog_marker: raw.expected_catalog_marker,
+        expected_bundle_id: raw.expected_bundle_id,
+        candidate_marker: raw.candidate_marker,
+        status: raw.status,
+    })
+}
+
 fn inventory_item_from_observation(
     observation: InventoryObservation,
     project_display_name: Option<String>,
@@ -12728,7 +13282,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=20).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=21).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -12745,6 +13299,7 @@ mod tests {
             "source_association_transactions",
             "removal_plans",
             "removal_transactions",
+            "editable_local_relink_plans",
         ] {
             let exists = storage
                 .connection

@@ -7,8 +7,9 @@ use std::{
 
 use rusqlite::Connection;
 use skillyard_lib::{
-    ApplicationPaths, InstallInputKind, ManagementKind, PlatformInfo, SkillYardApplication,
-    SourceRequest, SourceResponse, SourceTransport, SourceTransportError, UiIntent, UiOutcome,
+    ApplicationPaths, BundleUpdateStatus, InstallInputKind, ManagementKind, MountScope,
+    PlatformInfo, SkillYardApplication, SourceKind, SourceRequest, SourceResponse, SourceTransport,
+    SourceTransportError, SupportedAppId, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
 use url::Url;
@@ -339,9 +340,9 @@ fn editable_local_source_keeps_the_author_directory_outside_current_content() {
 }
 
 #[test]
-fn editable_local_source_rename_requires_an_explicit_future_relink_flow() {
+fn editable_local_source_rename_is_explicitly_relinked_without_adopting_content() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
-    let (application, data_root, _) = ready_application(sandbox.path());
+    let (application, data_root, home) = ready_application(sandbox.path());
     let editable = sandbox.path().join("author/original-skills");
     write_skill(&editable.join("alpha"), "alpha", "author-original");
     let original_locator = fs::canonicalize(&editable).expect("应取得原 Source 路径");
@@ -354,40 +355,234 @@ fn editable_local_source_rename_requires_an_explicit_future_relink_flow() {
     else {
         panic!("应返回安装 Plan");
     };
+    let UiOutcome::Inventory { entries, .. } = application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: plan.id,
+            selected_candidate_ids: plan
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.default_selected)
+                .map(|candidate| candidate.candidate_id.clone())
+                .collect(),
+        })
+        .expect("应安装 Editable Local Bundle")
+    else {
+        panic!("安装后应返回 Inventory");
+    };
+    let alpha_member_id = entries
+        .iter()
+        .find(|entry| entry.skill_name == "alpha")
+        .and_then(|entry| entry.member_id.clone())
+        .expect("应找到受管 alpha Member");
+    fs::create_dir_all(&home).expect("应创建隔离 home");
+    let UiOutcome::MountPlan { plan } = application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: alpha_member_id,
+            app_id: SupportedAppId::Codex,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect("应生成 Codex Mount Plan")
+    else {
+        panic!("应返回 Mount Plan");
+    };
     application
-        .handle(UiIntent::DiscardInstallPlan { plan_id: plan.id })
-        .expect("应放弃未确认的安装 Plan");
+        .handle(UiIntent::ConfirmMountPlan { plan_id: plan.id })
+        .expect("应挂载 alpha");
+    let UiOutcome::SourceDiscovery { sources, .. } = application
+        .handle(UiIntent::OpenSourceDiscovery)
+        .expect("应读取 Source")
+    else {
+        panic!("应返回 SourceDiscovery");
+    };
+    let source = sources
+        .into_iter()
+        .find(|source| source.kind == SourceKind::EditableLocal)
+        .expect("应找到 Editable Local Source");
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let before = connection
+        .query_row(
+            "SELECT source.catalog_generation, source.catalog_marker,
+                    bundle.current_target, link.update_check_status
+             FROM sources AS source
+             JOIN source_bundle_links AS link ON link.source_id = source.id
+             JOIN bundles AS bundle ON bundle.id = link.bundle_id
+             WHERE source.id = ?1",
+            [&source.id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .expect("应读取重新关联前状态");
 
     let moved = sandbox.path().join("author/moved-skills");
     fs::rename(&editable, &moved).expect("应在同一文件系统内移动 Source 目录");
-    let error = application
-        .handle(UiIntent::CreateEditableLocalInstallPlan {
-            input_path: moved.to_string_lossy().into_owned(),
+    fs::write(moved.join("alpha/payload.txt"), "author-after-move")
+        .expect("应模拟移动后继续编辑作者目录");
+    let UiOutcome::EditableLocalRelinkPlan { plan } = application
+        .handle(UiIntent::CreateEditableLocalRelinkPlan {
+            source_id: source.id.clone(),
+            candidate_path: moved.to_string_lossy().into_owned(),
         })
-        .expect_err("1.0 不能静默把同一 inode 重新关联到新路径");
-    assert!(error.to_string().contains("目录位置已变化"));
+        .expect("同一 inode 的新路径应生成明确确认 Plan")
+    else {
+        panic!("应返回 EditableLocalRelinkPlan");
+    };
+    assert_eq!(plan.source_id, source.id);
+    assert_eq!(Path::new(&plan.current_path), original_locator);
+    assert_eq!(
+        Path::new(&plan.candidate_path),
+        fs::canonicalize(&moved).expect("应取得候选 canonical path")
+    );
+    assert_eq!(plan.bundle_display_name.as_deref(), Some("original-skills"));
+    assert_eq!(plan.members.len(), 1);
+    assert_eq!(plan.members[0].skill_name.as_deref(), Some("alpha"));
+
+    let restarted = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        supported_platform(),
+    );
+    let UiOutcome::EditableLocalRelinkPlan {
+        plan: restored_plan,
+    } = restarted
+        .handle(UiIntent::GetStartupState)
+        .expect("重启后应恢复未确认的重新关联 Plan")
+    else {
+        panic!("重启后应继续返回 EditableLocalRelinkPlan");
+    };
+    assert_eq!(restored_plan, plan);
+    let UiOutcome::SourceDiscovery {
+        sources,
+        highlighted_source_id,
+        ..
+    } = restarted
+        .handle(UiIntent::ConfirmEditableLocalRelinkPlan { plan_id: plan.id })
+        .expect("确认后应只更新 Editable Local Source 路径")
+    else {
+        panic!("确认后应返回 SourceDiscovery");
+    };
+    let relinked = sources
+        .iter()
+        .find(|candidate| candidate.id == source.id)
+        .expect("应返回重新关联后的 Source");
+    assert_eq!(highlighted_source_id.as_deref(), Some(source.id.as_str()));
+    assert_eq!(
+        Path::new(&relinked.locator),
+        fs::canonicalize(&moved).expect("应取得新路径").as_path()
+    );
+
+    let state = connection
+        .query_row(
+            "SELECT source.locator, source.catalog_generation, source.catalog_marker,
+                    bundle.current_target, link.update_check_status,
+                    (SELECT COUNT(*) FROM sources WHERE kind = 'editable_local')
+             FROM sources AS source
+             JOIN source_bundle_links AS link ON link.source_id = source.id
+             JOIN bundles AS bundle ON bundle.id = link.bundle_id
+             WHERE source.id = ?1",
+            [&source.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .expect("应读取重新关联后的状态");
+    assert_eq!(Path::new(&state.0), fs::canonicalize(&moved).unwrap());
+    assert_eq!(state.1, before.0, "重新关联不能刷新 Source Catalog");
+    assert_eq!(state.2, before.1, "重新关联不能采用候选内容");
+    assert_eq!(state.3, before.2, "重新关联不能切换 current");
+    assert_eq!(state.4, "not_checked");
+    assert_eq!(state.5, 1, "同一 Source 不能因路径变化被重复创建");
+    assert_eq!(
+        fs::read_to_string(home.join(".codex/skills/alpha/payload.txt"))
+            .expect("既有 Mount 应继续指向受管内容"),
+        "author-original",
+        "重新关联不能把作者目录的新内容直接传播到 Host"
+    );
+
+    let UiOutcome::Inventory { bundle_updates, .. } = restarted
+        .handle(UiIntent::CheckEditableLocalBundle {
+            bundle_id: source.bundle_id.expect("已安装 Source 应关联 Bundle"),
+        })
+        .expect("重新关联后应能单独检查 Editable Local 更新")
+    else {
+        panic!("检查后应返回 Inventory");
+    };
+    assert!(
+        bundle_updates
+            .iter()
+            .any(|update| update.status == BundleUpdateStatus::Available)
+    );
+}
+
+#[test]
+fn editable_local_relink_rejects_a_similar_but_different_directory() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, _) = ready_application(sandbox.path());
+    let original = sandbox.path().join("author/original-skills");
+    let replacement = sandbox.path().join("author/copied-skills");
+    write_skill(&original.join("alpha"), "alpha", "same-content");
+    write_skill(&replacement.join("alpha"), "alpha", "same-content");
+
+    let UiOutcome::InstallPlan { plan } = application
+        .handle(UiIntent::CreateEditableLocalInstallPlan {
+            input_path: original.to_string_lossy().into_owned(),
+        })
+        .expect("应登记 Editable Local Source")
+    else {
+        panic!("应返回安装 Plan");
+    };
+    application
+        .handle(UiIntent::DiscardInstallPlan { plan_id: plan.id })
+        .expect("应放弃安装但保留 Source");
+    let UiOutcome::SourceDiscovery { sources, .. } = application
+        .handle(UiIntent::OpenSourceDiscovery)
+        .expect("应读取 Source")
+    else {
+        panic!("应返回 SourceDiscovery");
+    };
+    let source = sources
+        .into_iter()
+        .find(|source| source.kind == SourceKind::EditableLocal)
+        .expect("应找到 Editable Local Source");
+
+    let error = application
+        .handle(UiIntent::CreateEditableLocalRelinkPlan {
+            source_id: source.id,
+            candidate_path: replacement.to_string_lossy().into_owned(),
+        })
+        .expect_err("名称和内容相同但 inode 不同的目录不能被重新关联");
+    assert!(error.to_string().contains("已不是登记时的目录"));
 
     let connection =
         Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
     let state = connection
         .query_row(
-            "SELECT locator,
-                    (SELECT COUNT(*) FROM sources WHERE kind = 'editable_local'),
-                    (SELECT COUNT(*) FROM install_plans)
-             FROM sources
-             WHERE kind = 'editable_local'",
+            "SELECT source.locator,
+                    (SELECT COUNT(*) FROM editable_local_relink_plans)
+             FROM sources AS source
+             WHERE source.kind = 'editable_local'",
             [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
-        .expect("失败后应保留原 Source");
-    assert_eq!(Path::new(&state.0), original_locator.as_path());
-    assert_eq!((state.1, state.2), (1, 0));
+        .expect("拒绝后应保留原 Source");
+    assert_eq!(
+        Path::new(&state.0),
+        fs::canonicalize(&original).expect("应取得原路径").as_path()
+    );
+    assert_eq!(state.1, 0, "拒绝候选不能留下确认 Plan");
 }
 
 #[test]

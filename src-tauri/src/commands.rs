@@ -3,9 +3,10 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
-    BatchMountPlan, BatchMountRequest, InstallPlan, MergeContentChoice, MountPlan, MountScope,
-    SkillYardApplication, SourceAssociationPlan, SourceMemberMappingChoice, SupportedAppId,
-    TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome, application::ApplicationError,
+    BatchMountPlan, BatchMountRequest, EditableLocalRelinkPlan, InstallPlan, MergeContentChoice,
+    MountPlan, MountScope, SkillYardApplication, SourceAssociationPlan, SourceMemberMappingChoice,
+    SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome,
+    application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -148,6 +149,73 @@ pub fn confirm_source_ref_change(
     match dispatch(&application, UiIntent::ConfirmSourceRefChange { plan_id })? {
         outcome @ UiOutcome::SourceDiscovery { .. } => Ok(outcome),
         _ => Err(invalid_outcome("SkillYard 没有返回更新后的 Source 列表")),
+    }
+}
+
+/// Source ID 来自已加载目录，候选路径仍只能由原生目录选择器签发。
+#[tauri::command(async)]
+pub fn choose_editable_local_relink_plan(
+    app: AppHandle,
+    application: State<'_, SkillYardApplication>,
+    source_id: String,
+) -> Result<Option<EditableLocalRelinkPlan>, UiError> {
+    let Some(folder) = app
+        .dialog()
+        .file()
+        .set_title("重新指定 Editable Local Source 文件夹")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let path = folder.into_path().map_err(|error| UiError {
+        code: "dialogError",
+        message: format!("无法读取所选 Editable Local 文件夹：{error}"),
+    })?;
+    let candidate_path = path.to_str().ok_or_else(|| UiError {
+        code: "invalidPath",
+        message: "所选文件夹名称包含 SkillYard 1.0 无法保存的字符".to_owned(),
+    })?;
+    match dispatch(
+        &application,
+        UiIntent::CreateEditableLocalRelinkPlan {
+            source_id,
+            candidate_path: candidate_path.to_owned(),
+        },
+    )? {
+        UiOutcome::EditableLocalRelinkPlan { plan } => Ok(Some(plan)),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有生成 Editable Local 重新关联确认信息",
+        )),
+    }
+}
+
+#[tauri::command(async)]
+pub fn confirm_editable_local_relink_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::ConfirmEditableLocalRelinkPlan { plan_id },
+    )? {
+        outcome @ UiOutcome::SourceDiscovery { .. } => Ok(outcome),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有返回重新关联后的 Source 列表",
+        )),
+    }
+}
+
+#[tauri::command(async)]
+pub fn discard_editable_local_relink_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::DiscardEditableLocalRelinkPlan { plan_id },
+    )? {
+        outcome @ UiOutcome::SourceDiscovery { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回原 Source 列表")),
     }
 }
 

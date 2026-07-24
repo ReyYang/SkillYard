@@ -7,6 +7,7 @@ import type {
   BatchMountPlan,
   BundleUpdateBatchPlan,
   BundleUpdateBatchResult,
+  EditableLocalRelinkPlan,
   InstallPlan,
   InventoryObservation,
   MountPlan,
@@ -3285,6 +3286,108 @@ describe("GitHub Source 安装", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("Editable Local 重新关联只确认路径，不把候选内容描述成已更新", async () => {
+    const user = userEvent.setup();
+    const inventory = inventoryOutcome([createManagedEntry()]);
+    const editable = createSource({
+      kind: "editableLocal",
+      canonicalIdentity: "editable-local:1:2",
+      displayName: "original-skills",
+      locator: "/tmp/author/original-skills",
+      trackedRef: null,
+      bundleId: "bundle-1",
+      adoptedMarker: "old-marker",
+      members: [
+        createSourceMember({
+          relativePath: "alpha",
+          skillName: "alpha",
+          installedMemberId: "member-1",
+        }),
+      ],
+    });
+    const client = createClient(inventory);
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([editable]),
+    );
+    vi.mocked(client.chooseEditableLocalRelinkPlan).mockResolvedValue(
+      createEditableLocalRelinkPlan(),
+    );
+    vi.mocked(client.confirmEditableLocalRelinkPlan).mockResolvedValue(
+      sourceDiscoveryOutcome([
+        createSource({
+          ...editable,
+          displayName: "moved-skills",
+          locator: "/tmp/author/moved-skills",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(screen.getByRole("button", { name: "重新指定路径" }));
+
+    expect(client.chooseEditableLocalRelinkPlan).toHaveBeenCalledWith("source-1");
+    expect(
+      screen.getByRole("heading", { name: "确认重新指定 Source 路径" }),
+    ).toBeInTheDocument();
+    const preview = screen.getByLabelText("Source 路径变更预览");
+    expect(preview).toHaveTextContent("/tmp/author/original-skills");
+    expect(preview).toHaveTextContent("/tmp/author/moved-skills");
+    expect(screen.getByText(/本次操作不会直接采用这些变化/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "确认新路径" }));
+
+    expect(client.confirmEditableLocalRelinkPlan).toHaveBeenCalledWith(
+      "relink-plan-1",
+    );
+    expect(
+      await screen.findByText("/tmp/author/moved-skills"),
+    ).toBeInTheDocument();
+  });
+
+  it("重启后继续显示未确认的重新关联，并在明确取消后回到原清单", async () => {
+    const user = userEvent.setup();
+    const plan = createEditableLocalRelinkPlan();
+    const inventory = inventoryOutcome([createManagedEntry()]);
+    const client = createClient({
+      type: "editableLocalRelinkPlan",
+      plan,
+    });
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce({ type: "editableLocalRelinkPlan", plan })
+      .mockResolvedValueOnce(inventory);
+    vi.mocked(client.discardEditableLocalRelinkPlan).mockResolvedValue(
+      sourceDiscoveryOutcome([
+        createSource({
+          kind: "editableLocal",
+          canonicalIdentity: "editable-local:1:2",
+          locator: plan.currentPath,
+          trackedRef: null,
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "确认重新指定 Source 路径",
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(client.discardEditableLocalRelinkPlan).toHaveBeenCalledWith(
+      "relink-plan-1",
+    );
+    expect(
+      await screen.findByRole("heading", { name: "安装 Skill" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+  });
+
   it("添加同一 Source 的不同 Ref 时先确认，确认后再显示新 Ref", async () => {
     const user = userEvent.setup();
     const initialInventory = inventoryOutcome(
@@ -4807,6 +4910,33 @@ function createSourceRefChangePlan(
   };
 }
 
+function createEditableLocalRelinkPlan(
+  overrides: Partial<EditableLocalRelinkPlan> = {},
+): EditableLocalRelinkPlan {
+  return {
+    id: "relink-plan-1",
+    sourceId: "source-1",
+    sourceDisplayName: "original-skills",
+    currentPath: "/tmp/author/original-skills",
+    candidatePath: "/tmp/author/moved-skills",
+    candidateDisplayName: "moved-skills",
+    bundleDisplayName: "example",
+    members: [
+      {
+        relativePath: "alpha",
+        skillName: "alpha",
+        description: "alpha description",
+        selectable: true,
+        validationErrors: [],
+        warnings: [],
+      },
+    ],
+    createdAt: 1,
+    expiresAt: 2,
+    ...overrides,
+  };
+}
+
 function createClient(startup: UiOutcome): SkillYardClient {
   return {
     getStartupState: vi.fn().mockResolvedValue(startup),
@@ -4828,6 +4958,9 @@ function createClient(startup: UiOutcome): SkillYardClient {
     reloadGithubSource: vi.fn(),
     addGithubSource: vi.fn(),
     confirmSourceRefChange: vi.fn(),
+    chooseEditableLocalRelinkPlan: vi.fn(),
+    confirmEditableLocalRelinkPlan: vi.fn(),
+    discardEditableLocalRelinkPlan: vi.fn(),
     createSourceAssociationPlan: vi.fn(),
     confirmSourceAssociationPlan: vi.fn(),
     discardSourceAssociationPlan: vi.fn(),

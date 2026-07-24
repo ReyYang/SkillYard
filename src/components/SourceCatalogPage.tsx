@@ -26,9 +26,14 @@ interface SourceCatalogPageProps {
           | "searchingSkillsSh";
       }
     | {
-        type: "reloading" | "planningInstall" | "planningRemoval";
+        type:
+          | "reloading"
+          | "planningInstall"
+          | "planningRemoval"
+          | "choosingRelink";
         sourceId: string;
       }
+    | { type: "confirmingRelink" | "discardingRelink" }
     | null;
   error: string | null;
   onBack(): void;
@@ -40,6 +45,7 @@ interface SourceCatalogPageProps {
   onInstallUrl(url: string): void;
   onReload(sourceId: string): void;
   onInstall(sourceId: string): void;
+  onRelink(sourceId: string): void;
   onRemoveSource(sourceId: string): void;
 }
 
@@ -58,6 +64,7 @@ export function SourceCatalogPage({
   onInstallUrl,
   onReload,
   onInstall,
+  onRelink,
   onRemoveSource,
 }: SourceCatalogPageProps) {
   const [input, setInput] = useState("");
@@ -264,8 +271,13 @@ export function SourceCatalogPage({
               operation?.type === "planningRemoval" &&
               operation.sourceId === source.id
             }
+            isRelinking={
+              operation?.type === "choosingRelink" &&
+              operation.sourceId === source.id
+            }
             onReload={() => onReload(source.id)}
             onInstall={() => onInstall(source.id)}
+            onRelink={() => onRelink(source.id)}
             onRemove={() => onRemoveSource(source.id)}
           />
         ))}
@@ -329,8 +341,10 @@ function SourceCard({
   isReloading,
   isPlanning,
   isRemoving,
+  isRelinking,
   onReload,
   onInstall,
+  onRelink,
   onRemove,
 }: {
   source: SourceSummary;
@@ -340,14 +354,17 @@ function SourceCard({
   isReloading: boolean;
   isPlanning: boolean;
   isRemoving: boolean;
+  isRelinking: boolean;
   onReload(): void;
   onInstall(): void;
+  onRelink(): void;
   onRemove(): void;
 }) {
   const available = source.members.filter(
     (member) => member.selectable && !member.installedMemberId,
   );
   const isGithub = source.kind === "github";
+  const isEditableLocal = source.kind === "editableLocal";
   const canInstall =
     isGithub && source.catalogStatus === "fresh" && available.length > 0;
   const statusLabel =
@@ -399,6 +416,16 @@ function SourceCard({
                     : "安装 Bundle"}
               </button>
             </>
+          ) : null}
+          {isEditableLocal ? (
+            <button
+              className="secondary-action"
+              type="button"
+              disabled={isBusy}
+              onClick={onRelink}
+            >
+              {isRelinking ? "正在选择…" : "重新指定路径"}
+            </button>
           ) : null}
           <button
             className="danger-outline-action"

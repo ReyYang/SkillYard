@@ -404,6 +404,29 @@ export interface SourceRefChangePlan {
   expiresAt: number;
 }
 
+export interface EditableLocalRelinkMember {
+  relativePath: string;
+  skillName: string | null;
+  description: string | null;
+  selectable: boolean;
+  validationErrors: string[];
+  warnings: string[];
+}
+
+// 重新关联只改变 Source 路径，候选内容仍需后续单独检查和更新。
+export interface EditableLocalRelinkPlan {
+  id: string;
+  sourceId: string;
+  sourceDisplayName: string;
+  currentPath: string;
+  candidatePath: string;
+  candidateDisplayName: string;
+  bundleDisplayName: string | null;
+  members: EditableLocalRelinkMember[];
+  createdAt: number;
+  expiresAt: number;
+}
+
 export interface SkillsShSearchMember {
   skillId: string;
   name: string;
@@ -510,6 +533,10 @@ export type UiOutcome =
   | {
       type: "sourceRefChangePlan";
       plan: SourceRefChangePlan;
+    }
+  | {
+      type: "editableLocalRelinkPlan";
+      plan: EditableLocalRelinkPlan;
     }
   | {
       type: "sourceAssociationPlan";

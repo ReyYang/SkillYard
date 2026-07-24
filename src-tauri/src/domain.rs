@@ -25,6 +25,16 @@ pub enum UiIntent {
     ConfirmSourceRefChange {
         plan_id: String,
     },
+    CreateEditableLocalRelinkPlan {
+        source_id: String,
+        candidate_path: String,
+    },
+    ConfirmEditableLocalRelinkPlan {
+        plan_id: String,
+    },
+    DiscardEditableLocalRelinkPlan {
+        plan_id: String,
+    },
     CreateFolderInstallPlan {
         input_path: String,
     },
@@ -949,6 +959,34 @@ pub struct SourceRefChangePlan {
     pub expires_at: i64,
 }
 
+/// 重新关联页只展示候选目录中的 Skill，不把内容指纹包装成用户可见版本。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableLocalRelinkMember {
+    pub relative_path: String,
+    pub skill_name: Option<String>,
+    pub description: Option<String>,
+    pub selectable: bool,
+    pub validation_errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Editable Local Relink 只确认 Source metadata；受管内容和 Mount 不在计划影响范围内。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableLocalRelinkPlan {
+    pub id: String,
+    pub source_id: String,
+    pub source_display_name: String,
+    pub current_path: String,
+    pub candidate_path: String,
+    pub candidate_display_name: String,
+    pub bundle_display_name: Option<String>,
+    pub members: Vec<EditableLocalRelinkMember>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
 /// `skills.sh` 只返回发现线索；可支持的分组仍会转换成普通 GitHub Source。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1238,6 +1276,9 @@ pub enum UiOutcome {
     },
     SourceRefChangePlan {
         plan: SourceRefChangePlan,
+    },
+    EditableLocalRelinkPlan {
+        plan: EditableLocalRelinkPlan,
     },
     InstallPlan {
         plan: InstallPlan,

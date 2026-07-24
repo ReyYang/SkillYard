@@ -487,6 +487,30 @@ describe("Tauri IPC contract", () => {
     );
   });
 
+  it("Editable Local 重新关联只传 Source ID 或 opaque Plan ID", async () => {
+    mocks.invoke.mockResolvedValue(null);
+
+    await tauriSkillYardClient.chooseEditableLocalRelinkPlan("source-1");
+    await tauriSkillYardClient.confirmEditableLocalRelinkPlan("relink-plan-1");
+    await tauriSkillYardClient.discardEditableLocalRelinkPlan("relink-plan-2");
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      1,
+      "choose_editable_local_relink_plan",
+      { sourceId: "source-1" },
+    );
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      2,
+      "confirm_editable_local_relink_plan",
+      { planId: "relink-plan-1" },
+    );
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      3,
+      "discard_editable_local_relink_plan",
+      { planId: "relink-plan-2" },
+    );
+  });
+
   it("确认时只把 opaque Plan 与候选 ID 交回 Rust", async () => {
     mocks.invoke.mockResolvedValue({
       type: "inventory",

@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc, Mutex, TryLockError,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    path::Path,
+    sync::{
+        Arc, Mutex, TryLockError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use thiserror::Error;
@@ -12,8 +15,8 @@ use crate::{
         read_open_bundle_update_batch_outcome, recover_running_bundle_update_batch,
     },
     domain::{
-        BundleUpdateStatus, MergeContentChoice, PlatformInfo, SourceMemberMappingChoice,
-        TakeoverPlanRequest, UiIntent, UiOutcome,
+        BundleUpdateStatus, EditableLocalRelinkMember, MergeContentChoice, PlatformInfo,
+        SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, UiIntent, UiOutcome,
     },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
@@ -46,9 +49,10 @@ use crate::{
         SourceAssociationError, confirm_source_association_plan, create_source_association_plan,
         discard_source_association_plan, recover_pending_source_association_transactions,
     },
+    source_input::{SourceFilesystemIdentity, SourceInputError, inspect_editable_local_source},
     storage::{
-        NewGitHubSource, NewSourceCatalogMember, SaveGitHubSourceResult, Storage, StorageError,
-        StoredGithubSource,
+        NewEditableLocalRelinkPlan, NewGitHubSource, NewSourceCatalogMember,
+        SaveGitHubSourceResult, Storage, StorageError, StoredGithubSource,
     },
     takeover::{
         TakeoverError, confirm_takeover_plan, create_takeover_plan,
@@ -201,6 +205,18 @@ impl SkillYardApplication {
             UiIntent::ConfirmSourceRefChange { plan_id } => {
                 self.with_write_operation(|| self.confirm_source_ref_change(plan_id))
             }
+            UiIntent::CreateEditableLocalRelinkPlan {
+                source_id,
+                candidate_path,
+            } => self.with_write_operation(|| {
+                self.create_editable_local_relink_plan(source_id, candidate_path)
+            }),
+            UiIntent::ConfirmEditableLocalRelinkPlan { plan_id } => {
+                self.with_write_operation(|| self.confirm_editable_local_relink_plan(plan_id))
+            }
+            UiIntent::DiscardEditableLocalRelinkPlan { plan_id } => {
+                self.with_write_operation(|| self.discard_editable_local_relink_plan(plan_id))
+            }
             UiIntent::CreateFolderInstallPlan { input_path } => {
                 self.with_write_operation(|| self.create_folder_install_plan(input_path))
             }
@@ -341,6 +357,11 @@ impl SkillYardApplication {
             }
             if let Some(outcome) = read_open_bundle_update_batch_outcome(&self.paths, &storage)? {
                 return Ok(outcome);
+            }
+            if let Some(plan) =
+                storage.read_open_editable_local_relink_plan(unix_timestamp_millis())?
+            {
+                return Ok(UiOutcome::EditableLocalRelinkPlan { plan });
             }
             let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
             lifecycle_lock.recheck(&self.paths)?;
@@ -715,6 +736,144 @@ impl SkillYardApplication {
             sources,
             highlighted_source_id: Some(source_id),
             highlighted_member_path,
+        })
+    }
+
+    fn create_editable_local_relink_plan(
+        &self,
+        source_id: String,
+        candidate_path: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let source = storage.read_source_install_source(&source_id)?;
+        if source.kind != SourceKind::EditableLocal.as_str() {
+            return Err(ApplicationError::InvalidState(
+                "只有 Editable Local Source 可以重新指定目录",
+            ));
+        }
+        let identity = SourceFilesystemIdentity {
+            device: source
+                .filesystem_device
+                .ok_or(StorageError::InvalidSourceDefinition)?,
+            inode: source
+                .filesystem_inode
+                .ok_or(StorageError::InvalidSourceDefinition)?,
+        };
+        let inspected = inspect_editable_local_source(Path::new(&candidate_path), identity)
+            .map_err(LifecycleError::from)?;
+        if inspected.canonical_path.starts_with(self.paths.data_root()) {
+            return Err(ApplicationError::InvalidState(
+                "Editable Local Source 不能重新关联到 Central Store 内部",
+            ));
+        }
+        let canonical_path = inspected
+            .canonical_path
+            .to_str()
+            .ok_or(SourceInputError::InvalidEditableLocal)
+            .map_err(LifecycleError::from)?;
+        if canonical_path == source.locator {
+            return Err(ApplicationError::InvalidState(
+                "所选目录已经是当前 Editable Local Source 路径",
+            ));
+        }
+        let members = inspected
+            .candidates
+            .into_iter()
+            .map(|candidate| {
+                let selectable = candidate.selectable();
+                let relative_path = candidate
+                    .relative_path
+                    .to_str()
+                    .ok_or(SourceInputError::InvalidEditableLocal)
+                    .map_err(LifecycleError::from)?;
+                Ok(EditableLocalRelinkMember {
+                    relative_path: relative_path.to_owned(),
+                    skill_name: candidate.name,
+                    description: candidate.description,
+                    selectable,
+                    validation_errors: candidate.validation_errors,
+                    warnings: candidate.warnings,
+                })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let now = unix_timestamp_millis();
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let plan = storage.create_editable_local_relink_plan(NewEditableLocalRelinkPlan {
+            id: &plan_id,
+            source: &source,
+            candidate_path: canonical_path,
+            candidate_display_name: &inspected.display_name,
+            candidate_marker: &inspected.marker,
+            members: &members,
+            created_at: now,
+            expires_at: now.saturating_add(SOURCE_REF_PLAN_TTL_MILLIS),
+        })?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::EditableLocalRelinkPlan { plan })
+    }
+
+    fn confirm_editable_local_relink_plan(
+        &self,
+        plan_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let now = unix_timestamp_millis();
+        let plan = storage.read_editable_local_relink_plan(&plan_id, now)?;
+        let inspected = inspect_editable_local_source(
+            Path::new(&plan.public.candidate_path),
+            SourceFilesystemIdentity {
+                device: plan.expected_device,
+                inode: plan.expected_inode,
+            },
+        )
+        .map_err(LifecycleError::from)?;
+        if inspected.canonical_path.starts_with(self.paths.data_root()) {
+            return Err(ApplicationError::InvalidState(
+                "Editable Local Source 不能重新关联到 Central Store 内部",
+            ));
+        }
+        let candidate_path = inspected
+            .canonical_path
+            .to_str()
+            .ok_or(SourceInputError::InvalidEditableLocal)
+            .map_err(LifecycleError::from)?;
+        let source_id = storage.confirm_editable_local_relink_plan(
+            &plan,
+            candidate_path,
+            &inspected.display_name,
+            &inspected.marker,
+            now,
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        write_notice_from_storage(&self.paths, lifecycle_lock.root(), &storage)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::SourceDiscovery {
+            sources: storage.read_source_summaries()?,
+            highlighted_source_id: Some(source_id),
+            highlighted_member_path: None,
+        })
+    }
+
+    fn discard_editable_local_relink_plan(
+        &self,
+        plan_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let source_id = storage.discard_editable_local_relink_plan(&plan_id)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::SourceDiscovery {
+            sources: storage.read_source_summaries()?,
+            highlighted_source_id: Some(source_id),
+            highlighted_member_path: None,
         })
     }
 

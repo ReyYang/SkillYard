@@ -14,7 +14,10 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    content::{ContentValidationError, copy_skill_bundle_tree, validate_skill_bundle_folder},
+    content::{
+        ContentValidationError, DiscoveredBundleCandidate, copy_skill_bundle_tree,
+        validate_skill_bundle_folder,
+    },
     github_source::{MAX_RESPONSE_BYTES, SourceRequest, SourceTransport, SourceTransportError},
     source_archive::{ArchiveWrapperPolicy, SourceArchiveError, extract_zip_archive},
 };
@@ -36,6 +39,15 @@ pub(crate) enum PreparedSourceKind {
 pub(crate) struct SourceFilesystemIdentity {
     pub(crate) device: u64,
     pub(crate) inode: u64,
+}
+
+/// 重新关联只读识别候选目录；这里不会复制或采用其中的内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InspectedEditableLocalSource {
+    pub(crate) canonical_path: PathBuf,
+    pub(crate) display_name: String,
+    pub(crate) marker: String,
+    pub(crate) candidates: Vec<DiscoveredBundleCandidate>,
 }
 
 /// 已验证的 Plan 快照；未显式持久化时离开作用域会自动清理。
@@ -316,6 +328,30 @@ pub(crate) fn prepare_registered_editable_local_source(
     staging_root: &Path,
     plan_id: &str,
 ) -> Result<PreparedSourceSnapshot, SourceInputError> {
+    let inspected = inspect_editable_local_source(path, expected_identity)?;
+    if inspected.canonical_path != path {
+        return Err(SourceInputError::EditableLocalUnavailable);
+    }
+
+    let prepared = prepare_editable_local_source(&inspected.canonical_path, staging_root, plan_id)
+        .map_err(|error| {
+            if error == SourceInputError::InvalidEditableLocal {
+                SourceInputError::EditableLocalUnavailable
+            } else {
+                error
+            }
+        })?;
+    if prepared.filesystem_identity() != Some(expected_identity) {
+        return Err(SourceInputError::EditableLocalUnavailable);
+    }
+    Ok(prepared)
+}
+
+/// 候选路径必须仍是登记时的同一目录；名称或内容相似都不能替代 inode 证据。
+pub(crate) fn inspect_editable_local_source(
+    path: &Path,
+    expected_identity: SourceFilesystemIdentity,
+) -> Result<InspectedEditableLocalSource, SourceInputError> {
     let supplied =
         fs::symlink_metadata(path).map_err(|_| SourceInputError::EditableLocalUnavailable)?;
     if supplied.file_type().is_symlink()
@@ -329,24 +365,18 @@ pub(crate) fn prepare_registered_editable_local_source(
         fs::canonicalize(path).map_err(|_| SourceInputError::EditableLocalUnavailable)?;
     let canonical_metadata =
         fs::symlink_metadata(&canonical).map_err(|_| SourceInputError::EditableLocalUnavailable)?;
-    if canonical != path
-        || canonical_metadata.dev() != expected_identity.device
+    if canonical_metadata.dev() != expected_identity.device
         || canonical_metadata.ino() != expected_identity.inode
     {
         return Err(SourceInputError::EditableLocalUnavailable);
     }
-
-    let prepared = prepare_editable_local_source(path, staging_root, plan_id).map_err(|error| {
-        if error == SourceInputError::InvalidEditableLocal {
-            SourceInputError::EditableLocalUnavailable
-        } else {
-            error
-        }
-    })?;
-    if prepared.filesystem_identity() != Some(expected_identity) {
-        return Err(SourceInputError::EditableLocalUnavailable);
-    }
-    Ok(prepared)
+    let validated = validate_skill_bundle_folder(&canonical)?;
+    Ok(InspectedEditableLocalSource {
+        display_name: directory_display_name(&canonical)?,
+        canonical_path: canonical,
+        marker: validated.fingerprint,
+        candidates: validated.candidates,
+    })
 }
 
 fn expand_and_validate(archive_path: &Path, content_root: &Path) -> Result<(), SourceInputError> {
