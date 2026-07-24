@@ -649,7 +649,7 @@ Bundle Cascading Delete
 - 构建并启动仅面向 `arm64`、macOS 14 及以上的本地 `SkillYard.app`。
 - 验证重新本地构建并手动替换 `.app` 后，原 Central Store、SQLite、Journal、`current` 和 Mount 仍被识别。
 - 验证当前工作区没有重新引入旧 Python CLI、Local Server、HTML、旧 SQLite schema 或旧测试。
-- 按 PRD 的全部 168 条 User Story 建立实现或验收映射，并完成最终回归。
+- 按 PRD 的全部 167 条 User Story 建立实现或验收映射，并完成最终回归。
 - `[HUMAN]` 审阅关键危险确认、人工恢复页面和跨应用可见性提示是否容易理解。
 - `[HUMAN]` 使用一份真实 Bundle 完成最终日常流程体验，不以这一步替代任何自动化正确性断言。
 
@@ -689,7 +689,7 @@ Editable Local 重新关联
 - 生命周期事务期间允许使用缓存的已提交 Inventory 进行搜索、筛选和查看 Mount／Source 详情；不能发起安装、接管、挂载、更新、删除、Local Refresh、Update Check 或 Source Reload。
 - Finder 入口只调用固定的 `open_central_store` command；Rust 使用 Tauri Opener 打开 `ApplicationPaths::data_root()`，前端不能提供路径，也不获得通用文件系统或 shell 权限。
 - “重置应用”只清除当前前端导航、搜索筛选、临时错误和窗口内选择，并重新读取 Startup State。1.0 当前没有持久化偏好或窗口状态，因此不新增设置存储；SQLite、Journal、Source Catalog、Bundle、`current` 和 Mount 均不能被清理。
-- Stage 10 建立 168 条 User Story 到自动化、`[MAC-CONTRACT]` 或 `[HUMAN]` 证据的映射。已有公开 seam 测试继续作为证据，只为真实缺口补测试，不重复实现前九阶段。
+- Stage 10 建立 167 条 User Story 到自动化、`[MAC-CONTRACT]` 或 `[HUMAN]` 证据的映射。已有公开 seam 测试继续作为证据，只为真实缺口补测试，不重复实现前九阶段。
 
 ### 1.0 完成条件
 

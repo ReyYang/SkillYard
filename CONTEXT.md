@@ -103,12 +103,8 @@ A twice-confirmed destructive operation entered from a Bundle. It removes every 
 _Avoid_: delete Source, disable Source, remove Mount, member-level Skill deletion
 
 **Skill Identity**:
-The stable continuity of one Skill Member across upstream name or path changes. It is established only by a stable upstream identifier, explicit metadata, reviewed Adapter mapping, or an explicit user-confirmed association.
+The local identity of an already established Skill Member inside one Bundle. Version 1.0 does not infer rename or path-migration continuity from upstream name, path, description, or content changes.
 _Avoid_: Skill Name, Host Presentation Label, directory path, content similarity
-
-**Rename Candidate**:
-A suspected connection between an Upstream-removed Skill and a newly discovered Skill Member based only on weak evidence such as name, path, description, or content similarity. It does not change either member until the user confirms the association.
-_Avoid_: confirmed Skill Identity, automatic rename
 
 **Upstream-removed Skill**:
 An installed Skill Member that is absent from the latest successfully fetched catalog of its linked Source. SkillYard preserves that member inside Current Content together with its Member Selection and existing Mounts; it is not updated or silently deleted. The user may remove its Mounts, while its managed content remains until the Bundle is deleted.
