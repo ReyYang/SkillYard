@@ -106,7 +106,7 @@ export function SourceCatalogPage({
           <p className="eyebrow">SKILLYARD · SOURCE CATALOG</p>
           <h1>安装 Skill</h1>
           <p className="lead">
-            从 GitHub、归档、直接 URL 或个人编辑目录安装。内容进入
+            从 GitHub、归档、直接 URL、个人编辑目录或本机已有安装开始。内容进入
             SkillYard 后默认不会挂载到任何应用。
           </p>
         </div>
@@ -118,6 +118,14 @@ export function SourceCatalogPage({
             onClick={onBack}
           >
             返回清单
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isBusy}
+            onClick={onBack}
+          >
+            接管已有安装
           </button>
           <button
             className="secondary-action"

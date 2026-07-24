@@ -3238,8 +3238,11 @@ describe("GitHub Source 安装", () => {
       await screen.findByRole("heading", { name: "安装 Skill" }),
     ).toBeInTheDocument();
     expect(client.chooseFolderInstallPlan).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "接管已有安装" }),
+    ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    await user.click(screen.getByRole("button", { name: "接管已有安装" }));
 
     expect(screen.getByText("saved")).toBeInTheDocument();
     expect(client.getStartupState).toHaveBeenCalledTimes(1);
