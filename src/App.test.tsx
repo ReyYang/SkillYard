@@ -3044,6 +3044,8 @@ describe("接管已有 Skill", () => {
     const preview = screen.getByRole("region", { name: "接管影响预览" });
     expect(preview).toHaveTextContent("example-bundle");
     expect(preview).toHaveTextContent("没有更新来源");
+    expect(preview).toHaveTextContent("安装线索");
+    expect(preview).toHaveTextContent("未发现可靠的安装命令或来源记录");
     expect(preview).toHaveTextContent("/tmp/example");
     expect(preview).toHaveTextContent("/tmp/.codex/skills/example");
     expect(client.confirmTakeoverPlan).not.toHaveBeenCalled();

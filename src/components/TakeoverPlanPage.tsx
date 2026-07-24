@@ -39,6 +39,15 @@ export function TakeoverPlanPage({
           value={plan.sourceDisplayName ?? "没有更新来源"}
         />
         <PlanRow
+          label="安装线索"
+          // 1.0 只展示后端已确认的来源；没有证据时明确未知，不能猜测外部 CLI。
+          value={
+            plan.sourceDisplayName
+              ? `已确认来源：${plan.sourceDisplayName}`
+              : "未发现可靠的安装命令或来源记录"
+          }
+        />
+        <PlanRow
           label="采用内容"
           value={selectedOrigin?.originalPath ?? plan.selectedObservationId}
           code
