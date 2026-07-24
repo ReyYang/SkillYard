@@ -17,7 +17,9 @@ SkillYard is a local macOS application for discovering, installing, taking over,
 
 ## Current status
 
-The 1.0 PRD and ten-stage implementation plan are approved, and 20 vertical implementation issues have been published. No 1.0 Tauri application is available yet; implementation starts with [#19](https://github.com/ReyYang/SkillYard/issues/19).
+All ten implementation stages have entered final acceptance. The repository now contains the complete Tauri 2 desktop application, Rust lifecycle core, SQLite state, persistent Central Store, and Mount management for all three Supported Apps. Automated regression, the local macOS application build and launch, Codex path behavior, and application replacement contracts have been verified.
+
+All 167 User Stories are mapped to automated, Mac-contract, or human evidence. Version 1.0 is not marked complete yet: the product owner still needs to review the key copy and run one real Bundle through the final daily-use flow. See the [1.0 User Story acceptance evidence](./docs/acceptance/1.0-user-story-evidence.md) for the current execution status.
 
 The former Python CLI, local HTTP server, HTML view, and tests have been removed from the current workspace. Applicable behavioral constraints are preserved in the PRD and implementation plan, while Git retains the historical prototype.
 
@@ -28,4 +30,5 @@ The canonical design documents are currently maintained in Chinese:
 - [1.0 PRD](./docs/prd/0001-skillyard-1.0.md)
 - [1.0 implementation plan](./docs/plans/0001-skillyard-1.0-implementation.md)
 - [1.0 management authority](./docs/1.0-management-authority.md)
+- [1.0 User Story acceptance evidence](./docs/acceptance/1.0-user-story-evidence.md)
 - [Domain glossary](./CONTEXT.md)

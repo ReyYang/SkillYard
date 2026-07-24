@@ -23,7 +23,9 @@ SkillYard 是一个面向 macOS 的本地 AI Agent Skill 管理应用。它让�
 
 ## 当前状态
 
-SkillYard 1.0 PRD 与十阶段实施计划已确认，20 个纵向实施 Issue 已发布。当前仓库已经包含可构建的 Tauri 2 应用骨架、首次使用介绍、用户授权后的只读扫描、持久化 Skill 清单、管理状态筛选和用户主动的 Local Refresh；实现按 [#19–#38](https://github.com/ReyYang/SkillYard/issues/18) 继续推进。
+SkillYard 1.0 的十个实施阶段已经进入最终验收。当前仓库包含完整的 Tauri 2 桌面应用、Rust 生命周期核心、SQLite 持久化、Central Store 与三种 Supported App 的 Mount 管理；自动化回归和当前个人 Mac 的应用构建、真实启动、Codex 路径及应用替换契约均已验证。
+
+全部 167 条 User Story 已映射到自动化、本机契约或人工验收。代码还不能标记为最终完成：产品所有者仍需确认关键文案是否易懂，并用一份真实 Bundle 完成最终日常流程体验。执行状态见 [1.0 User Story 验收证据](./docs/acceptance/1.0-user-story-evidence.md)。
 
 旧 Python CLI、HTML View、Local Server 和对应测试已经从当前工作区删除。仍然适用于 1.0 的行为约束已经写入 PRD 和实施计划，历史实现只通过 Git 记录保留。
 

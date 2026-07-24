@@ -16,7 +16,9 @@
 
 ## 当前状态
 
-SkillYard 1.0 的产品契约、PRD 和十阶段实施计划均已确认，20 个纵向实施 Issue 已发布。旧 Python CLI、本地 HTTP Server、HTML View 和对应测试已经从当前工作区删除；适用于 1.0 的行为约束保留在 PRD 和实施计划中，历史实现由 Git 记录保存。
+SkillYard 1.0 的十个实施阶段已经进入最终验收。自动化回归和当前个人 Mac 的应用构建、真实启动、Codex 路径及应用替换契约均已验证；全部 167 条 User Story 已建立证据映射。当前只剩产品所有者完成关键文案审阅与一份真实 Bundle 的最终日常流程体验，具体状态记录在 [1.0 User Story 验收证据](acceptance/1.0-user-story-evidence.md)。
+
+旧 Python CLI、本地 HTTP Server、HTML View 和对应测试已经从当前工作区删除；适用于 1.0 的行为约束保留在 PRD 和实施计划中，历史实现由 Git 记录保存。
 
 ## 研究资料
 
