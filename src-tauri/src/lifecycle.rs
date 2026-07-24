@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::{CStr, CString, OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -25,19 +25,24 @@ use crate::{
         copy_single_skill_tree_into_open_directory, validate_single_skill_folder,
         validate_skill_bundle_folder,
     },
-    domain::{InstallCandidate, InstallInputKind, InstallMode, InstallPlan, SourceKind},
+    domain::{
+        BundleUpdateImpact, InstallCandidate, InstallInputKind, InstallMode, InstallPlan,
+        SourceKind,
+    },
     github_source::{
         GithubCatalogTarget, GithubSourceError, SourceTransport, prepare_github_install_snapshot,
+        resolve_github_source,
     },
     paths::ApplicationPaths,
     source_input::{
-        PreparedSourceKind, PreparedSourceSnapshot, SourceInputError, prepare_archive_source,
-        prepare_direct_url_source, prepare_editable_local_source,
+        PreparedSourceKind, PreparedSourceSnapshot, SourceFilesystemIdentity, SourceInputError,
+        prepare_archive_source, prepare_direct_url_source, prepare_editable_local_source,
+        prepare_registered_editable_local_source,
     },
     storage::{
-        NewInstallCandidate, NewInstallPlan, NewManualSource, NewSourceCatalogMember, Storage,
-        StorageError, StoredInstallCandidate, StoredInstallPlan, StoredLifecycleTransaction,
-        StoredSourceInstallCatalogMember, StoredSourceInstallSource,
+        BundleUpdateBatchChildOwner, NewInstallCandidate, NewInstallPlan, NewManualSource,
+        NewSourceCatalogMember, Storage, StorageError, StoredInstallCandidate, StoredInstallPlan,
+        StoredLifecycleTransaction, StoredSourceInstallCatalogMember, StoredSourceInstallSource,
     },
 };
 
@@ -50,6 +55,27 @@ const MAX_JOURNAL_BYTES: usize = 1024 * 1024;
 pub(crate) struct OwnedTreeCleanupManifest {
     root_device: u64,
     root_inode: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SealedTreeCleanupManifest {
+    root_device: u64,
+    root_inode: u64,
+    entries: Vec<SealedTreeCleanupEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SealedTreeCleanupEntry {
+    // 文件名使用原始字节的十六进制，避免 Journal 无法表示合法的非 UTF-8 文件名。
+    parent_index: Option<usize>,
+    name_hex: String,
+    device: u64,
+    inode: u64,
+    entry_type: u64,
+    size: i64,
+    modified_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +136,12 @@ pub enum LifecycleFailpoint {
     AfterSourceAssociationMountsApplied,
     AfterSourceAssociationStateCommitted,
     AfterSourceAssociationRollbackJournalRemovedBeforeForget,
+    AfterRemovalTransactionRecord,
+    AfterRemovalMountsJournalWrittenBeforePhase,
+    AfterRemovalMountsIsolated,
+    AfterRemovalBundleRenamedBeforeJournal,
+    AfterRemovalBundleIsolated,
+    AfterRemovalStateCommitted,
 }
 
 #[derive(Debug, Error)]
@@ -271,6 +303,7 @@ struct InstallPlanCandidateDraft {
     skill_name: Option<String>,
     skill_description: Option<String>,
     content_fingerprint: Option<String>,
+    previous_content_fingerprint: Option<String>,
     selectable: bool,
     preserve_existing: bool,
     validation_errors: Vec<String>,
@@ -298,6 +331,7 @@ pub fn ensure_central_store_layout(paths: &ApplicationPaths) -> Result<(), Lifec
         (OsStr::new("bundles"), paths.bundles_root()),
         (OsStr::new("staging"), paths.staging_root()),
         (OsStr::new("journals"), paths.journals_root()),
+        (OsStr::new("trash"), paths.trash_root()),
     ] {
         let child = match open_directory_at(&root, name) {
             Ok(child) => child,
@@ -401,6 +435,7 @@ pub fn create_folder_install_plan(
             skill_name: candidate.skill_name.as_deref(),
             skill_description: candidate.description.as_deref(),
             content_fingerprint: discovered.fingerprint.as_deref(),
+            previous_content_fingerprint: None,
             selectable: candidate.selectable,
             preserve_existing: false,
             validation_errors: &candidate.validation_errors,
@@ -421,6 +456,7 @@ pub fn create_folder_install_plan(
         source_tracked_ref: None,
         source_catalog_generation: None,
         source_marker: None,
+        expected_source_marker: None,
         expected_current_target: None,
         expected_adopted_marker: None,
         bundle_id: &bundle_id,
@@ -440,6 +476,7 @@ pub fn create_folder_install_plan(
         candidates,
         warnings,
         will_mount: false,
+        update_impact: None,
         created_at: now,
         expires_at,
     })
@@ -513,6 +550,528 @@ pub fn create_github_install_plan(
     )?;
     snapshot.persist();
     Ok(plan)
+}
+
+/// Bundle Update 按既有 Source kind 取得内容，但始终进入同一个 Update Plan。
+pub fn create_bundle_update_plan(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    transport: Option<&dyn SourceTransport>,
+    bundle_id: &str,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let source = storage.read_bundle_update_install_source(bundle_id)?;
+    match SourceKind::from_str(&source.kind)
+        .ok_or_else(|| StorageError::UnknownSourceKind(source.kind.clone()))?
+    {
+        SourceKind::Github => create_github_bundle_update_plan(
+            paths,
+            lifecycle_lock,
+            storage,
+            transport.ok_or(GithubSourceError::Network)?,
+            source,
+            now,
+        ),
+        SourceKind::EditableLocal => {
+            create_editable_local_bundle_update_plan(paths, lifecycle_lock, storage, source, now)
+        }
+        SourceKind::Archive | SourceKind::DirectUrl => {
+            Err(StorageError::SourceCatalogStateChanged.into())
+        }
+    }
+}
+
+fn create_github_bundle_update_plan(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    transport: &dyn SourceTransport,
+    source: StoredSourceInstallSource,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    source
+        .bundle
+        .as_ref()
+        .ok_or(StorageError::SourceBundleStateConflict)?;
+    let owner = source
+        .owner
+        .clone()
+        .filter(|value| !value.is_empty())
+        .ok_or(StorageError::SourceCatalogStateChanged)?;
+    let repository = source
+        .repository
+        .clone()
+        .filter(|value| !value.is_empty())
+        .ok_or(StorageError::SourceCatalogStateChanged)?;
+    let tracked_ref = source
+        .tracked_ref
+        .clone()
+        .filter(|value| !value.is_empty())
+        .ok_or(StorageError::SourceCatalogStateChanged)?;
+    if source.kind != SourceKind::Github.as_str() {
+        return Err(StorageError::SourceCatalogStateChanged.into());
+    }
+
+    let resolved = resolve_github_source(transport, &source.locator, Some(&tracked_ref))?;
+    if resolved.canonical_identity != source.canonical_identity
+        || resolved.owner != owner
+        || resolved.repository != repository
+        || resolved.tracked_ref != tracked_ref
+    {
+        return Err(StorageError::SourceCatalogStateChanged.into());
+    }
+
+    let plan_id = Uuid::new_v4().to_string();
+    let snapshot = prepare_github_install_snapshot(
+        transport,
+        GithubCatalogTarget {
+            owner: &owner,
+            repository: &repository,
+            canonical_identity: &source.canonical_identity,
+            display_name: &source.display_name,
+            tracked_ref: &tracked_ref,
+        },
+        &resolved.commit,
+        &paths.staging_root(),
+        &plan_id,
+    )?;
+    let validated = validate_skill_bundle_folder(snapshot.repository_root())?;
+    let repository_url = resolved.repository_url.to_string();
+    let plan = create_bundle_update_plan_from_prepared_snapshot(
+        paths,
+        lifecycle_lock,
+        storage,
+        source,
+        &plan_id,
+        validated,
+        snapshot.repository_root(),
+        &resolved.commit,
+        InstallInputKind::Github,
+        repository_url.clone(),
+        Some(repository_url),
+        now,
+    )?;
+    snapshot.persist();
+    Ok(plan)
+}
+
+/// 手动替换只把用户选择的归档当作本次快照，不重写原 Source 身份或 locator。
+pub fn create_bundle_replacement_plan(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    bundle_id: &str,
+    input: &Path,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let source = storage.read_bundle_update_install_source(bundle_id)?;
+    if !matches!(
+        SourceKind::from_str(&source.kind),
+        Some(SourceKind::Archive | SourceKind::DirectUrl)
+    ) {
+        return Err(StorageError::SourceCatalogStateChanged.into());
+    }
+    let plan_id = Uuid::new_v4().to_string();
+    let prepared = prepare_archive_source(input, &paths.staging_root(), &plan_id)?;
+    let validated = validate_skill_bundle_folder(prepared.content_root())?;
+    let marker = prepared.marker().to_owned();
+    let input_path = prepared.locator().to_owned();
+    let plan = create_bundle_update_plan_from_prepared_snapshot(
+        paths,
+        lifecycle_lock,
+        storage,
+        source,
+        &plan_id,
+        validated,
+        prepared.content_root(),
+        &marker,
+        InstallInputKind::Archive,
+        input_path,
+        None,
+        now,
+    )?;
+    prepared.persist();
+    Ok(plan)
+}
+
+/// Editable Local 只有刚检查出的 Catalog 仍对应同一目录快照时才能进入 Update Plan。
+fn create_editable_local_bundle_update_plan(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    source: StoredSourceInstallSource,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    let bundle = source
+        .bundle
+        .as_ref()
+        .ok_or(StorageError::SourceBundleStateConflict)?;
+    if bundle.update_check_status != crate::domain::BundleUpdateStatus::Available
+        || bundle.update_checked_marker.as_deref() != Some(source.catalog_marker.as_str())
+        || bundle.update_checked_at.is_none()
+    {
+        return Err(LifecycleError::PlanPreconditionChanged);
+    }
+    let identity = editable_local_identity(&source)?;
+    let plan_id = Uuid::new_v4().to_string();
+    let prepared = match prepare_registered_editable_local_source(
+        Path::new(&source.locator),
+        identity,
+        &paths.staging_root(),
+        &plan_id,
+    ) {
+        Ok(prepared) => prepared,
+        Err(SourceInputError::EditableLocalUnavailable) => {
+            storage.save_editable_local_check_unavailable(
+                &source,
+                now,
+                &SourceInputError::EditableLocalUnavailable.to_string(),
+            )?;
+            return Err(SourceInputError::EditableLocalUnavailable.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let validated = validate_skill_bundle_folder(prepared.content_root())?;
+    if prepared.marker() != source.catalog_marker
+        || !source_catalog_matches_snapshot(&source.catalog_members, &validated.candidates)?
+    {
+        return Err(LifecycleError::PlanPreconditionChanged);
+    }
+    let marker = prepared.marker().to_owned();
+    let input_path = source.locator.clone();
+    let plan = create_bundle_update_plan_from_prepared_snapshot(
+        paths,
+        lifecycle_lock,
+        storage,
+        source,
+        &plan_id,
+        validated,
+        prepared.content_root(),
+        &marker,
+        InstallInputKind::EditableLocal,
+        input_path,
+        None,
+        now,
+    )?;
+    prepared.persist();
+    Ok(plan)
+}
+
+/// 主动检查会刷新 Source Catalog；采用动作仍由随后创建的唯一 Update Plan 完成。
+pub fn check_editable_local_bundle(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    bundle_id: &str,
+    now: i64,
+) -> Result<(), LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let source = storage.read_bundle_update_install_source(bundle_id)?;
+    let identity = editable_local_identity(&source)?;
+    if storage.source_install_object_is_blocked(&source.id, Some(bundle_id))? {
+        return Err(StorageError::ManagedObjectBlocked.into());
+    }
+    let scan_id = Uuid::new_v4().to_string();
+    let prepared = match prepare_registered_editable_local_source(
+        Path::new(&source.locator),
+        identity,
+        &paths.staging_root(),
+        &scan_id,
+    ) {
+        Ok(prepared) => prepared,
+        Err(SourceInputError::EditableLocalUnavailable) => {
+            storage.save_editable_local_check_unavailable(
+                &source,
+                now,
+                &SourceInputError::EditableLocalUnavailable.to_string(),
+            )?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    lifecycle_lock.recheck(paths)?;
+    let validated = validate_skill_bundle_folder(prepared.content_root())?;
+    let member_ids = validated
+        .candidates
+        .iter()
+        .map(|_| Uuid::new_v4().to_string())
+        .collect::<Vec<_>>();
+    let relative_paths = validated
+        .candidates
+        .iter()
+        .map(|candidate| path_to_string(&candidate.relative_path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let members = validated
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| NewSourceCatalogMember {
+            id: &member_ids[index],
+            relative_path: &relative_paths[index],
+            skill_name: candidate.name.as_deref(),
+            description: candidate.description.as_deref(),
+            content_fingerprint: candidate.fingerprint.as_deref(),
+            selectable: candidate.selectable(),
+            validation_errors: &candidate.validation_errors,
+            warnings: &candidate.warnings,
+        })
+        .collect::<Vec<_>>();
+    storage.save_editable_local_check_success(&source, prepared.marker(), now, &members)?;
+    lifecycle_lock.recheck(paths)
+}
+
+fn editable_local_identity(
+    source: &StoredSourceInstallSource,
+) -> Result<SourceFilesystemIdentity, LifecycleError> {
+    let (Some(device), Some(inode)) = (source.filesystem_device, source.filesystem_inode) else {
+        return Err(StorageError::SourceCatalogStateChanged.into());
+    };
+    if source.kind != SourceKind::EditableLocal.as_str()
+        || source.canonical_identity != format!("editable-local:{device}:{inode}")
+    {
+        return Err(StorageError::SourceCatalogStateChanged.into());
+    }
+    Ok(SourceFilesystemIdentity { device, inode })
+}
+
+/// GitHub、手动替换和 Editable Local 共用成员匹配、保留与影响计算。
+#[allow(clippy::too_many_arguments)]
+fn create_bundle_update_plan_from_prepared_snapshot(
+    paths: &ApplicationPaths,
+    lifecycle_lock: &LifecycleLock,
+    storage: &mut Storage,
+    source: StoredSourceInstallSource,
+    plan_id: &str,
+    validated: ValidatedSkillBundle,
+    snapshot_input_root: &Path,
+    source_marker: &str,
+    input_kind: InstallInputKind,
+    input_path: String,
+    upstream_url: Option<String>,
+    now: i64,
+) -> Result<InstallPlan, LifecycleError> {
+    lifecycle_lock.recheck(paths)?;
+    let bundle = source
+        .bundle
+        .as_ref()
+        .ok_or(StorageError::SourceBundleStateConflict)?;
+    if storage.source_install_object_is_blocked(&source.id, Some(&bundle.id))? {
+        return Err(StorageError::ManagedObjectBlocked.into());
+    }
+    let superseded = storage.read_pending_source_install_plans_for_source(&source.id)?;
+    discard_pending_install_plans(paths, lifecycle_lock, storage, &superseded)?;
+    let input_metadata = fs::symlink_metadata(&validated.canonical_root)
+        .map_err(|error| io_error("读取 Bundle Update 快照", &validated.canonical_root, error))?;
+    let snapshot_relative_path = path_to_string(
+        snapshot_input_root
+            .strip_prefix(paths.data_root())
+            .map_err(|_| {
+                LifecycleError::UnsafeCentralStore(snapshot_input_root.display().to_string())
+            })?,
+    )?;
+
+    let mut existing_by_source_path = BTreeMap::new();
+    for member in &bundle.members {
+        if let Some(path) = member.source_relative_path.as_deref() {
+            existing_by_source_path.insert(path, member);
+        }
+    }
+    let current_paths = validated
+        .candidates
+        .iter()
+        .map(|candidate| path_to_string(&candidate.relative_path))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut matched_member_ids = BTreeSet::new();
+    let mut drafts = Vec::with_capacity(validated.candidates.len() + bundle.members.len());
+    for candidate in &validated.candidates {
+        let relative_path = path_to_string(&candidate.relative_path)?;
+        let matching = existing_by_source_path
+            .get(relative_path.as_str())
+            .copied()
+            .filter(|member| candidate.name.as_deref() == Some(member.skill_name.as_str()));
+        if let Some(member) = matching {
+            matched_member_ids.insert(member.id.clone());
+        }
+        drafts.push(InstallPlanCandidateDraft {
+            candidate_id: matching
+                .map(|member| member.id.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            source_relative_path: Some(relative_path),
+            skill_name: candidate.name.clone(),
+            skill_description: candidate.description.clone(),
+            content_fingerprint: candidate.fingerprint.clone(),
+            previous_content_fingerprint: matching.map(|member| member.content_fingerprint.clone()),
+            selectable: candidate.selectable(),
+            preserve_existing: false,
+            validation_errors: candidate.validation_errors.clone(),
+            warnings: candidate.warnings.clone(),
+            default_selected: candidate.selectable(),
+        });
+    }
+    for member in &bundle.members {
+        if matched_member_ids.contains(&member.id) {
+            continue;
+        }
+        let source_relative_path = member.source_relative_path.clone().filter(|path| {
+            // 同一路径出现不同名称时不猜重命名；旧成员转为不对应，新成员使用该路径。
+            !current_paths.contains(path)
+        });
+        drafts.push(InstallPlanCandidateDraft {
+            candidate_id: member.id.clone(),
+            source_relative_path,
+            skill_name: Some(member.skill_name.clone()),
+            skill_description: Some(member.description.clone()),
+            content_fingerprint: Some(member.content_fingerprint.clone()),
+            previous_content_fingerprint: Some(member.content_fingerprint.clone()),
+            selectable: false,
+            preserve_existing: true,
+            validation_errors: Vec::new(),
+            warnings: Vec::new(),
+            default_selected: true,
+        });
+    }
+
+    let mut name_counts = BTreeMap::new();
+    for candidate in &drafts {
+        if let Some(name) = candidate.skill_name.as_deref() {
+            *name_counts.entry(name.to_owned()).or_insert(0usize) += 1;
+        }
+    }
+    for candidate in &mut drafts {
+        if !candidate.preserve_existing
+            && candidate
+                .skill_name
+                .as_ref()
+                .is_some_and(|name| name_counts.get(name).copied().unwrap_or_default() > 1)
+        {
+            candidate.selectable = false;
+            candidate.default_selected = false;
+            candidate
+                .validation_errors
+                .push("更新后的 Bundle 包含重复 Skill Name".to_owned());
+        }
+    }
+    if let Some(candidate) = drafts
+        .iter()
+        .find(|candidate| !candidate.preserve_existing && !candidate.selectable)
+    {
+        let detail = candidate
+            .validation_errors
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Skill metadata 或内容无效".to_owned());
+        return Err(LifecycleError::SourceInput(format!(
+            "Bundle 更新内容无法生成计划：{detail}"
+        )));
+    }
+
+    let mut warnings = drafts
+        .iter()
+        .flat_map(|candidate| candidate.warnings.iter().cloned())
+        .collect::<Vec<_>>();
+    warnings.sort();
+    warnings.dedup();
+    let member_ids = bundle
+        .members
+        .iter()
+        .map(|member| member.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let existing_mounts = storage
+        .read_mount_summaries()?
+        .into_iter()
+        .filter(|mount| member_ids.contains(mount.member_id.as_str()))
+        .collect::<Vec<_>>();
+    let new_candidates = drafts
+        .iter()
+        .map(|candidate| NewInstallCandidate {
+            candidate_id: &candidate.candidate_id,
+            source_relative_path: candidate.source_relative_path.as_deref(),
+            skill_name: candidate.skill_name.as_deref(),
+            skill_description: candidate.skill_description.as_deref(),
+            content_fingerprint: candidate.content_fingerprint.as_deref(),
+            previous_content_fingerprint: candidate.previous_content_fingerprint.as_deref(),
+            selectable: candidate.selectable,
+            preserve_existing: candidate.preserve_existing,
+            validation_errors: &candidate.validation_errors,
+            warnings: &candidate.warnings,
+            default_selected: candidate.default_selected,
+        })
+        .collect::<Vec<_>>();
+    storage.save_install_plan(NewInstallPlan {
+        id: plan_id,
+        kind: "source_snapshot",
+        install_mode: "update",
+        input_path: None,
+        input_device: input_metadata.dev(),
+        input_inode: input_metadata.ino(),
+        input_fingerprint: &validated.fingerprint,
+        snapshot_relative_path: Some(&snapshot_relative_path),
+        source_id: Some(&source.id),
+        source_tracked_ref: source.tracked_ref.as_deref(),
+        source_catalog_generation: Some(source.catalog_generation),
+        source_marker: Some(source_marker),
+        expected_source_marker: Some(&source.catalog_marker),
+        expected_current_target: Some(&bundle.current_target),
+        expected_adopted_marker: bundle.adopted_marker.as_deref(),
+        bundle_id: &bundle.id,
+        bundle_display_name: &bundle.display_name,
+        warnings: &warnings,
+        candidates: &new_candidates,
+        created_at: now,
+        expires_at: now.saturating_add(PLAN_TTL_MILLIS),
+    })?;
+
+    let new_candidate_ids = drafts
+        .iter()
+        .filter(|candidate| {
+            !candidate.preserve_existing && candidate.previous_content_fingerprint.is_none()
+        })
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect::<Vec<_>>();
+    let candidates = drafts
+        .into_iter()
+        .filter(|candidate| !candidate.preserve_existing)
+        .map(|candidate| InstallCandidate {
+            target_directory: candidate.skill_name.as_ref().map(|name| {
+                paths
+                    .bundle_directory(&bundle.id)
+                    .join("current/members")
+                    .join(name)
+                    .display()
+                    .to_string()
+            }),
+            candidate_id: candidate.candidate_id,
+            source_relative_path: candidate
+                .source_relative_path
+                .expect("当前 Source 候选必须包含来源路径"),
+            skill_name: candidate.skill_name,
+            description: candidate.skill_description,
+            selectable: candidate.selectable,
+            validation_errors: candidate.validation_errors,
+            warnings: candidate.warnings,
+            default_selected: candidate.default_selected,
+        })
+        .collect();
+    Ok(InstallPlan {
+        id: plan_id.to_owned(),
+        input_kind,
+        mode: InstallMode::Update,
+        input_path,
+        bundle_display_name: bundle.display_name.clone(),
+        candidates,
+        warnings,
+        will_mount: false,
+        update_impact: Some(BundleUpdateImpact {
+            new_candidate_ids,
+            existing_mounts,
+            upstream_url,
+        }),
+        created_at: now,
+        expires_at: now.saturating_add(PLAN_TTL_MILLIS),
+    })
 }
 
 /// 本地归档只负责生成受控快照；Source、Plan 与确认都复用唯一生命周期。
@@ -699,6 +1258,7 @@ fn create_source_install_plan_from_prepared_snapshot(
                 skill_name: Some(member.skill_name.clone()),
                 skill_description: Some(member.description.clone()),
                 content_fingerprint: Some(member.content_fingerprint.clone()),
+                previous_content_fingerprint: Some(member.content_fingerprint.clone()),
                 selectable: false,
                 preserve_existing: true,
                 validation_errors: Vec::new(),
@@ -718,6 +1278,7 @@ fn create_source_install_plan_from_prepared_snapshot(
             skill_name: member.skill_name.clone(),
             skill_description: member.description.clone(),
             content_fingerprint: member.content_fingerprint.clone(),
+            previous_content_fingerprint: None,
             selectable: member.selectable,
             preserve_existing: false,
             validation_errors: member.validation_errors.clone(),
@@ -752,6 +1313,7 @@ fn create_source_install_plan_from_prepared_snapshot(
             skill_name: candidate.skill_name.as_deref(),
             skill_description: candidate.skill_description.as_deref(),
             content_fingerprint: candidate.content_fingerprint.as_deref(),
+            previous_content_fingerprint: candidate.previous_content_fingerprint.as_deref(),
             selectable: candidate.selectable,
             preserve_existing: candidate.preserve_existing,
             validation_errors: &candidate.validation_errors,
@@ -767,6 +1329,7 @@ fn create_source_install_plan_from_prepared_snapshot(
     let install_mode = match mode {
         InstallMode::Create => "create",
         InstallMode::Supplement => "supplement",
+        InstallMode::Update => unreachable!("普通 Source 安装不会生成 Update mode"),
     };
     storage.save_install_plan(NewInstallPlan {
         id: plan_id,
@@ -781,6 +1344,7 @@ fn create_source_install_plan_from_prepared_snapshot(
         source_tracked_ref: source.tracked_ref.as_deref(),
         source_catalog_generation: Some(source.catalog_generation),
         source_marker: Some(&source.catalog_marker),
+        expected_source_marker: None,
         expected_current_target: source
             .bundle
             .as_ref()
@@ -830,6 +1394,7 @@ fn create_source_install_plan_from_prepared_snapshot(
         candidates,
         warnings,
         will_mount: false,
+        update_impact: None,
         created_at: now,
         expires_at: now.saturating_add(PLAN_TTL_MILLIS),
     })
@@ -905,6 +1470,46 @@ pub fn confirm_install(
     now: i64,
     failpoint: LifecycleFailpoint,
 ) -> Result<(), LifecycleError> {
+    confirm_install_with_owner(
+        paths,
+        storage,
+        plan_id,
+        selected_candidate_ids,
+        now,
+        failpoint,
+        None,
+    )
+}
+
+pub(crate) fn confirm_bundle_update_batch_child_install(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    owner: BundleUpdateBatchChildOwner<'_>,
+    plan_id: &str,
+    selected_candidate_ids: &[String],
+    now: i64,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), LifecycleError> {
+    confirm_install_with_owner(
+        paths,
+        storage,
+        plan_id,
+        selected_candidate_ids,
+        now,
+        failpoint,
+        Some(owner),
+    )
+}
+
+fn confirm_install_with_owner(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    plan_id: &str,
+    selected_candidate_ids: &[String],
+    now: i64,
+    failpoint: LifecycleFailpoint,
+    owner: Option<BundleUpdateBatchChildOwner<'_>>,
+) -> Result<(), LifecycleError> {
     let lifecycle_lock = acquire_lifecycle_lock(paths)?;
     lifecycle_lock.recheck(paths)?;
     let preview = storage.read_install_plan(plan_id)?;
@@ -913,13 +1518,13 @@ pub fn confirm_install(
         return Err(StorageError::InstallPlanConsumed.into());
     }
     if preview.expires_at <= now {
-        discard_pending_install_plan(paths, &lifecycle_lock, storage, &preview)?;
+        discard_pending_install_plan(paths, &lifecycle_lock, storage, &preview, owner)?;
         return Err(StorageError::InstallPlanExpired.into());
     }
     let precondition = verify_plan_snapshot(paths, &preview)
         .and_then(|()| verify_install_target_precondition(paths, lifecycle_lock.root(), &preview));
     if let Err(error) = precondition {
-        discard_pending_install_plan(paths, &lifecycle_lock, storage, &preview)?;
+        discard_pending_install_plan(paths, &lifecycle_lock, storage, &preview, owner)?;
         return Err(error);
     }
     preflight_lifecycle_directories(paths)?;
@@ -930,16 +1535,27 @@ pub fn confirm_install(
     let expected_plan = prepare_selected_plan(&preview, selected_candidate_ids)?;
     let mut journal = build_journal(&transaction_id, &expected_plan)?;
     ensure_journal_fits(&journal)?;
-    let plan = match storage.begin_install_transaction_with_selection(
-        plan_id,
-        selected_candidate_ids,
-        &transaction_id,
-        &journal_relative,
-        now,
-    ) {
+    let begin = match owner {
+        Some(owner) => storage.begin_bundle_update_batch_child_transaction_with_selection(
+            plan_id,
+            selected_candidate_ids,
+            &transaction_id,
+            &journal_relative,
+            now,
+            owner,
+        ),
+        None => storage.begin_install_transaction_with_selection(
+            plan_id,
+            selected_candidate_ids,
+            &transaction_id,
+            &journal_relative,
+            now,
+        ),
+    };
+    let plan = match begin {
         Ok(plan) => plan,
         Err(error) if install_plan_error_invalidates_snapshot(&error) => {
-            discard_pending_install_plan(paths, &lifecycle_lock, storage, &preview)?;
+            discard_pending_install_plan(paths, &lifecycle_lock, storage, &preview, owner)?;
             return Err(error.into());
         }
         Err(error) => return Err(error.into()),
@@ -1003,6 +1619,24 @@ pub fn discard_install_plan(
     storage: &mut Storage,
     plan_id: &str,
 ) -> Result<(), LifecycleError> {
+    discard_install_plan_with_owner(paths, storage, plan_id, None)
+}
+
+pub(crate) fn discard_bundle_update_batch_child_plan(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    owner: BundleUpdateBatchChildOwner<'_>,
+    plan_id: &str,
+) -> Result<(), LifecycleError> {
+    discard_install_plan_with_owner(paths, storage, plan_id, Some(owner))
+}
+
+fn discard_install_plan_with_owner(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    plan_id: &str,
+    owner: Option<BundleUpdateBatchChildOwner<'_>>,
+) -> Result<(), LifecycleError> {
     let lifecycle_lock = acquire_lifecycle_lock(paths)?;
     lifecycle_lock.recheck(paths)?;
     let plan = match storage.read_install_plan(plan_id) {
@@ -1022,7 +1656,7 @@ pub fn discard_install_plan(
     if plan.status != "pending" {
         return Err(StorageError::InstallPlanConsumed.into());
     }
-    discard_pending_install_plan(paths, &lifecycle_lock, storage, &plan)
+    discard_pending_install_plan(paths, &lifecycle_lock, storage, &plan, owner)
 }
 
 fn install_plan_error_invalidates_snapshot(error: &StorageError) -> bool {
@@ -1039,13 +1673,20 @@ fn discard_pending_install_plan(
     lifecycle_lock: &LifecycleLock,
     storage: &mut Storage,
     plan: &StoredInstallPlan,
+    owner: Option<BundleUpdateBatchChildOwner<'_>>,
 ) -> Result<(), LifecycleError> {
+    storage.ensure_install_plan_discard_owner(&plan.id, owner)?;
     cleanup_plan_snapshot(paths, lifecycle_lock.root(), plan)?;
-    storage.discard_pending_install_plan(&plan.id)?;
+    match owner {
+        Some(owner) => {
+            storage.discard_pending_bundle_update_batch_child_plan(&plan.id, owner)?;
+        }
+        None => storage.discard_pending_install_plan(&plan.id)?,
+    }
     lifecycle_lock.recheck(paths)
 }
 
-fn discard_pending_install_plans(
+pub(crate) fn discard_pending_install_plans(
     paths: &ApplicationPaths,
     lifecycle_lock: &LifecycleLock,
     storage: &mut Storage,
@@ -1053,7 +1694,7 @@ fn discard_pending_install_plans(
 ) -> Result<(), LifecycleError> {
     for plan in plans {
         validate_stored_plan_identifiers(plan)?;
-        discard_pending_install_plan(paths, lifecycle_lock, storage, plan)?;
+        discard_pending_install_plan(paths, lifecycle_lock, storage, plan, None)?;
     }
     Ok(())
 }
@@ -1440,9 +2081,11 @@ fn verify_plan_snapshot(
     )?;
     let candidates_match = match plan.kind.as_str() {
         "folder_snapshot" => stored_candidates_match(&plan.candidates, &validated.candidates)?,
-        "source_snapshot" => {
-            stored_source_plan_candidates_match(&plan.candidates, &validated.candidates)?
-        }
+        "source_snapshot" => stored_source_plan_candidates_match(
+            &plan.candidates,
+            &validated.candidates,
+            plan.install_mode == "update",
+        )?,
         _ => false,
     };
     let unchanged = canonical == expected_input
@@ -1483,7 +2126,7 @@ fn verify_install_target_precondition(
 ) -> Result<(), LifecycleError> {
     match plan.install_mode.as_str() {
         "create" => ensure_absent(&paths.bundle_directory(&plan.bundle_id)),
-        "supplement" => validate_previous_bundle_content(paths, managed_root, plan),
+        "supplement" | "update" => validate_previous_bundle_content(paths, managed_root, plan),
         _ => Err(LifecycleError::PlanPreconditionChanged),
     }
 }
@@ -1513,15 +2156,15 @@ fn validate_previous_bundle_content(
         return Err(LifecycleError::PlanPreconditionChanged);
     }
 
-    let preserved = plan
+    let previous = plan
         .candidates
         .iter()
-        .filter(|candidate| candidate.preserve_existing)
+        .filter(|candidate| candidate.previous_content_fingerprint.is_some())
         .collect::<Vec<_>>();
-    if preserved.is_empty() {
+    if previous.is_empty() {
         return Err(LifecycleError::PlanPreconditionChanged);
     }
-    let member_names = preserved
+    let member_names = previous
         .iter()
         .map(|candidate| {
             candidate
@@ -1546,11 +2189,12 @@ fn validate_previous_bundle_content(
     if read_entry_names_from_handle(&guard.directories[4].0)? != expected_names {
         return Err(LifecycleError::PlanPreconditionChanged);
     }
-    for (candidate, member_path) in preserved.into_iter().zip(member_paths) {
+    for (candidate, member_path) in previous.into_iter().zip(member_paths) {
         let validated = validate_single_skill_folder(&member_path)?;
         guard.recheck(paths)?;
         if candidate.skill_name.as_deref() != Some(validated.name.as_str())
-            || candidate.content_fingerprint.as_deref() != Some(validated.fingerprint.as_str())
+            || candidate.previous_content_fingerprint.as_deref()
+                != Some(validated.fingerprint.as_str())
         {
             return Err(LifecycleError::PlanPreconditionChanged);
         }
@@ -1568,6 +2212,23 @@ fn prepare_selected_plan(
         .collect::<BTreeSet<_>>();
     if selected.is_empty() || selected.len() != selected_candidate_ids.len() {
         return Err(StorageError::InvalidInstallSelection.into());
+    }
+    if preview.install_mode == "update" {
+        let required = preview
+            .candidates
+            .iter()
+            .filter(|candidate| !candidate.preserve_existing)
+            .map(|candidate| candidate.candidate_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if selected != required
+            || preview
+                .candidates
+                .iter()
+                .filter(|candidate| !candidate.preserve_existing)
+                .any(|candidate| !candidate.selectable)
+        {
+            return Err(StorageError::InvalidInstallSelection.into());
+        }
     }
     if selected.iter().any(|candidate_id| {
         !preview
@@ -1623,6 +2284,12 @@ fn validate_stored_plan_identifiers(plan: &StoredInstallPlan) -> Result<(), Life
                 && plan.snapshot_relative_path.is_some()
                 && plan.source_id.is_some()
                 && plan.expected_current_target.is_some() => {}
+        ("source_snapshot", "update")
+            if plan.input_path.is_none()
+                && plan.snapshot_relative_path.is_some()
+                && plan.source_id.is_some()
+                && plan.expected_source_marker.is_some()
+                && plan.expected_current_target.is_some() => {}
         _ => {
             return Err(LifecycleError::RecoveryBlocked(
                 "SQLite 中的安装 Plan 类型组合无效".to_owned(),
@@ -1668,7 +2335,17 @@ fn stored_candidates_match(
 fn stored_source_plan_candidates_match(
     stored: &[StoredInstallCandidate],
     discovered: &[crate::content::DiscoveredBundleCandidate],
+    require_complete_source: bool,
 ) -> Result<bool, LifecycleError> {
+    if require_complete_source
+        && stored
+            .iter()
+            .filter(|candidate| !candidate.preserve_existing)
+            .count()
+            != discovered.len()
+    {
+        return Ok(false);
+    }
     for stored in stored
         .iter()
         .filter(|candidate| !candidate.preserve_existing)
@@ -1946,7 +2623,7 @@ fn recover_without_journal(
             "Journal 写入前出现了未知业务内容".to_owned(),
         ));
     }
-    if plan.install_mode == "supplement" {
+    if matches!(plan.install_mode.as_str(), "supplement" | "update") {
         validate_previous_bundle_content(paths, lifecycle_lock.root(), plan)?;
     }
     cleanup_plan_snapshot(paths, lifecycle_lock.root(), plan)?;
@@ -2254,7 +2931,8 @@ fn cleanup_before_activation(
     stage_unactivated_content_for_cleanup(paths, managed_root, journal)?;
     cleanup_staging_before_activation(paths, managed_root, journal)?;
     cleanup_plan_snapshot(paths, managed_root, plan)?;
-    if plan.install_mode == "supplement" {
+    // 只有 Create 可能留下由本事务新建的空 Bundle；Supplement 与 Update 都复用既有 Bundle。
+    if plan.install_mode != "create" {
         return Ok(());
     }
     let bundles = open_managed_directory_from_root(paths, managed_root, &paths.bundles_root())?;
@@ -2381,12 +3059,12 @@ fn cleanup_previous_content(
             "补装的新旧 current 目标相同".to_owned(),
         ));
     }
-    let preserved = plan
+    let previous = plan
         .candidates
         .iter()
-        .filter(|candidate| candidate.preserve_existing)
+        .filter(|candidate| candidate.previous_content_fingerprint.is_some())
         .collect::<Vec<_>>();
-    let member_names = preserved
+    let member_names = previous
         .iter()
         .map(|candidate| {
             candidate
@@ -2452,11 +3130,12 @@ fn cleanup_previous_content(
             "待清理旧内容的成员边界不一致".to_owned(),
         ));
     }
-    for (candidate, member_path) in preserved.into_iter().zip(member_paths) {
+    for (candidate, member_path) in previous.into_iter().zip(member_paths) {
         let validated = validate_single_skill_folder(&member_path)?;
         guard.recheck(paths)?;
         if candidate.skill_name.as_deref() != Some(validated.name.as_str())
-            || candidate.content_fingerprint.as_deref() != Some(validated.fingerprint.as_str())
+            || candidate.previous_content_fingerprint.as_deref()
+                != Some(validated.fingerprint.as_str())
         {
             return Err(LifecycleError::RecoveryBlocked(
                 "待清理旧内容已被外部修改".to_owned(),
@@ -3202,7 +3881,7 @@ pub(crate) fn capture_owned_tree_cleanup_manifest(
     })
 }
 
-/// 清理中断后继续删除同一事务根；1.0 不追踪隐藏清理目录内每个剩余文件的变化。
+/// 清理中断后继续删除同一事务根；调用方只在事务自有隐藏目录中使用这一轻量清单。
 pub(crate) fn remove_owned_tree_at_with_manifest_and_hook(
     parent: &File,
     name: &OsStr,
@@ -3276,6 +3955,370 @@ pub(crate) fn validate_owned_tree_cleanup_manifest(
         ));
     }
     Ok(())
+}
+
+/// Removal 在 destructive rename 前封存完整树，避免恢复时删除后来出现的未知内容。
+pub(crate) fn capture_sealed_tree_cleanup_manifest(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<SealedTreeCleanupManifest, LifecycleError> {
+    let root = open_directory_at(parent, name)
+        .map_err(|source| io_error("安全打开待封存清理目录", path, source))?;
+    let root_metadata = root
+        .metadata()
+        .map_err(|source| io_error("检查待封存清理目录", path, source))?;
+    if !root_metadata.is_dir() {
+        return Err(LifecycleError::RecoveryBlocked(format!(
+            "待清理根目录身份异常：{}",
+            path.display()
+        )));
+    }
+    Ok(SealedTreeCleanupManifest {
+        root_device: root_metadata.dev(),
+        root_inode: root_metadata.ino(),
+        entries: capture_sealed_tree_entries(&root, path)?,
+    })
+}
+
+/// 只删除完整清单中的条目；已删除条目可重放，新增或替换内容会阻塞并保留。
+pub(crate) fn remove_sealed_tree_at_with_manifest(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    manifest: &SealedTreeCleanupManifest,
+) -> Result<(), LifecycleError> {
+    validate_sealed_tree_cleanup_manifest(manifest)?;
+    let root = match open_directory_at(parent, name) {
+        Ok(root) => root,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return parent
+                .sync_all()
+                .map_err(|source| io_error("同步已清理事务目录父级", path, source));
+        }
+        Err(source) => return Err(io_error("安全打开事务清理目标", path, source)),
+    };
+    let root_metadata = root
+        .metadata()
+        .map_err(|source| io_error("检查事务清理目标", path, source))?;
+    if root_metadata.dev() != manifest.root_device
+        || root_metadata.ino() != manifest.root_inode
+        || !root_metadata.is_dir()
+    {
+        return Err(LifecycleError::RecoveryBlocked(format!(
+            "事务清理根目录已被替换：{}",
+            path.display()
+        )));
+    }
+    let current_indices = validate_sealed_tree_entries(&root, path, &manifest.entries)?;
+    remove_sealed_manifest_entries(&root, path, &manifest.entries, current_indices)?;
+    ensure_visible_directory_identity(
+        parent,
+        name,
+        path,
+        manifest.root_device,
+        manifest.root_inode,
+    )?;
+    drop(root);
+    unlink_at(parent, name, true).map_err(|source| io_error("清理事务目录", path, source))?;
+    parent
+        .sync_all()
+        .map_err(|source| io_error("同步事务目录父级", path, source))
+}
+
+fn validate_sealed_tree_cleanup_manifest(
+    manifest: &SealedTreeCleanupManifest,
+) -> Result<(), LifecycleError> {
+    if manifest.root_device == 0
+        || manifest.root_inode == 0
+        || !valid_sealed_tree_entries(&manifest.entries)
+    {
+        return Err(LifecycleError::RecoveryBlocked(
+            "待清理事务目录清单无效".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn capture_sealed_tree_entries(
+    directory: &File,
+    path: &Path,
+) -> Result<Vec<SealedTreeCleanupEntry>, LifecycleError> {
+    let root = directory
+        .try_clone()
+        .map_err(|source| io_error("保留待封存事务根目录", path, source))?;
+    let mut entries = Vec::new();
+    let mut pending = vec![(root, path.to_path_buf(), None)];
+    while let Some((current, current_path, parent_index)) = pending.pop() {
+        for name in read_entry_names_os_from_handle(&current)? {
+            let child_path = current_path.join(&name);
+            let metadata = entry_metadata_at(&current, &name)
+                .map_err(|source| io_error("检查待封存事务条目", &child_path, source))?
+                .ok_or_else(|| cleanup_entry_disappeared(&child_path))?;
+            let entry_type = (metadata.st_mode & libc::S_IFMT) as u64;
+            let entry_index = entries.len();
+            entries.push(SealedTreeCleanupEntry {
+                parent_index,
+                name_hex: encode_manifest_name(&name),
+                device: metadata.st_dev as u64,
+                inode: metadata.st_ino,
+                entry_type,
+                size: metadata.st_size,
+                modified_at: metadata.st_mtime,
+            });
+            if entry_type == libc::S_IFDIR as u64 {
+                let child = open_directory_at(&current, &name)
+                    .map_err(|source| io_error("安全打开待封存事务子目录", &child_path, source))?;
+                ensure_open_entry_identity(&child, &metadata, &child_path)?;
+                pending.push((child, child_path, Some(entry_index)));
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn validate_sealed_tree_entries(
+    directory: &File,
+    path: &Path,
+    expected: &[SealedTreeCleanupEntry],
+) -> Result<Vec<usize>, LifecycleError> {
+    let expected_by_name = expected
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let name = decode_manifest_name_bytes(&entry.name_hex).ok_or_else(|| {
+                LifecycleError::RecoveryBlocked("待清理事务目录清单无效".to_owned())
+            })?;
+            Ok(((entry.parent_index, name), (index, entry)))
+        })
+        .collect::<Result<BTreeMap<_, _>, LifecycleError>>()?;
+    let root = directory
+        .try_clone()
+        .map_err(|source| io_error("保留待清理事务根目录", path, source))?;
+    let mut current_indices = Vec::new();
+    let mut pending = vec![(root, path.to_path_buf(), None)];
+    while let Some((current, current_path, parent_index)) = pending.pop() {
+        for name in read_entry_names_os_from_handle(&current)? {
+            let child_path = current_path.join(&name);
+            let (entry_index, entry) = expected_by_name
+                .get(&(parent_index, name.as_bytes().to_vec()))
+                .ok_or_else(|| cleanup_entry_changed(&child_path))?;
+            let metadata = entry_metadata_at(&current, &name)
+                .map_err(|source| io_error("检查待清理事务条目", &child_path, source))?
+                .ok_or_else(|| cleanup_entry_disappeared(&child_path))?;
+            ensure_manifest_entry_identity(entry, &metadata, &child_path)?;
+            current_indices.push(*entry_index);
+            if entry.entry_type == libc::S_IFDIR as u64 {
+                let child = open_directory_at(&current, &name)
+                    .map_err(|source| io_error("安全打开待清理事务子目录", &child_path, source))?;
+                ensure_open_entry_identity(&child, &metadata, &child_path)?;
+                pending.push((child, child_path, Some(*entry_index)));
+            }
+        }
+    }
+    Ok(current_indices)
+}
+
+fn remove_sealed_manifest_entries(
+    directory: &File,
+    path: &Path,
+    expected: &[SealedTreeCleanupEntry],
+    mut current_indices: Vec<usize>,
+) -> Result<(), LifecycleError> {
+    let depths = sealed_manifest_depths(expected);
+    current_indices.sort_by(|left, right| {
+        depths[*right]
+            .cmp(&depths[*left])
+            .then_with(|| {
+                expected[*left]
+                    .parent_index
+                    .cmp(&expected[*right].parent_index)
+            })
+            .then_with(|| expected[*left].name_hex.cmp(&expected[*right].name_hex))
+    });
+    let mut start = 0;
+    while start < current_indices.len() {
+        let parent_index = expected[current_indices[start]].parent_index;
+        let mut end = start + 1;
+        while end < current_indices.len()
+            && expected[current_indices[end]].parent_index == parent_index
+        {
+            end += 1;
+        }
+        let Some((parent, parent_path)) =
+            open_sealed_manifest_parent(directory, path, expected, parent_index)?
+        else {
+            start = end;
+            continue;
+        };
+        for entry_index in &current_indices[start..end] {
+            let entry = &expected[*entry_index];
+            let name = decode_manifest_name(&entry.name_hex)?;
+            let child_path = parent_path.join(&name);
+            let Some(metadata) = entry_metadata_at(&parent, &name)
+                .map_err(|source| io_error("检查待清理事务条目", &child_path, source))?
+            else {
+                continue;
+            };
+            ensure_manifest_entry_identity(entry, &metadata, &child_path)?;
+            unlink_at(&parent, &name, entry.entry_type == libc::S_IFDIR as u64)
+                .map_err(|source| io_error("清理事务条目", &child_path, source))?;
+        }
+        parent
+            .sync_all()
+            .map_err(|source| io_error("同步事务清理目录", &parent_path, source))?;
+        start = end;
+    }
+    Ok(())
+}
+
+fn open_sealed_manifest_parent(
+    root: &File,
+    root_path: &Path,
+    entries: &[SealedTreeCleanupEntry],
+    parent_index: Option<usize>,
+) -> Result<Option<(File, PathBuf)>, LifecycleError> {
+    let mut chain = Vec::new();
+    let mut cursor = parent_index;
+    while let Some(index) = cursor {
+        chain.push(index);
+        cursor = entries[index].parent_index;
+    }
+    chain.reverse();
+    let mut current = root
+        .try_clone()
+        .map_err(|source| io_error("保留事务清理根目录", root_path, source))?;
+    let mut current_path = root_path.to_path_buf();
+    current
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .map_err(|source| io_error("准备清理事务目录", &current_path, source))?;
+    for index in chain {
+        let entry = &entries[index];
+        let name = decode_manifest_name(&entry.name_hex)?;
+        current_path.push(&name);
+        let Some(metadata) = entry_metadata_at(&current, &name)
+            .map_err(|source| io_error("检查事务清理父目录", &current_path, source))?
+        else {
+            return Ok(None);
+        };
+        ensure_manifest_entry_identity(entry, &metadata, &current_path)?;
+        let child = open_directory_at(&current, &name)
+            .map_err(|source| io_error("安全打开事务清理父目录", &current_path, source))?;
+        ensure_open_entry_identity(&child, &metadata, &current_path)?;
+        child
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(|source| io_error("准备清理事务子目录", &current_path, source))?;
+        current = child;
+    }
+    Ok(Some((current, current_path)))
+}
+
+fn sealed_manifest_depths(entries: &[SealedTreeCleanupEntry]) -> Vec<usize> {
+    let mut depths = Vec::with_capacity(entries.len());
+    for entry in entries {
+        depths.push(
+            entry
+                .parent_index
+                .map_or(1, |parent_index| depths[parent_index] + 1),
+        );
+    }
+    depths
+}
+
+fn ensure_manifest_entry_identity(
+    expected: &SealedTreeCleanupEntry,
+    actual: &libc::stat,
+    path: &Path,
+) -> Result<(), LifecycleError> {
+    let entry_type = (actual.st_mode & libc::S_IFMT) as u64;
+    let file_metadata_changed = entry_type != libc::S_IFDIR as u64
+        && (actual.st_size != expected.size || actual.st_mtime != expected.modified_at);
+    if actual.st_dev as u64 != expected.device
+        || actual.st_ino != expected.inode
+        || entry_type != expected.entry_type
+        || file_metadata_changed
+    {
+        return Err(cleanup_entry_changed(path));
+    }
+    Ok(())
+}
+
+fn ensure_open_entry_identity(
+    opened: &File,
+    expected: &libc::stat,
+    path: &Path,
+) -> Result<(), LifecycleError> {
+    let actual = opened
+        .metadata()
+        .map_err(|source| io_error("检查已打开事务目录", path, source))?;
+    if actual.dev() != expected.st_dev as u64 || actual.ino() != expected.st_ino || !actual.is_dir()
+    {
+        return Err(cleanup_entry_changed(path));
+    }
+    Ok(())
+}
+
+fn valid_sealed_tree_entries(entries: &[SealedTreeCleanupEntry]) -> bool {
+    let mut names = BTreeSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(name) = decode_manifest_name_bytes(&entry.name_hex) else {
+            return false;
+        };
+        if name.is_empty()
+            || name == b"."
+            || name == b".."
+            || name.contains(&b'/')
+            || name.contains(&0)
+            || entry.device == 0
+            || entry.inode == 0
+            || !names.insert((entry.parent_index, name))
+            || entry.parent_index.is_some_and(|parent_index| {
+                parent_index >= index || entries[parent_index].entry_type != libc::S_IFDIR as u64
+            })
+            || !matches!(
+                entry.entry_type as libc::mode_t,
+                libc::S_IFDIR
+                    | libc::S_IFREG
+                    | libc::S_IFLNK
+                    | libc::S_IFIFO
+                    | libc::S_IFSOCK
+                    | libc::S_IFCHR
+                    | libc::S_IFBLK
+            )
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn encode_manifest_name(name: &OsStr) -> String {
+    let mut encoded = String::with_capacity(name.as_bytes().len() * 2);
+    for byte in name.as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn decode_manifest_name(encoded: &str) -> Result<OsString, LifecycleError> {
+    decode_manifest_name_bytes(encoded)
+        .map(OsString::from_vec)
+        .ok_or_else(|| LifecycleError::RecoveryBlocked("待清理事务目录清单无效".to_owned()))
+}
+
+fn decode_manifest_name_bytes(encoded: &str) -> Option<Vec<u8>> {
+    if !encoded.len().is_multiple_of(2) {
+        return None;
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect()
 }
 
 fn cleanup_entry_changed(path: &Path) -> LifecycleError {
@@ -3558,10 +4601,13 @@ mod tests {
             source_tracked_ref: None,
             source_catalog_generation: None,
             source_marker: None,
+            expected_source_marker: None,
             expected_current_target: None,
             expected_adopted_marker: None,
             bundle_id: "bundle".to_owned(),
             bundle_display_name: "Bundle".to_owned(),
+            warnings: Vec::new(),
+            created_at: 1,
             expires_at: i64::MAX,
             status: "consumed".to_owned(),
             candidates,
@@ -3575,6 +4621,7 @@ mod tests {
             skill_name: Some(format!("skill-{index}")),
             skill_description: Some("测试 Skill".to_owned()),
             content_fingerprint: Some(fingerprint.to_owned()),
+            previous_content_fingerprint: None,
             selectable: true,
             preserve_existing: false,
             validation_errors: Vec::new(),

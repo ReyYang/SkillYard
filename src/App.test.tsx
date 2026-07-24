@@ -5,10 +5,13 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type {
   BatchMountPlan,
+  BundleUpdateBatchPlan,
+  BundleUpdateBatchResult,
   InstallPlan,
   InventoryObservation,
   MountPlan,
   MountSummary,
+  RemovalPlan,
   SourceAssociationPlan,
   SourceRefChangePlan,
   SourceSummary,
@@ -111,6 +114,1399 @@ describe("本机清单", () => {
     expect(screen.getByText("saved")).toBeInTheDocument();
     expect(client.startInitialScan).not.toHaveBeenCalled();
     expect(client.refreshLocalInventory).not.toHaveBeenCalled();
+  });
+
+  it("只在用户点击后检查 Bundle 更新，并在检查期间冻结写入口", async () => {
+    const user = userEvent.setup();
+    let finishCheck:
+      | ((
+          outcome: Extract<UiOutcome, { type: "inventory" }>,
+        ) => void)
+      | undefined;
+    const initial = inventoryOutcome(
+      [createManagedEntry({ sourceDisplayName: "owner/repo" })],
+      null,
+      {
+        bundleUpdates: [
+          {
+            bundleId: "bundle-1",
+            status: "notChecked",
+            action: null,
+            checkedAt: null,
+            message: "尚未检查更新",
+            upstreamUrl: "https://github.com/owner/repo",
+          },
+        ],
+      },
+    );
+    const client = createClient(initial);
+    vi.mocked(client.checkBundleUpdates).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishCheck = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByLabelText("Bundle 更新状态：尚未检查"),
+    ).toBeInTheDocument();
+    expect(client.checkBundleUpdates).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "检查更新" }));
+
+    expect(client.checkBundleUpdates).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "正在检查更新…" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", {
+        name: "删除 Bundle example-bundle",
+      }),
+    ).toBeDisabled();
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
+
+    await act(async () => {
+      finishCheck?.(
+        inventoryOutcome(
+          [createManagedEntry({ sourceDisplayName: "owner/repo" })],
+          null,
+          {
+            bundleUpdates: [
+              {
+                bundleId: "bundle-1",
+                status: "available",
+                action: "update",
+                checkedAt: 1_753_000_001_000,
+                message: "发现新的上游 commit",
+                upstreamUrl: "https://github.com/owner/repo",
+              },
+            ],
+          },
+        ),
+      );
+    });
+
+    expect(
+      screen.getByLabelText("Bundle 更新状态：可更新"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("更新")).toBeInTheDocument();
+  });
+
+  it("按 Bundle 启动更新准备，并在准备期间冻结写入口", async () => {
+    const user = userEvent.setup();
+    let finishPlan: ((plan: InstallPlan) => void) | undefined;
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleDisplayName: "superpowers",
+            sourceDisplayName: "obra/superpowers",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-1",
+              status: "available",
+              action: "update",
+              checkedAt: 1_753_000_001_000,
+              message: "发现新的上游 commit",
+              upstreamUrl: "https://github.com/obra/superpowers",
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createBundleUpdatePlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPlan = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    const updateButton = await screen.findByRole("button", {
+      name: "更新 superpowers",
+    });
+    await user.click(updateButton);
+
+    expect(client.createBundleUpdatePlan).toHaveBeenCalledWith("bundle-1");
+    expect(updateButton).toBeDisabled();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
+
+    await act(async () => {
+      finishPlan?.(
+        createInstallPlan({
+          mode: "update",
+          bundleDisplayName: "superpowers",
+          updateImpact: {
+            newCandidateIds: [],
+            existingMounts: [],
+            upstreamUrl: "https://github.com/obra/superpowers",
+          },
+        }),
+      );
+    });
+    expect(
+      screen.getByRole("heading", { name: "确认更新这个 Bundle" }),
+    ).toBeInTheDocument();
+  });
+
+  it("更新预览只读展示全部成员、新增成员和现有 Mount", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleDisplayName: "superpowers",
+            sourceDisplayName: "obra/superpowers",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-1",
+              status: "available",
+              action: "update",
+              checkedAt: 1,
+              message: "发现新的上游 commit",
+              upstreamUrl: "https://github.com/obra/superpowers",
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createBundleUpdatePlan).mockResolvedValue(
+      createInstallPlan({
+        mode: "update",
+        inputKind: "github",
+        inputPath: "https://github.com/obra/superpowers",
+        bundleDisplayName: "superpowers",
+        candidates: [
+          createInstallCandidate({
+            candidateId: "candidate-brainstorming",
+            sourceRelativePath: "skills/brainstorming",
+            skillName: "brainstorming",
+          }),
+          createInstallCandidate({
+            candidateId: "candidate-tdd",
+            sourceRelativePath: "skills/tdd",
+            skillName: "tdd",
+          }),
+        ],
+        updateImpact: {
+          newCandidateIds: ["candidate-tdd"],
+          existingMounts: [
+            createMount({
+              id: "mount-global",
+              memberId: "member-brainstorming",
+              skillName: "brainstorming",
+            }),
+            createMount({
+              id: "mount-project",
+              memberId: "member-brainstorming",
+              skillName: "brainstorming",
+              appId: "claudeCode",
+              scope: "project",
+              projectId: "project-1",
+              projectDisplayName: "SkillYard",
+            }),
+          ],
+          upstreamUrl: "https://github.com/obra/superpowers",
+        },
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "更新 superpowers" }),
+    );
+
+    const preview = await screen.findByLabelText("更新影响预览");
+    expect(within(preview).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(preview).getAllByText("brainstorming").length).toBeGreaterThan(
+      0,
+    );
+    expect(within(preview).getByText("tdd")).toBeInTheDocument();
+    expect(within(preview).getByText("新增安装")).toBeInTheDocument();
+    const mounts = within(preview).getByLabelText("现有挂载");
+    expect(mounts).toHaveTextContent("brainstorming");
+    expect(mounts).toHaveTextContent("Codex · 全局");
+    expect(mounts).toHaveTextContent("Claude Code · 项目 · SkillYard");
+    expect(preview).toHaveTextContent("现有挂载继续使用");
+    expect(preview).toHaveTextContent("新增 Skill 保持未挂载");
+    expect(
+      within(preview).getByRole("link", { name: "查看上游发布页" }),
+    ).toHaveAttribute("href", "https://github.com/obra/superpowers");
+  });
+
+  it("更新候选包含无效 Skill 时禁止确认整组更新", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry()], null, {
+        bundleUpdates: [
+          {
+            bundleId: "bundle-1",
+            status: "available",
+            action: "update",
+            checkedAt: 1,
+            message: "发现新的上游 commit",
+            upstreamUrl: "https://github.com/anthropics/skills",
+          },
+        ],
+      }),
+    );
+    vi.mocked(client.createBundleUpdatePlan).mockResolvedValue(
+      createInstallPlan({
+        mode: "update",
+        inputKind: "github",
+        candidates: [
+          createInstallCandidate({
+            selectable: false,
+            validationErrors: ["SKILL.md 缺少有效 name"],
+          }),
+        ],
+        updateImpact: {
+          newCandidateIds: [],
+          existingMounts: [],
+          upstreamUrl: "https://github.com/anthropics/skills",
+        },
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "更新 example-bundle" }),
+    );
+
+    expect(screen.getByText("SKILL.md 缺少有效 name")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认更新" })).toBeDisabled();
+    expect(client.confirmInstallPlan).not.toHaveBeenCalled();
+  });
+
+  it("确认更新提交全部成员，并在成功后返回 Inventory", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleDisplayName: "superpowers",
+            sourceDisplayName: "obra/superpowers",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-1",
+              status: "available",
+              action: "update",
+              checkedAt: 1,
+              message: "发现新的上游 commit",
+              upstreamUrl: "https://github.com/obra/superpowers",
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createBundleUpdatePlan).mockResolvedValue(
+      createInstallPlan({
+        mode: "update",
+        inputKind: "github",
+        bundleDisplayName: "superpowers",
+        candidates: [
+          createInstallCandidate({
+            candidateId: "candidate-brainstorming",
+            skillName: "brainstorming",
+          }),
+          createInstallCandidate({
+            candidateId: "candidate-tdd",
+            skillName: "tdd",
+          }),
+        ],
+        updateImpact: {
+          newCandidateIds: ["candidate-tdd"],
+          existingMounts: [],
+          upstreamUrl: "https://github.com/obra/superpowers",
+        },
+      }),
+    );
+    vi.mocked(client.confirmInstallPlan).mockResolvedValue(
+      inventoryOutcome([
+        createManagedEntry({
+          bundleDisplayName: "superpowers",
+          skillName: "brainstorming",
+        }),
+        createManagedEntry({
+          id: "managed:member-tdd",
+          memberId: "member-tdd",
+          bundleDisplayName: "superpowers",
+          skillName: "tdd",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "更新 superpowers" }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "确认更新" }),
+    );
+
+    expect(client.confirmInstallPlan).toHaveBeenCalledWith("plan-1", [
+      "candidate-brainstorming",
+      "candidate-tdd",
+    ]);
+    expect(
+      await screen.findByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("superpowers: tdd")).toBeInTheDocument();
+  });
+
+  it("更新确认失败后可以用新 Plan 重试，不继承旧错误", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome(
+      [
+        createManagedEntry({
+          bundleDisplayName: "superpowers",
+          sourceDisplayName: "obra/superpowers",
+        }),
+      ],
+      null,
+      {
+        bundleUpdates: [
+          {
+            bundleId: "bundle-1",
+            status: "available",
+            action: "update",
+            checkedAt: 1,
+            message: "发现新的上游 commit",
+            upstreamUrl: "https://github.com/obra/superpowers",
+          },
+        ],
+      },
+    );
+    const client = createClient(initial);
+    vi.mocked(client.createBundleUpdatePlan).mockResolvedValue(
+      createInstallPlan({
+        mode: "update",
+        inputKind: "github",
+        bundleDisplayName: "superpowers",
+        updateImpact: {
+          newCandidateIds: [],
+          existingMounts: [],
+          upstreamUrl: "https://github.com/obra/superpowers",
+        },
+      }),
+    );
+    vi.mocked(client.confirmInstallPlan).mockRejectedValueOnce({
+      code: "lifecycleError",
+      message: "更新中断，已自动恢复",
+    });
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "更新 superpowers" }),
+    );
+    await user.click(screen.getByRole("button", { name: "确认更新" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "更新中断，已自动恢复",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "更新 superpowers" }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "确认更新" }),
+    ).toBeEnabled();
+    expect(client.createBundleUpdatePlan).toHaveBeenCalledTimes(2);
+  });
+
+  it("更新 Plan 准备失败时保留 Inventory 和可更新状态", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleDisplayName: "superpowers",
+            sourceDisplayName: "obra/superpowers",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-1",
+              status: "available",
+              action: "update",
+              checkedAt: 1,
+              message: "发现新的上游 commit",
+              upstreamUrl: "https://github.com/obra/superpowers",
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createBundleUpdatePlan).mockRejectedValue({
+      code: "sourceUnavailable",
+      message: "暂时无法获取这个 Bundle 的更新内容",
+    });
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "更新 superpowers" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("更新未完成");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "暂时无法获取这个 Bundle 的更新内容",
+    );
+    expect(
+      screen.getByRole("button", { name: "更新 superpowers" }),
+    ).toBeEnabled();
+  });
+
+  it("从更新预览返回时复用安装 Plan 的真实丢弃流程", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleDisplayName: "superpowers",
+            sourceDisplayName: "obra/superpowers",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-1",
+              status: "available",
+              action: "update",
+              checkedAt: 1,
+              message: "发现新的上游 commit",
+              upstreamUrl: "https://github.com/obra/superpowers",
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.createBundleUpdatePlan).mockResolvedValue(
+      createInstallPlan({
+        id: "update-plan-1",
+        mode: "update",
+        inputKind: "github",
+        bundleDisplayName: "superpowers",
+        updateImpact: {
+          newCandidateIds: [],
+          existingMounts: [],
+          upstreamUrl: "https://github.com/obra/superpowers",
+        },
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "更新 superpowers" }),
+    );
+    await user.click(await screen.findByRole("button", { name: "返回" }));
+
+    expect(client.discardInstallPlan).toHaveBeenCalledWith("update-plan-1");
+    expect(
+      await screen.findByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+    expect(client.confirmInstallPlan).not.toHaveBeenCalled();
+  });
+
+  it("手动替换取消原生选择器时保留 Inventory", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleId: "bundle-archive",
+            bundleDisplayName: "archive-bundle",
+            sourceDisplayName: "archive.zip",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-archive",
+              status: "manual",
+              action: "importReplacement",
+              checkedAt: null,
+              message: "选择新的归档或文件来更新",
+              upstreamUrl: null,
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.chooseBundleReplacementPlan).mockResolvedValue(null);
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "导入新内容 archive-bundle",
+      }),
+    );
+
+    expect(client.chooseBundleReplacementPlan).toHaveBeenCalledWith(
+      "bundle-archive",
+    );
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "导入新内容 archive-bundle" }),
+    ).toBeEnabled();
+    expect(client.confirmInstallPlan).not.toHaveBeenCalled();
+  });
+
+  it("手动替换选择成功后冻结写入口并进入通用更新 Plan", async () => {
+    const user = userEvent.setup();
+    let finishSelection: ((plan: InstallPlan | null) => void) | undefined;
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleId: "bundle-archive",
+            bundleDisplayName: "archive-bundle",
+            sourceDisplayName: "archive.zip",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-archive",
+              status: "manual",
+              action: "importReplacement",
+              checkedAt: null,
+              message: "选择新的归档或文件来更新",
+              upstreamUrl: null,
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.chooseBundleReplacementPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishSelection = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    const replacementButton = await screen.findByRole("button", {
+      name: "导入新内容 archive-bundle",
+    });
+    await user.click(replacementButton);
+
+    expect(client.chooseBundleReplacementPlan).toHaveBeenCalledWith(
+      "bundle-archive",
+    );
+    expect(replacementButton).toBeDisabled();
+    expect(screen.getByText("正在选择新内容…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
+
+    await act(async () => {
+      finishSelection?.(
+        createInstallPlan({
+          id: "replacement-plan-1",
+          mode: "update",
+          inputKind: "archive",
+          inputPath: "/tmp/replacement.zip",
+          bundleDisplayName: "archive-bundle",
+          updateImpact: {
+            newCandidateIds: [],
+            existingMounts: [],
+            upstreamUrl: null,
+          },
+        }),
+      );
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "确认更新这个 Bundle" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("更新影响预览")).toHaveTextContent(
+      "/tmp/replacement.zip",
+    );
+    expect(
+      screen.queryByRole("link", { name: "查看上游发布页" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("手动替换选择失败时保留 Inventory 和重试入口", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleId: "bundle-direct",
+            bundleDisplayName: "direct-bundle",
+            sourceDisplayName: "https://example.com/skill.md",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-direct",
+              status: "manual",
+              action: "importReplacement",
+              checkedAt: null,
+              message: "选择新文件来更新",
+              upstreamUrl: null,
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.chooseBundleReplacementPlan).mockRejectedValue({
+      code: "sourceUnavailable",
+      message: "无法读取所选替换内容",
+    });
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "导入新内容 direct-bundle",
+      }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("无法读取所选替换内容");
+    expect(
+      screen.getByRole("button", { name: "导入新内容 direct-bundle" }),
+    ).toBeEnabled();
+  });
+
+  it("Editable Local 检查到改动时冻结写入口并显示通用更新入口", async () => {
+    const user = userEvent.setup();
+    let finishCheck:
+      | ((
+          outcome: Extract<UiOutcome, { type: "inventory" }>,
+        ) => void)
+      | undefined;
+    const editableEntry = createManagedEntry({
+      id: "managed:editable",
+      memberId: "member-editable",
+      bundleId: "bundle-editable",
+      bundleDisplayName: "editable-bundle",
+      sourceDisplayName: "editable-folder",
+    });
+    const client = createClient(
+      inventoryOutcome([editableEntry], null, {
+        bundleUpdates: [
+          {
+            bundleId: "bundle-editable",
+            status: "notChecked",
+            action: "checkEditableLocal",
+            checkedAt: null,
+            message: "检查本地改动后可以采用全部内容",
+            upstreamUrl: null,
+          },
+        ],
+      }),
+    );
+    vi.mocked(client.checkEditableLocalBundle).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishCheck = resolve;
+        }),
+    );
+    vi.mocked(client.createBundleUpdatePlan).mockResolvedValue(
+      createInstallPlan({
+        mode: "update",
+        inputKind: "editableLocal",
+        bundleDisplayName: "editable-bundle",
+        updateImpact: {
+          newCandidateIds: [],
+          existingMounts: [],
+          upstreamUrl: null,
+        },
+      }),
+    );
+    render(<App client={client} />);
+
+    const checkButton = await screen.findByRole("button", {
+      name: "检查本地改动 editable-bundle",
+    });
+    await user.click(checkButton);
+
+    expect(client.checkEditableLocalBundle).toHaveBeenCalledWith(
+      "bundle-editable",
+    );
+    expect(checkButton).toBeDisabled();
+    expect(screen.getByText("正在检查本地改动…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
+
+    await act(async () => {
+      finishCheck?.(
+        inventoryOutcome([editableEntry], null, {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-editable",
+              status: "available",
+              action: "update",
+              checkedAt: 1_753_000_001_000,
+              message: "检测到本地内容变化",
+              upstreamUrl: null,
+            },
+          ],
+        }),
+      );
+    });
+
+    expect(
+      screen.getByLabelText("Bundle 更新状态：可更新"),
+    ).toBeInTheDocument();
+    const updateButton = screen.getByRole("button", {
+      name: "更新 editable-bundle",
+    });
+    expect(updateButton).toBeEnabled();
+    await user.click(updateButton);
+    expect(client.createBundleUpdatePlan).toHaveBeenCalledWith(
+      "bundle-editable",
+    );
+    expect(
+      screen.getByRole("heading", { name: "确认更新这个 Bundle" }),
+    ).toBeInTheDocument();
+  });
+
+  it("Editable Local 没有改动时显示已是最新并保留再次检查", async () => {
+    const user = userEvent.setup();
+    const editableEntry = createManagedEntry({
+      id: "managed:editable",
+      memberId: "member-editable",
+      bundleId: "bundle-editable",
+      bundleDisplayName: "editable-bundle",
+      sourceDisplayName: "editable-folder",
+    });
+    const client = createClient(
+      inventoryOutcome([editableEntry], null, {
+        bundleUpdates: [
+          {
+            bundleId: "bundle-editable",
+            status: "notChecked",
+            action: "checkEditableLocal",
+            checkedAt: null,
+            message: "尚未检查本地改动",
+            upstreamUrl: null,
+          },
+        ],
+      }),
+    );
+    vi.mocked(client.checkEditableLocalBundle).mockResolvedValue(
+      inventoryOutcome([editableEntry], null, {
+        bundleUpdates: [
+          {
+            bundleId: "bundle-editable",
+            status: "upToDate",
+            action: "checkEditableLocal",
+            checkedAt: 1_753_000_001_000,
+            message: "本地内容与当前版本一致",
+            upstreamUrl: null,
+          },
+        ],
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "检查本地改动 editable-bundle",
+      }),
+    );
+
+    expect(
+      screen.getByLabelText("Bundle 更新状态：已是最新"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "再次检查 editable-bundle" }),
+    ).toBeEnabled();
+  });
+
+  it("Editable Local 来源不可用时保留重新检查并可重试", async () => {
+    const user = userEvent.setup();
+    const editableEntry = createManagedEntry({
+      id: "managed:editable",
+      memberId: "member-editable",
+      bundleId: "bundle-editable",
+      bundleDisplayName: "editable-bundle",
+      sourceDisplayName: "editable-folder",
+    });
+    const initial = inventoryOutcome([editableEntry], null, {
+      bundleUpdates: [
+        {
+          bundleId: "bundle-editable",
+          status: "notChecked",
+          action: "checkEditableLocal",
+          checkedAt: null,
+          message: "尚未检查本地改动",
+          upstreamUrl: null,
+        },
+      ],
+    });
+    const client = createClient(initial);
+    vi.mocked(client.checkEditableLocalBundle)
+      .mockResolvedValueOnce(
+        inventoryOutcome([editableEntry], null, {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-editable",
+              status: "sourceUnavailable",
+              action: "checkEditableLocal",
+              checkedAt: 1_753_000_001_000,
+              message: "原始本地目录暂时无法读取",
+              upstreamUrl: null,
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        inventoryOutcome([editableEntry], null, {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-editable",
+              status: "upToDate",
+              action: "checkEditableLocal",
+              checkedAt: 1_753_000_002_000,
+              message: "本地内容与当前版本一致",
+              upstreamUrl: null,
+            },
+          ],
+        }),
+      );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "检查本地改动 editable-bundle",
+      }),
+    );
+
+    expect(
+      screen.getByLabelText("Bundle 更新状态：来源不可用"),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: "重新检查 editable-bundle",
+      }),
+    );
+
+    expect(client.checkEditableLocalBundle).toHaveBeenNthCalledWith(
+      1,
+      "bundle-editable",
+    );
+    expect(client.checkEditableLocalBundle).toHaveBeenNthCalledWith(
+      2,
+      "bundle-editable",
+    );
+    expect(
+      screen.getByLabelText("Bundle 更新状态：已是最新"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "再次检查 editable-bundle" }),
+    ).toBeEnabled();
+  });
+
+  it("Editable Local 检查命令失败时保留 Inventory 和检查入口", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            id: "managed:editable",
+            memberId: "member-editable",
+            bundleId: "bundle-editable",
+            bundleDisplayName: "editable-bundle",
+            sourceDisplayName: "editable-folder",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-editable",
+              status: "notChecked",
+              action: "checkEditableLocal",
+              checkedAt: null,
+              message: "尚未检查本地改动",
+              upstreamUrl: null,
+            },
+          ],
+        },
+      ),
+    );
+    vi.mocked(client.checkEditableLocalBundle).mockRejectedValue({
+      code: "storageError",
+      message: "暂时无法保存检查结果",
+    });
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "检查本地改动 editable-bundle",
+      }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("暂时无法保存检查结果");
+    expect(
+      screen.getByRole("button", {
+        name: "检查本地改动 editable-bundle",
+      }),
+    ).toBeEnabled();
+  });
+
+  it("没有来源的 Bundle 只显示状态，不提供生命周期按钮", async () => {
+    const client = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            id: "managed:local",
+            memberId: "member-local",
+            bundleId: "bundle-local",
+            bundleDisplayName: "local-bundle",
+            sourceDisplayName: null,
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-local",
+              status: "noSource",
+              action: null,
+              checkedAt: null,
+              message: "没有更新来源",
+              upstreamUrl: null,
+            },
+          ],
+        },
+      ),
+    );
+    render(<App client={client} />);
+
+    const local = await screen.findByRole("region", { name: "local-bundle" });
+    expect(local).toHaveTextContent("没有更新来源");
+    expect(
+      within(local).queryByRole("button", { name: /更新|导入|检查/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("至少两个普通可更新 Bundle 时才显示全部更新，手动来源不计数", async () => {
+    const eligibleClient = createClient(inventoryWithTwoAvailableUpdates());
+    const { unmount } = render(<App client={eligibleClient} />);
+
+    expect(
+      await screen.findByRole("button", { name: "全部更新" }),
+    ).toBeEnabled();
+    unmount();
+
+    const ineligibleClient = createClient(
+      inventoryOutcome(
+        [
+          createManagedEntry({
+            bundleId: "bundle-alpha",
+            bundleDisplayName: "Alpha",
+          }),
+          createManagedEntry({
+            id: "managed:manual",
+            memberId: "member-manual",
+            bundleId: "bundle-manual",
+            bundleDisplayName: "Manual",
+          }),
+        ],
+        null,
+        {
+          bundleUpdates: [
+            {
+              bundleId: "bundle-alpha",
+              status: "available",
+              action: "update",
+              checkedAt: 1,
+              message: "可更新",
+              upstreamUrl: null,
+            },
+            {
+              bundleId: "bundle-manual",
+              status: "manual",
+              action: "importReplacement",
+              checkedAt: null,
+              message: "请导入新内容",
+              upstreamUrl: null,
+            },
+          ],
+        },
+      ),
+    );
+    render(<App client={ineligibleClient} />);
+
+    await screen.findByRole("heading", { name: "Skill 清单" });
+    expect(
+      screen.queryByRole("button", { name: "全部更新" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "导入新内容 Manual" }),
+    ).toBeEnabled();
+  });
+
+  it("准备全部更新期间冻结写入口并保留清单搜索", async () => {
+    const user = userEvent.setup();
+    let finishPlan:
+      | ((
+          outcome: Extract<UiOutcome, { type: "bundleUpdateBatchPlan" }>,
+        ) => void)
+      | undefined;
+    const client = createClient(inventoryWithTwoAvailableUpdates());
+    vi.mocked(client.createBundleUpdateBatchPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPlan = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    const updateAll = await screen.findByRole("button", {
+      name: "全部更新",
+    });
+    await user.click(updateAll);
+
+    expect(client.createBundleUpdateBatchPlan).toHaveBeenCalledTimes(1);
+    expect(updateAll).toBeDisabled();
+    expect(screen.getByText("正在准备全部更新…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "更新 Alpha" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "更新 Beta" })).toBeDisabled();
+    expect(
+      screen
+        .getAllByRole("button", { name: "批量挂载" })
+        .every((button) => button.hasAttribute("disabled")),
+    ).toBe(true);
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
+
+    await act(async () => {
+      finishPlan?.({
+        type: "bundleUpdateBatchPlan",
+        plan: createBundleUpdateBatchPlan(),
+      });
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "确认全部更新" }),
+    ).toBeInTheDocument();
+  });
+
+  it("批量预览只允许选择 Bundle，并按页面顺序确认 Ready 项", async () => {
+    const user = userEvent.setup();
+    let finishConfirm:
+      | ((
+          outcome: Extract<UiOutcome, { type: "bundleUpdateBatchResult" }>,
+        ) => void)
+      | undefined;
+    const plan = createBundleUpdateBatchPlan({
+      items: [
+        createBundleUpdateBatchPlanItem({
+          id: "item-beta",
+          bundleId: "bundle-beta",
+          bundleDisplayName: "Beta",
+          installPlan: createInstallPlan({
+            id: "child-beta",
+            mode: "update",
+            inputKind: "github",
+            bundleDisplayName: "Beta",
+            candidates: [
+              createInstallCandidate({
+                candidateId: "candidate-beta",
+                skillName: "beta",
+              }),
+              createInstallCandidate({
+                candidateId: "candidate-beta-new",
+                skillName: "beta-new",
+              }),
+            ],
+            updateImpact: {
+              newCandidateIds: ["candidate-beta-new"],
+              existingMounts: [
+                createMount({
+                  id: "mount-beta",
+                  memberId: "member-beta",
+                  skillName: "beta",
+                }),
+              ],
+              upstreamUrl: "https://github.com/example/beta",
+            },
+          }),
+        }),
+        createBundleUpdateBatchPlanItem({
+          id: "item-broken",
+          bundleId: "bundle-broken",
+          bundleDisplayName: "Broken",
+          disposition: "preparationFailed",
+          installPlan: null,
+          errorSummary: "无法获取这个 Bundle 的当前内容",
+        }),
+        createBundleUpdateBatchPlanItem({
+          id: "item-alpha",
+          bundleId: "bundle-alpha",
+          bundleDisplayName: "Alpha",
+          installPlan: createInstallPlan({
+            id: "child-alpha",
+            mode: "update",
+            inputKind: "github",
+            bundleDisplayName: "Alpha",
+          }),
+        }),
+      ],
+    });
+    const client = createClient({ type: "bundleUpdateBatchPlan", plan });
+    vi.mocked(client.confirmBundleUpdateBatchPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishConfirm = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "确认全部更新" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("checkbox")).toHaveLength(3);
+    const beta = screen.getByRole("checkbox", { name: "更新 Beta" });
+    const broken = screen.getByRole("checkbox", { name: "更新 Broken" });
+    const alpha = screen.getByRole("checkbox", { name: "更新 Alpha" });
+    expect(beta).toBeChecked();
+    expect(alpha).toBeChecked();
+    expect(broken).toBeDisabled();
+    expect(
+      within(
+        screen.getByRole("region", { name: "Bundle 更新预览：Beta" }),
+      ).getAllByRole("checkbox"),
+    ).toHaveLength(1);
+    expect(screen.getByLabelText("Beta 全部 Skill")).toHaveTextContent(
+      "beta-new",
+    );
+    expect(screen.getByText("新增安装")).toBeInTheDocument();
+    expect(screen.getByLabelText("Beta 现有挂载")).toHaveTextContent(
+      "Codex · 全局",
+    );
+    expect(screen.getByText("无法获取这个 Bundle 的当前内容")).toBeInTheDocument();
+
+    await user.click(beta);
+    await user.click(alpha);
+    expect(
+      screen.getByRole("button", { name: "确认全部更新" }),
+    ).toBeDisabled();
+    await user.click(alpha);
+    await user.click(beta);
+
+    const back = screen.getByRole("button", { name: "返回清单" });
+    const confirm = screen.getByRole("button", { name: "确认全部更新" });
+    await user.click(confirm);
+
+    expect(client.confirmBundleUpdateBatchPlan).toHaveBeenCalledWith(
+      "update-batch-plan-1",
+      ["item-beta", "item-alpha"],
+    );
+    expect(confirm).toBeDisabled();
+    expect(back).toBeDisabled();
+    expect(beta).toBeDisabled();
+    expect(alpha).toBeDisabled();
+    await user.click(confirm);
+    expect(client.confirmBundleUpdateBatchPlan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishConfirm?.({
+        type: "bundleUpdateBatchResult",
+        result: createBundleUpdateBatchResult({
+          items: [
+            createBundleUpdateBatchResultItem({
+              id: "item-beta",
+              bundleId: "bundle-beta",
+              bundleDisplayName: "Beta",
+              status: "failed",
+              errorSummary: "更新失败，已保留原内容",
+            }),
+            createBundleUpdateBatchResultItem({
+              id: "item-broken",
+              bundleId: "bundle-broken",
+              bundleDisplayName: "Broken",
+              status: "notExecuted",
+              errorSummary: "准备阶段未通过",
+            }),
+            createBundleUpdateBatchResultItem({
+              id: "item-alpha",
+              bundleId: "bundle-alpha",
+              bundleDisplayName: "Alpha",
+              status: "succeeded",
+            }),
+          ],
+        }),
+      });
+    });
+
+    const result = screen.getByRole("region", { name: "全部更新结果" });
+    expect(result).toHaveTextContent("Beta");
+    expect(result).toHaveTextContent("失败");
+    expect(result).toHaveTextContent("Broken");
+    expect(result).toHaveTextContent("未执行");
+    expect(result).toHaveTextContent("Alpha");
+    expect(result).toHaveTextContent("成功");
+    expect(
+      screen.getByRole("button", { name: "返回清单" }),
+    ).toBeEnabled();
+  });
+
+  it("返回批量预览时调用真实 discard，并在清理期间冻结页面", async () => {
+    const user = userEvent.setup();
+    let finishDiscard:
+      | ((outcome: Extract<UiOutcome, { type: "inventory" }>) => void)
+      | undefined;
+    const client = createClient({
+      type: "bundleUpdateBatchPlan",
+      plan: createBundleUpdateBatchPlan(),
+    });
+    vi.mocked(client.discardBundleUpdateBatchPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishDiscard = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    const back = await screen.findByRole("button", { name: "返回清单" });
+    const confirm = screen.getByRole("button", { name: "确认全部更新" });
+    await user.click(back);
+
+    expect(client.discardBundleUpdateBatchPlan).toHaveBeenCalledWith(
+      "update-batch-plan-1",
+    );
+    expect(back).toBeDisabled();
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText("正在清理更新预览…")).toBeInTheDocument();
+    await user.click(back);
+    expect(client.discardBundleUpdateBatchPlan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishDiscard?.(inventoryWithTwoAvailableUpdates());
+    });
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+  });
+
+  it("completed 结果确认已读期间冻结返回，并用结果 ID acknowledge", async () => {
+    const user = userEvent.setup();
+    let finishAcknowledge:
+      | ((outcome: Extract<UiOutcome, { type: "inventory" }>) => void)
+      | undefined;
+    const client = createClient({
+      type: "bundleUpdateBatchResult",
+      result: createBundleUpdateBatchResult(),
+    });
+    vi.mocked(client.acknowledgeBundleUpdateBatchResult).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishAcknowledge = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    const back = await screen.findByRole("button", { name: "返回清单" });
+    await user.click(back);
+
+    expect(client.acknowledgeBundleUpdateBatchResult).toHaveBeenCalledWith(
+      "update-batch-1",
+    );
+    expect(back).toBeDisabled();
+    expect(screen.getByText("正在返回清单…")).toBeInTheDocument();
+    await user.click(back);
+    expect(client.acknowledgeBundleUpdateBatchResult).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishAcknowledge?.(inventoryWithTwoAvailableUpdates());
+    });
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+  });
+
+  it("blocked 结果只提示等待人工恢复，不能 acknowledge", async () => {
+    const client = createClient({
+      type: "bundleUpdateBatchResult",
+      result: createBundleUpdateBatchResult({
+        status: "blocked",
+        items: [
+          createBundleUpdateBatchResultItem({
+            status: "blocked",
+            errorSummary: "Bundle current 指向未知内容",
+          }),
+          createBundleUpdateBatchResultItem({
+            id: "item-beta",
+            bundleId: "bundle-beta",
+            bundleDisplayName: "Beta",
+            status: "notExecuted",
+            errorSummary: "等待前一个 Bundle 完成人工恢复",
+          }),
+        ],
+      }),
+    });
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "全部更新正在等待人工恢复",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "请在人工恢复页面处理",
+    );
+    expect(screen.getByRole("region", { name: "全部更新结果" })).toHaveTextContent(
+      "等待人工恢复",
+    );
+    expect(
+      screen.queryByRole("button", { name: "返回清单" }),
+    ).not.toBeInTheDocument();
+    expect(client.acknowledgeBundleUpdateBatchResult).not.toHaveBeenCalled();
   });
 
   it("选择文件夹后先显示影响预览，确认前不写入", async () => {
@@ -1891,7 +3287,42 @@ describe("GitHub Source 安装", () => {
 
   it("添加同一 Source 的不同 Ref 时先确认，确认后再显示新 Ref", async () => {
     const user = userEvent.setup();
-    const client = createClient(inventoryOutcome([]));
+    const initialInventory = inventoryOutcome(
+      [createManagedEntry()],
+      null,
+      {
+        bundleUpdates: [
+          {
+            bundleId: "bundle-1",
+            status: "upToDate",
+            action: null,
+            checkedAt: 1_753_000_001_000,
+            message: "已是最新",
+            upstreamUrl: "https://github.com/anthropics/skills",
+          },
+        ],
+      },
+    );
+    const refreshedInventory = inventoryOutcome(
+      [createManagedEntry()],
+      null,
+      {
+        bundleUpdates: [
+          {
+            bundleId: "bundle-1",
+            status: "available",
+            action: "update",
+            checkedAt: 1_753_000_002_000,
+            message: "发现新的上游 commit",
+            upstreamUrl: "https://github.com/anthropics/skills",
+          },
+        ],
+      },
+    );
+    const client = createClient(initialInventory);
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initialInventory)
+      .mockResolvedValueOnce(refreshedInventory);
     vi.mocked(client.addGithubSource).mockResolvedValue({
       type: "sourceRefChangePlan",
       plan: createSourceRefChangePlan(),
@@ -1926,7 +3357,13 @@ describe("GitHub Source 安装", () => {
     expect(client.confirmSourceRefChange).toHaveBeenCalledWith(
       "source-ref-plan-1",
     );
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
     expect(screen.getByText("Tracked Ref: next")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    expect(
+      screen.getByLabelText("Bundle 更新状态：可更新"),
+    ).toBeInTheDocument();
   });
 
   it("Ref 确认失败后丢弃旧 Plan，并重新读取 Source 状态", async () => {
@@ -2687,7 +4124,7 @@ describe("补充来源与 Bundle 归并", () => {
     ).toBeInTheDocument();
   });
 
-  it("GitHub 已关联但没有 adopted marker 时显示可更新", async () => {
+  it("Source Catalog 不根据 adopted marker 自行推断更新状态", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([]));
     vi.mocked(client.openSourceDiscovery).mockResolvedValue(
@@ -2702,8 +4139,355 @@ describe("补充来源与 Bundle 归并", () => {
     expect(
       within(
         screen.getByRole("article", { name: "anthropics/skills" }),
-      ).getByText("可更新"),
+      ).queryByText("可更新"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("移除与删除", () => {
+  it("Bundle 删除完整展示影响，并且第二次点击前不会确认", async () => {
+    const user = userEvent.setup();
+    let finishConfirm: ((outcome: UiOutcome) => void) | undefined;
+    const initial = inventoryOutcome(
+      [
+        createManagedEntry(),
+        createManagedEntry({
+          id: "managed:member-2",
+          memberId: "member-2",
+          skillName: "example-tools",
+        }),
+      ],
+      null,
+      {
+        mounts: createRemovalPlan().mounts,
+      },
+    );
+    const client = createClient(initial);
+    vi.mocked(client.createBundleRemovalPlan).mockResolvedValue({
+      type: "removalPlan",
+      plan: createRemovalPlan(),
+    });
+    vi.mocked(client.confirmRemovalPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishConfirm = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", {
+      name: "example-bundle",
+    });
+    await user.click(
+      within(bundle).getByRole("button", {
+        name: "删除 Bundle example-bundle",
+      }),
+    );
+
+    expect(client.createBundleRemovalPlan).toHaveBeenCalledWith("bundle-1");
+    expect(
+      screen.getByRole("heading", { name: "删除 Bundle example-bundle" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "将删除的 Skill" })).toHaveTextContent(
+      "example-tools",
+    );
+    expect(screen.getByRole("region", { name: "将移除的 Mount" })).toHaveTextContent(
+      "Claude Code · 项目 · SkillYard",
+    );
+    expect(screen.getByText("/tmp/central/bundles/bundle-1")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "将保留的内容" })).toHaveTextContent(
+      "anthropics/skills",
+    );
+    expect(screen.getByRole("region", { name: "将保留的内容" })).toHaveTextContent(
+      "/Users/test/editable/example",
+    );
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /删除 Skill/ }),
+    ).not.toBeInTheDocument();
+    expect(client.confirmRemovalPlan).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "继续删除" }));
+
+    expect(client.confirmRemovalPlan).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("永久删除");
+    expect(screen.getByRole("alert")).toHaveTextContent("没有回滚");
+
+    const confirm = screen.getByRole("button", { name: "确认永久删除" });
+    const back = screen.getByRole("button", { name: "返回清单" });
+    await user.click(confirm);
+
+    expect(client.confirmRemovalPlan).toHaveBeenCalledWith("removal-plan-1");
+    expect(confirm).toBeDisabled();
+    expect(back).toBeDisabled();
+    await user.click(confirm);
+    expect(client.confirmRemovalPlan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishConfirm?.(inventoryOutcome([]));
+    });
+    expect(
+      screen.getByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+  });
+
+  it("删除 Source 只做普通确认，并明确本地内容和 Editable 原目录保留", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const source = createSource({
+      id: "source-editable",
+      kind: "editableLocal",
+      displayName: "editable-skills",
+      locator: "/Users/test/editable/skills",
+      bundleId: "bundle-1",
+    });
+    const client = createClient(initial);
+    vi.mocked(client.getStartupState)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(
+        inventoryOutcome(
+          [createManagedEntry({ sourceDisplayName: null })],
+          null,
+          {
+            bundleUpdates: [
+              {
+                bundleId: "bundle-1",
+                status: "noSource",
+                action: null,
+                checkedAt: null,
+                message: "没有更新来源",
+                upstreamUrl: null,
+              },
+            ],
+          },
+        ),
+      );
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([source]),
+    );
+    vi.mocked(client.createSourceRemovalPlan).mockResolvedValue({
+      type: "removalPlan",
+      plan: createRemovalPlan({
+        kind: "source",
+        targetId: "source-editable",
+        targetDisplayName: "editable-skills",
+        members: [],
+        mounts: [],
+        affectedBundles: [
+          { id: "bundle-1", displayName: "example-bundle" },
+        ],
+        preservedSource: null,
+        managedDirectory: null,
+        preservedExternalPaths: ["/Users/test/editable/skills"],
+        warnings: [],
+      }),
+    });
+    vi.mocked(client.confirmRemovalPlan).mockResolvedValue(
+      sourceDiscoveryOutcome([]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    const sourceCard = await screen.findByRole("article", {
+      name: "editable-skills",
+    });
+    await user.click(
+      within(sourceCard).getByRole("button", {
+        name: "删除 Source editable-skills",
+      }),
+    );
+
+    expect(client.createSourceRemovalPlan).toHaveBeenCalledWith(
+      "source-editable",
+    );
+    expect(
+      screen.getByRole("heading", { name: "删除 Source editable-skills" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "失去更新来源的 Bundle" }))
+      .toHaveTextContent("example-bundle");
+    expect(screen.getByText(/本地 Bundle、current 内容和 Mount 都会保留/))
+      .toBeInTheDocument();
+    expect(screen.getByText(/Editable Local 原目录不会被删除/))
+      .toBeInTheDocument();
+    expect(screen.getByText("/Users/test/editable/skills")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "继续删除" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "确认永久删除" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "确认删除 Source" }),
+    );
+
+    expect(client.confirmRemovalPlan).toHaveBeenCalledWith("removal-plan-1");
+    expect(
+      await screen.findByRole("heading", { name: "安装 Skill" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("article", { name: "editable-skills" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    expect(
+      screen.getByLabelText("Bundle 更新状态：没有更新来源"),
+    ).toBeInTheDocument();
+  });
+
+  it("Source 删除预览返回时调用真实 discard 并回到 Source Catalog", async () => {
+    const user = userEvent.setup();
+    let finishDiscard: ((outcome: UiOutcome) => void) | undefined;
+    const initial = inventoryOutcome([]);
+    const source = createSource();
+    const client = createClient(initial);
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([source]),
+    );
+    vi.mocked(client.createSourceRemovalPlan).mockResolvedValue({
+      type: "removalPlan",
+      plan: createRemovalPlan({
+        kind: "source",
+        targetId: source.id,
+        targetDisplayName: source.displayName,
+        members: [],
+        mounts: [],
+        affectedBundles: [],
+        preservedSource: null,
+        managedDirectory: null,
+        preservedExternalPaths: [],
+      }),
+    });
+    vi.mocked(client.discardRemovalPlan).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishDiscard = resolve;
+        }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(
+      within(
+        await screen.findByRole("article", { name: source.displayName }),
+      ).getByRole("button", {
+        name: `删除 Source ${source.displayName}`,
+      }),
+    );
+    const back = await screen.findByRole("button", {
+      name: "返回 Source 列表",
+    });
+    const confirm = screen.getByRole("button", { name: "确认删除 Source" });
+    await user.click(back);
+
+    expect(client.discardRemovalPlan).toHaveBeenCalledWith("removal-plan-1");
+    expect(back).toBeDisabled();
+    expect(confirm).toBeDisabled();
+    await user.click(back);
+    expect(client.discardRemovalPlan).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishDiscard?.(sourceDiscoveryOutcome([source]));
+    });
+    expect(
+      screen.getByRole("article", { name: source.displayName }),
+    ).toBeInTheDocument();
+  });
+
+  it("没有受管 Skill 时仍可移除 Project，并展示将移除的 project Mount", async () => {
+    const user = userEvent.setup();
+    const projectMount = createMount({
+      id: "mount-project",
+      scope: "project",
+      projectId: "project-1",
+      projectDisplayName: "SkillYard",
+      targetPath: "/tmp/SkillYard/.codex/skills/example",
+    });
+    const initial = inventoryOutcome([], null, {
+      projects: [
+        {
+          id: "project-1",
+          displayName: "SkillYard",
+          rootPath: "/tmp/SkillYard",
+        },
+      ],
+      mounts: [projectMount],
+    });
+    const client = createClient(initial);
+    vi.mocked(client.createProjectRemovalPlan).mockResolvedValue({
+      type: "removalPlan",
+      plan: createRemovalPlan({
+        kind: "project",
+        targetId: "project-1",
+        targetDisplayName: "SkillYard",
+        members: [],
+        mounts: [projectMount],
+        affectedBundles: [],
+        preservedSource: null,
+        managedDirectory: null,
+        preservedExternalPaths: ["/tmp/SkillYard"],
+        warnings: [],
+      }),
+    });
+    vi.mocked(client.confirmRemovalPlan).mockResolvedValue(
+      inventoryOutcome([createManagedEntry()]),
+    );
+    render(<App client={client} />);
+
+    expect(
+      await screen.findAllByRole("button", { name: "移除项目 SkillYard" }),
+    ).toHaveLength(1);
+    await user.click(
+      screen.getByRole("button", { name: "移除项目 SkillYard" }),
+    );
+
+    expect(client.createProjectRemovalPlan).toHaveBeenCalledWith("project-1");
+    expect(
+      screen.getByRole("heading", { name: "移除项目 SkillYard" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "将移除的 Mount" }))
+      .toHaveTextContent("Codex · 项目 · SkillYard");
+    expect(screen.getByText(/不会删除 Bundle 或 Skill/)).toBeInTheDocument();
+    expect(screen.getByText(/不会删除项目目录中的未知内容/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "确认移除项目" }));
+    expect(client.confirmRemovalPlan).toHaveBeenCalledWith("removal-plan-1");
+    expect(
+      await screen.findByRole("heading", { name: "Skill 清单" }),
+    ).toBeInTheDocument();
+  });
+
+  it("确认失败后重读唯一状态，并把 Bundle 危险确认重置到第一步", async () => {
+    const user = userEvent.setup();
+    const removalOutcome: Extract<UiOutcome, { type: "removalPlan" }> = {
+      type: "removalPlan",
+      plan: createRemovalPlan(),
+    };
+    const client = createClient(removalOutcome);
+    vi.mocked(client.confirmRemovalPlan).mockRejectedValue({
+      code: "lifecycleError",
+      message: "删除状态需要重新读取",
+    });
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "继续删除" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "确认永久删除" }),
+    );
+
+    expect(client.confirmRemovalPlan).toHaveBeenCalledTimes(1);
+    expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "删除状态需要重新读取",
+    );
+    expect(
+      screen.getByRole("button", { name: "继续删除" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "确认永久删除" }),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -2801,6 +4585,7 @@ function createInstallPlan(
     inputPath: "/tmp/example",
     bundleDisplayName: "example",
     candidates: [createInstallCandidate()],
+    updateImpact: null,
     warnings: [],
     willMount: false,
     createdAt: 1,
@@ -2823,6 +4608,134 @@ function createInstallCandidate(
     defaultSelected: true,
     targetDirectory:
       "/tmp/central/bundles/example/current/members/example",
+    ...overrides,
+  };
+}
+
+function createBundleUpdateBatchPlan(
+  overrides: Partial<BundleUpdateBatchPlan> = {},
+): BundleUpdateBatchPlan {
+  return {
+    id: "update-batch-plan-1",
+    items: [
+      createBundleUpdateBatchPlanItem(),
+      createBundleUpdateBatchPlanItem({
+        id: "item-beta",
+        bundleId: "bundle-beta",
+        bundleDisplayName: "Beta",
+        installPlan: createInstallPlan({
+          id: "child-beta",
+          mode: "update",
+          inputKind: "github",
+          bundleDisplayName: "Beta",
+          updateImpact: {
+            newCandidateIds: [],
+            existingMounts: [],
+            upstreamUrl: "https://github.com/example/beta",
+          },
+        }),
+      }),
+    ],
+    createdAt: 1,
+    expiresAt: 2,
+    ...overrides,
+  };
+}
+
+function createBundleUpdateBatchPlanItem(
+  overrides: Partial<BundleUpdateBatchPlan["items"][number]> = {},
+): BundleUpdateBatchPlan["items"][number] {
+  return {
+    id: "item-alpha",
+    bundleId: "bundle-alpha",
+    bundleDisplayName: "Alpha",
+    disposition: "ready",
+    installPlan: createInstallPlan({
+      id: "child-alpha",
+      mode: "update",
+      inputKind: "github",
+      bundleDisplayName: "Alpha",
+      updateImpact: {
+        newCandidateIds: [],
+        existingMounts: [],
+        upstreamUrl: "https://github.com/example/alpha",
+      },
+    }),
+    errorSummary: null,
+    ...overrides,
+  };
+}
+
+function createBundleUpdateBatchResult(
+  overrides: Partial<BundleUpdateBatchResult> = {},
+): BundleUpdateBatchResult {
+  return {
+    id: "update-batch-1",
+    status: "completed",
+    items: [
+      createBundleUpdateBatchResultItem(),
+      createBundleUpdateBatchResultItem({
+        id: "item-beta",
+        bundleId: "bundle-beta",
+        bundleDisplayName: "Beta",
+      }),
+    ],
+    confirmedAt: 1,
+    updatedAt: 2,
+    ...overrides,
+  };
+}
+
+function createBundleUpdateBatchResultItem(
+  overrides: Partial<BundleUpdateBatchResult["items"][number]> = {},
+): BundleUpdateBatchResult["items"][number] {
+  return {
+    id: "item-alpha",
+    bundleId: "bundle-alpha",
+    bundleDisplayName: "Alpha",
+    status: "succeeded",
+    errorSummary: null,
+    ...overrides,
+  };
+}
+
+function createRemovalPlan(
+  overrides: Partial<RemovalPlan> = {},
+): RemovalPlan {
+  return {
+    id: "removal-plan-1",
+    kind: "bundle",
+    targetId: "bundle-1",
+    targetDisplayName: "example-bundle",
+    members: [
+      { id: "member-1", skillName: "example" },
+      { id: "member-2", skillName: "example-tools" },
+    ],
+    mounts: [
+      createMount(),
+      createMount({
+        id: "mount-project",
+        memberId: "member-2",
+        skillName: "example-tools",
+        appId: "claudeCode",
+        scope: "project",
+        projectId: "project-1",
+        projectDisplayName: "SkillYard",
+        targetPath: "/tmp/SkillYard/.claude/skills/example-tools",
+      }),
+    ],
+    affectedBundles: [],
+    preservedSource: {
+      id: "source-1",
+      displayName: "anthropics/skills",
+      kind: "github",
+      locator: "https://github.com/anthropics/skills",
+    },
+    managedDirectory: "/tmp/central/bundles/bundle-1",
+    preservedExternalPaths: ["/Users/test/editable/example"],
+    warnings: ["删除成功后没有回滚入口"],
+    createdAt: 1,
+    expiresAt: 2,
     ...overrides,
   };
 }
@@ -2899,6 +4812,17 @@ function createClient(startup: UiOutcome): SkillYardClient {
     getStartupState: vi.fn().mockResolvedValue(startup),
     startInitialScan: vi.fn(),
     refreshLocalInventory: vi.fn(),
+    checkBundleUpdates: vi.fn(),
+    checkEditableLocalBundle: vi.fn(),
+    createBundleUpdateBatchPlan: vi.fn(),
+    confirmBundleUpdateBatchPlan: vi.fn(),
+    discardBundleUpdateBatchPlan: vi.fn(),
+    acknowledgeBundleUpdateBatchResult: vi.fn(),
+    createProjectRemovalPlan: vi.fn(),
+    createSourceRemovalPlan: vi.fn(),
+    createBundleRemovalPlan: vi.fn(),
+    confirmRemovalPlan: vi.fn(),
+    discardRemovalPlan: vi.fn(),
     openSourceDiscovery: vi.fn().mockResolvedValue(sourceDiscoveryOutcome()),
     searchSkillsSh: vi.fn(),
     reloadGithubSource: vi.fn(),
@@ -2908,6 +4832,8 @@ function createClient(startup: UiOutcome): SkillYardClient {
     confirmSourceAssociationPlan: vi.fn(),
     discardSourceAssociationPlan: vi.fn(),
     createGithubInstallPlan: vi.fn(),
+    createBundleUpdatePlan: vi.fn(),
+    chooseBundleReplacementPlan: vi.fn(),
     createUrlInstallPlan: vi.fn(),
     discardInstallPlan: vi.fn().mockResolvedValue(undefined),
     chooseFolderInstallPlan: vi.fn(),
@@ -2926,6 +4852,51 @@ function createClient(startup: UiOutcome): SkillYardClient {
   };
 }
 
+function inventoryWithTwoAvailableUpdates(): Extract<
+  UiOutcome,
+  { type: "inventory" }
+> {
+  return inventoryOutcome(
+    [
+      createManagedEntry({
+        id: "managed:alpha",
+        memberId: "member-alpha",
+        bundleId: "bundle-alpha",
+        bundleDisplayName: "Alpha",
+        skillName: "alpha",
+      }),
+      createManagedEntry({
+        id: "managed:beta",
+        memberId: "member-beta",
+        bundleId: "bundle-beta",
+        bundleDisplayName: "Beta",
+        skillName: "beta",
+      }),
+    ],
+    null,
+    {
+      bundleUpdates: [
+        {
+          bundleId: "bundle-alpha",
+          status: "available",
+          action: "update",
+          checkedAt: 1,
+          message: "Alpha 可更新",
+          upstreamUrl: "https://github.com/example/alpha",
+        },
+        {
+          bundleId: "bundle-beta",
+          status: "available",
+          action: "update",
+          checkedAt: 1,
+          message: "Beta 可更新",
+          upstreamUrl: "https://github.com/example/beta",
+        },
+      ],
+    },
+  );
+}
+
 function inventoryOutcome(
   entries: InventoryObservation[],
   lastLocalRefresh: Extract<UiOutcome, { type: "inventory" }>["lastLocalRefresh"] = null,
@@ -2941,6 +4912,7 @@ function inventoryOutcome(
     recoveryIssues: [],
     projects: [],
     mounts: [],
+    bundleUpdates: [],
     ...overrides,
   };
 }

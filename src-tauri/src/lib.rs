@@ -1,6 +1,7 @@
 //! SkillYard 的内部 Rust Lifecycle Core。
 
 mod application;
+mod bundle_update_batch;
 mod commands;
 mod content;
 mod domain;
@@ -9,6 +10,7 @@ mod github_source;
 mod lifecycle;
 mod mount_lifecycle;
 mod paths;
+mod removal;
 mod scanner;
 mod skills_sh;
 mod source_archive;
@@ -19,15 +21,20 @@ mod takeover;
 
 pub use application::SkillYardApplication;
 pub use domain::{
-    BatchMountDisposition, BatchMountPlan, BatchMountPlanItem, BatchMountRequest, InstallCandidate,
-    InstallInputKind, InstallMode, InstallPlan, InventoryItem, InventoryLocationKind,
-    InventoryObservation, LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind,
-    ManagementKind, MergeContentChoice, MountHealth, MountOperation, MountPlan, MountPlanPurpose,
-    MountScope, MountSummary, PlatformInfo, ProjectSummary, RecoveryIssue, ScanIssue,
-    ScanIssueCode, ScanRootKey, SkillMetadataStatus, SkillsShSearchMember, SkillsShSearchSource,
-    SourceAssociationConflict, SourceAssociationMember, SourceAssociationMemberChoice,
-    SourceAssociationMode, SourceAssociationPlan, SourceCatalogMemberSummary, SourceCatalogStatus,
-    SourceKind, SourceMemberMappingChoice, SourceRefChangePlan, SourceSummary, SupportedAppId,
+    BatchMountDisposition, BatchMountPlan, BatchMountPlanItem, BatchMountRequest,
+    BundleUpdateAction, BundleUpdateBatchPlan, BundleUpdateBatchPlanItem,
+    BundleUpdateBatchPlanItemDisposition, BundleUpdateBatchResult, BundleUpdateBatchResultItem,
+    BundleUpdateBatchResultItemStatus, BundleUpdateBatchResultStatus, BundleUpdateImpact,
+    BundleUpdateStatus, BundleUpdateSummary, InstallCandidate, InstallInputKind, InstallMode,
+    InstallPlan, InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
+    ManagementEvidence, ManagementEvidenceKind, ManagementKind, MergeContentChoice, MountHealth,
+    MountOperation, MountPlan, MountPlanPurpose, MountScope, MountSummary, PlatformInfo,
+    ProjectSummary, RecoveryIssue, RemovalBundleSummary, RemovalKind, RemovalMemberSummary,
+    RemovalPlan, RemovalPreservedSource, ScanIssue, ScanIssueCode, ScanRootKey,
+    SkillMetadataStatus, SkillsShSearchMember, SkillsShSearchSource, SourceAssociationConflict,
+    SourceAssociationMember, SourceAssociationMemberChoice, SourceAssociationMode,
+    SourceAssociationPlan, SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind,
+    SourceMemberMappingChoice, SourceRefChangePlan, SourceSummary, SupportedAppId,
     TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin,
     TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest, UiIntent, UiOutcome,
 };
@@ -56,12 +63,20 @@ pub fn run() {
             commands::get_startup_state,
             commands::start_initial_scan,
             commands::refresh_local_inventory,
+            commands::check_bundle_updates,
+            commands::check_editable_local_bundle,
             commands::open_source_discovery,
             commands::search_skills_sh,
             commands::reload_github_source,
             commands::add_github_source,
             commands::confirm_source_ref_change,
             commands::create_github_install_plan,
+            commands::create_bundle_update_plan,
+            commands::create_bundle_update_batch_plan,
+            commands::confirm_bundle_update_batch_plan,
+            commands::discard_bundle_update_batch_plan,
+            commands::acknowledge_bundle_update_batch_result,
+            commands::choose_bundle_replacement_plan,
             commands::choose_folder_install_plan,
             commands::choose_archive_install_plan,
             commands::create_url_install_plan,
@@ -79,7 +94,12 @@ pub fn run() {
             commands::create_repair_mount_plan,
             commands::confirm_mount_plan,
             commands::create_batch_mount_plan,
-            commands::confirm_batch_mount_plan
+            commands::confirm_batch_mount_plan,
+            commands::create_project_removal_plan,
+            commands::create_source_removal_plan,
+            commands::create_bundle_removal_plan,
+            commands::confirm_removal_plan,
+            commands::discard_removal_plan
         ])
         .run(tauri::generate_context!())
         .expect("SkillYard.app 运行失败");

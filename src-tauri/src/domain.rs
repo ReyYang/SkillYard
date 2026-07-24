@@ -7,6 +7,10 @@ pub enum UiIntent {
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
+    CheckBundleUpdates,
+    CheckEditableLocalBundle {
+        bundle_id: String,
+    },
     OpenSourceDiscovery,
     SearchSkillsSh {
         query: String,
@@ -35,6 +39,48 @@ pub enum UiIntent {
     },
     CreateGithubInstallPlan {
         source_id: String,
+    },
+    CreateBundleUpdatePlan {
+        bundle_id: String,
+    },
+    CreateBundleUpdateBatchPlan,
+    ConfirmBundleUpdateBatchPlan {
+        #[serde(rename = "planId")]
+        plan_id: String,
+        #[serde(rename = "selectedItemIds")]
+        selected_item_ids: Vec<String>,
+    },
+    DiscardBundleUpdateBatchPlan {
+        #[serde(rename = "planId")]
+        plan_id: String,
+    },
+    AcknowledgeBundleUpdateBatch {
+        #[serde(rename = "batchId")]
+        batch_id: String,
+    },
+    CreateProjectRemovalPlan {
+        #[serde(rename = "projectId")]
+        project_id: String,
+    },
+    CreateSourceRemovalPlan {
+        #[serde(rename = "sourceId")]
+        source_id: String,
+    },
+    CreateBundleRemovalPlan {
+        #[serde(rename = "bundleId")]
+        bundle_id: String,
+    },
+    ConfirmRemovalPlan {
+        #[serde(rename = "planId")]
+        plan_id: String,
+    },
+    DiscardRemovalPlan {
+        #[serde(rename = "planId")]
+        plan_id: String,
+    },
+    CreateBundleReplacementPlan {
+        bundle_id: String,
+        input_path: String,
     },
     ConfirmInstallPlan {
         plan_id: String,
@@ -512,6 +558,8 @@ pub struct InstallPlan {
     pub candidates: Vec<InstallCandidate>,
     pub warnings: Vec<String>,
     pub will_mount: bool,
+    /// 只有完整 Bundle Update 才展示新增成员、既有挂载和上游入口。
+    pub update_impact: Option<BundleUpdateImpact>,
     pub created_at: i64,
     pub expires_at: i64,
 }
@@ -531,6 +579,16 @@ pub enum InstallInputKind {
 pub enum InstallMode {
     Create,
     Supplement,
+    Update,
+}
+
+/// 更新确认页只展示用户关心的 Bundle 级影响，不暴露内部保留成员。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleUpdateImpact {
+    pub new_candidate_ids: Vec<String>,
+    pub existing_mounts: Vec<MountSummary>,
+    pub upstream_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -631,6 +689,177 @@ pub struct SourceSummary {
     pub bundle_id: Option<String>,
     pub adopted_marker: Option<String>,
     pub members: Vec<SourceCatalogMemberSummary>,
+}
+
+/// 状态描述 Bundle 与更新来源的关系，不代表成员级版本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BundleUpdateStatus {
+    NotChecked,
+    Available,
+    UpToDate,
+    UnableToCheck,
+    Manual,
+    NoSource,
+    SourceUnavailable,
+}
+
+impl BundleUpdateStatus {
+    pub(crate) fn as_stored_str(self) -> Option<&'static str> {
+        match self {
+            Self::NotChecked => Some("not_checked"),
+            Self::Available => Some("available"),
+            Self::UpToDate => Some("up_to_date"),
+            Self::UnableToCheck => Some("unable_to_check"),
+            Self::SourceUnavailable => Some("source_unavailable"),
+            Self::Manual | Self::NoSource => None,
+        }
+    }
+
+    pub(crate) fn from_stored_str(value: &str) -> Option<Self> {
+        match value {
+            "not_checked" => Some(Self::NotChecked),
+            "available" => Some(Self::Available),
+            "up_to_date" => Some(Self::UpToDate),
+            "unable_to_check" => Some(Self::UnableToCheck),
+            "source_unavailable" => Some(Self::SourceUnavailable),
+            _ => None,
+        }
+    }
+}
+
+/// Action 直接告诉界面当前 Bundle 能进入哪一种已确认的 1.0 更新入口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BundleUpdateAction {
+    Update,
+    ImportReplacement,
+    CheckEditableLocal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleUpdateSummary {
+    pub bundle_id: String,
+    pub status: BundleUpdateStatus,
+    pub action: Option<BundleUpdateAction>,
+    pub checked_at: Option<i64>,
+    pub message: String,
+    pub upstream_url: Option<String>,
+}
+
+/// “全部更新”只协调普通 Bundle Update Plan，不形成跨 Bundle 生命周期事务。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleUpdateBatchPlan {
+    pub id: String,
+    pub items: Vec<BundleUpdateBatchPlanItem>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleUpdateBatchPlanItem {
+    pub id: String,
+    pub bundle_id: String,
+    pub bundle_display_name: String,
+    pub disposition: BundleUpdateBatchPlanItemDisposition,
+    pub install_plan: Option<InstallPlan>,
+    pub error_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BundleUpdateBatchPlanItemDisposition {
+    Ready,
+    PreparationFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleUpdateBatchResult {
+    pub id: String,
+    pub status: BundleUpdateBatchResultStatus,
+    pub items: Vec<BundleUpdateBatchResultItem>,
+    pub confirmed_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BundleUpdateBatchResultStatus {
+    Completed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleUpdateBatchResultItem {
+    pub id: String,
+    pub bundle_id: String,
+    pub bundle_display_name: String,
+    pub status: BundleUpdateBatchResultItemStatus,
+    pub error_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BundleUpdateBatchResultItemStatus {
+    Succeeded,
+    Failed,
+    Blocked,
+    NotExecuted,
+}
+
+/// 三种移除共享一份 Plan；kind 决定确认后的唯一生产路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemovalKind {
+    Project,
+    Source,
+    Bundle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalMemberSummary {
+    pub id: String,
+    pub skill_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalBundleSummary {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalPreservedSource {
+    pub id: String,
+    pub display_name: String,
+    pub kind: SourceKind,
+    pub locator: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalPlan {
+    pub id: String,
+    pub kind: RemovalKind,
+    pub target_id: String,
+    pub target_display_name: String,
+    pub members: Vec<RemovalMemberSummary>,
+    pub mounts: Vec<MountSummary>,
+    pub affected_bundles: Vec<RemovalBundleSummary>,
+    pub preserved_source: Option<RemovalPreservedSource>,
+    pub managed_directory: Option<String>,
+    pub preserved_external_paths: Vec<String>,
+    pub warnings: Vec<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 /// 同一份关联 Plan 用 mode 区分直接关联和归并，不建立第二套确认协议。
@@ -996,6 +1225,7 @@ pub enum UiOutcome {
         recovery_issues: Vec<RecoveryIssue>,
         projects: Vec<ProjectSummary>,
         mounts: Vec<MountSummary>,
+        bundle_updates: Vec<BundleUpdateSummary>,
     },
     SourceDiscovery {
         sources: Vec<SourceSummary>,
@@ -1011,6 +1241,15 @@ pub enum UiOutcome {
     },
     InstallPlan {
         plan: InstallPlan,
+    },
+    BundleUpdateBatchPlan {
+        plan: BundleUpdateBatchPlan,
+    },
+    BundleUpdateBatchResult {
+        result: BundleUpdateBatchResult,
+    },
+    RemovalPlan {
+        plan: RemovalPlan,
     },
     InstallPlanDiscarded,
     MountPlan {
@@ -1140,12 +1379,14 @@ mod tests {
             }],
             projects: Vec::new(),
             mounts: Vec::new(),
+            bundle_updates: Vec::new(),
         };
 
         let value = serde_json::to_value(outcome).expect("应序列化 UI 状态");
         assert_eq!(value["type"], "inventory");
         assert_eq!(value["scanCompletedAt"], 10);
         assert_eq!(value["recoveryIssues"][0]["bundleDisplayName"], "example");
+        assert_eq!(value["bundleUpdates"], serde_json::json!([]));
         assert!(value.get("scan_completed_at").is_none());
         assert!(value.get("recovery_issues").is_none());
 
@@ -1249,6 +1490,7 @@ mod tests {
             candidates: Vec::new(),
             warnings: Vec::new(),
             will_mount: false,
+            update_impact: None,
             created_at: 10,
             expires_at: 20,
         };
@@ -1277,6 +1519,108 @@ mod tests {
             serde_json::to_value(UiOutcome::InstallPlanDiscarded).expect("应序列化放弃完成状态"),
             serde_json::json!({"type": "installPlanDiscarded"})
         );
+    }
+
+    #[test]
+    fn bundle_update_batch_uses_the_exact_frontend_contract() {
+        let child = InstallPlan {
+            id: "child-plan".to_owned(),
+            input_kind: InstallInputKind::EditableLocal,
+            mode: InstallMode::Update,
+            input_path: "/tmp/editable".to_owned(),
+            bundle_display_name: "Editable".to_owned(),
+            candidates: Vec::new(),
+            warnings: Vec::new(),
+            will_mount: false,
+            update_impact: Some(BundleUpdateImpact {
+                new_candidate_ids: Vec::new(),
+                existing_mounts: Vec::new(),
+                upstream_url: None,
+            }),
+            created_at: 10,
+            expires_at: 20,
+        };
+        let plan = UiOutcome::BundleUpdateBatchPlan {
+            plan: BundleUpdateBatchPlan {
+                id: "batch-plan".to_owned(),
+                items: vec![BundleUpdateBatchPlanItem {
+                    id: "batch-item".to_owned(),
+                    bundle_id: "bundle".to_owned(),
+                    bundle_display_name: "Bundle".to_owned(),
+                    disposition: BundleUpdateBatchPlanItemDisposition::Ready,
+                    install_plan: Some(child),
+                    error_summary: None,
+                }],
+                created_at: 10,
+                expires_at: 20,
+            },
+        };
+        let plan_value = serde_json::to_value(plan).expect("应序列化 Batch Update Plan");
+        assert_eq!(plan_value["type"], "bundleUpdateBatchPlan");
+        assert_eq!(
+            plan_value["plan"]["items"][0]["bundleDisplayName"],
+            "Bundle"
+        );
+        assert_eq!(plan_value["plan"]["items"][0]["disposition"], "ready");
+        assert_eq!(
+            plan_value["plan"]["items"][0]["installPlan"]["mode"],
+            "update"
+        );
+
+        assert_eq!(
+            serde_json::to_value(UiIntent::ConfirmBundleUpdateBatchPlan {
+                plan_id: "batch-plan".to_owned(),
+                selected_item_ids: vec!["batch-item".to_owned()],
+            })
+            .expect("应序列化 Batch Update 确认"),
+            serde_json::json!({
+                "type": "confirmBundleUpdateBatchPlan",
+                "planId": "batch-plan",
+                "selectedItemIds": ["batch-item"]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UiIntent::DiscardBundleUpdateBatchPlan {
+                plan_id: "batch-plan".to_owned(),
+            })
+            .expect("应序列化 Batch Update 放弃"),
+            serde_json::json!({
+                "type": "discardBundleUpdateBatchPlan",
+                "planId": "batch-plan"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UiIntent::AcknowledgeBundleUpdateBatch {
+                batch_id: "batch-plan".to_owned(),
+            })
+            .expect("应序列化 Batch Update 结果确认"),
+            serde_json::json!({
+                "type": "acknowledgeBundleUpdateBatch",
+                "batchId": "batch-plan"
+            })
+        );
+
+        let result = UiOutcome::BundleUpdateBatchResult {
+            result: BundleUpdateBatchResult {
+                id: "batch-plan".to_owned(),
+                status: BundleUpdateBatchResultStatus::Completed,
+                items: vec![BundleUpdateBatchResultItem {
+                    id: "batch-item".to_owned(),
+                    bundle_id: "bundle".to_owned(),
+                    bundle_display_name: "Bundle".to_owned(),
+                    status: BundleUpdateBatchResultItemStatus::Succeeded,
+                    error_summary: None,
+                }],
+                confirmed_at: 30,
+                updated_at: 40,
+            },
+        };
+        let result_value = serde_json::to_value(result).expect("应序列化 Batch Update Result");
+        assert_eq!(result_value["type"], "bundleUpdateBatchResult");
+        assert_eq!(result_value["result"]["status"], "completed");
+        assert_eq!(result_value["result"]["items"][0]["status"], "succeeded");
+        assert_eq!(result_value["result"]["confirmedAt"], 30);
+        assert_eq!(result_value["result"]["updatedAt"], 40);
     }
 
     #[test]

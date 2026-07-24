@@ -12,12 +12,13 @@ use rusqlite::{
 use thiserror::Error;
 
 use crate::domain::{
-    BatchMountDisposition, InventoryItem, InventoryLocationKind, InventoryObservation,
-    LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
-    MountOperation, MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue,
-    ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus,
-    SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind, SourceRefChangePlan,
-    SourceSummary, SupportedAppId, SupportedAppSummary, TakeoverPlan, UiOutcome,
+    BatchMountDisposition, BundleUpdateAction, BundleUpdateStatus, BundleUpdateSummary,
+    InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
+    ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth, MountOperation,
+    MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue, ScanIssue,
+    ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SourceCatalogMemberSummary,
+    SourceCatalogStatus, SourceKind, SourceRefChangePlan, SourceSummary, SupportedAppId,
+    SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -58,6 +59,16 @@ const MIGRATIONS: &[(i64, &str)] = &[
         16,
         include_str!("../migrations/0016_source_association_transactions.sql"),
     ),
+    (
+        17,
+        include_str!("../migrations/0017_bundle_update_checks.sql"),
+    ),
+    (18, include_str!("../migrations/0018_bundle_update.sql")),
+    (
+        19,
+        include_str!("../migrations/0019_bundle_update_batches.sql"),
+    ),
+    (20, include_str!("../migrations/0020_removals.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -84,6 +95,8 @@ pub enum StorageError {
     UnknownSourceCatalogStatus(String),
     #[error("SQLite 中包含未知 Source kind：{0}")]
     UnknownSourceKind(String),
+    #[error("SQLite 中包含未知 Bundle 更新检查状态：{0}")]
+    UnknownBundleUpdateStatus(String),
     #[error("Source Catalog 成员 metadata 无法解析：{0}")]
     InvalidSourceCatalogMetadata(#[source] serde_json::Error),
     #[error("无法保存 Source：{0}")]
@@ -138,6 +151,8 @@ pub enum StorageError {
     InstallPlanNotFound,
     #[error("安装 Plan 已经使用，不能重复确认")]
     InstallPlanConsumed,
+    #[error("安装 Plan 由“全部更新”协调器持有，不能单独确认或放弃")]
+    InstallPlanOwnedByBundleUpdateBatch,
     #[error("安装 Plan 已过期，请重新生成")]
     InstallPlanExpired,
     #[error("安装 Plan 没有可保存的候选成员")]
@@ -158,12 +173,38 @@ pub enum StorageError {
     InvalidPlanValidationErrors(#[source] serde_json::Error),
     #[error("安装 Plan 中包含非法布尔值：{0}")]
     InvalidPlanBoolean(i64),
+    #[error("当前没有可用的“全部更新”计划")]
+    BundleUpdateBatchNotFound,
+    #[error("已有一份尚未处理的“全部更新”计划")]
+    BundleUpdateBatchAlreadyOpen,
+    #[error("“全部更新”计划已经确认，不能重复修改")]
+    BundleUpdateBatchConsumed,
+    #[error("“全部更新”计划已过期，请重新生成")]
+    BundleUpdateBatchExpired,
+    #[error("“全部更新”的 Bundle 选择或顺序无效")]
+    InvalidBundleUpdateBatchSelection,
+    #[error("“全部更新”的持久化状态不一致")]
+    InvalidBundleUpdateBatch,
+    #[error("无法保存“全部更新”状态：{0}")]
+    SaveBundleUpdateBatch(#[source] rusqlite::Error),
+    #[error("无法读取“全部更新”状态：{0}")]
+    ReadBundleUpdateBatch(#[source] rusqlite::Error),
     #[error("无法保存生命周期事务：{0}")]
     SaveLifecycleTransaction(#[source] rusqlite::Error),
     #[error("无法读取生命周期事务：{0}")]
     ReadLifecycleTransaction(#[source] rusqlite::Error),
     #[error("无法读取人工恢复状态：{0}")]
     ReadRecoveryIssues(#[source] rusqlite::Error),
+    #[error("Removal Plan 未签发、已使用或已经不存在")]
+    RemovalPlanNotFound,
+    #[error("Removal Plan 已过期，请重新生成")]
+    RemovalPlanExpired,
+    #[error("Removal Plan 或事务状态已经变化，请重新预览")]
+    RemovalStateConflict,
+    #[error("无法保存 Removal 状态：{0}")]
+    SaveRemoval(#[source] rusqlite::Error),
+    #[error("无法读取 Removal 状态：{0}")]
+    ReadRemoval(#[source] rusqlite::Error),
     #[error("无法保存受管 Bundle：{0}")]
     SaveManagedBundle(#[source] rusqlite::Error),
     #[error("受管 Bundle 的持久化状态与事务计划不一致")]
@@ -382,10 +423,13 @@ pub struct StoredInstallPlan {
     pub source_tracked_ref: Option<String>,
     pub source_catalog_generation: Option<i64>,
     pub source_marker: Option<String>,
+    pub expected_source_marker: Option<String>,
     pub expected_current_target: Option<String>,
     pub expected_adopted_marker: Option<String>,
     pub bundle_id: String,
     pub bundle_display_name: String,
+    pub warnings: Vec<String>,
+    pub created_at: i64,
     pub expires_at: i64,
     pub status: String,
     pub candidates: Vec<StoredInstallCandidate>,
@@ -399,6 +443,8 @@ pub struct StoredInstallCandidate {
     pub skill_name: Option<String>,
     pub skill_description: Option<String>,
     pub content_fingerprint: Option<String>,
+    /// 已安装成员的旧 fingerprint 用于更新前校验，不能当作可回滚版本。
+    pub previous_content_fingerprint: Option<String>,
     pub selectable: bool,
     /// 已安装成员属于最终完整集合，但不能再次作为用户选择提交。
     pub preserve_existing: bool,
@@ -406,6 +452,64 @@ pub struct StoredInstallCandidate {
     pub warnings: Vec<String>,
     pub default_selected: bool,
     pub selected: bool,
+}
+
+/// Coordinator 复用 Inventory 的 GitHub Available 语义；Editable Local 必须显式检查。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredBundleUpdateEligibility {
+    pub source_id: String,
+    pub bundle_id: String,
+    pub bundle_display_name: String,
+    pub target_marker: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredBundleUpdateBatch {
+    pub id: String,
+    pub status: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub confirmed_at: Option<i64>,
+    pub updated_at: i64,
+    pub items: Vec<StoredBundleUpdateBatchItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredBundleUpdateBatchItem {
+    pub id: String,
+    pub source_id: String,
+    pub bundle_id: String,
+    pub display_name: String,
+    pub install_plan_id: Option<String>,
+    pub target_marker: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub display_order: i64,
+    pub confirmed_order: Option<i64>,
+}
+
+pub(crate) struct NewBundleUpdateBatchItem<'a> {
+    pub id: &'a str,
+    pub source_id: &'a str,
+    pub bundle_id: &'a str,
+    pub display_name: &'a str,
+    pub install_plan_id: Option<&'a str>,
+    pub target_marker: &'a str,
+    pub status: &'a str,
+    pub error: Option<&'a str>,
+}
+
+/// 只有 coordinator 持有的 batch/item 对才能消费对应 child Install Plan。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BundleUpdateBatchChildOwner<'a> {
+    pub batch_id: &'a str,
+    pub item_id: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BundleUpdateBatchChildOperation {
+    Confirm,
+    Discard,
 }
 
 pub struct NewInstallPlan<'a> {
@@ -421,6 +525,7 @@ pub struct NewInstallPlan<'a> {
     pub source_tracked_ref: Option<&'a str>,
     pub source_catalog_generation: Option<i64>,
     pub source_marker: Option<&'a str>,
+    pub expected_source_marker: Option<&'a str>,
     pub expected_current_target: Option<&'a str>,
     pub expected_adopted_marker: Option<&'a str>,
     pub bundle_id: &'a str,
@@ -437,6 +542,7 @@ pub struct NewInstallCandidate<'a> {
     pub skill_name: Option<&'a str>,
     pub skill_description: Option<&'a str>,
     pub content_fingerprint: Option<&'a str>,
+    pub previous_content_fingerprint: Option<&'a str>,
     pub selectable: bool,
     pub preserve_existing: bool,
     pub validation_errors: &'a [String],
@@ -458,10 +564,13 @@ struct RawStoredInstallPlan {
     source_tracked_ref: Option<String>,
     source_catalog_generation: Option<i64>,
     source_marker: Option<String>,
+    expected_source_marker: Option<String>,
     expected_current_target: Option<String>,
     expected_adopted_marker: Option<String>,
     bundle_id: String,
     bundle_display_name: String,
+    warnings_json: String,
+    created_at: i64,
     expires_at: i64,
     status: String,
 }
@@ -493,6 +602,17 @@ pub struct StoredGithubSource {
     pub tracked_ref: String,
 }
 
+/// Update Check 只读取已关联 GitHub Source 的稳定身份和现有采用基线。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredGithubBundleUpdateSource {
+    pub source_id: String,
+    pub bundle_id: String,
+    pub canonical_identity: String,
+    pub locator: String,
+    pub tracked_ref: String,
+    pub adopted_marker: Option<String>,
+}
+
 /// Lifecycle 组 Plan 时只接收同一个 SQLite 快照中的 Fresh Catalog 与本地关联状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSourceInstallSource {
@@ -504,6 +624,8 @@ pub struct StoredSourceInstallSource {
     pub display_name: String,
     pub locator: String,
     pub tracked_ref: Option<String>,
+    pub filesystem_device: Option<u64>,
+    pub filesystem_inode: Option<u64>,
     pub catalog_generation: i64,
     pub catalog_marker: String,
     pub catalog_members: Vec<StoredSourceInstallCatalogMember>,
@@ -528,6 +650,9 @@ pub struct StoredSourceInstallBundle {
     pub display_name: String,
     pub current_target: String,
     pub adopted_marker: Option<String>,
+    pub update_check_status: BundleUpdateStatus,
+    pub update_checked_marker: Option<String>,
+    pub update_checked_at: Option<i64>,
     pub members: Vec<StoredSourceInstallBundleMember>,
 }
 
@@ -658,6 +783,39 @@ pub struct StoredLifecycleTransaction {
     pub plan_id: String,
     pub bundle_id: String,
     pub member_id: String,
+    pub journal_path: String,
+    pub phase: String,
+    pub status: String,
+}
+
+pub(crate) struct NewRemovalPlan<'a> {
+    pub id: &'a str,
+    pub kind: &'a str,
+    pub target_id: &'a str,
+    pub payload_json: &'a str,
+    pub payload_sha256: &'a str,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredRemovalPlan {
+    pub id: String,
+    pub kind: String,
+    pub target_id: String,
+    pub payload_json: String,
+    pub payload_sha256: String,
+    pub status: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredRemovalTransaction {
+    pub id: String,
+    pub plan_id: String,
+    pub kind: String,
+    pub target_id: String,
     pub journal_path: String,
     pub phase: String,
     pub status: String,
@@ -1743,6 +1901,7 @@ impl Storage {
         let recovery_issues = self.read_recovery_issues()?;
         let projects = self.read_projects()?;
         let mounts = self.read_mount_summaries()?;
+        let bundle_updates = self.read_bundle_update_summaries()?;
         let last_local_refresh = refresh_at
             .map(|completed_at| {
                 Ok(LocalRefreshSummary {
@@ -1763,7 +1922,162 @@ impl Storage {
             recovery_issues,
             projects,
             mounts,
+            bundle_updates,
         }))
+    }
+
+    /// Inventory 直接给出每个本地 Bundle 的更新入口，不要求前端拼接 Source 状态。
+    pub fn read_bundle_update_summaries(&self) -> Result<Vec<BundleUpdateSummary>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT bundle.id, source.id, source.kind, source.locator,
+                        link.adopted_marker, link.update_check_status,
+                        link.update_checked_at, link.update_check_error
+                 FROM bundles AS bundle
+                 LEFT JOIN source_bundle_links AS link ON link.bundle_id = bundle.id
+                 LEFT JOIN sources AS source ON source.id = link.source_id
+                 ORDER BY bundle.display_name, bundle.id",
+            )
+            .map_err(StorageError::ReadSources)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            })
+            .map_err(StorageError::ReadSources)?;
+        let mut summaries = Vec::new();
+        for row in rows {
+            let (
+                bundle_id,
+                source_id,
+                kind,
+                locator,
+                adopted_marker,
+                stored_status,
+                checked_at,
+                check_error,
+            ) = row.map_err(StorageError::ReadSources)?;
+            let Some(source_id) = source_id else {
+                summaries.push(BundleUpdateSummary {
+                    bundle_id,
+                    status: BundleUpdateStatus::NoSource,
+                    action: None,
+                    checked_at: None,
+                    message: "没有更新来源".to_owned(),
+                    upstream_url: None,
+                });
+                continue;
+            };
+            let kind = kind.ok_or_else(|| StorageError::UnknownSourceKind("NULL".to_owned()))?;
+            let kind = SourceKind::from_str(&kind)
+                .ok_or_else(|| StorageError::UnknownSourceKind(kind.clone()))?;
+            let upstream_url = match kind {
+                SourceKind::Github | SourceKind::DirectUrl => locator,
+                SourceKind::Archive | SourceKind::EditableLocal => None,
+            };
+            let stored_status = stored_status
+                .ok_or_else(|| StorageError::UnknownBundleUpdateStatus("NULL".to_owned()))?;
+            let stored_status = BundleUpdateStatus::from_stored_str(&stored_status)
+                .ok_or_else(|| StorageError::UnknownBundleUpdateStatus(stored_status.clone()))?;
+
+            let (status, action, message) = match kind {
+                SourceKind::Github
+                    if adopted_marker.is_none()
+                        && stored_status == BundleUpdateStatus::NotChecked =>
+                {
+                    (
+                        BundleUpdateStatus::Available,
+                        Some(BundleUpdateAction::Update),
+                        "尚未建立上游基线，可以更新整个 Bundle".to_owned(),
+                    )
+                }
+                SourceKind::Github => {
+                    let action = if stored_status == BundleUpdateStatus::Available {
+                        Some(BundleUpdateAction::Update)
+                    } else {
+                        None
+                    };
+                    let message = match stored_status {
+                        BundleUpdateStatus::NotChecked => "尚未检查更新".to_owned(),
+                        BundleUpdateStatus::Available => "发现新的上游 commit".to_owned(),
+                        BundleUpdateStatus::UpToDate => "已是最新".to_owned(),
+                        BundleUpdateStatus::UnableToCheck => check_error
+                            .as_deref()
+                            .map(|error| format!("无法检查更新：{error}"))
+                            .unwrap_or_else(|| "无法检查更新".to_owned()),
+                        BundleUpdateStatus::SourceUnavailable => "更新来源当前不可用".to_owned(),
+                        BundleUpdateStatus::Manual | BundleUpdateStatus::NoSource => {
+                            return Err(StorageError::UnknownBundleUpdateStatus(
+                                stored_status
+                                    .as_stored_str()
+                                    .unwrap_or("derived")
+                                    .to_owned(),
+                            ));
+                        }
+                    };
+                    (stored_status, action, message)
+                }
+                SourceKind::Archive | SourceKind::DirectUrl => (
+                    BundleUpdateStatus::Manual,
+                    Some(BundleUpdateAction::ImportReplacement),
+                    "选择新的归档或文件来更新".to_owned(),
+                ),
+                SourceKind::EditableLocal if stored_status == BundleUpdateStatus::Available => (
+                    BundleUpdateStatus::Available,
+                    Some(BundleUpdateAction::Update),
+                    "发现尚未采用的本地改动".to_owned(),
+                ),
+                SourceKind::EditableLocal => {
+                    let message = match stored_status {
+                        BundleUpdateStatus::NotChecked => "尚未检查本地改动",
+                        BundleUpdateStatus::UpToDate => "已采用当前本地内容",
+                        BundleUpdateStatus::SourceUnavailable => "本地来源当前不可用",
+                        BundleUpdateStatus::UnableToCheck => "上次检查本地改动失败",
+                        BundleUpdateStatus::Available => unreachable!("Available 已单独处理"),
+                        BundleUpdateStatus::Manual | BundleUpdateStatus::NoSource => {
+                            return Err(StorageError::UnknownBundleUpdateStatus(
+                                stored_status
+                                    .as_stored_str()
+                                    .unwrap_or("derived")
+                                    .to_owned(),
+                            ));
+                        }
+                    };
+                    (
+                        stored_status,
+                        Some(BundleUpdateAction::CheckEditableLocal),
+                        message.to_owned(),
+                    )
+                }
+            };
+            let is_blocked = bundle_or_source_write_is_blocked(
+                &self.connection,
+                Some(&bundle_id),
+                Some(&source_id),
+            )?;
+            summaries.push(BundleUpdateSummary {
+                bundle_id,
+                status,
+                action: if is_blocked { None } else { action },
+                checked_at,
+                message: if is_blocked {
+                    format!("{message}；等待人工恢复")
+                } else {
+                    message
+                },
+                upstream_url,
+            });
+        }
+        Ok(summaries)
     }
 
     /// 发现页从一个 SQLite 快照读取 Source、Catalog 与已安装关系，不自行访问网络。
@@ -1904,6 +2218,371 @@ impl Storage {
             .ok_or(StorageError::SourceNotFound)
     }
 
+    /// 全局检查只遍历已经关联本地 Bundle 的 GitHub Source。
+    pub(crate) fn read_github_bundle_update_sources(
+        &self,
+    ) -> Result<Vec<StoredGithubBundleUpdateSource>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT source.id, link.bundle_id, source.canonical_identity,
+                        source.locator, source.tracked_ref, link.adopted_marker
+                 FROM sources AS source
+                 JOIN source_bundle_links AS link ON link.source_id = source.id
+                 WHERE source.kind = 'github'
+                 ORDER BY source.sort_order, source.id",
+            )
+            .map_err(StorageError::ReadSources)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(StoredGithubBundleUpdateSource {
+                    source_id: row.get(0)?,
+                    bundle_id: row.get(1)?,
+                    canonical_identity: row.get(2)?,
+                    locator: row.get(3)?,
+                    tracked_ref: row.get(4)?,
+                    adopted_marker: row.get(5)?,
+                })
+            })
+            .map_err(StorageError::ReadSources)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadSources)
+    }
+
+    /// 成功结果替换最近上游标识；失败方法则有意保留这个字段。
+    pub(crate) fn save_bundle_update_check_success(
+        &mut self,
+        source_id: &str,
+        bundle_id: &str,
+        status: BundleUpdateStatus,
+        upstream_marker: &str,
+        checked_at: i64,
+    ) -> Result<(), StorageError> {
+        let Some(status) = status.as_stored_str() else {
+            return Err(StorageError::InvalidSourceDefinition);
+        };
+        if !matches!(status, "available" | "up_to_date")
+            || source_id.is_empty()
+            || bundle_id.is_empty()
+            || upstream_marker.is_empty()
+            || checked_at < 0
+        {
+            return Err(StorageError::InvalidSourceDefinition);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        if bundle_or_source_write_is_blocked(&transaction, Some(bundle_id), Some(source_id))? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE source_bundle_links
+                 SET update_check_status = ?3,
+                     update_checked_marker = ?4,
+                     update_checked_at = ?5,
+                     update_check_error = NULL
+                 WHERE source_id = ?1 AND bundle_id = ?2",
+                params![source_id, bundle_id, status, upstream_marker, checked_at],
+            )
+            .map_err(StorageError::SaveSource)?;
+        if changed != 1 {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        transaction.commit().map_err(StorageError::SaveSource)?;
+        Ok(())
+    }
+
+    pub(crate) fn save_bundle_update_check_failure(
+        &mut self,
+        source_id: &str,
+        bundle_id: &str,
+        checked_at: i64,
+        error: &str,
+    ) -> Result<(), StorageError> {
+        if source_id.is_empty() || bundle_id.is_empty() || checked_at < 0 || error.is_empty() {
+            return Err(StorageError::InvalidSourceDefinition);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        if bundle_or_source_write_is_blocked(&transaction, Some(bundle_id), Some(source_id))? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE source_bundle_links
+                 SET update_check_status = 'unable_to_check',
+                     update_checked_at = ?3,
+                     update_check_error = ?4
+                 WHERE source_id = ?1 AND bundle_id = ?2",
+                params![source_id, bundle_id, checked_at, error],
+            )
+            .map_err(StorageError::SaveSource)?;
+        if changed != 1 {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        transaction.commit().map_err(StorageError::SaveSource)?;
+        Ok(())
+    }
+
+    /// Editable Local 检查在一个事务中替换 Catalog 并记录与 adopted marker 的比较结果。
+    pub(crate) fn save_editable_local_check_success(
+        &mut self,
+        expected: &StoredSourceInstallSource,
+        marker: &str,
+        checked_at: i64,
+        members: &[NewSourceCatalogMember<'_>],
+    ) -> Result<BundleUpdateStatus, StorageError> {
+        let bundle = expected
+            .bundle
+            .as_ref()
+            .ok_or(StorageError::SourceBundleStateConflict)?;
+        let expected_device = expected
+            .filesystem_device
+            .map(filesystem_identity_to_sql)
+            .transpose()?;
+        let expected_inode = expected
+            .filesystem_inode
+            .map(filesystem_identity_to_sql)
+            .transpose()?;
+        if expected.kind != SourceKind::EditableLocal.as_str()
+            || expected_device.is_none()
+            || expected_inode.is_none()
+            || marker.is_empty()
+            || checked_at < 0
+            || members.is_empty()
+        {
+            return Err(StorageError::InvalidSourceDefinition);
+        }
+        let encoded_members = members
+            .iter()
+            .map(|member| {
+                Ok((
+                    serde_json::to_string(member.validation_errors)
+                        .map_err(StorageError::SerializeSourceCatalogMetadata)?,
+                    serde_json::to_string(member.warnings)
+                        .map_err(StorageError::SerializeSourceCatalogMetadata)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSourceCatalog)?;
+        if bundle_or_source_write_is_blocked(&transaction, Some(&bundle.id), Some(&expected.id))? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
+        let source_state = transaction
+            .query_row(
+                "SELECT kind, canonical_identity, locator, filesystem_device,
+                        filesystem_inode, catalog_generation, catalog_marker
+                 FROM sources
+                 WHERE id = ?1",
+                [&expected.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::SaveSourceCatalog)?
+            .ok_or(StorageError::SourceNotFound)?;
+        if source_state
+            != (
+                expected.kind.clone(),
+                expected.canonical_identity.clone(),
+                expected.locator.clone(),
+                expected_device,
+                expected_inode,
+                expected.catalog_generation,
+                Some(expected.catalog_marker.clone()),
+            )
+        {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        let link_state = transaction
+            .query_row(
+                "SELECT bundle_id, adopted_marker
+                 FROM source_bundle_links
+                 WHERE source_id = ?1",
+                [&expected.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveSourceCatalog)?
+            .ok_or(StorageError::SourceBundleStateConflict)?;
+        if link_state != (bundle.id.clone(), bundle.adopted_marker.clone()) {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        let next_generation = expected
+            .catalog_generation
+            .checked_add(1)
+            .ok_or(StorageError::SourceCatalogStateChanged)?;
+        transaction
+            .execute(
+                "DELETE FROM source_catalog_members WHERE source_id = ?1",
+                [&expected.id],
+            )
+            .map_err(StorageError::SaveSourceCatalog)?;
+        for (sort_order, (member, (validation_errors, warnings))) in
+            members.iter().zip(encoded_members.iter()).enumerate()
+        {
+            transaction
+                .execute(
+                    "INSERT INTO source_catalog_members (
+                        id, source_id, catalog_generation, relative_path,
+                        skill_name, description, content_fingerprint, selectable,
+                        validation_errors_json, warnings_json, sort_order
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        member.id,
+                        expected.id,
+                        next_generation,
+                        member.relative_path,
+                        member.skill_name,
+                        member.description,
+                        member.content_fingerprint,
+                        member.selectable,
+                        validation_errors,
+                        warnings,
+                        sort_order as i64,
+                    ],
+                )
+                .map_err(StorageError::SaveSourceCatalog)?;
+        }
+        let source_changed = transaction
+            .execute(
+                "UPDATE sources
+                 SET catalog_status = 'fresh', catalog_generation = ?2,
+                     catalog_marker = ?3, catalog_fetched_at = ?4,
+                     last_reload_at = ?4, last_reload_error = NULL, updated_at = ?4
+                 WHERE id = ?1 AND kind = 'editable_local'",
+                params![expected.id, next_generation, marker, checked_at],
+            )
+            .map_err(StorageError::SaveSourceCatalog)?;
+        if source_changed != 1 {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        let status = if bundle.adopted_marker.as_deref() == Some(marker) {
+            BundleUpdateStatus::UpToDate
+        } else {
+            BundleUpdateStatus::Available
+        };
+        let status_value = status
+            .as_stored_str()
+            .ok_or(StorageError::InvalidSourceDefinition)?;
+        let link_changed = transaction
+            .execute(
+                "UPDATE source_bundle_links
+                 SET update_check_status = ?3,
+                     update_checked_marker = ?4,
+                     update_checked_at = ?5,
+                     update_check_error = NULL
+                 WHERE source_id = ?1 AND bundle_id = ?2",
+                params![expected.id, bundle.id, status_value, marker, checked_at],
+            )
+            .map_err(StorageError::SaveSourceCatalog)?;
+        if link_changed != 1 {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        transaction
+            .commit()
+            .map_err(StorageError::SaveSourceCatalog)?;
+        Ok(status)
+    }
+
+    /// 路径不可访问或 inode 不符时只记录可重试状态，保留 Catalog、adopted 与当前内容。
+    pub(crate) fn save_editable_local_check_unavailable(
+        &mut self,
+        expected: &StoredSourceInstallSource,
+        checked_at: i64,
+        error: &str,
+    ) -> Result<(), StorageError> {
+        let bundle = expected
+            .bundle
+            .as_ref()
+            .ok_or(StorageError::SourceBundleStateConflict)?;
+        let expected_device = expected
+            .filesystem_device
+            .map(filesystem_identity_to_sql)
+            .transpose()?;
+        let expected_inode = expected
+            .filesystem_inode
+            .map(filesystem_identity_to_sql)
+            .transpose()?;
+        if expected.kind != SourceKind::EditableLocal.as_str()
+            || expected_device.is_none()
+            || expected_inode.is_none()
+            || checked_at < 0
+            || error.is_empty()
+        {
+            return Err(StorageError::InvalidSourceDefinition);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveSource)?;
+        if bundle_or_source_write_is_blocked(&transaction, Some(&bundle.id), Some(&expected.id))? {
+            return Err(StorageError::ManagedObjectBlocked);
+        }
+        let stable_source = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM sources
+                    WHERE id = ?1
+                      AND kind = 'editable_local'
+                      AND canonical_identity = ?2
+                      AND locator = ?3
+                      AND filesystem_device = ?4
+                      AND filesystem_inode = ?5
+                 )",
+                params![
+                    expected.id,
+                    expected.canonical_identity,
+                    expected.locator,
+                    expected_device,
+                    expected_inode
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::SaveSource)?;
+        if !stable_source {
+            return Err(StorageError::SourceCatalogStateChanged);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE source_bundle_links
+                 SET update_check_status = 'source_unavailable',
+                     update_checked_at = ?3,
+                     update_check_error = ?4
+                 WHERE source_id = ?1 AND bundle_id = ?2 AND adopted_marker IS ?5",
+                params![
+                    expected.id,
+                    bundle.id,
+                    checked_at,
+                    error,
+                    bundle.adopted_marker
+                ],
+            )
+            .map_err(StorageError::SaveSource)?;
+        if changed != 1 {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        transaction.commit().map_err(StorageError::SaveSource)
+    }
+
     pub fn read_source_install_source(
         &mut self,
         source_id: &str,
@@ -1916,6 +2595,88 @@ impl Storage {
         let source = read_source_install_source_from(&transaction, source_id)?;
         transaction.commit().map_err(StorageError::ReadSources)?;
         Ok(source)
+    }
+
+    /// Bundle Update 从一份读快照取得唯一关联 Source 及完整本地成员状态。
+    pub(crate) fn read_bundle_update_install_source(
+        &mut self,
+        bundle_id: &str,
+    ) -> Result<StoredSourceInstallSource, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(StorageError::ReadSources)?;
+        let source_id = transaction
+            .query_row(
+                "SELECT source_id FROM source_bundle_links WHERE bundle_id = ?1",
+                [bundle_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StorageError::ReadSources)?
+            .ok_or(StorageError::SourceNotFound)?;
+        let source = read_source_install_source_from(&transaction, &source_id)?;
+        if source.bundle.as_ref().map(|bundle| bundle.id.as_str()) != Some(bundle_id) {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        transaction.commit().map_err(StorageError::ReadSources)?;
+        Ok(source)
+    }
+
+    pub(crate) fn read_eligible_bundle_updates(
+        &self,
+    ) -> Result<Vec<StoredBundleUpdateEligibility>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT source.id, link.bundle_id, bundle.display_name,
+                        CASE
+                            WHEN source.kind = 'github'
+                             AND link.adopted_marker IS NULL
+                             AND link.update_check_status = 'not_checked'
+                            THEN source.catalog_marker
+                            ELSE link.update_checked_marker
+                        END
+                 FROM sources AS source
+                 JOIN source_bundle_links AS link ON link.source_id = source.id
+                 JOIN bundles AS bundle ON bundle.id = link.bundle_id
+                 WHERE (
+                       source.kind = 'github'
+                       AND (
+                           (
+                               link.adopted_marker IS NULL
+                               AND link.update_check_status = 'not_checked'
+                               AND source.catalog_marker IS NOT NULL
+                           )
+                           OR (
+                               link.update_check_status = 'available'
+                               AND link.update_checked_marker IS NOT NULL
+                               AND link.update_checked_at IS NOT NULL
+                           )
+                       )
+                   )
+                   OR (
+                       source.kind = 'editable_local'
+                       AND link.update_check_status = 'available'
+                       AND link.update_checked_marker IS NOT NULL
+                       AND link.update_checked_at IS NOT NULL
+                       AND link.update_checked_marker = source.catalog_marker
+                   )
+                 ORDER BY source.sort_order, source.id",
+            )
+            .map_err(StorageError::ReadBundleUpdateBatch)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(StoredBundleUpdateEligibility {
+                    source_id: row.get(0)?,
+                    bundle_id: row.get(1)?,
+                    bundle_display_name: row.get(2)?,
+                    target_marker: row.get(3)?,
+                })
+            })
+            .map_err(StorageError::ReadBundleUpdateBatch)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadBundleUpdateBatch)
     }
 
     pub(crate) fn read_source_association_bundle(
@@ -2585,8 +3346,8 @@ impl Storage {
             .map_err(StorageError::SaveSource)?;
         let plan = transaction
             .query_row(
-                "SELECT source_id, current_ref, candidate_ref, member_path_hint,
-                        expires_at, status
+                "SELECT source_id, current_ref, candidate_ref, candidate_commit_sha,
+                        member_path_hint, expires_at, status
                  FROM source_ref_change_plans WHERE id = ?1",
                 [plan_id],
                 |row| {
@@ -2594,16 +3355,25 @@ impl Storage {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
             .optional()
             .map_err(StorageError::SaveSource)?
             .ok_or(StorageError::SourceRefChangePlanNotFound)?;
-        let (source_id, current_ref, candidate_ref, member_path_hint, expires_at, status) = plan;
+        let (
+            source_id,
+            current_ref,
+            candidate_ref,
+            candidate_commit_sha,
+            member_path_hint,
+            expires_at,
+            status,
+        ) = plan;
         if status != "pending" {
             return Err(StorageError::SourceRefChangePlanConsumed);
         }
@@ -2634,6 +3404,20 @@ impl Storage {
         if changed != 1 {
             return Err(StorageError::SourceRefChangeStateChanged);
         }
+        transaction
+            .execute(
+                "UPDATE source_bundle_links
+                 SET update_check_status = CASE
+                         WHEN adopted_marker = ?2 THEN 'up_to_date'
+                         ELSE 'available'
+                     END,
+                     update_checked_marker = ?2,
+                     update_checked_at = ?3,
+                     update_check_error = NULL
+                 WHERE source_id = ?1",
+                params![source_id, candidate_commit_sha, now],
+            )
+            .map_err(StorageError::SaveSource)?;
         let consumed = transaction
             .execute(
                 "UPDATE source_ref_change_plans
@@ -2899,8 +3683,9 @@ impl Storage {
         &self,
         member_id: &str,
         target_path: &str,
+        project_id: Option<&str>,
     ) -> Result<bool, StorageError> {
-        mount_object_is_blocked(&self.connection, member_id, target_path)
+        mount_object_is_blocked(&self.connection, member_id, target_path, project_id)
     }
 
     pub(crate) fn source_install_object_is_blocked(
@@ -2909,6 +3694,81 @@ impl Storage {
         bundle_id: Option<&str>,
     ) -> Result<bool, StorageError> {
         bundle_or_source_write_is_blocked(&self.connection, bundle_id, Some(source_id))
+    }
+
+    pub(crate) fn removal_object_is_blocked(
+        &self,
+        kind: &str,
+        target_id: &str,
+    ) -> Result<bool, StorageError> {
+        let already_blocked = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM removal_transactions AS removal_tx
+                    WHERE removal_tx.status = 'blocked'
+                      AND (
+                        (removal_tx.kind = ?1 AND removal_tx.target_id = ?2)
+                        OR (
+                            ?1 = 'bundle'
+                            AND removal_tx.kind = 'project'
+                            AND EXISTS(
+                                SELECT 1
+                                FROM mounts AS mount
+                                JOIN skill_members AS member ON member.id = mount.member_id
+                                WHERE mount.project_id = removal_tx.target_id
+                                  AND member.bundle_id = ?2
+                            )
+                        )
+                        OR (
+                            ?1 = 'project'
+                            AND removal_tx.kind = 'bundle'
+                            AND EXISTS(
+                                SELECT 1
+                                FROM mounts AS mount
+                                JOIN skill_members AS member ON member.id = mount.member_id
+                                WHERE mount.project_id = ?2
+                                  AND member.bundle_id = removal_tx.target_id
+                            )
+                        )
+                      )
+                 )",
+                params![kind, target_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::ReadRecoveryIssues)?;
+        if already_blocked {
+            return Ok(true);
+        }
+        match kind {
+            "bundle" => bundle_or_source_write_is_blocked(&self.connection, Some(target_id), None),
+            "source" => bundle_or_source_write_is_blocked(&self.connection, None, Some(target_id)),
+            "project" => self
+                .connection
+                .query_row(
+                    "SELECT
+                        EXISTS(
+                            SELECT 1
+                            FROM mount_transactions AS mount_tx
+                            JOIN mount_plans AS mount_plan ON mount_plan.id = mount_tx.plan_id
+                            WHERE mount_tx.status = 'blocked'
+                              AND mount_plan.project_id = ?1
+                        )
+                        OR EXISTS(
+                            SELECT 1
+                            FROM batch_mount_transactions AS batch_tx
+                            JOIN batch_mount_plan_items AS item
+                              ON item.plan_id = batch_tx.plan_id
+                            WHERE batch_tx.status = 'blocked'
+                              AND item.project_id = ?1
+                        )",
+                    [target_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(StorageError::ReadRecoveryIssues),
+            _ => Err(StorageError::RemovalStateConflict),
+        }
     }
 
     pub(crate) fn save_mount_plan(&mut self, plan: NewMountPlan<'_>) -> Result<(), StorageError> {
@@ -3324,7 +4184,12 @@ impl Storage {
                 return Err(StorageError::InvalidBatchMountPlan);
             }
             if item.disposition == BatchMountDisposition::Ready
-                && mount_object_is_blocked(&transaction, item.member_id, item.target_path)?
+                && mount_object_is_blocked(
+                    &transaction,
+                    item.member_id,
+                    item.target_path,
+                    item.project_id,
+                )?
             {
                 return Err(StorageError::ManagedObjectBlocked);
             }
@@ -3756,12 +4621,12 @@ impl Storage {
                 "INSERT INTO install_plans (
                     id, kind, install_mode, input_path, input_device, input_inode,
                     input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
-                    source_catalog_generation, source_marker, expected_current_target,
-                    expected_adopted_marker, bundle_id, bundle_display_name,
+                    source_catalog_generation, source_marker, expected_source_marker,
+                    expected_current_target, expected_adopted_marker, bundle_id, bundle_display_name,
                     warnings_json, created_at, expires_at, status
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                    ?15, ?16, ?17, ?18, ?19, 'pending'
+                    ?15, ?16, ?17, ?18, ?19, ?20, 'pending'
                  )",
                 params![
                     plan.id,
@@ -3776,6 +4641,7 @@ impl Storage {
                     plan.source_tracked_ref,
                     plan.source_catalog_generation,
                     plan.source_marker,
+                    plan.expected_source_marker,
                     plan.expected_current_target,
                     plan.expected_adopted_marker,
                     plan.bundle_id,
@@ -3795,11 +4661,11 @@ impl Storage {
                 .execute(
                     "INSERT INTO install_plan_candidates (
                         plan_id, candidate_id, source_relative_path, skill_name,
-                        skill_description, content_fingerprint, selectable,
+                        skill_description, content_fingerprint, previous_content_fingerprint, selectable,
                         preserve_existing, validation_errors_json, warnings_json,
                         default_selected, selected, sort_order
                      ) VALUES (
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13
                      )",
                     params![
                         plan.id,
@@ -3808,6 +4674,7 @@ impl Storage {
                         candidate.skill_name,
                         candidate.skill_description,
                         candidate.content_fingerprint,
+                        candidate.previous_content_fingerprint,
                         i64::from(candidate.selectable),
                         i64::from(candidate.preserve_existing),
                         validation_errors,
@@ -3828,6 +4695,385 @@ impl Storage {
         read_install_plan_from(&self.connection, plan_id)?.ok_or(StorageError::InstallPlanNotFound)
     }
 
+    pub(crate) fn save_bundle_update_batch(
+        &mut self,
+        batch_id: &str,
+        items: &[NewBundleUpdateBatchItem<'_>],
+        created_at: i64,
+        expires_at: i64,
+    ) -> Result<(), StorageError> {
+        validate_new_bundle_update_batch(batch_id, items, created_at, expires_at)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        transaction
+            .execute(
+                "INSERT INTO bundle_update_batches (
+                    id, status, created_at, expires_at, confirmed_at, updated_at
+                 ) VALUES (?1, 'pending', ?2, ?3, NULL, ?2)",
+                params![batch_id, created_at, expires_at],
+            )
+            .map_err(map_bundle_update_batch_insert_error)?;
+        for (display_order, item) in items.iter().enumerate() {
+            transaction
+                .execute(
+                    "INSERT INTO bundle_update_batch_items (
+                        id, batch_id, source_id, bundle_id, display_name,
+                        install_plan_id, target_marker, status, error,
+                        display_order, confirmed_order
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+                    params![
+                        item.id,
+                        batch_id,
+                        item.source_id,
+                        item.bundle_id,
+                        item.display_name,
+                        item.install_plan_id,
+                        item.target_marker,
+                        item.status,
+                        item.error,
+                        display_order as i64,
+                    ],
+                )
+                .map_err(StorageError::SaveBundleUpdateBatch)?;
+        }
+        let stored = read_bundle_update_batch_from(&transaction, batch_id)?
+            .ok_or(StorageError::InvalidBundleUpdateBatch)?;
+        validate_stored_bundle_update_batch(&stored)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveBundleUpdateBatch)
+    }
+
+    pub(crate) fn read_open_bundle_update_batch(
+        &self,
+    ) -> Result<Option<StoredBundleUpdateBatch>, StorageError> {
+        let id = self
+            .connection
+            .query_row(
+                "SELECT id FROM bundle_update_batches ORDER BY created_at, id LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StorageError::ReadBundleUpdateBatch)?;
+        id.map(|id| {
+            read_bundle_update_batch_from(&self.connection, &id)?
+                .ok_or(StorageError::BundleUpdateBatchNotFound)
+        })
+        .transpose()
+    }
+
+    pub(crate) fn read_bundle_update_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<StoredBundleUpdateBatch, StorageError> {
+        read_bundle_update_batch_from(&self.connection, batch_id)?
+            .ok_or(StorageError::BundleUpdateBatchNotFound)
+    }
+
+    pub(crate) fn begin_bundle_update_batch(
+        &mut self,
+        batch_id: &str,
+        selected_item_ids: &[String],
+        now: i64,
+    ) -> Result<StoredBundleUpdateBatch, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        let batch = read_bundle_update_batch_from(&transaction, batch_id)?
+            .ok_or(StorageError::BundleUpdateBatchNotFound)?;
+        if batch.status != "pending" {
+            return Err(StorageError::BundleUpdateBatchConsumed);
+        }
+        if batch.expires_at <= now {
+            return Err(StorageError::BundleUpdateBatchExpired);
+        }
+        let selected = selected_item_ids.iter().collect::<BTreeSet<_>>();
+        if selected.is_empty()
+            || selected.len() != selected_item_ids.len()
+            || selected.iter().any(|item_id| {
+                !batch.items.iter().any(|item| {
+                    item.id.as_str() == item_id.as_str()
+                        && item.status == "ready"
+                        && item.install_plan_id.is_some()
+                })
+            })
+        {
+            return Err(StorageError::InvalidBundleUpdateBatchSelection);
+        }
+        for item_id in selected_item_ids {
+            let changed = transaction
+                .execute(
+                    "UPDATE install_plans
+                     SET expires_at = ?3
+                     WHERE id = (
+                         SELECT install_plan_id
+                         FROM bundle_update_batch_items
+                         WHERE batch_id = ?1 AND id = ?2 AND status = 'ready'
+                     )
+                       AND status = 'pending'",
+                    params![batch_id, item_id, i64::MAX],
+                )
+                .map_err(StorageError::SaveBundleUpdateBatch)?;
+            if changed != 1 {
+                return Err(StorageError::InvalidBundleUpdateBatchSelection);
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE bundle_update_batch_items
+                 SET status = 'failed'
+                 WHERE batch_id = ?1 AND status = 'preparation_failed'",
+                [batch_id],
+            )
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        transaction
+            .execute(
+                "UPDATE bundle_update_batch_items
+                 SET status = 'not_executed'
+                 WHERE batch_id = ?1 AND status = 'ready'",
+                [batch_id],
+            )
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        for (confirmed_order, item_id) in selected_item_ids.iter().enumerate() {
+            let changed = transaction
+                .execute(
+                    "UPDATE bundle_update_batch_items
+                     SET status = 'ready', confirmed_order = ?3
+                     WHERE batch_id = ?1 AND id = ?2 AND status = 'not_executed'",
+                    params![batch_id, item_id, confirmed_order as i64],
+                )
+                .map_err(StorageError::SaveBundleUpdateBatch)?;
+            if changed != 1 {
+                return Err(StorageError::InvalidBundleUpdateBatchSelection);
+            }
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE bundle_update_batches
+                 SET status = 'running', confirmed_at = ?2, updated_at = ?2
+                 WHERE id = ?1 AND status = 'pending'",
+                params![batch_id, now],
+            )
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        if changed != 1 {
+            return Err(StorageError::BundleUpdateBatchConsumed);
+        }
+        let started = read_bundle_update_batch_from(&transaction, batch_id)?
+            .ok_or(StorageError::BundleUpdateBatchNotFound)?;
+        validate_stored_bundle_update_batch(&started)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        Ok(started)
+    }
+
+    pub(crate) fn save_bundle_update_batch_item_result(
+        &mut self,
+        batch_id: &str,
+        item_id: &str,
+        status: &str,
+        error: Option<&str>,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        if !matches!(status, "succeeded" | "failed" | "blocked")
+            || (status == "succeeded" && error.is_some())
+            || (status != "succeeded" && error.is_none())
+        {
+            return Err(StorageError::InvalidBundleUpdateBatch);
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE bundle_update_batch_items
+                 SET status = ?3, error = ?4
+                 WHERE batch_id = ?1
+                   AND id = ?2
+                   AND status = 'ready'
+                   AND confirmed_order IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1 FROM bundle_update_batches AS batch
+                       WHERE batch.id = ?1 AND batch.status = 'running'
+                   )",
+                params![batch_id, item_id, status, error],
+            )
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        if changed == 0 {
+            let existing = self.read_bundle_update_batch(batch_id)?;
+            let matches_terminal = existing
+                .items
+                .iter()
+                .find(|item| item.id == item_id)
+                .is_some_and(|item| item.status == status && item.error.as_deref() == error);
+            if !matches_terminal {
+                return Err(StorageError::InvalidBundleUpdateBatch);
+            }
+        }
+        self.connection
+            .execute(
+                "UPDATE bundle_update_batches
+                 SET updated_at = ?2
+                 WHERE id = ?1 AND status = 'running'",
+                params![batch_id, now],
+            )
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_bundle_update_batch(
+        &mut self,
+        batch_id: &str,
+        status: &str,
+        now: i64,
+    ) -> Result<StoredBundleUpdateBatch, StorageError> {
+        if !matches!(status, "completed" | "blocked") {
+            return Err(StorageError::InvalidBundleUpdateBatch);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        if status == "blocked" {
+            transaction
+                .execute(
+                    "UPDATE bundle_update_batch_items
+                     SET status = 'not_executed'
+                     WHERE batch_id = ?1 AND status = 'ready'",
+                    [batch_id],
+                )
+                .map_err(StorageError::SaveBundleUpdateBatch)?;
+        }
+        let unfinished = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM bundle_update_batch_items
+                 WHERE batch_id = ?1 AND status = 'ready'",
+                [batch_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(StorageError::ReadBundleUpdateBatch)?;
+        let blocked = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM bundle_update_batch_items
+                 WHERE batch_id = ?1 AND status = 'blocked'",
+                [batch_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(StorageError::ReadBundleUpdateBatch)?;
+        if unfinished != 0
+            || (status == "completed" && blocked != 0)
+            || (status == "blocked" && blocked != 1)
+        {
+            return Err(StorageError::InvalidBundleUpdateBatch);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE bundle_update_batches
+                 SET status = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status = 'running'",
+                params![batch_id, status, now],
+            )
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        if changed != 1 {
+            return Err(StorageError::BundleUpdateBatchConsumed);
+        }
+        let finished = read_bundle_update_batch_from(&transaction, batch_id)?
+            .ok_or(StorageError::BundleUpdateBatchNotFound)?;
+        validate_stored_bundle_update_batch(&finished)?;
+        transaction
+            .commit()
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        Ok(finished)
+    }
+
+    pub(crate) fn delete_pending_bundle_update_batch(
+        &mut self,
+        batch_id: &str,
+    ) -> Result<(), StorageError> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM bundle_update_batches
+                 WHERE id = ?1 AND status = 'pending'",
+                [batch_id],
+            )
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        if deleted != 1 {
+            return Err(StorageError::BundleUpdateBatchConsumed);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn acknowledge_bundle_update_batch(
+        &mut self,
+        batch_id: &str,
+    ) -> Result<(), StorageError> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM bundle_update_batches
+                 WHERE id = ?1 AND status = 'completed'",
+                [batch_id],
+            )
+            .map_err(StorageError::SaveBundleUpdateBatch)?;
+        if deleted != 1 {
+            return Err(StorageError::BundleUpdateBatchConsumed);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bundle_has_adopted_marker(
+        &self,
+        bundle_id: &str,
+        marker: &str,
+    ) -> Result<bool, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM source_bundle_links
+                    WHERE bundle_id = ?1 AND adopted_marker = ?2
+                 )",
+                params![bundle_id, marker],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::ReadBundleUpdateBatch)
+    }
+
+    pub(crate) fn install_plan_transaction_status(
+        &self,
+        plan_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT status FROM lifecycle_transactions WHERE plan_id = ?1",
+                [plan_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StorageError::ReadBundleUpdateBatch)
+    }
+
+    pub(crate) fn source_kind_and_locator(
+        &self,
+        source_id: &str,
+    ) -> Result<(SourceKind, String), StorageError> {
+        let (kind, locator) = self
+            .connection
+            .query_row(
+                "SELECT kind, locator FROM sources WHERE id = ?1",
+                [source_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::ReadBundleUpdateBatch)?
+            .ok_or(StorageError::SourceNotFound)?;
+        let kind = SourceKind::from_str(&kind)
+            .ok_or_else(|| StorageError::UnknownSourceKind(kind.clone()))?;
+        Ok((kind, locator))
+    }
+
     pub fn read_expired_pending_install_plans(
         &self,
         now: i64,
@@ -3839,6 +5085,13 @@ impl Storage {
                  WHERE status = 'pending'
                    AND kind = 'source_snapshot'
                    AND expires_at <= ?1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM bundle_update_batch_items AS batch_item
+                       JOIN bundle_update_batches AS batch
+                         ON batch.id = batch_item.batch_id
+                       WHERE batch_item.install_plan_id = install_plans.id
+                   )
                  ORDER BY created_at, id",
             )
             .map_err(StorageError::ReadInstallPlan)?;
@@ -3866,6 +5119,13 @@ impl Storage {
                  WHERE status = 'pending'
                    AND kind = 'source_snapshot'
                    AND source_id = ?1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM bundle_update_batch_items AS batch_item
+                       JOIN bundle_update_batches AS batch
+                         ON batch.id = batch_item.batch_id
+                       WHERE batch_item.install_plan_id = install_plans.id
+                   )
                  ORDER BY created_at, id",
             )
             .map_err(StorageError::ReadInstallPlan)?;
@@ -3882,12 +5142,48 @@ impl Storage {
             .collect()
     }
 
-    /// 只删除尚未进入生命周期事务的失效 Plan；快照内容由 Lifecycle 先安全清理。
+    /// 文件清理前先验证 owner，避免普通放弃入口破坏 Batch 持有的快照。
+    pub(crate) fn ensure_install_plan_discard_owner(
+        &self,
+        plan_id: &str,
+        owner: Option<BundleUpdateBatchChildOwner<'_>>,
+    ) -> Result<(), StorageError> {
+        validate_bundle_update_batch_child_owner(
+            &self.connection,
+            plan_id,
+            owner,
+            BundleUpdateBatchChildOperation::Discard,
+        )
+    }
+
+    /// 只删除尚未进入生命周期事务的失效 Plan；普通入口不能消费 Batch child。
     pub fn discard_pending_install_plan(&mut self, plan_id: &str) -> Result<(), StorageError> {
+        self.discard_pending_install_plan_with_owner(plan_id, None)
+    }
+
+    pub(crate) fn discard_pending_bundle_update_batch_child_plan(
+        &mut self,
+        plan_id: &str,
+        owner: BundleUpdateBatchChildOwner<'_>,
+    ) -> Result<(), StorageError> {
+        self.discard_pending_install_plan_with_owner(plan_id, Some(owner))
+    }
+
+    fn discard_pending_install_plan_with_owner(
+        &mut self,
+        plan_id: &str,
+        owner: Option<BundleUpdateBatchChildOwner<'_>>,
+    ) -> Result<(), StorageError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveInstallPlan)?;
+        validate_bundle_update_batch_child_owner(
+            &transaction,
+            plan_id,
+            owner,
+            BundleUpdateBatchChildOperation::Discard,
+        )?;
         let deleted = transaction
             .execute(
                 "DELETE FROM install_plans
@@ -3957,6 +5253,44 @@ impl Storage {
         journal_path: &str,
         now: i64,
     ) -> Result<StoredInstallPlan, StorageError> {
+        self.begin_install_transaction_with_selection_owned(
+            plan_id,
+            selected_candidate_ids,
+            transaction_id,
+            journal_path,
+            now,
+            None,
+        )
+    }
+
+    pub(crate) fn begin_bundle_update_batch_child_transaction_with_selection(
+        &mut self,
+        plan_id: &str,
+        selected_candidate_ids: &[String],
+        transaction_id: &str,
+        journal_path: &str,
+        now: i64,
+        owner: BundleUpdateBatchChildOwner<'_>,
+    ) -> Result<StoredInstallPlan, StorageError> {
+        self.begin_install_transaction_with_selection_owned(
+            plan_id,
+            selected_candidate_ids,
+            transaction_id,
+            journal_path,
+            now,
+            Some(owner),
+        )
+    }
+
+    fn begin_install_transaction_with_selection_owned(
+        &mut self,
+        plan_id: &str,
+        selected_candidate_ids: &[String],
+        transaction_id: &str,
+        journal_path: &str,
+        now: i64,
+        owner: Option<BundleUpdateBatchChildOwner<'_>>,
+    ) -> Result<StoredInstallPlan, StorageError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3969,6 +5303,12 @@ impl Storage {
         if plan.expires_at <= now {
             return Err(StorageError::InstallPlanExpired);
         }
+        validate_bundle_update_batch_child_owner(
+            &transaction,
+            plan_id,
+            owner,
+            BundleUpdateBatchChildOperation::Confirm,
+        )?;
         validate_install_plan_source_contract(&transaction, &plan)?;
         if bundle_or_source_write_is_blocked(
             &transaction,
@@ -3980,6 +5320,23 @@ impl Storage {
         let selected = selected_candidate_ids.iter().collect::<BTreeSet<_>>();
         if selected.is_empty() || selected.len() != selected_candidate_ids.len() {
             return Err(StorageError::InvalidInstallSelection);
+        }
+        if plan.install_mode == "update" {
+            let required = plan
+                .candidates
+                .iter()
+                .filter(|candidate| !candidate.preserve_existing)
+                .map(|candidate| &candidate.candidate_id)
+                .collect::<BTreeSet<_>>();
+            if selected != required
+                || plan
+                    .candidates
+                    .iter()
+                    .filter(|candidate| !candidate.preserve_existing)
+                    .any(|candidate| !candidate.selectable)
+            {
+                return Err(StorageError::InvalidInstallSelection);
+            }
         }
         if selected.iter().any(|candidate_id| {
             !plan.candidates.iter().any(|candidate| {
@@ -4208,6 +5565,14 @@ impl Storage {
                 current_target,
                 now,
             )?,
+            "update" => finalize_install_update_rows(
+                &transaction,
+                plan,
+                &selected,
+                managed_directory,
+                current_target,
+                now,
+            )?,
             _ => return Err(StorageError::InvalidInstallPlan),
         }
         ensure_managed_state_matches(
@@ -4337,6 +5702,579 @@ impl Storage {
             .map_err(StorageError::ReadSources)
     }
 
+    /// Removal Plan 的 JSON 与摘要一同持久化，确认时必须重新核对摘要。
+    pub(crate) fn save_removal_plan(
+        &mut self,
+        plan: NewRemovalPlan<'_>,
+    ) -> Result<(), StorageError> {
+        if !is_single_path_component(plan.id)
+            || !is_single_path_component(plan.target_id)
+            || !matches!(plan.kind, "project" | "source" | "bundle")
+            || plan.payload_json.is_empty()
+            || plan.payload_sha256.len() != 64
+            || !plan
+                .payload_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || plan.created_at < 0
+            || plan.expires_at <= plan.created_at
+        {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute(
+                "DELETE FROM removal_plans
+                 WHERE kind = ?1 AND target_id = ?2 AND status = 'pending'",
+                params![plan.kind, plan.target_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute(
+                "INSERT INTO removal_plans (
+                    id, kind, target_id, payload_json, payload_sha256,
+                    status, created_at, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7)",
+                params![
+                    plan.id,
+                    plan.kind,
+                    plan.target_id,
+                    plan.payload_json,
+                    plan.payload_sha256,
+                    plan.created_at,
+                    plan.expires_at
+                ],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction.commit().map_err(StorageError::SaveRemoval)
+    }
+
+    pub(crate) fn read_removal_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<StoredRemovalPlan, StorageError> {
+        let plan = self
+            .connection
+            .query_row(
+                "SELECT id, kind, target_id, payload_json, payload_sha256,
+                        status, created_at, expires_at
+                 FROM removal_plans WHERE id = ?1",
+                [plan_id],
+                stored_removal_plan_from_row,
+            )
+            .optional()
+            .map_err(StorageError::ReadRemoval)?
+            .ok_or(StorageError::RemovalPlanNotFound)?;
+        validate_stored_removal_plan(&plan)?;
+        Ok(plan)
+    }
+
+    pub(crate) fn read_pending_removal_plan(
+        &self,
+    ) -> Result<Option<StoredRemovalPlan>, StorageError> {
+        let plan = self
+            .connection
+            .query_row(
+                "SELECT id, kind, target_id, payload_json, payload_sha256,
+                        status, created_at, expires_at
+                 FROM removal_plans
+                 WHERE status = 'pending'
+                 ORDER BY created_at, id
+                 LIMIT 1",
+                [],
+                stored_removal_plan_from_row,
+            )
+            .optional()
+            .map_err(StorageError::ReadRemoval)?;
+        if let Some(plan) = &plan {
+            validate_stored_removal_plan(plan)?;
+        }
+        Ok(plan)
+    }
+
+    pub(crate) fn discard_removal_plan(&mut self, plan_id: &str) -> Result<(), StorageError> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM removal_plans WHERE id = ?1 AND status = 'pending'",
+                [plan_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        if deleted == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::RemovalPlanNotFound)
+        }
+    }
+
+    /// 先提交 journal_pending 行，随后生命周期层才能写 Journal。
+    pub(crate) fn begin_removal_transaction(
+        &mut self,
+        plan_id: &str,
+        transaction_id: &str,
+        journal_path: &str,
+        now: i64,
+    ) -> Result<StoredRemovalPlan, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveRemoval)?;
+        let plan = transaction
+            .query_row(
+                "SELECT id, kind, target_id, payload_json, payload_sha256,
+                        status, created_at, expires_at
+                 FROM removal_plans WHERE id = ?1",
+                [plan_id],
+                stored_removal_plan_from_row,
+            )
+            .optional()
+            .map_err(StorageError::ReadRemoval)?
+            .ok_or(StorageError::RemovalPlanNotFound)?;
+        validate_stored_removal_plan(&plan)?;
+        if plan.status != "pending" {
+            return Err(StorageError::RemovalPlanNotFound);
+        }
+        if plan.expires_at <= now {
+            return Err(StorageError::RemovalPlanExpired);
+        }
+        if !matches!(plan.kind.as_str(), "project" | "bundle")
+            || !is_single_path_component(transaction_id)
+            || journal_path != format!("journals/{transaction_id}.json")
+        {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        transaction
+            .execute(
+                "INSERT INTO removal_transactions (
+                    id, plan_id, kind, target_id, journal_path, phase, status,
+                    error_message, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, 'journal_pending', 'in_progress',
+                    NULL, ?6, ?6
+                 )",
+                params![
+                    transaction_id,
+                    plan.id,
+                    plan.kind,
+                    plan.target_id,
+                    journal_path,
+                    now
+                ],
+            )
+            .map_err(map_removal_transaction_insert_error)?;
+        transaction
+            .execute(
+                "UPDATE removal_plans SET status = 'consumed'
+                 WHERE id = ?1 AND status = 'pending'",
+                [plan_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction.commit().map_err(StorageError::SaveRemoval)?;
+        Ok(StoredRemovalPlan {
+            status: "consumed".to_owned(),
+            ..plan
+        })
+    }
+
+    pub(crate) fn update_removal_phase(
+        &mut self,
+        transaction_id: &str,
+        expected_phase: &str,
+        next_phase: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let updated = self
+            .connection
+            .execute(
+                "UPDATE removal_transactions
+                 SET phase = ?3, updated_at = ?4
+                 WHERE id = ?1 AND phase = ?2 AND status = 'in_progress'",
+                params![transaction_id, expected_phase, next_phase, now],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        if updated == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::RemovalStateConflict)
+        }
+    }
+
+    pub(crate) fn recoverable_removal_transactions(
+        &self,
+    ) -> Result<Vec<StoredRemovalTransaction>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, plan_id, kind, target_id, journal_path, phase, status
+                 FROM removal_transactions
+                 ORDER BY created_at, id",
+            )
+            .map_err(StorageError::ReadRemoval)?;
+        let rows = statement
+            .query_map([], stored_removal_transaction_from_row)
+            .map_err(StorageError::ReadRemoval)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadRemoval)
+    }
+
+    pub(crate) fn abort_removal_transaction(
+        &mut self,
+        transaction_id: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let updated = self
+            .connection
+            .execute(
+                "UPDATE removal_transactions
+                 SET status = 'aborted', error_message = NULL, updated_at = ?2
+                 WHERE id = ?1 AND status = 'in_progress'",
+                params![transaction_id, now],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        if updated == 1 {
+            Ok(())
+        } else if self
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM removal_transactions
+                    WHERE id = ?1 AND status = 'aborted'
+                 )",
+                [transaction_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::ReadRemoval)?
+        {
+            // 崩溃可能发生在标记 aborted 之后；重复恢复不能因此转成人工阻塞。
+            Ok(())
+        } else {
+            Err(StorageError::RemovalStateConflict)
+        }
+    }
+
+    pub(crate) fn block_removal_transaction(
+        &mut self,
+        transaction_id: &str,
+        message: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "UPDATE removal_transactions
+                 SET status = 'blocked', error_message = ?2, updated_at = ?3
+                 WHERE id = ?1 AND status <> 'blocked'",
+                params![transaction_id, message, now],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        Ok(())
+    }
+
+    pub(crate) fn forget_terminal_removal_transaction(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveRemoval)?;
+        let plan_id = transaction
+            .query_row(
+                "SELECT plan_id FROM removal_transactions
+                 WHERE id = ?1 AND status IN ('completed', 'aborted')",
+                [transaction_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StorageError::ReadRemoval)?
+            .ok_or(StorageError::RemovalStateConflict)?;
+        transaction
+            .execute(
+                "DELETE FROM removal_transactions WHERE id = ?1",
+                [transaction_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute("DELETE FROM removal_plans WHERE id = ?1", [plan_id])
+            .map_err(StorageError::SaveRemoval)?;
+        transaction.commit().map_err(StorageError::SaveRemoval)
+    }
+
+    pub(crate) fn read_pending_install_plans_for_bundle(
+        &self,
+        bundle_id: &str,
+    ) -> Result<Vec<StoredInstallPlan>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id FROM install_plans
+                 WHERE status = 'pending'
+                   AND bundle_id = ?1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM bundle_update_batch_items AS batch_item
+                       JOIN bundle_update_batches AS batch
+                         ON batch.id = batch_item.batch_id
+                       WHERE batch_item.install_plan_id = install_plans.id
+                   )
+                 ORDER BY created_at, id",
+            )
+            .map_err(StorageError::ReadInstallPlan)?;
+        let ids = statement
+            .query_map([bundle_id], |row| row.get::<_, String>(0))
+            .map_err(StorageError::ReadInstallPlan)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::ReadInstallPlan)?;
+        ids.into_iter()
+            .map(|id| {
+                read_install_plan_from(&self.connection, &id)?
+                    .ok_or(StorageError::InstallPlanNotFound)
+            })
+            .collect()
+    }
+
+    /// Source 删除是纯 SQLite 事务；关联 Bundle 与其 Current Content 不参与删除。
+    pub(crate) fn finalize_source_removal(
+        &mut self,
+        plan_id: &str,
+        source_id: &str,
+        canonical_identity: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveRemoval)?;
+        let plan = read_removal_plan_from(&transaction, plan_id)?
+            .ok_or(StorageError::RemovalPlanNotFound)?;
+        if plan.kind != "source"
+            || plan.target_id != source_id
+            || plan.status != "pending"
+            || transaction
+                .query_row(
+                    "SELECT canonical_identity FROM sources WHERE id = ?1",
+                    [source_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(StorageError::ReadSources)?
+                .as_deref()
+                != Some(canonical_identity)
+        {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        let pending_count = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM install_plans WHERE source_id = ?1",
+                [source_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(StorageError::ReadInstallPlan)?;
+        if pending_count != 0 {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        transaction
+            .execute("DELETE FROM sources WHERE id = ?1", [source_id])
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute("DELETE FROM removal_plans WHERE id = ?1", [plan_id])
+            .map_err(StorageError::SaveRemoval)?;
+        transaction.commit().map_err(StorageError::SaveRemoval)
+    }
+
+    pub(crate) fn finalize_project_removal(
+        &mut self,
+        transaction_id: &str,
+        project: &StoredProject,
+        expected_mount_ids: &[String],
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveRemoval)?;
+        ensure_removal_transaction_phase(
+            &transaction,
+            transaction_id,
+            "project",
+            &project.id,
+            "mounts_isolated",
+        )?;
+        let current_project = read_project_from(&transaction, &project.id)?
+            .ok_or(StorageError::RemovalStateConflict)?;
+        if &current_project != project {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        let current_mount_ids = read_sorted_string_column(
+            &transaction,
+            "SELECT id FROM mounts WHERE project_id = ?1 ORDER BY id",
+            &project.id,
+        )?;
+        let mut expected_mount_ids = expected_mount_ids.to_vec();
+        expected_mount_ids.sort();
+        if current_mount_ids != expected_mount_ids {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        transaction
+            .execute(
+                "DELETE FROM batch_mount_plans
+                 WHERE id IN (
+                    SELECT plan_id FROM batch_mount_plan_items WHERE project_id = ?1
+                 )",
+                [&project.id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute(
+                "DELETE FROM mount_plans WHERE project_id = ?1",
+                [&project.id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute("DELETE FROM mounts WHERE project_id = ?1", [&project.id])
+            .map_err(StorageError::SaveRemoval)?;
+        let deleted = transaction
+            .execute("DELETE FROM projects WHERE id = ?1", [&project.id])
+            .map_err(StorageError::SaveRemoval)?;
+        if deleted != 1 {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        transaction
+            .execute(
+                "UPDATE removal_transactions
+                 SET phase = 'state_committed', status = 'completed', updated_at = ?2
+                 WHERE id = ?1 AND status = 'in_progress' AND phase = 'mounts_isolated'",
+                params![transaction_id, now],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction.commit().map_err(StorageError::SaveRemoval)
+    }
+
+    // 这些参数共同构成确认页封存的 Bundle 删除合同，保持扁平可避免再造第二个领域类型。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finalize_bundle_removal(
+        &mut self,
+        transaction_id: &str,
+        bundle_id: &str,
+        display_name: &str,
+        managed_directory: &str,
+        current_target: &str,
+        expected_member_ids: &[String],
+        expected_mount_ids: &[String],
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveRemoval)?;
+        ensure_removal_transaction_phase(
+            &transaction,
+            transaction_id,
+            "bundle",
+            bundle_id,
+            "bundle_isolated",
+        )?;
+        let current_bundle = transaction
+            .query_row(
+                "SELECT display_name, managed_directory, current_target
+                 FROM bundles WHERE id = ?1",
+                [bundle_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::ReadInventory)?
+            .ok_or(StorageError::RemovalStateConflict)?;
+        if current_bundle
+            != (
+                display_name.to_owned(),
+                managed_directory.to_owned(),
+                current_target.to_owned(),
+            )
+        {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        let current_member_ids = read_sorted_string_column(
+            &transaction,
+            "SELECT id FROM skill_members WHERE bundle_id = ?1 ORDER BY id",
+            bundle_id,
+        )?;
+        let mut expected_member_ids = expected_member_ids.to_vec();
+        expected_member_ids.sort();
+        if current_member_ids != expected_member_ids {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        let current_mount_ids = read_sorted_string_column(
+            &transaction,
+            "SELECT mount.id
+             FROM mounts AS mount
+             JOIN skill_members AS member ON member.id = mount.member_id
+             WHERE member.bundle_id = ?1
+             ORDER BY mount.id",
+            bundle_id,
+        )?;
+        let mut expected_mount_ids = expected_mount_ids.to_vec();
+        expected_mount_ids.sort();
+        if current_mount_ids != expected_mount_ids {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        let pending_plan_count = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM install_plans WHERE bundle_id = ?1",
+                [bundle_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(StorageError::ReadInstallPlan)?;
+        if pending_plan_count != 0 {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        transaction
+            .execute(
+                "DELETE FROM mount_plans
+                 WHERE member_id IN (
+                    SELECT id FROM skill_members WHERE bundle_id = ?1
+                 )",
+                [bundle_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute(
+                "DELETE FROM batch_mount_plans WHERE bundle_id = ?1",
+                [bundle_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute(
+                "DELETE FROM mounts
+                 WHERE member_id IN (
+                    SELECT id FROM skill_members WHERE bundle_id = ?1
+                 )",
+                [bundle_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        let deleted = transaction
+            .execute("DELETE FROM bundles WHERE id = ?1", [bundle_id])
+            .map_err(StorageError::SaveRemoval)?;
+        if deleted != 1 {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        transaction
+            .execute(
+                "UPDATE removal_transactions
+                 SET phase = 'state_committed', status = 'completed', updated_at = ?2
+                 WHERE id = ?1 AND status = 'in_progress' AND phase = 'bundle_isolated'",
+                params![transaction_id, now],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction.commit().map_err(StorageError::SaveRemoval)
+    }
+
     fn with_managed_entries(
         &self,
         entries: Vec<InventoryObservation>,
@@ -4377,7 +6315,7 @@ impl Storage {
         read_scan_issues_from(&self.connection)
     }
 
-    fn read_mount_summaries(&self) -> Result<Vec<MountSummary>, StorageError> {
+    pub(crate) fn read_mount_summaries(&self) -> Result<Vec<MountSummary>, StorageError> {
         self.read_mounts()?
             .into_iter()
             .map(|mount| {
@@ -4445,6 +6383,27 @@ impl Storage {
                     LEFT JOIN bundles AS bundle
                       ON bundle.id = association_tx.target_bundle_id
                     WHERE association_tx.status = 'blocked'
+                    UNION ALL
+                    SELECT removal_tx.id AS id,
+                           COALESCE(
+                               bundle.display_name,
+                               project.display_name,
+                               source.display_name,
+                               removal_tx.target_id
+                           ) AS display_name,
+                           COALESCE(
+                               removal_tx.error_message,
+                               'Removal 事务状态无法自动判断'
+                           ) AS message,
+                           removal_tx.created_at AS created_at
+                    FROM removal_transactions AS removal_tx
+                    LEFT JOIN bundles AS bundle
+                      ON removal_tx.kind = 'bundle' AND bundle.id = removal_tx.target_id
+                    LEFT JOIN projects AS project
+                      ON removal_tx.kind = 'project' AND project.id = removal_tx.target_id
+                    LEFT JOIN sources AS source
+                      ON removal_tx.kind = 'source' AND source.id = removal_tx.target_id
+                    WHERE removal_tx.status = 'blocked'
                  ) ORDER BY created_at, id",
             )
             .map_err(StorageError::ReadRecoveryIssues)?;
@@ -4910,7 +6869,7 @@ fn validate_mount_plan_state(
     {
         return Err(StorageError::InvalidMountPlan);
     }
-    if mount_object_is_blocked(connection, member_id, target_path)? {
+    if mount_object_is_blocked(connection, member_id, target_path, project_id)? {
         return Err(StorageError::ManagedObjectBlocked);
     }
     match (scope, project_id) {
@@ -5061,6 +7020,19 @@ fn bundle_or_source_write_is_blocked(
                         ))
                         OR (?2 IS NOT NULL AND association_tx.source_id = ?2)
                       )
+                )
+                OR EXISTS(
+                    SELECT 1
+                    FROM removal_transactions AS removal_tx
+                    LEFT JOIN source_bundle_links AS removal_link
+                      ON removal_tx.kind = 'bundle'
+                     AND removal_link.bundle_id = removal_tx.target_id
+                    WHERE removal_tx.status = 'blocked'
+                      AND removal_tx.kind = 'bundle'
+                      AND (
+                        (?1 IS NOT NULL AND removal_tx.target_id = ?1)
+                        OR (?2 IS NOT NULL AND removal_link.source_id = ?2)
+                      )
                 )",
             params![bundle_id, source_id],
             |row| row.get::<_, bool>(0),
@@ -5072,6 +7044,7 @@ fn mount_object_is_blocked(
     connection: &Connection,
     member_id: &str,
     target_path: &str,
+    project_id: Option<&str>,
 ) -> Result<bool, StorageError> {
     let bundle_id = connection
         .query_row(
@@ -5095,6 +7068,29 @@ fn mount_object_is_blocked(
         )
         .map_err(StorageError::ReadLifecycleTransaction)?;
     if install_is_blocked {
+        return Ok(true);
+    }
+
+    let removal_is_blocked = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM removal_transactions AS removal_tx
+                WHERE removal_tx.status = 'blocked'
+                  AND (
+                    (removal_tx.kind = 'bundle' AND removal_tx.target_id = ?1)
+                    OR (
+                        removal_tx.kind = 'project'
+                        AND ?2 IS NOT NULL
+                        AND removal_tx.target_id = ?2
+                    )
+                  )
+             )",
+            params![bundle_id.as_deref(), project_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::ReadRecoveryIssues)?;
+    if removal_is_blocked {
         return Ok(true);
     }
 
@@ -5276,7 +7272,12 @@ fn validate_batch_ready_item_state(
     {
         return Err(StorageError::InvalidBatchMountPlan);
     }
-    if mount_object_is_blocked(connection, &item.member_id, &item.target_path)? {
+    if mount_object_is_blocked(
+        connection,
+        &item.member_id,
+        &item.target_path,
+        item.project_id.as_deref(),
+    )? {
         return Err(StorageError::ManagedObjectBlocked);
     }
     match item.scope {
@@ -5855,6 +7856,107 @@ fn read_mount_plan_from(
     Ok(Some(plan))
 }
 
+fn stored_removal_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRemovalPlan> {
+    Ok(StoredRemovalPlan {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        target_id: row.get(2)?,
+        payload_json: row.get(3)?,
+        payload_sha256: row.get(4)?,
+        status: row.get(5)?,
+        created_at: row.get(6)?,
+        expires_at: row.get(7)?,
+    })
+}
+
+fn read_removal_plan_from(
+    connection: &Connection,
+    plan_id: &str,
+) -> Result<Option<StoredRemovalPlan>, StorageError> {
+    connection
+        .query_row(
+            "SELECT id, kind, target_id, payload_json, payload_sha256,
+                    status, created_at, expires_at
+             FROM removal_plans WHERE id = ?1",
+            [plan_id],
+            stored_removal_plan_from_row,
+        )
+        .optional()
+        .map_err(StorageError::ReadRemoval)
+}
+
+fn validate_stored_removal_plan(plan: &StoredRemovalPlan) -> Result<(), StorageError> {
+    if !is_single_path_component(&plan.id)
+        || !is_single_path_component(&plan.target_id)
+        || !matches!(plan.kind.as_str(), "project" | "source" | "bundle")
+        || !matches!(plan.status.as_str(), "pending" | "consumed")
+        || plan.payload_json.is_empty()
+        || plan.payload_sha256.len() != 64
+        || !plan
+            .payload_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || plan.created_at < 0
+        || plan.expires_at <= plan.created_at
+    {
+        Err(StorageError::RemovalStateConflict)
+    } else {
+        Ok(())
+    }
+}
+
+fn stored_removal_transaction_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredRemovalTransaction> {
+    Ok(StoredRemovalTransaction {
+        id: row.get(0)?,
+        plan_id: row.get(1)?,
+        kind: row.get(2)?,
+        target_id: row.get(3)?,
+        journal_path: row.get(4)?,
+        phase: row.get(5)?,
+        status: row.get(6)?,
+    })
+}
+
+fn ensure_removal_transaction_phase(
+    connection: &Connection,
+    transaction_id: &str,
+    kind: &str,
+    target_id: &str,
+    phase: &str,
+) -> Result<(), StorageError> {
+    let matches = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM removal_transactions
+                WHERE id = ?1 AND kind = ?2 AND target_id = ?3
+                  AND phase = ?4 AND status = 'in_progress'
+             )",
+            params![transaction_id, kind, target_id, phase],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(StorageError::ReadRemoval)?;
+    if matches == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::RemovalStateConflict)
+    }
+}
+
+fn read_sorted_string_column(
+    connection: &Connection,
+    sql: &str,
+    parameter: &str,
+) -> Result<Vec<String>, StorageError> {
+    let mut statement = connection.prepare(sql).map_err(StorageError::ReadRemoval)?;
+    let rows = statement
+        .query_map([parameter], |row| row.get::<_, String>(0))
+        .map_err(StorageError::ReadRemoval)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::ReadRemoval)
+}
+
 fn read_mount_from(
     connection: &Connection,
     data_root: &Path,
@@ -6137,6 +8239,7 @@ fn validate_new_install_plan_contract(plan: &NewInstallPlan<'_>) -> Result<(), S
         plan.source_tracked_ref,
         plan.source_catalog_generation,
         plan.source_marker,
+        plan.expected_source_marker,
         plan.expected_current_target,
         plan.expected_adopted_marker,
         plan.id,
@@ -6152,6 +8255,7 @@ fn validate_new_install_plan_contract(plan: &NewInstallPlan<'_>) -> Result<(), S
             candidate.skill_name,
             candidate.skill_description,
             candidate.content_fingerprint,
+            candidate.previous_content_fingerprint,
             candidate.selectable,
             candidate.preserve_existing,
             candidate.default_selected,
@@ -6173,6 +8277,7 @@ fn validate_stored_install_plan_contract(plan: &StoredInstallPlan) -> Result<(),
         plan.source_tracked_ref.as_deref(),
         plan.source_catalog_generation,
         plan.source_marker.as_deref(),
+        plan.expected_source_marker.as_deref(),
         plan.expected_current_target.as_deref(),
         plan.expected_adopted_marker.as_deref(),
         &plan.id,
@@ -6190,6 +8295,7 @@ fn validate_stored_install_plan_contract(plan: &StoredInstallPlan) -> Result<(),
                 candidate.skill_name.as_deref(),
                 candidate.skill_description.as_deref(),
                 candidate.content_fingerprint.as_deref(),
+                candidate.previous_content_fingerprint.as_deref(),
                 candidate.selectable,
                 candidate.preserve_existing,
                 candidate.default_selected,
@@ -6212,6 +8318,7 @@ fn validate_install_plan_shape(
     source_tracked_ref: Option<&str>,
     source_catalog_generation: Option<i64>,
     source_marker: Option<&str>,
+    expected_source_marker: Option<&str>,
     expected_current_target: Option<&str>,
     expected_adopted_marker: Option<&str>,
     plan_id: &str,
@@ -6225,6 +8332,7 @@ fn validate_install_plan_shape(
         && source_tracked_ref.is_none()
         && source_catalog_generation.is_none()
         && source_marker.is_none()
+        && expected_source_marker.is_none()
         && expected_current_target.is_none()
         && expected_adopted_marker.is_none();
     let folder_is_valid = kind == "folder_snapshot"
@@ -6239,9 +8347,20 @@ fn validate_install_plan_shape(
         && snapshot_relative_path.is_some_and(is_normalized_relative_path)
         && input_path.is_none();
     let source_mode_is_valid = match install_mode {
-        "create" => expected_current_target.is_none() && expected_adopted_marker.is_none(),
+        "create" => {
+            expected_source_marker.is_none()
+                && expected_current_target.is_none()
+                && expected_adopted_marker.is_none()
+        }
         "supplement" => {
-            expected_current_target.is_some_and(is_safe_current_target)
+            expected_source_marker.is_none()
+                && expected_current_target.is_some_and(is_safe_current_target)
+                && expected_adopted_marker.is_none_or(|value| !value.is_empty())
+        }
+        "update" => {
+            source_tracked_ref.is_none_or(|value| !value.is_empty())
+                && expected_source_marker.is_some_and(|value| !value.is_empty())
+                && expected_current_target.is_some_and(is_safe_current_target)
                 && expected_adopted_marker.is_none_or(|value| !value.is_empty())
         }
         _ => false,
@@ -6265,6 +8384,7 @@ fn valid_install_candidate_shape(
     skill_name: Option<&str>,
     skill_description: Option<&str>,
     content_fingerprint: Option<&str>,
+    previous_content_fingerprint: Option<&str>,
     selectable: bool,
     preserve_existing: bool,
     default_selected: bool,
@@ -6276,12 +8396,25 @@ fn valid_install_candidate_shape(
     let source_path_is_valid = source_relative_path
         .is_some_and(|path| path.is_empty() || is_normalized_relative_path(path))
         || (source_relative_path.is_none() && preserve_existing);
+    let previous_fingerprint_is_valid = match install_mode {
+        "create" => previous_content_fingerprint.is_none(),
+        "supplement" => {
+            if preserve_existing {
+                previous_content_fingerprint == content_fingerprint
+            } else {
+                previous_content_fingerprint.is_none()
+            }
+        }
+        "update" => previous_content_fingerprint.is_none_or(|value| !value.is_empty()),
+        _ => false,
+    };
     is_single_path_component(candidate_id)
         && source_path_is_valid
+        && previous_fingerprint_is_valid
         && (!selectable || metadata_is_complete)
         && (!preserve_existing
             || (plan_kind == "source_snapshot"
-                && install_mode == "supplement"
+                && matches!(install_mode, "supplement" | "update")
                 && !selectable
                 && default_selected
                 && selected
@@ -6311,9 +8444,14 @@ fn validate_install_plan_source_contract(
         .as_deref()
         .ok_or(StorageError::InvalidInstallPlan)?;
     let source = read_source_install_source_from(connection, source_id)?;
+    let source_marker_matches = if plan.install_mode == "update" {
+        plan.expected_source_marker.as_deref() == Some(source.catalog_marker.as_str())
+    } else {
+        plan.source_marker.as_deref() == Some(source.catalog_marker.as_str())
+    };
     if plan.source_tracked_ref != source.tracked_ref
         || plan.source_catalog_generation != Some(source.catalog_generation)
-        || plan.source_marker.as_deref() != Some(source.catalog_marker.as_str())
+        || !source_marker_matches
     {
         return Err(StorageError::SourceCatalogStateChanged);
     }
@@ -6347,9 +8485,79 @@ fn validate_install_plan_source_contract(
             validate_preserved_install_members(plan, bundle)?;
             Some(bundle)
         }
+        "update" => {
+            let bundle = source
+                .bundle
+                .as_ref()
+                .ok_or(StorageError::SourceBundleStateConflict)?;
+            let source_kind = SourceKind::from_str(&source.kind)
+                .ok_or_else(|| StorageError::UnknownSourceKind(source.kind.clone()))?;
+            let editable_check_is_current = source_kind != SourceKind::EditableLocal
+                || (bundle.update_check_status == BundleUpdateStatus::Available
+                    && bundle.update_checked_marker == plan.source_marker
+                    && bundle.update_checked_at.is_some()
+                    && plan.source_marker == plan.expected_source_marker);
+            if !editable_check_is_current
+                || bundle.id != plan.bundle_id
+                || bundle.display_name != plan.bundle_display_name
+                || Some(bundle.current_target.as_str()) != plan.expected_current_target.as_deref()
+                || bundle.adopted_marker != plan.expected_adopted_marker
+            {
+                return Err(StorageError::SourceBundleStateConflict);
+            }
+            validate_update_install_members(plan, bundle)?;
+            return Ok(());
+        }
         _ => return Err(StorageError::InvalidInstallPlan),
     };
     validate_source_install_candidates(plan, &source.catalog_members, bundle)
+}
+
+/// Update 的候选同时描述新 Source 内容和旧 current 校验，且每个旧成员只能出现一次。
+fn validate_update_install_members(
+    plan: &StoredInstallPlan,
+    bundle: &StoredSourceInstallBundle,
+) -> Result<(), StorageError> {
+    let previous = plan
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.previous_content_fingerprint.is_some())
+        .map(|candidate| (candidate.candidate_id.as_str(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    if previous.len() != bundle.members.len() {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    for member in &bundle.members {
+        let candidate = previous
+            .get(member.id.as_str())
+            .ok_or(StorageError::SourceBundleStateConflict)?;
+        if candidate.skill_name.as_deref() != Some(member.skill_name.as_str())
+            || candidate.previous_content_fingerprint.as_deref()
+                != Some(member.content_fingerprint.as_str())
+            || (candidate.preserve_existing
+                && (candidate.skill_description.as_deref() != Some(member.description.as_str())
+                    || candidate.content_fingerprint.as_deref()
+                        != Some(member.content_fingerprint.as_str())))
+            || (!candidate.preserve_existing
+                && candidate.source_relative_path != member.source_relative_path)
+        {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+    }
+
+    let current = plan
+        .candidates
+        .iter()
+        .filter(|candidate| !candidate.preserve_existing)
+        .collect::<Vec<_>>();
+    if current.is_empty()
+        || current
+            .iter()
+            .any(|candidate| candidate.source_relative_path.is_none())
+    {
+        return Err(StorageError::InvalidInstallPlan);
+    }
+    Ok(())
 }
 
 fn validate_preserved_install_members(
@@ -7763,6 +9971,245 @@ fn read_mount_target_paths_from(connection: &Connection) -> Result<BTreeSet<Stri
     Ok(targets)
 }
 
+fn validate_new_bundle_update_batch(
+    batch_id: &str,
+    items: &[NewBundleUpdateBatchItem<'_>],
+    created_at: i64,
+    expires_at: i64,
+) -> Result<(), StorageError> {
+    let mut item_ids = BTreeSet::new();
+    let mut bundle_ids = BTreeSet::new();
+    if !is_single_path_component(batch_id)
+        || items.is_empty()
+        || created_at < 0
+        || expires_at <= created_at
+        || items.iter().any(|item| {
+            !is_single_path_component(item.id)
+                || !is_single_path_component(item.source_id)
+                || !is_single_path_component(item.bundle_id)
+                || item.display_name.trim().is_empty()
+                || item.target_marker.is_empty()
+                || !item_ids.insert(item.id)
+                || !bundle_ids.insert(item.bundle_id)
+                || !matches!(
+                    (item.status, item.install_plan_id, item.error),
+                    ("ready", Some(_), None) | ("preparation_failed", None, Some(_))
+                )
+        })
+    {
+        return Err(StorageError::InvalidBundleUpdateBatch);
+    }
+    Ok(())
+}
+
+fn read_bundle_update_batch_from(
+    connection: &Connection,
+    batch_id: &str,
+) -> Result<Option<StoredBundleUpdateBatch>, StorageError> {
+    let batch = connection
+        .query_row(
+            "SELECT id, status, created_at, expires_at, confirmed_at, updated_at
+             FROM bundle_update_batches
+             WHERE id = ?1",
+            [batch_id],
+            |row| {
+                Ok(StoredBundleUpdateBatch {
+                    id: row.get(0)?,
+                    status: row.get(1)?,
+                    created_at: row.get(2)?,
+                    expires_at: row.get(3)?,
+                    confirmed_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    items: Vec::new(),
+                })
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadBundleUpdateBatch)?;
+    let Some(mut batch) = batch else {
+        return Ok(None);
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT id, source_id, bundle_id, display_name, install_plan_id,
+                    target_marker, status, error, display_order, confirmed_order
+             FROM bundle_update_batch_items
+             WHERE batch_id = ?1
+             ORDER BY display_order, id",
+        )
+        .map_err(StorageError::ReadBundleUpdateBatch)?;
+    let rows = statement
+        .query_map([batch_id], |row| {
+            Ok(StoredBundleUpdateBatchItem {
+                id: row.get(0)?,
+                source_id: row.get(1)?,
+                bundle_id: row.get(2)?,
+                display_name: row.get(3)?,
+                install_plan_id: row.get(4)?,
+                target_marker: row.get(5)?,
+                status: row.get(6)?,
+                error: row.get(7)?,
+                display_order: row.get(8)?,
+                confirmed_order: row.get(9)?,
+            })
+        })
+        .map_err(StorageError::ReadBundleUpdateBatch)?;
+    batch.items = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::ReadBundleUpdateBatch)?;
+    validate_stored_bundle_update_batch(&batch)?;
+    Ok(Some(batch))
+}
+
+fn validate_bundle_update_batch_child_owner(
+    connection: &Connection,
+    plan_id: &str,
+    owner: Option<BundleUpdateBatchChildOwner<'_>>,
+    operation: BundleUpdateBatchChildOperation,
+) -> Result<(), StorageError> {
+    let ownership = connection
+        .query_row(
+            "SELECT item.batch_id, item.id, batch.status, item.status, item.confirmed_order
+             FROM bundle_update_batch_items AS item
+             JOIN bundle_update_batches AS batch ON batch.id = item.batch_id
+             WHERE item.install_plan_id = ?1",
+            [plan_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::ReadBundleUpdateBatch)?;
+    let Some((batch_id, item_id, batch_status, item_status, confirmed_order)) = ownership else {
+        return if owner.is_none() {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidBundleUpdateBatch)
+        };
+    };
+    let Some(owner) = owner else {
+        return Err(StorageError::InstallPlanOwnedByBundleUpdateBatch);
+    };
+    if owner.batch_id != batch_id || owner.item_id != item_id {
+        return Err(StorageError::InvalidBundleUpdateBatch);
+    }
+
+    let is_valid = match operation {
+        BundleUpdateBatchChildOperation::Confirm => {
+            batch_status == "running" && item_status == "ready" && confirmed_order.is_some()
+        }
+        BundleUpdateBatchChildOperation::Discard => {
+            (batch_status == "running" && item_status == "ready" && confirmed_order.is_some())
+                || (matches!(batch_status.as_str(), "running" | "blocked")
+                    && item_status == "not_executed")
+        }
+    };
+    if is_valid {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidBundleUpdateBatch)
+    }
+}
+
+fn validate_stored_bundle_update_batch(
+    batch: &StoredBundleUpdateBatch,
+) -> Result<(), StorageError> {
+    let mut item_ids = BTreeSet::new();
+    let mut bundle_ids = BTreeSet::new();
+    let mut display_orders = BTreeSet::new();
+    let mut confirmed_orders = BTreeSet::new();
+    let common_is_valid = is_single_path_component(&batch.id)
+        && !batch.items.is_empty()
+        && batch.created_at >= 0
+        && batch.expires_at > batch.created_at
+        && batch.updated_at >= batch.created_at
+        && batch.items.iter().all(|item| {
+            is_single_path_component(&item.id)
+                && is_single_path_component(&item.source_id)
+                && is_single_path_component(&item.bundle_id)
+                && !item.display_name.trim().is_empty()
+                && !item.target_marker.is_empty()
+                && item.display_order >= 0
+                && item.confirmed_order.is_none_or(|order| order >= 0)
+                && item_ids.insert(item.id.as_str())
+                && bundle_ids.insert(item.bundle_id.as_str())
+                && display_orders.insert(item.display_order)
+                && item
+                    .confirmed_order
+                    .is_none_or(|order| confirmed_orders.insert(order))
+                && matches!(
+                    (item.status.as_str(), item.error.as_deref()),
+                    ("ready", None)
+                        | ("preparation_failed", Some(_))
+                        | ("succeeded", None)
+                        | ("failed", Some(_))
+                        | ("blocked", Some(_))
+                        | ("not_executed", None)
+                )
+        });
+    let state_is_valid = match batch.status.as_str() {
+        "pending" => {
+            batch.confirmed_at.is_none()
+                && batch.items.iter().all(|item| {
+                    matches!(item.status.as_str(), "ready" | "preparation_failed")
+                        && item.confirmed_order.is_none()
+                        && ((item.status == "ready" && item.install_plan_id.is_some())
+                            || (item.status == "preparation_failed"
+                                && item.install_plan_id.is_none()))
+                })
+        }
+        "running" => {
+            batch.confirmed_at.is_some()
+                && batch
+                    .items
+                    .iter()
+                    .all(|item| item.status != "preparation_failed")
+                && batch
+                    .items
+                    .iter()
+                    .filter(|item| item.status == "blocked")
+                    .count()
+                    <= 1
+        }
+        "completed" => {
+            batch.confirmed_at.is_some()
+                && batch.items.iter().all(|item| {
+                    matches!(
+                        item.status.as_str(),
+                        "succeeded" | "failed" | "not_executed"
+                    )
+                })
+        }
+        "blocked" => {
+            batch.confirmed_at.is_some()
+                && batch
+                    .items
+                    .iter()
+                    .filter(|item| item.status == "blocked")
+                    .count()
+                    == 1
+                && batch.items.iter().all(|item| {
+                    matches!(
+                        item.status.as_str(),
+                        "succeeded" | "failed" | "blocked" | "not_executed"
+                    )
+                })
+        }
+        _ => false,
+    };
+    if common_is_valid && state_is_valid {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidBundleUpdateBatch)
+    }
+}
+
 fn read_install_plan_from(
     connection: &Connection,
     plan_id: &str,
@@ -7772,8 +10219,9 @@ fn read_install_plan_from(
             "SELECT
                 id, kind, install_mode, input_path, input_device, input_inode,
                 input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
-                source_catalog_generation, source_marker, expected_current_target,
-                expected_adopted_marker, bundle_id, bundle_display_name, expires_at, status
+                source_catalog_generation, source_marker, expected_source_marker,
+                expected_current_target, expected_adopted_marker, bundle_id, bundle_display_name,
+                warnings_json, created_at, expires_at, status
              FROM install_plans
              WHERE id = ?1",
             [plan_id],
@@ -7791,12 +10239,15 @@ fn read_install_plan_from(
                     source_tracked_ref: row.get(9)?,
                     source_catalog_generation: row.get(10)?,
                     source_marker: row.get(11)?,
-                    expected_current_target: row.get(12)?,
-                    expected_adopted_marker: row.get(13)?,
-                    bundle_id: row.get(14)?,
-                    bundle_display_name: row.get(15)?,
-                    expires_at: row.get(16)?,
-                    status: row.get(17)?,
+                    expected_source_marker: row.get(12)?,
+                    expected_current_target: row.get(13)?,
+                    expected_adopted_marker: row.get(14)?,
+                    bundle_id: row.get(15)?,
+                    bundle_display_name: row.get(16)?,
+                    warnings_json: row.get(17)?,
+                    created_at: row.get(18)?,
+                    expires_at: row.get(19)?,
+                    status: row.get(20)?,
                 })
             },
         )
@@ -7809,6 +10260,8 @@ fn read_install_plan_from(
         u64::try_from(row.input_device).map_err(|_| StorageError::InvalidInstallPlan)?;
     let input_inode =
         u64::try_from(row.input_inode).map_err(|_| StorageError::InvalidInstallPlan)?;
+    let warnings =
+        serde_json::from_str(&row.warnings_json).map_err(StorageError::InvalidPlanWarnings)?;
     let candidates = read_install_candidates_from(connection, &row.id)?;
     let plan = StoredInstallPlan {
         id: row.id,
@@ -7823,10 +10276,13 @@ fn read_install_plan_from(
         source_tracked_ref: row.source_tracked_ref,
         source_catalog_generation: row.source_catalog_generation,
         source_marker: row.source_marker,
+        expected_source_marker: row.expected_source_marker,
         expected_current_target: row.expected_current_target,
         expected_adopted_marker: row.expected_adopted_marker,
         bundle_id: row.bundle_id,
         bundle_display_name: row.bundle_display_name,
+        warnings,
+        created_at: row.created_at,
         expires_at: row.expires_at,
         status: row.status,
         candidates,
@@ -7842,7 +10298,7 @@ fn read_install_candidates_from(
     let mut statement = connection
         .prepare(
             "SELECT candidate_id, source_relative_path, skill_name, skill_description,
-                    content_fingerprint, selectable, preserve_existing,
+                    content_fingerprint, previous_content_fingerprint, selectable, preserve_existing,
                     validation_errors_json, warnings_json, default_selected, selected
              FROM install_plan_candidates
              WHERE plan_id = ?1
@@ -7857,12 +10313,13 @@ fn read_install_candidates_from(
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(5)?,
                 row.get::<_, i64>(6)?,
-                row.get::<_, String>(7)?,
+                row.get::<_, i64>(7)?,
                 row.get::<_, String>(8)?,
-                row.get::<_, i64>(9)?,
+                row.get::<_, String>(9)?,
                 row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
             ))
         })
         .map_err(StorageError::ReadInstallPlan)?;
@@ -7874,6 +10331,7 @@ fn read_install_candidates_from(
             skill_name,
             skill_description,
             content_fingerprint,
+            previous_content_fingerprint,
             selectable,
             preserve_existing,
             validation_errors_json,
@@ -7887,6 +10345,7 @@ fn read_install_candidates_from(
             skill_name,
             skill_description,
             content_fingerprint,
+            previous_content_fingerprint,
             selectable: sqlite_bool(selectable)?,
             preserve_existing: sqlite_bool(preserve_existing)?,
             validation_errors: serde_json::from_str(&validation_errors_json)
@@ -7918,7 +10377,8 @@ fn read_source_install_source_from(
     let source = connection
         .query_row(
             "SELECT kind, canonical_identity, owner, repository, display_name,
-                    locator, tracked_ref, catalog_status, catalog_generation, catalog_marker
+                    locator, tracked_ref, filesystem_device, filesystem_inode,
+                    catalog_status, catalog_generation, catalog_marker
              FROM sources
              WHERE id = ?1",
             [source_id],
@@ -7931,9 +10391,11 @@ fn read_source_install_source_from(
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             },
         )
@@ -7948,10 +10410,18 @@ fn read_source_install_source_from(
         display_name,
         locator,
         tracked_ref,
+        filesystem_device,
+        filesystem_inode,
         catalog_status,
         catalog_generation,
         catalog_marker,
     ) = source;
+    let filesystem_device = filesystem_device
+        .map(filesystem_identity_from_sql)
+        .transpose()?;
+    let filesystem_inode = filesystem_inode
+        .map(filesystem_identity_from_sql)
+        .transpose()?;
     let Some(catalog_marker) = catalog_marker else {
         return Err(StorageError::SourceCatalogStateChanged);
     };
@@ -7966,6 +10436,8 @@ fn read_source_install_source_from(
             && (owner.as_deref().is_none_or(str::is_empty)
                 || repository.as_deref().is_none_or(str::is_empty)))
         || (kind != "github" && (owner.is_some() || repository.is_some() || tracked_ref.is_some()))
+        || (kind == "editable_local" && (filesystem_device.is_none() || filesystem_inode.is_none()))
+        || (kind != "editable_local" && (filesystem_device.is_some() || filesystem_inode.is_some()))
     {
         return Err(StorageError::SourceCatalogStateChanged);
     }
@@ -7974,18 +10446,43 @@ fn read_source_install_source_from(
         read_source_install_catalog_members_from(connection, source_id, catalog_generation)?;
     let linked = connection
         .query_row(
-            "SELECT bundle_id, adopted_marker
+            "SELECT bundle_id, adopted_marker, update_check_status,
+                    update_checked_marker, update_checked_at
              FROM source_bundle_links
              WHERE source_id = ?1",
             [source_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(StorageError::ReadSources)?;
     let bundle = linked
-        .map(|(bundle_id, adopted_marker)| {
-            read_source_install_bundle_from(connection, source_id, &bundle_id, adopted_marker)
-        })
+        .map(
+            |(
+                bundle_id,
+                adopted_marker,
+                update_check_status,
+                update_checked_marker,
+                update_checked_at,
+            )| {
+                read_source_install_bundle_from(
+                    connection,
+                    source_id,
+                    &bundle_id,
+                    adopted_marker,
+                    update_check_status,
+                    update_checked_marker,
+                    update_checked_at,
+                )
+            },
+        )
         .transpose()?;
 
     Ok(StoredSourceInstallSource {
@@ -7997,6 +10494,8 @@ fn read_source_install_source_from(
         display_name,
         locator,
         tracked_ref,
+        filesystem_device,
+        filesystem_inode,
         catalog_generation,
         catalog_marker,
         catalog_members,
@@ -8070,6 +10569,9 @@ fn read_source_install_bundle_from(
     source_id: &str,
     bundle_id: &str,
     adopted_marker: Option<String>,
+    update_check_status: String,
+    update_checked_marker: Option<String>,
+    update_checked_at: Option<i64>,
 ) -> Result<StoredSourceInstallBundle, StorageError> {
     let bundle = connection
         .query_row(
@@ -8089,6 +10591,8 @@ fn read_source_install_bundle_from(
         .map_err(StorageError::ReadSources)?
         .ok_or(StorageError::SourceBundleStateConflict)?;
     let (display_name, managed_directory, current_target) = bundle;
+    let update_check_status = BundleUpdateStatus::from_stored_str(&update_check_status)
+        .ok_or_else(|| StorageError::UnknownBundleUpdateStatus(update_check_status.clone()))?;
     if !is_single_path_component(bundle_id)
         || managed_directory != format!("bundles/{bundle_id}")
         || !is_safe_current_target(&current_target)
@@ -8173,6 +10677,9 @@ fn read_source_install_bundle_from(
         display_name,
         current_target,
         adopted_marker,
+        update_check_status,
+        update_checked_marker,
+        update_checked_at,
         members,
     })
 }
@@ -8520,6 +11027,16 @@ fn map_lifecycle_insert_error(error: rusqlite::Error) -> StorageError {
     StorageError::SaveLifecycleTransaction(error)
 }
 
+fn map_bundle_update_batch_insert_error(error: rusqlite::Error) -> StorageError {
+    if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error
+        && code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+        && message.contains("bundle_update_batch_single_open")
+    {
+        return StorageError::BundleUpdateBatchAlreadyOpen;
+    }
+    StorageError::SaveBundleUpdateBatch(error)
+}
+
 fn map_mount_transaction_insert_error(error: rusqlite::Error) -> StorageError {
     if let rusqlite::Error::SqliteFailure(code, Some(message)) = &error
         && ((code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
@@ -8562,6 +11079,17 @@ fn map_source_association_transaction_insert_error(error: rusqlite::Error) -> St
         return StorageError::ActiveLifecycleTransaction;
     }
     StorageError::SaveSourceAssociationTransaction(error)
+}
+
+fn map_removal_transaction_insert_error(error: rusqlite::Error) -> StorageError {
+    match &error {
+        rusqlite::Error::SqliteFailure(_, Some(message))
+            if message.contains("active_lifecycle_transaction") =>
+        {
+            StorageError::ActiveLifecycleTransaction
+        }
+        _ => StorageError::SaveRemoval(error),
+    }
 }
 
 fn ensure_install_transaction_can_finalize(
@@ -8727,6 +11255,244 @@ fn finalize_install_supplement_rows(
     Ok(())
 }
 
+fn finalize_install_update_rows(
+    transaction: &Transaction<'_>,
+    plan: &StoredInstallPlan,
+    selected: &[&StoredInstallCandidate],
+    managed_directory: &str,
+    current_target: &str,
+    now: i64,
+) -> Result<(), StorageError> {
+    if plan.kind != "source_snapshot" {
+        return Err(StorageError::InvalidInstallPlan);
+    }
+    let source_id = plan
+        .source_id
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallPlan)?;
+    let target_marker = plan
+        .source_marker
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallPlan)?;
+    let expected_source_marker = plan
+        .expected_source_marker
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallPlan)?;
+    let expected_current_target = plan
+        .expected_current_target
+        .as_deref()
+        .ok_or(StorageError::InvalidInstallPlan)?;
+    let target_generation = plan
+        .source_catalog_generation
+        .and_then(|generation| generation.checked_add(1))
+        .ok_or(StorageError::InvalidInstallPlan)?;
+
+    let source_baseline = transaction
+        .query_row(
+            "SELECT bundle_id, adopted_marker
+             FROM source_bundle_links
+             WHERE source_id = ?1",
+            [source_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(StorageError::SaveManagedBundle)?
+        .ok_or(StorageError::SourceBundleStateConflict)?;
+    if source_baseline.0 != plan.bundle_id
+        || (source_baseline.1 != plan.expected_adopted_marker
+            && source_baseline.1.as_deref() != Some(target_marker))
+    {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    let source_catalog = transaction
+        .query_row(
+            "SELECT catalog_generation, catalog_marker FROM sources WHERE id = ?1",
+            [source_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    let old_catalog = (
+        plan.source_catalog_generation
+            .ok_or(StorageError::InvalidInstallPlan)?,
+        Some(expected_source_marker.to_owned()),
+    );
+    let new_catalog = (target_generation, Some(target_marker.to_owned()));
+    if source_catalog != old_catalog && source_catalog != new_catalog {
+        return Err(StorageError::SourceCatalogStateChanged);
+    }
+
+    let changed = transaction
+        .execute(
+            "UPDATE bundles
+             SET current_target = ?4
+             WHERE id = ?1
+               AND display_name = ?2
+               AND managed_directory = ?3
+               AND current_target IN (?4, ?5)",
+            params![
+                plan.bundle_id,
+                plan.bundle_display_name,
+                managed_directory,
+                current_target,
+                expected_current_target
+            ],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    if changed != 1 {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+
+    for candidate in selected {
+        if let Some(previous_fingerprint) = candidate.previous_content_fingerprint.as_deref() {
+            let skill_name = candidate
+                .skill_name
+                .as_deref()
+                .ok_or(StorageError::InvalidInstallSelection)?;
+            let description = candidate
+                .skill_description
+                .as_deref()
+                .ok_or(StorageError::InvalidInstallSelection)?;
+            let fingerprint = candidate
+                .content_fingerprint
+                .as_deref()
+                .ok_or(StorageError::InvalidInstallSelection)?;
+            let updated = transaction
+                .execute(
+                    "UPDATE skill_members
+                     SET description = ?4, content_fingerprint = ?5
+                     WHERE id = ?1
+                       AND bundle_id = ?2
+                       AND skill_name = ?3
+                       AND stable_relative_path = ?6
+                       AND content_fingerprint IN (?5, ?7)",
+                    params![
+                        candidate.candidate_id,
+                        plan.bundle_id,
+                        skill_name,
+                        description,
+                        fingerprint,
+                        format!("members/{skill_name}"),
+                        previous_fingerprint
+                    ],
+                )
+                .map_err(StorageError::SaveManagedBundle)?;
+            if updated != 1 {
+                return Err(StorageError::SourceBundleStateConflict);
+            }
+        } else {
+            persist_install_member(transaction, &plan.bundle_id, candidate, now)?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO member_selections (bundle_id, member_id, selected_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(bundle_id, member_id) DO NOTHING",
+                params![plan.bundle_id, candidate.candidate_id, now],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+    }
+
+    transaction
+        .execute(
+            "DELETE FROM source_catalog_members WHERE source_id = ?1",
+            [source_id],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    for (sort_order, candidate) in selected
+        .iter()
+        .filter(|candidate| !candidate.preserve_existing)
+        .enumerate()
+    {
+        let validation_errors = serde_json::to_string(&candidate.validation_errors)
+            .map_err(StorageError::InvalidPlanValidationErrors)?;
+        let warnings = serde_json::to_string(&candidate.warnings)
+            .map_err(StorageError::InvalidPlanWarnings)?;
+        transaction
+            .execute(
+                "INSERT INTO source_catalog_members (
+                    id, source_id, catalog_generation, relative_path, skill_name,
+                    description, content_fingerprint, selectable,
+                    validation_errors_json, warnings_json, sort_order
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
+                params![
+                    candidate.candidate_id,
+                    source_id,
+                    target_generation,
+                    candidate.source_relative_path,
+                    candidate.skill_name,
+                    candidate.skill_description,
+                    candidate.content_fingerprint,
+                    validation_errors,
+                    warnings,
+                    sort_order as i64
+                ],
+            )
+            .map_err(StorageError::SaveManagedBundle)?;
+    }
+    let source_changed = transaction
+        .execute(
+            "UPDATE sources
+             SET catalog_status = 'fresh',
+                 catalog_generation = ?2,
+                 catalog_marker = ?3,
+                 catalog_fetched_at = ?4,
+                 last_reload_at = ?4,
+                 last_reload_error = NULL,
+                 updated_at = ?4
+             WHERE id = ?1
+               AND (
+                   (catalog_generation = ?5 AND catalog_marker = ?6)
+                   OR (catalog_generation = ?2 AND catalog_marker = ?3)
+               )",
+            params![
+                source_id,
+                target_generation,
+                target_marker,
+                now,
+                plan.source_catalog_generation,
+                expected_source_marker
+            ],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    if source_changed != 1 {
+        return Err(StorageError::SourceCatalogStateChanged);
+    }
+
+    transaction
+        .execute(
+            "DELETE FROM source_member_links WHERE source_id = ?1",
+            [source_id],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    for candidate in selected {
+        persist_source_member_link(transaction, source_id, candidate, now)?;
+    }
+    let linked = transaction
+        .execute(
+            "UPDATE source_bundle_links
+             SET adopted_marker = ?3,
+                 update_check_status = 'up_to_date',
+                 update_checked_marker = ?3,
+                 update_checked_at = ?4,
+                 update_check_error = NULL
+             WHERE source_id = ?1
+               AND bundle_id = ?2
+               AND (adopted_marker IS ?5 OR adopted_marker = ?3)",
+            params![
+                source_id,
+                plan.bundle_id,
+                target_marker,
+                now,
+                plan.expected_adopted_marker
+            ],
+        )
+        .map_err(StorageError::SaveManagedBundle)?;
+    if linked != 1 {
+        return Err(StorageError::SourceBundleStateConflict);
+    }
+    Ok(())
+}
+
 fn persist_install_member(
     transaction: &Transaction<'_>,
     bundle_id: &str,
@@ -8809,7 +11575,7 @@ fn ensure_source_install_state_matches(
         .source_id
         .as_deref()
         .ok_or(StorageError::InvalidInstallPlan)?;
-    let expected_adopted_marker = if plan.install_mode == "create" {
+    let expected_adopted_marker = if matches!(plan.install_mode.as_str(), "create" | "update") {
         plan.source_marker.clone()
     } else {
         plan.expected_adopted_marker.clone()
@@ -9316,6 +12082,7 @@ mod tests {
             skill_name: Some(member_id),
             skill_description: Some("测试 Skill"),
             content_fingerprint: Some("sha256:test"),
+            previous_content_fingerprint: None,
             selectable: true,
             preserve_existing: false,
             validation_errors: &[],
@@ -9336,6 +12103,7 @@ mod tests {
                 source_tracked_ref: None,
                 source_catalog_generation: None,
                 source_marker: None,
+                expected_source_marker: None,
                 expected_current_target: None,
                 expected_adopted_marker: None,
                 bundle_id,
@@ -9398,6 +12166,7 @@ mod tests {
                 skill_name: Some("alpha"),
                 skill_description: Some("Alpha Skill"),
                 content_fingerprint: Some("sha256:alpha-v1"),
+                previous_content_fingerprint: None,
                 selectable: true,
                 preserve_existing: false,
                 validation_errors: &[],
@@ -9410,6 +12179,7 @@ mod tests {
                 skill_name: Some("beta"),
                 skill_description: Some("Beta Skill"),
                 content_fingerprint: Some("sha256:beta"),
+                previous_content_fingerprint: None,
                 selectable: true,
                 preserve_existing: false,
                 validation_errors: &[],
@@ -9431,6 +12201,7 @@ mod tests {
                 source_tracked_ref: Some("main"),
                 source_catalog_generation: Some(1),
                 source_marker: Some(TEST_GITHUB_COMMIT_ONE),
+                expected_source_marker: None,
                 expected_current_target: None,
                 expected_adopted_marker: None,
                 bundle_id,
@@ -9457,6 +12228,7 @@ mod tests {
                 skill_name: Some("alpha"),
                 skill_description: Some("Alpha Skill"),
                 content_fingerprint: Some("sha256:alpha-v1"),
+                previous_content_fingerprint: Some("sha256:alpha-v1"),
                 selectable: false,
                 preserve_existing: true,
                 validation_errors: &[],
@@ -9469,6 +12241,7 @@ mod tests {
                 skill_name: Some("beta"),
                 skill_description: Some("Beta Skill"),
                 content_fingerprint: Some("sha256:beta"),
+                previous_content_fingerprint: None,
                 selectable: true,
                 preserve_existing: false,
                 validation_errors: &[],
@@ -9490,6 +12263,7 @@ mod tests {
                 source_tracked_ref: Some("main"),
                 source_catalog_generation: Some(2),
                 source_marker: Some(TEST_GITHUB_COMMIT_TWO),
+                expected_source_marker: None,
                 expected_current_target: Some(expected_current_target),
                 expected_adopted_marker: Some(TEST_GITHUB_COMMIT_ONE),
                 bundle_id,
@@ -9598,6 +12372,7 @@ mod tests {
                 skill_name: Some(&first_name),
                 skill_description: Some("第一个测试 Skill"),
                 content_fingerprint: Some("sha256:alpha"),
+                previous_content_fingerprint: None,
                 selectable: true,
                 preserve_existing: false,
                 validation_errors: &[],
@@ -9610,6 +12385,7 @@ mod tests {
                 skill_name: Some(&second_name),
                 skill_description: Some("第二个测试 Skill"),
                 content_fingerprint: Some("sha256:beta"),
+                previous_content_fingerprint: None,
                 selectable: true,
                 preserve_existing: false,
                 validation_errors: &[],
@@ -9631,6 +12407,7 @@ mod tests {
                 source_tracked_ref: None,
                 source_catalog_generation: None,
                 source_marker: None,
+                expected_source_marker: None,
                 expected_current_target: None,
                 expected_adopted_marker: None,
                 bundle_id: &bundle_id,
@@ -9951,7 +12728,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=16).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=20).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -9966,6 +12743,8 @@ mod tests {
             "takeover_transactions",
             "source_association_plans",
             "source_association_transactions",
+            "removal_plans",
+            "removal_transactions",
         ] {
             let exists = storage
                 .connection
@@ -10028,6 +12807,7 @@ mod tests {
             "source_tracked_ref",
             "source_catalog_generation",
             "source_marker",
+            "expected_source_marker",
             "expected_current_target",
             "expected_adopted_marker",
         ] {
@@ -10057,6 +12837,7 @@ mod tests {
             .collect::<Result<BTreeSet<_>, _>>()
             .expect("应收集候选 schema");
         assert!(candidate_columns.contains("preserve_existing"));
+        assert!(candidate_columns.contains("previous_content_fingerprint"));
         let source_path_not_null = storage
             .connection
             .query_row(
@@ -10112,6 +12893,8 @@ mod tests {
             "install_transaction_reject_active_batch_mount",
             "takeover_transaction_reject_active_writer",
             "install_transaction_reject_active_takeover",
+            "source_association_transaction_reject_active_writer",
+            "install_transaction_reject_active_source_association",
         ] {
             let exists = storage
                 .connection
@@ -10323,6 +13106,99 @@ mod tests {
                 .expect("active lifecycle 应保持可恢复")
                 .iter()
                 .any(|transaction| transaction.id == "active-before-association-tx")
+        );
+        let foreign_key_issues = storage
+            .connection
+            .prepare("PRAGMA foreign_key_check")
+            .expect("应准备外键检查")
+            .query_map([], |_| Ok(()))
+            .expect("应执行外键检查")
+            .count();
+        assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn bundle_update_migration_preserves_pending_and_blocked_install_state() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let database = data_root.join("skillyard.sqlite3");
+        let connection = Connection::open(&database).expect("应创建 version 17 SQLite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("应建立 migration 表");
+        for (version, migration) in MIGRATIONS.iter().take(17) {
+            connection
+                .execute_batch(migration)
+                .expect("应建立 version 17 schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 1)",
+                    [version],
+                )
+                .expect("应记录旧 migration");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO install_plans (
+                    id, kind, install_mode, input_path, input_device, input_inode,
+                    input_fingerprint, snapshot_relative_path, source_id, source_tracked_ref,
+                    source_catalog_generation, source_marker, expected_current_target,
+                    expected_adopted_marker, bundle_id, bundle_display_name,
+                    warnings_json, created_at, expires_at, status
+                 ) VALUES
+                    ('pending-before-update', 'folder_snapshot', 'create',
+                     '/tmp/pending-update', 1, 2, 'sha256:pending', NULL, NULL, NULL,
+                     NULL, NULL, NULL, NULL, 'pending-update-bundle', 'Pending',
+                     '[]', 10, 1000, 'pending'),
+                    ('blocked-before-update', 'folder_snapshot', 'create',
+                     '/tmp/blocked-update', 3, 4, 'sha256:blocked', NULL, NULL, NULL,
+                     NULL, NULL, NULL, NULL, 'blocked-update-bundle', 'Blocked',
+                     '[]', 11, 1000, 'consumed');
+
+                 INSERT INTO install_plan_candidates (
+                    plan_id, candidate_id, source_relative_path, skill_name,
+                    skill_description, content_fingerprint, selectable, preserve_existing,
+                    validation_errors_json, warnings_json, default_selected, selected, sort_order
+                 ) VALUES
+                    ('pending-before-update', 'pending-update-member', '', 'pending-update',
+                     'Pending', 'sha256:pending', 1, 0, '[]', '[]', 1, 1, 0),
+                    ('blocked-before-update', 'blocked-update-member', '', 'blocked-update',
+                     'Blocked', 'sha256:blocked', 1, 0, '[]', '[]', 1, 1, 0);
+
+                 INSERT INTO lifecycle_transactions (
+                    id, kind, plan_id, bundle_id, member_id, journal_path,
+                    phase, status, error_message, created_at, updated_at
+                 ) VALUES (
+                    'blocked-before-update-tx', 'install_bundle',
+                    'blocked-before-update', 'blocked-update-bundle',
+                    'blocked-update-member', 'journals/blocked-before-update.json',
+                    'journal_ready', 'blocked', '测试人工恢复', 12, 12
+                 );",
+            )
+            .expect("应写入 0018 迁移前状态");
+        drop(connection);
+
+        let storage = Storage::open(&data_root, &database).expect("0018 应保留未完成状态");
+        let pending = storage
+            .read_install_plan("pending-before-update")
+            .expect("pending Plan 应保持可读");
+        assert!(pending.expected_source_marker.is_none());
+        assert!(pending.candidates[0].previous_content_fingerprint.is_none());
+        assert!(
+            storage
+                .recoverable_lifecycle_transactions()
+                .expect("blocked lifecycle 应保持可恢复")
+                .iter()
+                .any(|transaction| {
+                    transaction.id == "blocked-before-update-tx" && transaction.status == "blocked"
+                })
         );
         let foreign_key_issues = storage
             .connection
@@ -11795,6 +14671,7 @@ mod tests {
                 skill_name: Some(&members[0].skill_name),
                 skill_description: Some("第一个测试 Skill"),
                 content_fingerprint: Some(&members[0].content_fingerprint),
+                previous_content_fingerprint: Some(&members[0].content_fingerprint),
                 selectable: false,
                 preserve_existing: true,
                 validation_errors: &[],
@@ -11807,6 +14684,7 @@ mod tests {
                 skill_name: Some(&members[1].skill_name),
                 skill_description: Some("第二个测试 Skill"),
                 content_fingerprint: Some(&members[1].content_fingerprint),
+                previous_content_fingerprint: Some(&members[1].content_fingerprint),
                 selectable: false,
                 preserve_existing: true,
                 validation_errors: &[],
@@ -11819,6 +14697,7 @@ mod tests {
                 skill_name: Some("alpha"),
                 skill_description: Some("Alpha Skill"),
                 content_fingerprint: Some("sha256:alpha-v1"),
+                previous_content_fingerprint: None,
                 selectable: true,
                 preserve_existing: false,
                 validation_errors: &[],
@@ -11831,6 +14710,7 @@ mod tests {
                 skill_name: Some("beta"),
                 skill_description: Some("Beta Skill"),
                 content_fingerprint: Some("sha256:beta"),
+                previous_content_fingerprint: None,
                 selectable: true,
                 preserve_existing: false,
                 validation_errors: &[],
@@ -11852,6 +14732,7 @@ mod tests {
                 source_tracked_ref: Some("main"),
                 source_catalog_generation: Some(1),
                 source_marker: Some(TEST_GITHUB_COMMIT_ONE),
+                expected_source_marker: None,
                 expected_current_target: Some(&bundle.current_target),
                 expected_adopted_marker: None,
                 bundle_id: &bundle_id,
@@ -12135,6 +15016,7 @@ mod tests {
             skill_name: Some("alpha"),
             skill_description: Some("Alpha Skill"),
             content_fingerprint: Some("sha256:alpha-v2"),
+            previous_content_fingerprint: None,
             selectable: true,
             preserve_existing: false,
             validation_errors: &[],
@@ -12155,6 +15037,7 @@ mod tests {
                 source_tracked_ref: None,
                 source_catalog_generation: Some(source.catalog_generation),
                 source_marker: Some(&source.catalog_marker),
+                expected_source_marker: None,
                 expected_current_target: None,
                 expected_adopted_marker: None,
                 bundle_id: "manual-bundle",
@@ -12231,6 +15114,7 @@ mod tests {
             skill_name: Some("alpha"),
             skill_description: Some("Alpha Skill"),
             content_fingerprint: Some("sha256:alpha-original"),
+            previous_content_fingerprint: None,
             selectable: true,
             preserve_existing: false,
             validation_errors: &[],
@@ -12251,6 +15135,7 @@ mod tests {
                 source_tracked_ref: None,
                 source_catalog_generation: Some(saved.catalog_generation),
                 source_marker: Some("sha256:archive-original"),
+                expected_source_marker: None,
                 expected_current_target: None,
                 expected_adopted_marker: None,
                 bundle_id: "blocked-bundle",

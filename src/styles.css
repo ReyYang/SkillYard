@@ -37,6 +37,8 @@ button:focus-visible {
 .mount-shell,
 .source-shell,
 .association-shell,
+.batch-update-shell,
+.removal-shell,
 .state-page {
   min-height: 100vh;
 }
@@ -193,6 +195,8 @@ code {
 .mount-shell,
 .source-shell,
 .association-shell,
+.batch-update-shell,
+.removal-shell,
 .state-page {
   max-width: 980px;
   margin: 0 auto;
@@ -210,6 +214,54 @@ code {
 
 .inventory-shell {
   max-width: 1180px;
+}
+
+.registered-projects {
+  margin-top: 2rem;
+  padding: 1.15rem;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 16px;
+  background: rgb(255 255 251 / 76%);
+  box-shadow: 0 14px 34px rgb(34 57 41 / 6%);
+}
+
+.registered-projects > header,
+.registered-projects li {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.registered-projects h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.registered-projects > p {
+  color: #687269;
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.registered-projects ul {
+  display: grid;
+  gap: 0.6rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.registered-projects li {
+  padding: 0.8rem;
+  border-radius: 11px;
+  background: #f3f5ee;
+}
+
+.registered-projects li > div {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
 }
 
 .source-shell {
@@ -632,6 +684,12 @@ code {
   display: block;
 }
 
+.install-plan-row a {
+  width: fit-content;
+  color: #2f6240;
+  font-weight: 720;
+}
+
 .install-candidates {
   display: grid;
   gap: 0.65rem;
@@ -657,8 +715,20 @@ code {
   cursor: not-allowed;
 }
 
+.install-candidate.is-readonly {
+  grid-template-columns: minmax(0, 1fr);
+  cursor: default;
+}
+
 .install-candidate input {
   margin-top: 0.18rem;
+}
+
+.install-candidate-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 .install-candidate-copy {
@@ -677,6 +747,7 @@ code {
 
 .candidate-error,
 .candidate-warning,
+.candidate-new,
 .install-selection-warning,
 .install-selection-empty {
   font-size: 0.8rem;
@@ -689,6 +760,14 @@ code {
 
 .candidate-warning {
   color: #7a6227;
+}
+
+.candidate-new {
+  padding: 0.14rem 0.45rem;
+  border-radius: 999px;
+  color: #285239;
+  background: #d8eadc;
+  font-weight: 720;
 }
 
 .install-selection-warning,
@@ -716,6 +795,35 @@ code {
 .install-warnings {
   color: #657069;
   font-size: 0.82rem;
+}
+
+.update-mounts {
+  display: grid;
+  gap: 0.7rem;
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid rgb(50 70 56 / 8%);
+}
+
+.update-mounts ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.update-mounts li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  color: #657069;
+  font-size: 0.8rem;
+}
+
+.update-mounts li span:first-child {
+  color: #38533f;
+  font-weight: 700;
 }
 
 .install-warnings {
@@ -1144,6 +1252,23 @@ code {
   border-color: rgb(131 69 55 / 20%);
 }
 
+.danger-action {
+  min-width: 148px;
+  padding: 0.95rem 1.35rem;
+  border: 0;
+  border-radius: 12px;
+  color: #fff8f5;
+  background: #853f32;
+  box-shadow: 0 10px 24px rgb(104 43 34 / 18%);
+  cursor: pointer;
+  font-weight: 720;
+}
+
+.danger-action:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .compact-action:disabled,
 .danger-outline-action:disabled,
 .mount-target:disabled {
@@ -1179,6 +1304,92 @@ code {
 
 .mount-confirm-warning {
   color: #715926;
+}
+
+/* RemovalPlan 只呈现后端冻结的影响；Bundle 的第二次确认仅保存在当前页面。 */
+.removal-shell {
+  max-width: 900px;
+}
+
+.removal-shell h1 {
+  font-size: clamp(2.7rem, 6vw, 4.5rem);
+}
+
+.removal-section,
+.removal-warnings,
+.removal-safety-copy,
+.removal-danger-confirmation {
+  margin-top: 1rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 14px;
+  background: rgb(255 255 251 / 78%);
+}
+
+.removal-section:first-of-type {
+  margin-top: 2.4rem;
+}
+
+.removal-section h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+
+.removal-section > p,
+.removal-safety-copy p,
+.removal-danger-confirmation p {
+  margin: 0.4rem 0 0;
+  line-height: 1.55;
+}
+
+.removal-list {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.removal-list li,
+.removal-preserved-source {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  background: #f3f5ee;
+}
+
+.removal-list li > span,
+.removal-preserved-source > span {
+  color: #687269;
+  font-size: 0.78rem;
+}
+
+.removal-section.is-destructive {
+  color: #763c31;
+  background: #f6e4de;
+}
+
+.removal-section.is-preserved,
+.removal-safety-copy {
+  color: #3d5944;
+  background: #e8f0df;
+}
+
+.removal-warnings {
+  color: #6f5521;
+  background: #f2e8bd;
+}
+
+.removal-warnings ul {
+  margin: 0.55rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.removal-danger-confirmation {
+  color: #6b342b;
+  background: #f4ddd6;
+  border-color: rgb(121 53 42 / 14%);
 }
 
 .batch-intro {
@@ -1334,6 +1545,218 @@ code {
   background: #e2e5e7;
 }
 
+/* Bundle 是唯一可选择层级；内部 Skill 与挂载只展示本次更新的只读影响。 */
+.batch-update-shell h1 {
+  font-size: clamp(2.7rem, 6vw, 4.5rem);
+}
+
+.bundle-update-batch-plan,
+.bundle-update-batch-results {
+  display: grid;
+  gap: 0.85rem;
+  margin: 2.4rem 0 1.2rem;
+}
+
+.bundle-update-batch-item,
+.bundle-update-result-item {
+  overflow: hidden;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 16px;
+  background: rgb(255 255 251 / 78%);
+  box-shadow: 0 14px 34px rgb(34 57 41 / 6%);
+}
+
+.bundle-update-batch-item.is-failed,
+.bundle-update-result-item.is-failed,
+.bundle-update-result-item.is-blocked {
+  border-color: rgb(121 53 42 / 16%);
+  background: #f7e9e4;
+}
+
+.bundle-update-batch-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: start;
+  padding: 1rem 1.15rem;
+  cursor: pointer;
+}
+
+.bundle-update-batch-choice:has(input:disabled) {
+  cursor: default;
+}
+
+.bundle-update-batch-choice input {
+  margin-top: 0.2rem;
+}
+
+.bundle-update-batch-choice > span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.batch-disposition.ready {
+  color: #285239;
+  background: #d8eadc;
+}
+
+.batch-disposition.preparationFailed {
+  color: #854638;
+  background: #f0d8cf;
+}
+
+.bundle-update-batch-preview {
+  border-top: 1px solid rgb(50 70 56 / 8%);
+}
+
+.bundle-update-batch-skills {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 1rem 1.15rem;
+  list-style: none;
+}
+
+.bundle-update-batch-skills li {
+  display: grid;
+  gap: 0.28rem;
+  padding: 0.8rem;
+  border-radius: 11px;
+  background: #f4f7f0;
+}
+
+.bundle-update-batch-skills code {
+  display: block;
+}
+
+.bundle-update-batch-mounts {
+  display: grid;
+  gap: 0.55rem;
+  padding: 1rem 1.15rem;
+  border-top: 1px solid rgb(50 70 56 / 8%);
+  color: #657069;
+  font-size: 0.8rem;
+}
+
+.bundle-update-batch-mounts > strong {
+  color: #38533f;
+  font-size: 0.88rem;
+}
+
+.bundle-update-batch-mounts ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bundle-update-batch-mounts li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 1rem;
+  justify-content: space-between;
+}
+
+.bundle-update-batch-error {
+  margin: 0;
+  padding: 0 1.15rem 1rem 2.75rem;
+  color: #854638;
+  line-height: 1.5;
+}
+
+.bundle-update-result-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  padding: 1rem 1.15rem;
+}
+
+.bundle-update-result-item p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #7a493e;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.batch-result-status {
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  color: #566057;
+  background: #e6eae5;
+  font-size: 0.72rem;
+  font-weight: 720;
+}
+
+.batch-result-status.is-succeeded {
+  color: #285239;
+  background: #d8eadc;
+}
+
+.batch-result-status.is-failed,
+.batch-result-status.is-blocked {
+  color: #854638;
+  background: #f0d8cf;
+}
+
+.batch-result-status.is-notExecuted {
+  color: #5e6570;
+  background: #e2e5e7;
+}
+
+.bundle-update-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.bundle-update-summary small {
+  max-width: 220px;
+  overflow: hidden;
+  color: #786057;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bundle-update-status,
+.bundle-update-action {
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  color: #566057;
+  background: #e6eae5;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.bundle-update-status.is-available {
+  color: #285239;
+  background: #d8eadc;
+}
+
+.bundle-update-status.is-unableToCheck,
+.bundle-update-status.is-sourceUnavailable {
+  color: #854638;
+  background: #f0d8cf;
+}
+
+.bundle-update-action {
+  border: 0;
+  color: #385142;
+  background: #edf1eb;
+  cursor: pointer;
+}
+
+.bundle-update-action:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .management-direction {
   margin: 0.3rem 0 0;
   color: #647068;
@@ -1429,6 +1852,19 @@ code {
 
   .association-mapping-list label {
     grid-template-columns: 1fr;
+  }
+
+  .bundle-update-result-item {
+    grid-template-columns: 1fr;
+  }
+
+  .bundle-update-result-item p {
+    grid-column: 1;
+  }
+
+  .registered-projects li {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

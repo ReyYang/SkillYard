@@ -1,6 +1,9 @@
 import { useMemo, useState } from "react";
 
 import type {
+  BundleUpdateAction,
+  BundleUpdateSummary,
+  BundleUpdateStatus,
   InventoryObservation,
   MountSummary,
   SupportedAppId,
@@ -14,15 +17,30 @@ interface InventoryPageProps {
   outcome: InventoryOutcome;
   isWriteBlocked: boolean;
   isRefreshing: boolean;
+  isCheckingUpdates: boolean;
+  preparingBundleUpdateId: string | null;
+  checkingEditableBundleId: string | null;
+  isPreparingBundleUpdateBatch: boolean;
+  removingBundleId: string | null;
+  removingProjectId: string | null;
   isOpeningInstaller: boolean;
   isAddingProject: boolean;
   refreshError: string | null;
+  updateError: string | null;
   installError: string | null;
   projectError: string | null;
+  removalError: string | null;
   mountError: string | null;
   takeoverError: string | null;
   sourceAssociationError: string | null;
   onRefresh(): void;
+  onCheckUpdates(): void;
+  onUpdateBundle(bundleId: string): void;
+  onChooseBundleReplacement(bundleId: string): void;
+  onCheckEditableLocalBundle(bundleId: string): void;
+  onUpdateAll(): void;
+  onRemoveBundle(bundleId: string): void;
+  onRemoveProject(projectId: string): void;
   onInstall(): void;
   onAddProject(): void;
   onAssociateSource(bundleId: string): void;
@@ -42,15 +60,30 @@ export function InventoryPage({
   outcome,
   isWriteBlocked,
   isRefreshing,
+  isCheckingUpdates,
+  preparingBundleUpdateId,
+  checkingEditableBundleId,
+  isPreparingBundleUpdateBatch,
+  removingBundleId,
+  removingProjectId,
   isOpeningInstaller,
   isAddingProject,
   refreshError,
+  updateError,
   installError,
   projectError,
+  removalError,
   mountError,
   takeoverError,
   sourceAssociationError,
   onRefresh,
+  onCheckUpdates,
+  onUpdateBundle,
+  onChooseBundleReplacement,
+  onCheckEditableLocalBundle,
+  onUpdateAll,
+  onRemoveBundle,
+  onRemoveProject,
   onInstall,
   onAddProject,
   onAssociateSource,
@@ -86,6 +119,15 @@ export function InventoryPage({
     (entry) => entry.managementKind === "projectManaged",
   );
   const hasVisibleEntries = visibleEntries.length > 0;
+  const updatableBundleCount = useMemo(
+    () =>
+      new Set(
+        outcome.bundleUpdates
+          .filter((update) => update.action === "update")
+          .map((update) => update.bundleId),
+      ).size,
+    [outcome.bundleUpdates],
+  );
 
   return (
     <main className="inventory-shell">
@@ -100,6 +142,27 @@ export function InventoryPage({
           </p>
         </div>
         <div className="inventory-actions">
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isWriteBlocked || isCheckingUpdates}
+            onClick={onCheckUpdates}
+          >
+            {isCheckingUpdates ? "正在检查更新…" : "检查更新"}
+          </button>
+          {updatableBundleCount >= 2 ? (
+            <button
+              className="secondary-action"
+              type="button"
+              aria-label="全部更新"
+              disabled={isWriteBlocked || isPreparingBundleUpdateBatch}
+              onClick={onUpdateAll}
+            >
+              {isPreparingBundleUpdateBatch
+                ? "正在准备全部更新…"
+                : "全部更新"}
+            </button>
+          ) : null}
           <button
             className="primary-action"
             type="button"
@@ -126,6 +189,42 @@ export function InventoryPage({
           </button>
         </div>
       </header>
+
+      {outcome.projects.length > 0 ? (
+        <section className="registered-projects" aria-label="已登记项目">
+          <header>
+            <div>
+              <p className="section-eyebrow">REGISTERED PROJECTS</p>
+              <h2>已登记项目</h2>
+            </div>
+            <span>{outcome.projects.length}</span>
+          </header>
+          <p>
+            移除项目会先清理其中全部 SkillYard-managed project Mount，再删除登记记录。
+          </p>
+          <ul>
+            {outcome.projects.map((project) => (
+              <li key={project.id}>
+                <div>
+                  <strong>{project.displayName}</strong>
+                  <code title={project.rootPath}>{project.rootPath}</code>
+                </div>
+                <button
+                  className="danger-outline-action"
+                  type="button"
+                  aria-label={`移除项目 ${project.displayName}`}
+                  disabled={isWriteBlocked}
+                  onClick={() => onRemoveProject(project.id)}
+                >
+                  {removingProjectId === project.id
+                    ? "正在准备移除…"
+                    : "移除项目"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {outcome.recoveryIssues.length > 0 ? (
         <section className="recovery-warning" aria-label="需要人工恢复">
@@ -179,6 +278,13 @@ export function InventoryPage({
         </div>
       ) : null}
 
+      {updateError ? (
+        <div className="inline-error" role="alert">
+          <strong>更新未完成</strong>
+          <span>{updateError}</span>
+        </div>
+      ) : null}
+
       {installError ? (
         <div className="inline-error" role="alert">
           <strong>无法准备安装</strong>
@@ -190,6 +296,13 @@ export function InventoryPage({
         <div className="inline-error" role="alert">
           <strong>无法添加项目</strong>
           <span>{projectError}</span>
+        </div>
+      ) : null}
+
+      {removalError ? (
+        <div className="inline-error" role="alert">
+          <strong>移除操作未完成</strong>
+          <span>{removalError}</span>
         </div>
       ) : null}
 
@@ -253,6 +366,20 @@ export function InventoryPage({
             onBatchMount={onBatchMount}
             canAssociateSource={!group.hasSource}
             onAssociateSource={onAssociateSource}
+            bundleUpdate={
+              group.bundleId
+                ? outcome.bundleUpdates.find(
+                    (update) => update.bundleId === group.bundleId,
+                  ) ?? null
+                : null
+            }
+            preparingBundleUpdateId={preparingBundleUpdateId}
+            checkingEditableBundleId={checkingEditableBundleId}
+            onUpdateBundle={onUpdateBundle}
+            onChooseBundleReplacement={onChooseBundleReplacement}
+            onCheckEditableLocalBundle={onCheckEditableLocalBundle}
+            removingBundleId={removingBundleId}
+            onRemoveBundle={onRemoveBundle}
           />
         ))}
         <InventorySection
@@ -300,6 +427,14 @@ function InventorySection({
   onBatchMount,
   canAssociateSource = false,
   onAssociateSource,
+  bundleUpdate = null,
+  preparingBundleUpdateId = null,
+  checkingEditableBundleId = null,
+  onUpdateBundle,
+  onChooseBundleReplacement,
+  onCheckEditableLocalBundle,
+  removingBundleId = null,
+  onRemoveBundle,
   onTakeover,
 }: {
   title: string;
@@ -312,6 +447,14 @@ function InventorySection({
   onBatchMount?(bundleId: string): void;
   canAssociateSource?: boolean;
   onAssociateSource?(bundleId: string): void;
+  bundleUpdate?: BundleUpdateSummary | null;
+  preparingBundleUpdateId?: string | null;
+  checkingEditableBundleId?: string | null;
+  onUpdateBundle?(bundleId: string): void;
+  onChooseBundleReplacement?(bundleId: string): void;
+  onCheckEditableLocalBundle?(bundleId: string): void;
+  removingBundleId?: string | null;
+  onRemoveBundle?(bundleId: string): void;
   onTakeover?(observationId: string): void;
 }) {
   if (entries.length === 0) return null;
@@ -323,6 +466,30 @@ function InventorySection({
           <h2>{title}</h2>
         </div>
         <div className="inventory-section-actions">
+          {bundleUpdate ? (
+            <BundleUpdateStatusView
+              update={bundleUpdate}
+              bundleDisplayName={title}
+              isPreparing={preparingBundleUpdateId === batchMountBundleId}
+              isChecking={checkingEditableBundleId === batchMountBundleId}
+              actionsDisabled={actionsDisabled}
+              onUpdate={
+                batchMountBundleId
+                  ? () => onUpdateBundle?.(batchMountBundleId)
+                  : undefined
+              }
+              onImportReplacement={
+                batchMountBundleId
+                  ? () => onChooseBundleReplacement?.(batchMountBundleId)
+                  : undefined
+              }
+              onCheckEditableLocal={
+                batchMountBundleId
+                  ? () => onCheckEditableLocalBundle?.(batchMountBundleId)
+                  : undefined
+              }
+            />
+          ) : null}
           {batchMountBundleId && canAssociateSource ? (
             <button
               className="compact-action"
@@ -341,6 +508,19 @@ function InventorySection({
               onClick={() => onBatchMount?.(batchMountBundleId)}
             >
               批量挂载
+            </button>
+          ) : null}
+          {batchMountBundleId ? (
+            <button
+              className="danger-outline-action"
+              type="button"
+              aria-label={`删除 Bundle ${title}`}
+              disabled={actionsDisabled}
+              onClick={() => onRemoveBundle?.(batchMountBundleId)}
+            >
+              {removingBundleId === batchMountBundleId
+                ? "正在准备删除…"
+                : "删除 Bundle"}
             </button>
           ) : null}
           <span>{entries.length}</span>
@@ -362,6 +542,101 @@ function InventorySection({
       </ul>
     </section>
   );
+}
+
+function BundleUpdateStatusView({
+  update,
+  bundleDisplayName,
+  isPreparing,
+  isChecking,
+  actionsDisabled,
+  onUpdate,
+  onImportReplacement,
+  onCheckEditableLocal,
+}: {
+  update: BundleUpdateSummary;
+  bundleDisplayName: string;
+  isPreparing: boolean;
+  isChecking: boolean;
+  actionsDisabled: boolean;
+  onUpdate?: () => void;
+  onImportReplacement?: () => void;
+  onCheckEditableLocal?: () => void;
+}) {
+  const actionLabel = bundleUpdateActionLabel(update.status, update.action);
+  const actionHandler =
+    update.action === "update"
+      ? onUpdate
+      : update.action === "importReplacement"
+        ? onImportReplacement
+        : update.action === "checkEditableLocal"
+          ? onCheckEditableLocal
+          : undefined;
+  const actionBusy =
+    update.action === "checkEditableLocal" ? isChecking : isPreparing;
+  const checkedAt = update.checkedAt
+    ? ` · ${formatTimestamp(update.checkedAt)}`
+    : "";
+  return (
+    <div
+      className="bundle-update-summary"
+      aria-label={`Bundle 更新状态：${bundleUpdateStatusLabel(update.status)}`}
+    >
+      <span className={`bundle-update-status is-${update.status}`}>
+        {bundleUpdateStatusLabel(update.status)}
+      </span>
+      {actionLabel && actionHandler ? (
+        <button
+          className="bundle-update-action"
+          type="button"
+          aria-label={`${actionLabel} ${bundleDisplayName}`}
+          disabled={actionsDisabled}
+          onClick={actionHandler}
+        >
+          {actionBusy ? bundleUpdateBusyLabel(update.action) : actionLabel}
+        </button>
+      ) : actionLabel ? (
+        <span className="bundle-update-action">{actionLabel}</span>
+      ) : null}
+      {update.message ? (
+        <small title={`${update.message}${checkedAt}`}>{update.message}</small>
+      ) : null}
+    </div>
+  );
+}
+
+function bundleUpdateStatusLabel(status: BundleUpdateStatus): string {
+  return {
+    noSource: "没有更新来源",
+    notChecked: "尚未检查",
+    available: "可更新",
+    upToDate: "已是最新",
+    unableToCheck: "无法检查",
+    manual: "手动更新",
+    sourceUnavailable: "来源不可用",
+  }[status];
+}
+
+function bundleUpdateActionLabel(
+  status: BundleUpdateStatus,
+  action: BundleUpdateAction,
+): string | null {
+  if (action === "update") return "更新";
+  if (action === "importReplacement") return "导入新内容";
+  if (action === "checkEditableLocal") {
+    if (status === "upToDate") return "再次检查";
+    if (status === "sourceUnavailable" || status === "unableToCheck") {
+      return "重新检查";
+    }
+    return "检查本地改动";
+  }
+  return null;
+}
+
+function bundleUpdateBusyLabel(action: BundleUpdateAction): string {
+  if (action === "importReplacement") return "正在选择新内容…";
+  if (action === "checkEditableLocal") return "正在检查本地改动…";
+  return "正在准备…";
 }
 
 function SkillCard({

@@ -517,6 +517,48 @@ Stage 7 新增 `source_association.rs` 作为唯一关联与归并编排器；`d
 - Batch Update 顺序执行每个 Bundle 的独立事务；普通失败不回滚其他成功 Bundle，并继续后续 Bundle。
 - 更新结果保持简洁，不提供文件 diff、自动 changelog、本地版本或回滚。
 
+### 完整技术实现图
+
+Stage 8 沿用唯一的 `InstallPlan(mode=update)` 和 `lifecycle_transactions(kind=install_bundle)`。单个 Bundle 的 GitHub、手动归档和 Editable Local 更新只在候选内容如何进入临时区上不同；确认后都执行同一条 Bundle `current` 原子切换协议：
+
+```text
+用户点击检查
+  -> GitHub：只解析 tracked ref 当前 commit
+  -> Editable Local：只读取已登记目录并生成临时候选快照
+  -> 保存检查状态，不修改 current 或 Mount
+
+用户发起单 Bundle 更新
+  -> 完整获取或选择替换内容
+  -> InstallPlan(mode=update，封存 current、Source marker 和全部候选)
+  -> lifecycle transaction + Install Journal
+  -> 发布完整 Bundle 候选
+  -> 原子替换一次 current
+  -> 一个 SQLite 事务提交成员选择、Catalog／采用标识和更新状态
+  -> 清理旧内容、临时区和 Journal
+```
+
+模型和边界固定如下：
+
+- `0017_bundle_update_checks.sql` 只保存每个 Source-backed Bundle 的检查状态、检查 marker、时间和错误摘要。GitHub 查询失败保留上次成功 marker；没有 Source、手动替换来源和未主动检查的 Editable Local 不伪装成“已是最新”。
+- `0018_bundle_update.sql` 原地扩展既有 Install Plan，增加 `update` mode、预期 Source marker 和旧内容 fingerprint；不建立第二套更新事务或本地版本。更新确认必须带入全部可更新候选，成员级排除在公开入口和领域校验中都被拒绝。
+- GitHub Update 获取当前完整 Source；Archive／Direct URL Update 只使用用户本次选择的本地替换文件，不后台重新访问原 URL；Editable Local 先主动检查已登记目录，只有检测到变化并再次确认才采用。
+- 候选中的新成员进入同一个完整 `current` 但不自动 Mount。上游已移除或明确“不对应”的既有成员从旧 `current` 保留；成功后现有 Mount 继续指向不变的成员路径。
+- 生效点前中断保留旧 `current` 并清理候选；生效点后中断采用新 `current` 并继续提交成员、marker、notice 和清理。只有 `current`、路径身份或 Journal 证据无法安全判断时才把相关 Bundle 标记为 blocked。
+
+“全部更新”只新增一个持久化的 `BundleUpdateBatch` 协调器：
+
+```text
+显式处于 Available 的 GitHub／Editable Local Bundle
+  -> 逐个准备普通 InstallPlan(mode=update)
+  -> 汇总页只选择 Bundle，并按页面顺序确认
+  -> 逐个调用同一条单 Bundle 更新事务
+  -> ordinary failure：记录失败并继续
+  -> blocked child：停止，剩余项记为 NotExecuted
+  -> completed／blocked 结果持久化，重启后继续展示
+```
+
+`0019_bundle_update_batches.sql` 只记录参与 Bundle、顺序、child Plan 和结果，不保存第二份候选内容，也不形成跨 Bundle Journal 或回滚。启动时先恢复普通 child transaction，再依据 blocked child、已采用 marker 或仍可执行 Plan 幂等归并批次状态；未执行 child 的临时 Plan 会被清理。
+
 ### 阶段验收
 
 - Update Check 不下载 archive，不改变 Current Content。
@@ -541,6 +583,45 @@ Stage 7 新增 `source_association.rs` 作为唯一关联与归并编排器；`d
 - Cascading Delete 删除全部 managed Mount、Member Selection、Current Content、Managed Bundle Directory 和 Bundle 记录，同时保留独立 Source。
 - Cascading Delete 的 Journal 明确记录破坏性生效点；生效前恢复原状态，生效后持续完成删除意图。
 - 1.0 不提供成员级卸载或删除，也不提供删除后的版本回滚。
+
+### 完整技术实现图
+
+Stage 9 只增加一份 `RemovalPlan`。Project、Source 与 Bundle 共用影响预览、过期校验和不可变摘要；确认后的实现按真实副作用分成两类，而不是建立三套删除模型：
+
+```text
+Project Remove
+  -> RemovalPlan 封存 Project 与全部 managed project Mount
+  -> removal transaction + Removal Journal
+  -> 复用既有 Mount 隔离／恢复能力
+  -> 一个 SQLite 事务删除 Mount 与 Project 记录
+  -> 清理隔离项、Journal 和事务记录
+
+Source Delete
+  -> RemovalPlan 封存 Source 与受影响 Bundle
+  -> 普通确认
+  -> 一个 SQLite 事务删除 Source、Catalog、检查状态和更新关联
+  -> Bundle、current、Mount 与 Editable Local 原目录保持不变
+
+Bundle Cascading Delete
+  -> RemovalPlan 封存全部 Member、Mount、Source 保留项和受管目录身份
+  -> 前端两次明确确认，同一个 opaque planId
+  -> removal transaction + Removal Journal
+  -> 隔离全部 managed Mount
+  -> 原子 rename：bundles/<bundleId> -> trash/<transaction-owned-name>
+  -> 一个 SQLite 事务删除 Mount、Member Selection 与 Bundle 记录
+  -> 安全清理 Trash、Mount 隔离项、Journal 和事务记录
+```
+
+模型、持久化和恢复方向固定如下：
+
+- `0020_removals.sql` 保存一份带 SHA-256 摘要的 `removal_plans`，以及 Project／Bundle 共用的 `removal_transactions`。Source 没有跨文件系统破坏性状态，只使用同一 Plan 和一个 SQLite 事务，不伪造 Journal。
+- `removal.rs` 是唯一协调器；`mount_lifecycle.rs` 只暴露既有 Mount 删除协议所需的封存、隔离、检查、恢复和清理能力；`storage.rs` 只负责 Plan、阶段和最终领域提交。
+- SQLite 事务行先以 `journal_pending` 写入，Journal 持久化后才进入 `journal_ready`，避免数据库行与 Journal 之间的崩溃间隙被误判为已生效。
+- Project 在 Journal 就绪前中断时保持原状态；全部 Mount 隔离后中断时继续完成 Project 移除。没有 Mount 的 Project 仍走同一协议并可正常删除登记记录。
+- Bundle 的唯一破坏性生效点是受管目录原子进入 Central Store 的 `trash/`。该点之前中断会恢复 Mount 并保留 Bundle；该点之后中断会继续删除领域状态和受管内容，不向用户提供回滚选择。
+- Trash 只按封存的目录身份和受管树清单清理，不使用路径递归删除未知内容。Mount、Bundle 或 Trash 身份被外部改写时，相关事务进入 blocked；已经提交后发生的清理异常同样保持可见，不影响其他 Bundle。
+- 确认前会再次核对 Project、Source、Bundle、Source 关联和完整 Mount 集合。预览后新增或改变的 Mount 会让旧 Plan 失效，不能先执行部分删除。
+- `RemovalPlanPage` 负责三种影响预览。Project 入口始终位于 Inventory；Source 使用普通确认；Bundle 的第一次点击只进入危险确认状态，第二次点击才调用后端。1.0 不提供成员删除入口。
 
 ### 阶段验收
 

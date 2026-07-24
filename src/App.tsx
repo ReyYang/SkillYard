@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 
 import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
 import { BundleMountPage } from "./components/BundleMountPage";
+import { BundleUpdateBatchPage } from "./components/BundleUpdateBatchPage";
 import { InventoryPage } from "./components/InventoryPage";
 import { InstallPlanPage } from "./components/InstallPlanPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
+import { RemovalPlanPage } from "./components/RemovalPlanPage";
 import { SourceAssociationPlanPage } from "./components/SourceAssociationPlanPage";
 import { SourceAssociationSelectionPage } from "./components/SourceAssociationSelectionPage";
 import { SourceCatalogPage } from "./components/SourceCatalogPage";
@@ -19,6 +21,8 @@ import type {
   InstallPlan,
   MountPlan,
   MountScope,
+  RemovalKind,
+  RemovalPlan,
   SourceAssociationContentChoice,
   SourceAssociationPlan,
   SourceMemberMappingChoice,
@@ -57,11 +61,36 @@ type SourceOperation =
   | { type: "planningInstall"; sourceId: string }
   | { type: "confirmingRef" };
 
+type RemovalOperation =
+  | { type: "planning"; kind: RemovalKind; targetId: string }
+  | { type: "confirming" | "discarding"; planId: string };
+
 export function App({ client = tauriSkillYardClient }: AppProps) {
   const [viewState, setViewState] = useState<ViewState>({ status: "loading" });
   const [isScanning, setIsScanning] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [preparingBundleUpdateId, setPreparingBundleUpdateId] = useState<
+    string | null
+  >(null);
+  const [checkingEditableBundleId, setCheckingEditableBundleId] = useState<
+    string | null
+  >(null);
+  const [isPreparingBundleUpdateBatch, setIsPreparingBundleUpdateBatch] =
+    useState(false);
+  const [isConfirmingBundleUpdateBatch, setIsConfirmingBundleUpdateBatch] =
+    useState(false);
+  const [isDiscardingBundleUpdateBatch, setIsDiscardingBundleUpdateBatch] =
+    useState(false);
+  const [
+    isAcknowledgingBundleUpdateBatch,
+    setIsAcknowledgingBundleUpdateBatch,
+  ] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [bundleUpdateBatchError, setBundleUpdateBatchError] = useState<
+    string | null
+  >(null);
   // Inventory 保留为主界面基座；Source 页面只是临时路由，不覆盖已加载清单。
   const [sourceDiscovery, setSourceDiscovery] =
     useState<SourceDiscoveryOutcome | null>(null);
@@ -113,6 +142,18 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     useState<BatchMountPlan | null>(null);
   const [isPlanningBatchMount, setIsPlanningBatchMount] = useState(false);
   const [isConfirmingBatchMount, setIsConfirmingBatchMount] = useState(false);
+  const [pendingRemovalPlan, setPendingRemovalPlan] =
+    useState<RemovalPlan | null>(null);
+  const [removalOperation, setRemovalOperation] =
+    useState<RemovalOperation | null>(null);
+  const [removalError, setRemovalError] = useState<string | null>(null);
+
+  const activeRemovalPlan =
+    pendingRemovalPlan ??
+    (viewState.status === "ready" &&
+    viewState.outcome.type === "removalPlan"
+      ? viewState.outcome.plan
+      : null);
 
   useEffect(() => {
     let active = true;
@@ -154,6 +195,305 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       setRefreshError(formatError(error));
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const checkBundleUpdates = async () => {
+    if (
+      isCheckingUpdates ||
+      preparingBundleUpdateId ||
+      checkingEditableBundleId
+    ) {
+      return;
+    }
+    setIsCheckingUpdates(true);
+    setUpdateError(null);
+    try {
+      const outcome = await client.checkBundleUpdates();
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      // 检查失败不抹掉上次结果，也不能改变当前 Bundle 内容或 Mount。
+      setUpdateError(formatError(error));
+    } finally {
+      setIsCheckingUpdates(false);
+    }
+  };
+
+  const createBundleUpdatePlan = async (bundleId: string) => {
+    if (
+      isCheckingUpdates ||
+      preparingBundleUpdateId ||
+      checkingEditableBundleId
+    ) {
+      return;
+    }
+    setPreparingBundleUpdateId(bundleId);
+    setUpdateError(null);
+    // 上一次确认失败已经回到 Inventory，新的 Plan 不能继承旧确认页错误。
+    setInstallError(null);
+    try {
+      setPendingInstallPlan(await client.createBundleUpdatePlan(bundleId));
+    } catch (error) {
+      // 准备 Plan 尚未切换 Current Content，失败后保留主清单和上次检查结果。
+      setUpdateError(formatError(error));
+    } finally {
+      setPreparingBundleUpdateId(null);
+    }
+  };
+
+  const chooseBundleReplacementPlan = async (bundleId: string) => {
+    if (
+      isCheckingUpdates ||
+      preparingBundleUpdateId ||
+      checkingEditableBundleId
+    ) {
+      return;
+    }
+    setPreparingBundleUpdateId(bundleId);
+    setUpdateError(null);
+    setInstallError(null);
+    try {
+      const plan = await client.chooseBundleReplacementPlan(bundleId);
+      // 取消原生选择器返回 null；当前 Inventory 和 Bundle 状态保持不变。
+      if (plan) setPendingInstallPlan(plan);
+    } catch (error) {
+      setUpdateError(formatError(error));
+    } finally {
+      setPreparingBundleUpdateId(null);
+    }
+  };
+
+  const checkEditableLocalBundle = async (bundleId: string) => {
+    if (
+      isCheckingUpdates ||
+      preparingBundleUpdateId ||
+      checkingEditableBundleId
+    ) {
+      return;
+    }
+    setCheckingEditableBundleId(bundleId);
+    setUpdateError(null);
+    setInstallError(null);
+    try {
+      // Rust 返回完整 Inventory；前端不根据文件时间或内容自行推断更新状态。
+      const outcome = await client.checkEditableLocalBundle(bundleId);
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      setUpdateError(formatError(error));
+    } finally {
+      setCheckingEditableBundleId(null);
+    }
+  };
+
+  const createBundleUpdateBatchPlan = async () => {
+    if (
+      isPreparingBundleUpdateBatch ||
+      isCheckingUpdates ||
+      preparingBundleUpdateId ||
+      checkingEditableBundleId
+    ) {
+      return;
+    }
+    setIsPreparingBundleUpdateBatch(true);
+    setUpdateError(null);
+    setBundleUpdateBatchError(null);
+    try {
+      const outcome = await client.createBundleUpdateBatchPlan();
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      // 准备失败没有进入批量确认页，保留当前清单和每个 Bundle 的检查结果。
+      setUpdateError(formatError(error));
+    } finally {
+      setIsPreparingBundleUpdateBatch(false);
+    }
+  };
+
+  const discardBundleUpdateBatchPlan = async (planId: string) => {
+    if (
+      viewState.status !== "ready" ||
+      viewState.outcome.type !== "bundleUpdateBatchPlan" ||
+      viewState.outcome.plan.id !== planId ||
+      isConfirmingBundleUpdateBatch ||
+      isDiscardingBundleUpdateBatch
+    ) {
+      return;
+    }
+    setIsDiscardingBundleUpdateBatch(true);
+    setBundleUpdateBatchError(null);
+    try {
+      const outcome = await client.discardBundleUpdateBatchPlan(planId);
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      // 必须由 Rust 确认全部 child Plan 已清理后，页面才能返回 Inventory。
+      setBundleUpdateBatchError(formatError(error));
+    } finally {
+      setIsDiscardingBundleUpdateBatch(false);
+    }
+  };
+
+  const confirmBundleUpdateBatchPlan = async (
+    planId: string,
+    selectedItemIds: string[],
+  ) => {
+    if (
+      viewState.status !== "ready" ||
+      viewState.outcome.type !== "bundleUpdateBatchPlan" ||
+      viewState.outcome.plan.id !== planId ||
+      isConfirmingBundleUpdateBatch ||
+      isDiscardingBundleUpdateBatch
+    ) {
+      return;
+    }
+    setIsConfirmingBundleUpdateBatch(true);
+    setBundleUpdateBatchError(null);
+    try {
+      const outcome = await client.confirmBundleUpdateBatchPlan(
+        planId,
+        selectedItemIds,
+      );
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      const message = formatError(error);
+      try {
+        // 确认可能已经消费 Plan；重读唯一持久状态，不能让旧页面自行决定是否可重试。
+        const outcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome });
+        if (outcome.type === "inventory") {
+          setUpdateError(message);
+        } else {
+          setBundleUpdateBatchError(message);
+        }
+      } catch (recoveryError) {
+        setViewState({
+          status: "error",
+          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+        });
+      }
+    } finally {
+      setIsConfirmingBundleUpdateBatch(false);
+    }
+  };
+
+  const acknowledgeBundleUpdateBatchResult = async (batchId: string) => {
+    if (
+      viewState.status !== "ready" ||
+      viewState.outcome.type !== "bundleUpdateBatchResult" ||
+      viewState.outcome.result.id !== batchId ||
+      viewState.outcome.result.status !== "completed" ||
+      isAcknowledgingBundleUpdateBatch
+    ) {
+      return;
+    }
+    setIsAcknowledgingBundleUpdateBatch(true);
+    setBundleUpdateBatchError(null);
+    try {
+      const outcome =
+        await client.acknowledgeBundleUpdateBatchResult(batchId);
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      setBundleUpdateBatchError(formatError(error));
+    } finally {
+      setIsAcknowledgingBundleUpdateBatch(false);
+    }
+  };
+
+  const createRemovalPlan = async (
+    kind: RemovalKind,
+    targetId: string,
+  ) => {
+    if (removalOperation || sourceOperation) return;
+    setRemovalOperation({ type: "planning", kind, targetId });
+    setRemovalError(null);
+    if (kind === "source") setSourceError(null);
+    try {
+      const outcome =
+        kind === "project"
+          ? await client.createProjectRemovalPlan(targetId)
+          : kind === "source"
+            ? await client.createSourceRemovalPlan(targetId)
+            : await client.createBundleRemovalPlan(targetId);
+      setPendingRemovalPlan(outcome.plan);
+    } catch (error) {
+      // Plan 创建仍是只读预览；失败后保留入口所在页面和已提交 read model。
+      setRemovalError(formatError(error));
+    } finally {
+      setRemovalOperation(null);
+    }
+  };
+
+  const applyRemovalOutcome = async (outcome: UiOutcome) => {
+    setPendingRemovalPlan(null);
+    setManagedMemberId(null);
+    if (outcome.type === "sourceDiscovery") {
+      setSkillsShSearch(null);
+      setSourceDiscovery(outcome);
+      try {
+        // Source 删除会同步改变 Bundle 更新能力，返回清单前必须补读最新 Inventory。
+        const startupOutcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome: startupOutcome });
+      } catch (error) {
+        setViewState({
+          status: "error",
+          message: `Source 已处理，但重新读取本机清单失败：${formatError(error)}`,
+        });
+      }
+      return;
+    }
+    setSourceDiscovery(null);
+    setViewState({ status: "ready", outcome });
+  };
+
+  const discardRemovalPlan = async (planId: string) => {
+    if (
+      !activeRemovalPlan ||
+      activeRemovalPlan.id !== planId ||
+      removalOperation
+    ) {
+      return;
+    }
+    setRemovalOperation({ type: "discarding", planId });
+    setRemovalError(null);
+    try {
+      await applyRemovalOutcome(await client.discardRemovalPlan(planId));
+    } catch (error) {
+      // 只有 Rust 确认 Plan 与预览资源清理完成后，页面才允许返回。
+      setRemovalError(formatError(error));
+    } finally {
+      setRemovalOperation(null);
+    }
+  };
+
+  const confirmRemovalPlan = async (planId: string) => {
+    if (
+      !activeRemovalPlan ||
+      activeRemovalPlan.id !== planId ||
+      removalOperation
+    ) {
+      return;
+    }
+    setRemovalOperation({ type: "confirming", planId });
+    setRemovalError(null);
+    try {
+      await applyRemovalOutcome(await client.confirmRemovalPlan(planId));
+    } catch (error) {
+      const message = formatError(error);
+      // 确认后 Plan 可能已经消费；必须丢弃本地页面并读取唯一持久状态。
+      setPendingRemovalPlan(null);
+      try {
+        const outcome = await client.getStartupState();
+        setViewState({ status: "ready", outcome });
+        setSourceDiscovery(
+          outcome.type === "sourceDiscovery" ? outcome : null,
+        );
+        setRemovalError(message);
+      } catch (recoveryError) {
+        setViewState({
+          status: "error",
+          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+        });
+      }
+    } finally {
+      setRemovalOperation(null);
     }
   };
 
@@ -363,10 +703,28 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       );
       setPendingSourceRefChange(null);
       setSourceDiscovery(outcome);
+      try {
+        // Ref 确认会同步改变 Bundle 更新状态，主清单必须读取同一份持久结果。
+        const inventory = await client.getStartupState();
+        setViewState({ status: "ready", outcome: inventory });
+      } catch (error) {
+        setSourceError(
+          `Tracked Ref 已更改，但重新读取清单失败：${formatError(error)}`,
+        );
+      }
     } catch (error) {
       // 确认失败后丢弃旧页面并重读持久状态，避免用户重试结果不确定的 Plan。
       setPendingSourceRefChange(null);
       await rereadSourceAfterFailure(error);
+      try {
+        // 确认可能已提交但后续步骤报错，不能让主清单继续保留旧 marker。
+        const inventory = await client.getStartupState();
+        setViewState({ status: "ready", outcome: inventory });
+      } catch (recoveryError) {
+        setSourceError(
+          `${formatError(error)}；重新读取清单失败：${formatError(recoveryError)}`,
+        );
+      }
     } finally {
       setSourceOperation(null);
     }
@@ -746,6 +1104,36 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       </main>
     );
   }
+  if (
+    viewState.outcome.type === "bundleUpdateBatchPlan" ||
+    viewState.outcome.type === "bundleUpdateBatchResult"
+  ) {
+    return (
+      <BundleUpdateBatchPage
+        outcome={viewState.outcome}
+        isConfirming={isConfirmingBundleUpdateBatch}
+        isDiscarding={isDiscardingBundleUpdateBatch}
+        isAcknowledging={isAcknowledgingBundleUpdateBatch}
+        error={bundleUpdateBatchError}
+        onDiscard={discardBundleUpdateBatchPlan}
+        onConfirm={confirmBundleUpdateBatchPlan}
+        onAcknowledge={acknowledgeBundleUpdateBatchResult}
+      />
+    );
+  }
+  if (activeRemovalPlan) {
+    return (
+      <RemovalPlanPage
+        key={activeRemovalPlan.id}
+        plan={activeRemovalPlan}
+        isConfirming={removalOperation?.type === "confirming"}
+        isDiscarding={removalOperation?.type === "discarding"}
+        error={removalError}
+        onDiscard={discardRemovalPlan}
+        onConfirm={confirmRemovalPlan}
+      />
+    );
+  }
   if (pendingSourceAssociationPlan) {
     return (
       <SourceAssociationPlanPage
@@ -881,8 +1269,16 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         mounts={
           viewState.outcome.type === "inventory" ? viewState.outcome.mounts : []
         }
-        operation={sourceOperation}
-        error={sourceError}
+        operation={
+          removalOperation?.type === "planning" &&
+          removalOperation.kind === "source"
+            ? {
+                type: "planningRemoval",
+                sourceId: removalOperation.targetId,
+              }
+            : sourceOperation
+        }
+        error={sourceError ?? removalError}
         onBack={returnToInventory}
         onAddSource={addGithubSource}
         onSearchSkillsSh={searchSkillsSh}
@@ -892,6 +1288,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         onInstallUrl={createUrlInstallPlan}
         onReload={reloadGithubSource}
         onInstall={createGithubInstallPlan}
+        onRemoveSource={(sourceId) =>
+          createRemovalPlan("source", sourceId)
+        }
       />
     );
   }
@@ -1005,19 +1404,53 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       // 任一主界面写操作进行中时统一冻结其他写入口；搜索和筛选仍可使用。
       isWriteBlocked={
         isRefreshing ||
+        isCheckingUpdates ||
+        preparingBundleUpdateId !== null ||
+        checkingEditableBundleId !== null ||
+        isPreparingBundleUpdateBatch ||
         isAddingProject ||
+        removalOperation !== null ||
         sourceOperation?.type === "opening"
       }
       isRefreshing={isRefreshing}
+      isCheckingUpdates={isCheckingUpdates}
       isOpeningInstaller={sourceOperation?.type === "opening"}
       isAddingProject={isAddingProject}
       refreshError={refreshError}
+      updateError={updateError}
       installError={installError ?? sourceError}
       projectError={projectError}
+      removalError={removalError}
       mountError={mountError}
       takeoverError={takeoverError}
       sourceAssociationError={sourceAssociationError}
       onRefresh={refreshLocalInventory}
+      onCheckUpdates={checkBundleUpdates}
+      preparingBundleUpdateId={preparingBundleUpdateId}
+      checkingEditableBundleId={checkingEditableBundleId}
+      isPreparingBundleUpdateBatch={isPreparingBundleUpdateBatch}
+      removingBundleId={
+        removalOperation?.type === "planning" &&
+        removalOperation.kind === "bundle"
+          ? removalOperation.targetId
+          : null
+      }
+      removingProjectId={
+        removalOperation?.type === "planning" &&
+        removalOperation.kind === "project"
+          ? removalOperation.targetId
+          : null
+      }
+      onUpdateBundle={createBundleUpdatePlan}
+      onChooseBundleReplacement={chooseBundleReplacementPlan}
+      onCheckEditableLocalBundle={checkEditableLocalBundle}
+      onUpdateAll={createBundleUpdateBatchPlan}
+      onRemoveBundle={(bundleId) =>
+        createRemovalPlan("bundle", bundleId)
+      }
+      onRemoveProject={(projectId) =>
+        createRemovalPlan("project", projectId)
+      }
       onInstall={openSourceDiscovery}
       onAddProject={chooseAndRegisterProject}
       onAssociateSource={openSourceAssociation}

@@ -86,6 +86,30 @@ export interface RecoveryIssue {
   message: string;
 }
 
+export type BundleUpdateStatus =
+  | "noSource"
+  | "notChecked"
+  | "available"
+  | "upToDate"
+  | "unableToCheck"
+  | "manual"
+  | "sourceUnavailable";
+
+export type BundleUpdateAction =
+  | "update"
+  | "importReplacement"
+  | "checkEditableLocal"
+  | null;
+
+export interface BundleUpdateSummary {
+  bundleId: string;
+  status: BundleUpdateStatus;
+  action: BundleUpdateAction;
+  checkedAt: number | null;
+  message: string;
+  upstreamUrl: string | null;
+}
+
 export type MountScope = "global" | "project";
 export type MountHealth = "healthy" | "missing" | "conflict";
 
@@ -173,10 +197,16 @@ export interface InstallPlan {
     | "archive"
     | "directUrl"
     | "editableLocal";
-  mode: "create" | "supplement";
+  mode: "create" | "supplement" | "update";
   inputPath: string;
   bundleDisplayName: string;
   candidates: InstallCandidate[];
+  // Update 继续复用安装 Plan；这里仅补充整组更新的只读影响信息。
+  updateImpact: {
+    newCandidateIds: string[];
+    existingMounts: MountSummary[];
+    upstreamUrl: string | null;
+  } | null;
   warnings: string[];
   willMount: boolean;
   createdAt: number;
@@ -193,6 +223,47 @@ export interface InstallCandidate {
   validationErrors: string[];
   warnings: string[];
   defaultSelected: boolean;
+}
+
+export type BundleUpdateBatchDisposition = "ready" | "preparationFailed";
+
+export interface BundleUpdateBatchPlanItem {
+  id: string;
+  bundleId: string;
+  bundleDisplayName: string;
+  disposition: BundleUpdateBatchDisposition;
+  // Ready 项复用单 Bundle 的唯一更新 Plan；准备失败时保持为空。
+  installPlan: InstallPlan | null;
+  errorSummary: string | null;
+}
+
+export interface BundleUpdateBatchPlan {
+  id: string;
+  items: BundleUpdateBatchPlanItem[];
+  createdAt: number;
+  expiresAt: number;
+}
+
+export type BundleUpdateBatchItemStatus =
+  | "succeeded"
+  | "failed"
+  | "blocked"
+  | "notExecuted";
+
+export interface BundleUpdateBatchResultItem {
+  id: string;
+  bundleId: string;
+  bundleDisplayName: string;
+  status: BundleUpdateBatchItemStatus;
+  errorSummary: string | null;
+}
+
+export interface BundleUpdateBatchResult {
+  id: string;
+  status: "completed" | "blocked";
+  items: BundleUpdateBatchResultItem[];
+  confirmedAt: number;
+  updatedAt: number;
 }
 
 export type SourceCatalogStatus = "unloaded" | "fresh" | "stale";
@@ -231,6 +302,42 @@ export interface SourceSummary {
   bundleId: string | null;
   adoptedMarker: string | null;
   members: SourceCatalogMemberSummary[];
+}
+
+export type RemovalKind = "project" | "source" | "bundle";
+
+export interface RemovalMemberSummary {
+  id: string;
+  skillName: string;
+}
+
+export interface RemovalBundleSummary {
+  id: string;
+  displayName: string;
+}
+
+export interface RemovalPreservedSource {
+  id: string;
+  displayName: string;
+  kind: SourceKind;
+  locator: string;
+}
+
+// 三类移除共用一份只读影响模型，前端不能按入口重新推导删除范围。
+export interface RemovalPlan {
+  id: string;
+  kind: RemovalKind;
+  targetId: string;
+  targetDisplayName: string;
+  members: RemovalMemberSummary[];
+  mounts: MountSummary[];
+  affectedBundles: RemovalBundleSummary[];
+  preservedSource: RemovalPreservedSource | null;
+  managedDirectory: string | null;
+  preservedExternalPaths: string[];
+  warnings: string[];
+  createdAt: number;
+  expiresAt: number;
 }
 
 export type SourceAssociationMode = "link" | "merge";
@@ -391,6 +498,8 @@ export type UiOutcome =
       recoveryIssues: RecoveryIssue[];
       projects: ProjectSummary[];
       mounts: MountSummary[];
+      // 更新状态属于 Bundle read model，前端不能根据 Source marker 自行推断。
+      bundleUpdates: BundleUpdateSummary[];
     }
   | {
       type: "sourceDiscovery";
@@ -417,6 +526,18 @@ export type UiOutcome =
   | {
       type: "installPlan";
       plan: InstallPlan;
+    }
+  | {
+      type: "bundleUpdateBatchPlan";
+      plan: BundleUpdateBatchPlan;
+    }
+  | {
+      type: "bundleUpdateBatchResult";
+      result: BundleUpdateBatchResult;
+    }
+  | {
+      type: "removalPlan";
+      plan: RemovalPlan;
     }
   | {
       type: "installPlanDiscarded";

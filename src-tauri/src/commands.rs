@@ -25,6 +25,8 @@ impl From<ApplicationError> for UiError {
             ApplicationError::GithubSource(_) => "sourceError",
             ApplicationError::SkillsSh(_) => "sourceError",
             ApplicationError::SourceAssociation(_) => "sourceAssociationError",
+            ApplicationError::BundleUpdateBatch(_) => "bundleUpdateBatchError",
+            ApplicationError::Removal(_) => "removalError",
             ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",
@@ -57,6 +59,32 @@ pub fn refresh_local_inventory(
     application: State<'_, SkillYardApplication>,
 ) -> Result<UiOutcome, UiError> {
     dispatch(&application, UiIntent::RefreshLocalInventory)
+}
+
+#[tauri::command(async)]
+pub fn check_bundle_updates(
+    application: State<'_, SkillYardApplication>,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::CheckBundleUpdates)? {
+        outcome @ UiOutcome::Inventory { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回更新检查后的本机清单")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn check_editable_local_bundle(
+    application: State<'_, SkillYardApplication>,
+    bundle_id: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::CheckEditableLocalBundle { bundle_id },
+    )? {
+        outcome @ UiOutcome::Inventory { .. } => Ok(outcome),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有返回 Editable Local 检查后的本机清单",
+        )),
+    }
 }
 
 #[tauri::command(async)]
@@ -134,6 +162,113 @@ pub fn create_github_install_plan(
     )? {
         UiOutcome::InstallPlan { plan } => Ok(plan),
         _ => Err(invalid_outcome("SkillYard 没有生成 GitHub 安装确认信息")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn create_bundle_update_plan(
+    application: State<'_, SkillYardApplication>,
+    bundle_id: String,
+) -> Result<InstallPlan, UiError> {
+    match dispatch(&application, UiIntent::CreateBundleUpdatePlan { bundle_id })? {
+        UiOutcome::InstallPlan { plan } => Ok(plan),
+        _ => Err(invalid_outcome("SkillYard 没有生成 Bundle 更新确认信息")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn create_bundle_update_batch_plan(
+    application: State<'_, SkillYardApplication>,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::CreateBundleUpdateBatchPlan)? {
+        outcome @ UiOutcome::BundleUpdateBatchPlan { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有生成“全部更新”确认信息")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn confirm_bundle_update_batch_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+    selected_item_ids: Vec<String>,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::ConfirmBundleUpdateBatchPlan {
+            plan_id,
+            selected_item_ids,
+        },
+    )? {
+        outcome @ UiOutcome::BundleUpdateBatchResult { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回“全部更新”执行结果")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn discard_bundle_update_batch_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::DiscardBundleUpdateBatchPlan { plan_id },
+    )? {
+        outcome @ UiOutcome::Inventory { .. } => Ok(outcome),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有返回放弃“全部更新”后的本机清单",
+        )),
+    }
+}
+
+#[tauri::command(async)]
+pub fn acknowledge_bundle_update_batch_result(
+    application: State<'_, SkillYardApplication>,
+    batch_id: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::AcknowledgeBundleUpdateBatch { batch_id },
+    )? {
+        outcome @ UiOutcome::Inventory { .. } => Ok(outcome),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有返回确认“全部更新”结果后的本机清单",
+        )),
+    }
+}
+
+/// 替换文件路径只由原生选择器签发，不能覆盖既有 Source 的 locator。
+#[tauri::command(async)]
+pub fn choose_bundle_replacement_plan(
+    app: AppHandle,
+    application: State<'_, SkillYardApplication>,
+    bundle_id: String,
+) -> Result<Option<InstallPlan>, UiError> {
+    let Some(archive) = app
+        .dialog()
+        .file()
+        .set_title("选择 Bundle 替换归档")
+        .add_filter("Skill Bundle", &["zip", "skill"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = archive.into_path().map_err(|error| UiError {
+        code: "dialogError",
+        message: format!("无法读取所选替换归档：{error}"),
+    })?;
+    let input_path = path.to_str().ok_or_else(|| UiError {
+        code: "invalidPath",
+        message: "所选归档名称包含 SkillYard 1.0 无法保存的字符".to_owned(),
+    })?;
+    match dispatch(
+        &application,
+        UiIntent::CreateBundleReplacementPlan {
+            bundle_id,
+            input_path: input_path.to_owned(),
+        },
+    )? {
+        UiOutcome::InstallPlan { plan } => Ok(Some(plan)),
+        _ => Err(invalid_outcome("SkillYard 没有生成 Bundle 替换确认信息")),
     }
 }
 
@@ -501,6 +636,55 @@ pub fn confirm_batch_mount_plan(
             selected_item_ids,
         },
     )
+}
+
+#[tauri::command(async)]
+pub fn create_project_removal_plan(
+    application: State<'_, SkillYardApplication>,
+    project_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(
+        &application,
+        UiIntent::CreateProjectRemovalPlan { project_id },
+    )
+}
+
+#[tauri::command(async)]
+pub fn create_source_removal_plan(
+    application: State<'_, SkillYardApplication>,
+    source_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(
+        &application,
+        UiIntent::CreateSourceRemovalPlan { source_id },
+    )
+}
+
+#[tauri::command(async)]
+pub fn create_bundle_removal_plan(
+    application: State<'_, SkillYardApplication>,
+    bundle_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(
+        &application,
+        UiIntent::CreateBundleRemovalPlan { bundle_id },
+    )
+}
+
+#[tauri::command(async)]
+pub fn confirm_removal_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(&application, UiIntent::ConfirmRemovalPlan { plan_id })
+}
+
+#[tauri::command(async)]
+pub fn discard_removal_plan(
+    application: State<'_, SkillYardApplication>,
+    plan_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(&application, UiIntent::DiscardRemovalPlan { plan_id })
 }
 
 fn dispatch(application: &SkillYardApplication, intent: UiIntent) -> Result<UiOutcome, UiError> {

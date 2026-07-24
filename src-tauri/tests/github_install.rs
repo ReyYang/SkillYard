@@ -9,7 +9,7 @@ use std::{
 
 use rusqlite::Connection;
 use skillyard_lib::{
-    ApplicationPaths, LifecycleFailpoint, ManagementKind, MountScope, PlatformInfo,
+    ApplicationPaths, InstallMode, LifecycleFailpoint, ManagementKind, MountScope, PlatformInfo,
     SkillYardApplication, SourceRequest, SourceResponse, SourceTransport, SourceTransportError,
     SupportedAppId, UiIntent, UiOutcome,
 };
@@ -298,6 +298,298 @@ fn supplement_keeps_existing_content_mount_and_adopted_marker_while_adding_selec
             .exists(),
         "事务完成后旧内容不是回滚版本，应被清理"
     );
+}
+
+#[test]
+fn bundle_update_replaces_all_current_source_members_and_preserves_removed_members() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let transport = Arc::new(RecordingTransport::default());
+    let (application, data_root, home) = ready_application(sandbox.path(), transport.clone());
+    let commit_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let commit_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        commit_a,
+        &bundle_archive("alpha-old", true),
+    );
+    let source_id = open_sources(&application)
+        .into_iter()
+        .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
+        .expect("应加载更新基线")
+        .id;
+
+    transport.enqueue_bytes(200, &bundle_archive("alpha-old", true));
+    let install_plan = create_github_plan(&application, &source_id);
+    let installed = application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: install_plan.id,
+            selected_candidate_ids: install_plan
+                .candidates
+                .iter()
+                .map(|candidate| candidate.candidate_id.clone())
+                .collect(),
+        })
+        .expect("应安装 alpha 与 beta 基线");
+    let alpha_member_id = managed_member_id(&installed, "alpha");
+    let beta_member_id = managed_member_id(&installed, "beta");
+    mount_codex_global(&application, &alpha_member_id);
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let (bundle_id, old_current_target) = connection
+        .query_row(
+            "SELECT bundle.id, bundle.current_target
+             FROM bundles AS bundle
+             JOIN source_bundle_links AS link ON link.bundle_id = bundle.id
+             WHERE link.source_id = ?1",
+            [&source_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("应读取更新前 Bundle");
+    drop(connection);
+
+    transport.enqueue_catalog_prefix("anthropics/skills", "main", commit_b);
+    let checked = application
+        .handle(UiIntent::CheckBundleUpdates)
+        .expect("应检查到新的 commit");
+    let UiOutcome::Inventory { bundle_updates, .. } = checked else {
+        panic!("检查后应返回 Inventory");
+    };
+    assert_eq!(
+        bundle_updates
+            .iter()
+            .find(|summary| summary.bundle_id == bundle_id)
+            .expect("应包含更新摘要")
+            .status,
+        skillyard_lib::BundleUpdateStatus::Available
+    );
+
+    transport.enqueue_catalog_prefix("anthropics/skills", "main", commit_b);
+    transport.enqueue_bytes(200, &update_archive());
+    let UiOutcome::InstallPlan { plan } = application
+        .handle(UiIntent::CreateBundleUpdatePlan {
+            bundle_id: bundle_id.clone(),
+        })
+        .expect("应从当前 Source 准备完整 Bundle 更新")
+    else {
+        panic!("Bundle 更新应复用 Install Plan");
+    };
+    assert_eq!(plan.mode, InstallMode::Update);
+    let alpha = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.skill_name.as_deref() == Some("alpha"))
+        .expect("更新 Plan 应包含 alpha");
+    let gamma = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.skill_name.as_deref() == Some("gamma"))
+        .expect("更新 Plan 应包含新增 gamma");
+    assert_eq!(alpha.candidate_id, alpha_member_id);
+    assert!(
+        plan.candidates
+            .iter()
+            .all(|candidate| candidate.skill_name.as_deref() != Some("beta")),
+        "上游移除成员属于内部保留内容，不应作为更新候选展示"
+    );
+    let impact = plan.update_impact.as_ref().expect("更新 Plan 应展示影响");
+    assert_eq!(impact.new_candidate_ids, vec![gamma.candidate_id.clone()]);
+    assert_eq!(impact.existing_mounts.len(), 1);
+    assert_eq!(impact.existing_mounts[0].member_id, alpha_member_id);
+    assert_eq!(
+        impact.upstream_url,
+        Some("https://github.com/anthropics/skills".to_owned())
+    );
+
+    let before_confirmation = open_sources(&application);
+    let source_before = before_confirmation
+        .iter()
+        .find(|source| source.id == source_id)
+        .expect("确认前 Source 应继续存在");
+    assert_eq!(source_before.catalog_marker.as_deref(), Some(commit_a));
+    assert_eq!(source_before.adopted_marker.as_deref(), Some(commit_a));
+    assert_eq!(current_target(&data_root, &bundle_id), old_current_target);
+    assert_eq!(
+        fs::read_to_string(home.join(".codex/skills/alpha/payload.txt"))
+            .expect("确认前 Mount 应继续读取旧内容"),
+        "alpha-old"
+    );
+
+    let selected_candidate_ids = plan
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect::<Vec<_>>();
+    let updated = application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: plan.id,
+            selected_candidate_ids,
+        })
+        .expect("确认后应一次切换完整 Bundle");
+    let UiOutcome::Inventory {
+        ref entries,
+        ref mounts,
+        ref bundle_updates,
+        ..
+    } = updated
+    else {
+        panic!("更新后应返回 Inventory");
+    };
+    assert_eq!(managed_member_id(&updated, "alpha"), alpha_member_id);
+    assert_eq!(managed_member_id(&updated, "beta"), beta_member_id);
+    assert!(managed_member_id(&updated, "gamma") != alpha_member_id);
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].skill_name, "alpha");
+    assert_eq!(
+        fs::read_to_string(home.join(".codex/skills/alpha/payload.txt"))
+            .expect("既有 Mount 应跟随 Bundle current"),
+        "alpha-updated"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            data_root
+                .join("bundles")
+                .join(&bundle_id)
+                .join("current/members/beta/payload.txt"),
+        )
+        .expect("上游移除成员应保留原内容"),
+        "beta-original"
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.skill_name == "gamma")
+            .is_some_and(|entry| {
+                let member_id = entry.member_id.as_deref();
+                mounts
+                    .iter()
+                    .all(|mount| Some(mount.member_id.as_str()) != member_id)
+            }),
+        "新增 gamma 必须保持已安装、未挂载"
+    );
+    assert_ne!(current_target(&data_root, &bundle_id), old_current_target);
+    assert_eq!(
+        bundle_updates
+            .iter()
+            .find(|summary| summary.bundle_id == bundle_id)
+            .expect("更新后应包含 Bundle 状态")
+            .status,
+        skillyard_lib::BundleUpdateStatus::UpToDate
+    );
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let persisted = connection
+        .query_row(
+            "SELECT
+                (SELECT adopted_marker FROM source_bundle_links WHERE source_id = ?1),
+                (SELECT catalog_marker FROM sources WHERE id = ?1),
+                (SELECT COUNT(*) FROM source_catalog_members WHERE source_id = ?1),
+                (SELECT COUNT(*) FROM source_member_links WHERE source_id = ?1)",
+            [&source_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("应读取更新后的 Source 基线");
+    assert_eq!(persisted, (commit_b.to_owned(), commit_b.to_owned(), 2, 3));
+    assert_eq!(
+        fs::read_dir(data_root.join("bundles").join(bundle_id).join("contents"))
+            .expect("应读取 Bundle 内容目录")
+            .count(),
+        1,
+        "成功后只保留当前内容，不建立本地版本历史"
+    );
+}
+
+#[test]
+fn bundle_update_rejects_partial_member_selection_without_changing_current_or_marker() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let transport = Arc::new(RecordingTransport::default());
+    let (application, data_root, _home) = ready_application(sandbox.path(), transport.clone());
+    let commit_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let commit_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        commit_a,
+        &bundle_archive("alpha-old", true),
+    );
+    let source_id = open_sources(&application)
+        .into_iter()
+        .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
+        .expect("应加载更新基线")
+        .id;
+    transport.enqueue_bytes(200, &bundle_archive("alpha-old", true));
+    let install_plan = create_github_plan(&application, &source_id);
+    application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: install_plan.id,
+            selected_candidate_ids: install_plan
+                .candidates
+                .iter()
+                .map(|candidate| candidate.candidate_id.clone())
+                .collect(),
+        })
+        .expect("应安装初始 Bundle");
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let (bundle_id, old_current_target) = connection
+        .query_row(
+            "SELECT bundle.id, bundle.current_target
+             FROM bundles AS bundle
+             JOIN source_bundle_links AS link ON link.bundle_id = bundle.id
+             WHERE link.source_id = ?1",
+            [&source_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("应读取更新前 Bundle");
+    drop(connection);
+
+    transport.enqueue_catalog_prefix("anthropics/skills", "main", commit_b);
+    transport.enqueue_bytes(200, &update_archive());
+    let UiOutcome::InstallPlan { plan } = application
+        .handle(UiIntent::CreateBundleUpdatePlan {
+            bundle_id: bundle_id.clone(),
+        })
+        .expect("应准备更新 Plan")
+    else {
+        panic!("Bundle 更新应复用 Install Plan");
+    };
+    let alpha_only = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.skill_name.as_deref() == Some("alpha"))
+        .map(|candidate| vec![candidate.candidate_id.clone()])
+        .expect("应包含 alpha");
+    let error = application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: plan.id,
+            selected_candidate_ids: alpha_only,
+        })
+        .expect_err("Bundle 更新不能只确认部分当前成员");
+    assert!(
+        error.to_string().contains("选择") || error.to_string().contains("Plan"),
+        "错误应说明更新确认无效：{error}"
+    );
+    assert_eq!(current_target(&data_root, &bundle_id), old_current_target);
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应重新打开真实 SQLite");
+    let adopted_marker = connection
+        .query_row(
+            "SELECT adopted_marker FROM source_bundle_links WHERE source_id = ?1",
+            [&source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("应读取采用基线");
+    assert_eq!(adopted_marker, commit_a);
 }
 
 #[test]
@@ -839,6 +1131,84 @@ fn github_supplement_hard_exit_after_current_finishes_the_new_bundle() {
 }
 
 #[test]
+fn github_update_hard_exit_before_journal_preserves_old_content_and_marker() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (prepared, bundle_id, source_id, old_current_target) =
+        prepare_github_update_hard_exit(sandbox.path());
+
+    run_github_hard_exit_worker(&prepared, "before-journal");
+    let outcome = reopen_after_hard_exit(&prepared);
+    assert_managed_names(&outcome, &["alpha", "beta"]);
+    assert_eq!(
+        current_target(&prepared.data_root, &bundle_id),
+        old_current_target
+    );
+    assert_eq!(
+        adopted_marker(&prepared.data_root, &source_id),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(staging_entry_count(&prepared.data_root), 0);
+}
+
+#[test]
+fn github_update_hard_exit_before_current_preserves_old_content_and_marker() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (prepared, bundle_id, source_id, old_current_target) =
+        prepare_github_update_hard_exit(sandbox.path());
+
+    run_github_hard_exit_worker(&prepared, "before-current");
+    let outcome = reopen_after_hard_exit(&prepared);
+    assert_managed_names(&outcome, &["alpha", "beta"]);
+    assert_eq!(
+        current_target(&prepared.data_root, &bundle_id),
+        old_current_target
+    );
+    assert_eq!(
+        adopted_marker(&prepared.data_root, &source_id),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(staging_entry_count(&prepared.data_root), 0);
+}
+
+#[test]
+fn github_update_hard_exit_after_current_finishes_whole_bundle_and_marker() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (prepared, bundle_id, source_id, old_current_target) =
+        prepare_github_update_hard_exit(sandbox.path());
+
+    run_github_hard_exit_worker(&prepared, "after-current");
+    let outcome = reopen_after_hard_exit(&prepared);
+    assert_managed_names(&outcome, &["alpha", "beta", "gamma"]);
+    let new_current_target = current_target(&prepared.data_root, &bundle_id);
+    assert_ne!(new_current_target, old_current_target);
+    assert_eq!(
+        adopted_marker(&prepared.data_root, &source_id),
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            prepared
+                .data_root
+                .join("bundles")
+                .join(&bundle_id)
+                .join("current/members/alpha/payload.txt"),
+        )
+        .expect("向前恢复后应读取更新内容"),
+        "alpha-updated"
+    );
+    assert!(
+        !prepared
+            .data_root
+            .join("bundles")
+            .join(bundle_id)
+            .join(old_current_target)
+            .exists(),
+        "向前恢复完成后应清理旧内容"
+    );
+    assert_eq!(staging_entry_count(&prepared.data_root), 0);
+}
+
+#[test]
 fn github_supplement_retries_an_interrupted_old_content_cleanup() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (prepared, bundle_id, old_current_target) =
@@ -851,7 +1221,7 @@ fn github_supplement_retries_an_interrupted_old_content_cleanup() {
     interrupted
         .handle(UiIntent::ConfirmInstallPlan {
             plan_id: prepared.plan_id.clone(),
-            selected_candidate_ids: vec![prepared.candidate_id.clone()],
+            selected_candidate_ids: prepared.candidate_ids.clone(),
         })
         .expect_err("应停在领域提交之后、旧内容清理之前");
 
@@ -1046,9 +1416,14 @@ fn github_hard_exit_worker() {
     let data_root = env::var_os(HARD_EXIT_DATA_ROOT).expect("子进程必须收到数据目录");
     let home = env::var_os(HARD_EXIT_HOME).expect("子进程必须收到 home");
     let plan_id = env::var(HARD_EXIT_PLAN_ID).expect("子进程必须收到 Plan ID");
-    let candidate_id = env::var(HARD_EXIT_CANDIDATE_ID).expect("子进程必须收到候选成员 ID");
+    let candidate_ids = env::var(HARD_EXIT_CANDIDATE_ID)
+        .expect("子进程必须收到候选成员 ID")
+        .split(',')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let failpoint = match env::var(HARD_EXIT_POINT).as_deref() {
         Ok("before-journal") => LifecycleFailpoint::HardExitAfterTransactionRecord,
+        Ok("before-current") => LifecycleFailpoint::HardExitAfterCandidatePublishedBeforePhase,
         Ok("after-current") => LifecycleFailpoint::HardExitAfterCurrentSwitchedBeforePhase,
         _ => panic!("子进程收到未知 failpoint"),
     };
@@ -1060,7 +1435,7 @@ fn github_hard_exit_worker() {
     application
         .handle(UiIntent::ConfirmInstallPlan {
             plan_id,
-            selected_candidate_ids: vec![candidate_id],
+            selected_candidate_ids: candidate_ids,
         })
         .expect("hard-exit failpoint 必须在返回前终止进程");
 }
@@ -1069,7 +1444,7 @@ struct PreparedHardExit {
     data_root: std::path::PathBuf,
     home: std::path::PathBuf,
     plan_id: String,
-    candidate_id: String,
+    candidate_ids: Vec<String>,
 }
 
 fn prepare_github_create_hard_exit(base: &Path) -> PreparedHardExit {
@@ -1095,7 +1470,7 @@ fn prepare_github_create_hard_exit(base: &Path) -> PreparedHardExit {
         data_root,
         home,
         plan_id: plan.id,
-        candidate_id,
+        candidate_ids: vec![candidate_id],
     }
 }
 
@@ -1153,9 +1528,80 @@ fn prepare_github_supplement_hard_exit(base: &Path) -> (PreparedHardExit, String
             data_root,
             home,
             plan_id: plan.id,
-            candidate_id,
+            candidate_ids: vec![candidate_id],
         },
         bundle_id,
+        old_current_target,
+    )
+}
+
+fn prepare_github_update_hard_exit(base: &Path) -> (PreparedHardExit, String, String, String) {
+    let transport = Arc::new(RecordingTransport::default());
+    let (application, data_root, home) = ready_application(base, transport.clone());
+    let commit_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let commit_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        commit_a,
+        &bundle_archive("alpha-old", true),
+    );
+    let source_id = open_sources(&application)
+        .into_iter()
+        .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
+        .expect("应加载更新 hard-exit 基线")
+        .id;
+    transport.enqueue_bytes(200, &bundle_archive("alpha-old", true));
+    let install_plan = create_github_plan(&application, &source_id);
+    application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: install_plan.id,
+            selected_candidate_ids: install_plan
+                .candidates
+                .iter()
+                .map(|candidate| candidate.candidate_id.clone())
+                .collect(),
+        })
+        .expect("应安装更新 hard-exit 基线");
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    let (bundle_id, old_current_target) = connection
+        .query_row(
+            "SELECT bundle.id, bundle.current_target
+             FROM bundles AS bundle
+             JOIN source_bundle_links AS link ON link.bundle_id = bundle.id
+             WHERE link.source_id = ?1",
+            [&source_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("应读取更新前 Bundle");
+    drop(connection);
+
+    transport.enqueue_catalog_prefix("anthropics/skills", "main", commit_b);
+    transport.enqueue_bytes(200, &update_archive());
+    let UiOutcome::InstallPlan { plan } = application
+        .handle(UiIntent::CreateBundleUpdatePlan {
+            bundle_id: bundle_id.clone(),
+        })
+        .expect("应准备更新 hard-exit Plan")
+    else {
+        panic!("更新 hard-exit 应返回 Install Plan");
+    };
+    let candidate_ids = plan
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect();
+    drop(application);
+    (
+        PreparedHardExit {
+            data_root,
+            home,
+            plan_id: plan.id,
+            candidate_ids,
+        },
+        bundle_id,
+        source_id,
         old_current_target,
     )
 }
@@ -1167,7 +1613,7 @@ fn run_github_hard_exit_worker(prepared: &PreparedHardExit, point: &str) {
         .env(HARD_EXIT_DATA_ROOT, &prepared.data_root)
         .env(HARD_EXIT_HOME, &prepared.home)
         .env(HARD_EXIT_PLAN_ID, &prepared.plan_id)
-        .env(HARD_EXIT_CANDIDATE_ID, &prepared.candidate_id)
+        .env(HARD_EXIT_CANDIDATE_ID, prepared.candidate_ids.join(","))
         .env(HARD_EXIT_POINT, point)
         .status()
         .expect("应启动 hard-exit 子进程");
@@ -1224,6 +1670,17 @@ fn current_target(data_root: &Path, bundle_id: &str) -> String {
             |row| row.get(0),
         )
         .expect("应读取 Bundle current")
+}
+
+fn adopted_marker(data_root: &Path, source_id: &str) -> String {
+    Connection::open(data_root.join("skillyard.sqlite3"))
+        .expect("应打开真实 SQLite")
+        .query_row(
+            "SELECT adopted_marker FROM source_bundle_links WHERE source_id = ?1",
+            [source_id],
+            |row| row.get(0),
+        )
+        .expect("应读取 Source 采用基线")
 }
 
 fn ready_application(
@@ -1459,6 +1916,23 @@ fn supplement_archive() -> Vec<u8> {
     archive
         .finish()
         .expect("应完成补装 ZIP fixture")
+        .into_inner()
+}
+
+fn update_archive() -> Vec<u8> {
+    let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o100644);
+    for (root, name, payload) in [
+        ("repository-sha/skills/alpha", "alpha", "alpha-updated"),
+        ("repository-sha/skills/gamma", "gamma", "gamma-new"),
+    ] {
+        write_archive_skill(&mut archive, options, root, name, payload);
+    }
+    archive
+        .finish()
+        .expect("应完成更新 ZIP fixture")
         .into_inner()
 }
 

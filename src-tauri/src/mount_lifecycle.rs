@@ -191,6 +191,35 @@ impl TargetSnapshot {
     }
 }
 
+/// 多对象 Removal 复用单 Mount 的路径身份与隔离协议，但不创建第二套 Mount 事务。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ManagedMountRemovalSnapshot {
+    pub mount_id: String,
+    pub member_id: String,
+    pub bundle_id: String,
+    pub skill_name: String,
+    pub member_fingerprint: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub project_root_path: Option<String>,
+    pub project_root_device: Option<u64>,
+    pub project_root_inode: Option<u64>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub target_observation: String,
+    pub temporary_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManagedMountRemovalState {
+    Original,
+    Isolated,
+    Ambiguous(String),
+}
+
 struct PreparedBatchMountItem {
     id: String,
     mount_id: String,
@@ -409,6 +438,147 @@ pub fn create_remove_mount_plan(
     stored_plan_to_ui(&stored, target_health(&snapshot))
 }
 
+pub(crate) fn seal_managed_mount_removal(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    mount: &StoredMount,
+    temporary_name: String,
+) -> Result<ManagedMountRemovalSnapshot, MountLifecycleError> {
+    ensure_supported_scope(mount.scope, mount.project_id.as_deref())?;
+    let member = storage.read_managed_member(&mount.member_id)?;
+    if member.bundle_id != mount.bundle_id
+        || member.skill_name != mount.skill_name
+        || member.content_fingerprint != mount.member_fingerprint
+        || member.expected_target != mount.expected_target
+    {
+        return Err(MountLifecycleError::PlanPreconditionChanged);
+    }
+    validate_member_content(&member)?;
+    let project = read_scope_project(storage, mount.scope, mount.project_id.as_deref())?;
+    let target = derive_target_path(paths, &member, mount.app_id, mount.scope, project.as_ref())?;
+    if path_to_string(&target)? != mount.target_path {
+        return Err(MountLifecycleError::PlanPreconditionChanged);
+    }
+    let observed = observe_removal_target(
+        paths,
+        mount.app_id,
+        mount.scope,
+        project.as_ref(),
+        &mount.skill_name,
+        &mount.expected_target,
+    )?;
+    Ok(ManagedMountRemovalSnapshot {
+        mount_id: mount.id.clone(),
+        member_id: mount.member_id.clone(),
+        bundle_id: mount.bundle_id.clone(),
+        skill_name: mount.skill_name.clone(),
+        member_fingerprint: mount.member_fingerprint.clone(),
+        app_id: mount.app_id,
+        scope: mount.scope,
+        project_id: mount.project_id.clone(),
+        project_display_name: mount.project_display_name.clone(),
+        project_root_path: mount.project_root_path.clone(),
+        project_root_device: mount.project_root_device,
+        project_root_inode: mount.project_root_inode,
+        target_path: mount.target_path.clone(),
+        expected_target: mount.expected_target.clone(),
+        target_observation: observed.observation,
+        temporary_name,
+    })
+}
+
+pub(crate) fn isolate_managed_mount_removal(
+    paths: &ApplicationPaths,
+    snapshot: &ManagedMountRemovalSnapshot,
+) -> Result<(), MountLifecycleError> {
+    let plan = removal_snapshot_plan(snapshot);
+    let journal = removal_snapshot_journal(snapshot);
+    apply_mount_effect(paths, &plan, &journal)?;
+    match inspect_effect_state(paths, &plan, &journal)? {
+        EffectState::Applied => Ok(()),
+        EffectState::NotApplied => Err(MountLifecycleError::PlanPreconditionChanged),
+        EffectState::Ambiguous(message) => Err(MountLifecycleError::RecoveryBlocked(message)),
+    }
+}
+
+pub(crate) fn inspect_managed_mount_removal(
+    paths: &ApplicationPaths,
+    snapshot: &ManagedMountRemovalSnapshot,
+) -> Result<ManagedMountRemovalState, MountLifecycleError> {
+    let plan = removal_snapshot_plan(snapshot);
+    let journal = removal_snapshot_journal(snapshot);
+    Ok(match inspect_effect_state(paths, &plan, &journal)? {
+        EffectState::NotApplied => ManagedMountRemovalState::Original,
+        EffectState::Applied => ManagedMountRemovalState::Isolated,
+        EffectState::Ambiguous(message) => ManagedMountRemovalState::Ambiguous(message),
+    })
+}
+
+pub(crate) fn restore_managed_mount_removal(
+    paths: &ApplicationPaths,
+    snapshot: &ManagedMountRemovalSnapshot,
+) -> Result<(), MountLifecycleError> {
+    let plan = removal_snapshot_plan(snapshot);
+    let project = stored_plan_project(&plan)?;
+    let parent = match open_mount_parent(paths, plan.app_id, plan.scope, project.as_ref(), false) {
+        Ok(parent) => parent,
+        Err(error) if matches_unavailable_removal_observation(&plan, &error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let ParentLookup::Open(parent) = parent else {
+        return if plan.target_observation == "absent" {
+            Ok(())
+        } else {
+            Err(MountLifecycleError::RecoveryBlocked(
+                "Mount 父目录在 Removal 回滚时消失".to_owned(),
+            ))
+        };
+    };
+    ensure_parent_matches_target(&parent, &plan)?;
+    let leaf = OsStr::new(&plan.skill_name);
+    let temporary_name = OsStr::new(&snapshot.temporary_name);
+    let target = snapshot_at(&parent.parent, leaf, &plan.expected_target)?;
+    let temporary = snapshot_at(&parent.parent, temporary_name, &plan.expected_target)?;
+    match observation_kind(&plan.target_observation) {
+        TargetKind::ExpectedLink
+            if target.observation == plan.target_observation
+                && temporary.kind == TargetKind::Absent =>
+        {
+            Ok(())
+        }
+        TargetKind::ExpectedLink
+            if target.kind == TargetKind::Absent
+                && temporary.observation == plan.target_observation =>
+        {
+            rename_at_no_replace(&parent.parent, temporary_name, &parent.parent, leaf).map_err(
+                |source| mount_io("恢复 Removal 隔离的 Mount", &parent.parent_path, source),
+            )?;
+            parent
+                .parent
+                .sync_all()
+                .map_err(|source| mount_io("同步 Removal Mount 回滚", &parent.parent_path, source))
+        }
+        TargetKind::Absent | TargetKind::Other
+            if target.observation == plan.target_observation
+                && temporary.kind == TargetKind::Absent =>
+        {
+            Ok(())
+        }
+        _ => Err(MountLifecycleError::RecoveryBlocked(
+            "Removal 回滚时 Mount 或隔离路径已被外部改写".to_owned(),
+        )),
+    }
+}
+
+pub(crate) fn finalize_managed_mount_removal(
+    paths: &ApplicationPaths,
+    snapshot: &ManagedMountRemovalSnapshot,
+) -> Result<(), MountLifecycleError> {
+    let plan = removal_snapshot_plan(snapshot);
+    let journal = removal_snapshot_journal(snapshot);
+    cleanup_applied_temporary(paths, &plan, &journal)
+}
+
 pub fn create_repair_mount_plan(
     paths: &ApplicationPaths,
     storage: &mut Storage,
@@ -567,7 +737,11 @@ pub fn create_batch_mount_plan(
             &member.expected_target,
         )?;
         let target_path = path_to_string(&target_path)?;
-        let blocked_object = storage.is_batch_mount_object_blocked(&member.id, &target_path)?;
+        let blocked_object = storage.is_batch_mount_object_blocked(
+            &member.id,
+            &target_path,
+            request.project_id.as_deref(),
+        )?;
 
         let exact_mount = existing_mounts.iter().any(|mount| {
             mount.member_id == member.id
@@ -3470,6 +3644,47 @@ fn ensure_temporary_absent(
         ))
     } else {
         Ok(())
+    }
+}
+
+fn removal_snapshot_plan(snapshot: &ManagedMountRemovalSnapshot) -> StoredMountPlan {
+    StoredMountPlan {
+        id: format!("removal-{}", snapshot.mount_id),
+        operation: MountOperation::Remove,
+        purpose: MountPlanPurpose::Remove,
+        mount_id: snapshot.mount_id.clone(),
+        member_id: snapshot.member_id.clone(),
+        bundle_id: snapshot.bundle_id.clone(),
+        skill_name: snapshot.skill_name.clone(),
+        app_id: snapshot.app_id,
+        scope: snapshot.scope,
+        project_id: snapshot.project_id.clone(),
+        project_display_name: snapshot.project_display_name.clone(),
+        project_root_path: snapshot.project_root_path.clone(),
+        project_root_device: snapshot.project_root_device,
+        project_root_inode: snapshot.project_root_inode,
+        target_path: snapshot.target_path.clone(),
+        expected_target: snapshot.expected_target.clone(),
+        member_fingerprint: snapshot.member_fingerprint.clone(),
+        target_observation: snapshot.target_observation.clone(),
+        created_at: 0,
+        expires_at: i64::MAX,
+        status: "consumed".to_owned(),
+    }
+}
+
+fn removal_snapshot_journal(snapshot: &ManagedMountRemovalSnapshot) -> MountJournal {
+    MountJournal {
+        version: MOUNT_JOURNAL_VERSION,
+        transaction_id: format!("removal-{}", snapshot.mount_id),
+        plan_id: format!("removal-{}", snapshot.mount_id),
+        mount_id: snapshot.mount_id.clone(),
+        operation: MountOperation::Remove,
+        target_path: snapshot.target_path.clone(),
+        expected_target: snapshot.expected_target.clone(),
+        target_observation: snapshot.target_observation.clone(),
+        temporary_name: snapshot.temporary_name.clone(),
+        phase: MountJournalPhase::JournalReady,
     }
 }
 

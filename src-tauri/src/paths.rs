@@ -45,6 +45,10 @@ impl ApplicationPaths {
         self.data_root.join("journals")
     }
 
+    pub(crate) fn trash_root(&self) -> PathBuf {
+        self.data_root.join("trash")
+    }
+
     pub(crate) fn central_store_notice(&self) -> PathBuf {
         self.data_root.join("SKILLYARD-INFO.md")
     }

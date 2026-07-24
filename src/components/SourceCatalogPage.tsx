@@ -25,7 +25,10 @@ interface SourceCatalogPageProps {
           | "confirmingRef"
           | "searchingSkillsSh";
       }
-    | { type: "reloading" | "planningInstall"; sourceId: string }
+    | {
+        type: "reloading" | "planningInstall" | "planningRemoval";
+        sourceId: string;
+      }
     | null;
   error: string | null;
   onBack(): void;
@@ -37,6 +40,7 @@ interface SourceCatalogPageProps {
   onInstallUrl(url: string): void;
   onReload(sourceId: string): void;
   onInstall(sourceId: string): void;
+  onRemoveSource(sourceId: string): void;
 }
 
 export function SourceCatalogPage({
@@ -54,6 +58,7 @@ export function SourceCatalogPage({
   onInstallUrl,
   onReload,
   onInstall,
+  onRemoveSource,
 }: SourceCatalogPageProps) {
   const [input, setInput] = useState("");
   const [trackedRef, setTrackedRef] = useState("");
@@ -255,8 +260,13 @@ export function SourceCatalogPage({
               operation?.type === "planningInstall" &&
               operation.sourceId === source.id
             }
+            isRemoving={
+              operation?.type === "planningRemoval" &&
+              operation.sourceId === source.id
+            }
             onReload={() => onReload(source.id)}
             onInstall={() => onInstall(source.id)}
+            onRemove={() => onRemoveSource(source.id)}
           />
         ))}
       </section>
@@ -318,8 +328,10 @@ function SourceCard({
   isBusy,
   isReloading,
   isPlanning,
+  isRemoving,
   onReload,
   onInstall,
+  onRemove,
 }: {
   source: SourceSummary;
   mounts: MountSummary[];
@@ -327,8 +339,10 @@ function SourceCard({
   isBusy: boolean;
   isReloading: boolean;
   isPlanning: boolean;
+  isRemoving: boolean;
   onReload(): void;
   onInstall(): void;
+  onRemove(): void;
 }) {
   const available = source.members.filter(
     (member) => member.selectable && !member.installedMemberId,
@@ -350,9 +364,6 @@ function SourceCard({
           <span className={`source-status is-${source.catalogStatus}`}>
             {statusLabel}
           </span>
-          {isGithub && source.bundleId && source.adoptedMarker === null ? (
-            <span className="source-update-status">可更新</span>
-          ) : null}
           <h2>{source.displayName}</h2>
           <code>{source.locator}</code>
           {source.trackedRef ? (
@@ -389,6 +400,15 @@ function SourceCard({
               </button>
             </>
           ) : null}
+          <button
+            className="danger-outline-action"
+            type="button"
+            aria-label={`删除 Source ${source.displayName}`}
+            disabled={isBusy}
+            onClick={onRemove}
+          >
+            {isRemoving ? "正在准备删除…" : "删除 Source"}
+          </button>
         </div>
       </header>
 

@@ -6,20 +6,26 @@ use std::sync::{
 use thiserror::Error;
 
 use crate::{
+    bundle_update_batch::{
+        BundleUpdateBatchError, acknowledge_bundle_update_batch, confirm_bundle_update_batch_plan,
+        create_bundle_update_batch_plan, discard_bundle_update_batch_plan,
+        read_open_bundle_update_batch_outcome, recover_running_bundle_update_batch,
+    },
     domain::{
-        MergeContentChoice, PlatformInfo, SourceMemberMappingChoice, TakeoverPlanRequest, UiIntent,
-        UiOutcome,
+        BundleUpdateStatus, MergeContentChoice, PlatformInfo, SourceMemberMappingChoice,
+        TakeoverPlanRequest, UiIntent, UiOutcome,
     },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
         fetch_github_catalog, parse_github_source, resolve_github_source,
     },
     lifecycle::{
-        LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock, confirm_install,
-        create_archive_install_plan, create_editable_local_install_plan,
-        create_folder_install_plan, create_github_install_plan, create_url_install_plan,
-        discard_install_plan, ensure_central_store_layout, recover_pending_transactions,
-        write_notice_from_storage,
+        LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
+        check_editable_local_bundle as check_editable_local_bundle_lifecycle, confirm_install,
+        create_archive_install_plan, create_bundle_replacement_plan, create_bundle_update_plan,
+        create_editable_local_install_plan, create_folder_install_plan, create_github_install_plan,
+        create_url_install_plan, discard_install_plan, ensure_central_store_layout,
+        recover_pending_transactions, write_notice_from_storage,
     },
     mount_lifecycle::{
         MountLifecycleError, confirm_batch_mount_plan, confirm_mount_plan, create_batch_mount_plan,
@@ -29,6 +35,11 @@ use crate::{
         refresh_mount_health,
     },
     paths::ApplicationPaths,
+    removal::{
+        RemovalError, confirm_removal_plan, create_bundle_removal_plan,
+        create_project_removal_plan, create_source_removal_plan, discard_removal_plan,
+        read_open_removal_plan, recover_pending_removals,
+    },
     scanner::{scan, scan_projects, scan_with_projects},
     skills_sh::{SkillsShError, search_skills_sh},
     source_association::{
@@ -70,6 +81,10 @@ pub enum ApplicationError {
     SkillsSh(#[from] SkillsShError),
     #[error(transparent)]
     SourceAssociation(#[from] SourceAssociationError),
+    #[error(transparent)]
+    BundleUpdateBatch(#[from] BundleUpdateBatchError),
+    #[error(transparent)]
+    Removal(#[from] RemovalError),
     #[error("首次扫描未完整完成：{0}")]
     InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
@@ -165,6 +180,12 @@ impl SkillYardApplication {
             UiIntent::RefreshLocalInventory => {
                 self.with_write_operation(|| self.refresh_local_inventory())
             }
+            UiIntent::CheckBundleUpdates => {
+                self.with_write_operation(|| self.check_bundle_updates())
+            }
+            UiIntent::CheckEditableLocalBundle { bundle_id } => {
+                self.with_write_operation(|| self.check_editable_local_bundle(bundle_id))
+            }
             UiIntent::OpenSourceDiscovery => {
                 self.with_write_operation(|| self.open_source_discovery())
             }
@@ -195,6 +216,30 @@ impl SkillYardApplication {
             UiIntent::CreateGithubInstallPlan { source_id } => {
                 self.with_write_operation(|| self.create_github_install_plan(source_id))
             }
+            UiIntent::CreateBundleUpdatePlan { bundle_id } => {
+                self.with_write_operation(|| self.create_bundle_update_plan(bundle_id))
+            }
+            UiIntent::CreateBundleUpdateBatchPlan => {
+                self.with_write_operation(|| self.create_bundle_update_batch_plan())
+            }
+            UiIntent::ConfirmBundleUpdateBatchPlan {
+                plan_id,
+                selected_item_ids,
+            } => self.with_write_operation(|| {
+                self.confirm_bundle_update_batch_plan(plan_id, selected_item_ids)
+            }),
+            UiIntent::DiscardBundleUpdateBatchPlan { plan_id } => {
+                self.with_write_operation(|| self.discard_bundle_update_batch_plan(plan_id))
+            }
+            UiIntent::AcknowledgeBundleUpdateBatch { batch_id } => {
+                self.with_write_operation(|| self.acknowledge_bundle_update_batch(batch_id))
+            }
+            UiIntent::CreateBundleReplacementPlan {
+                bundle_id,
+                input_path,
+            } => self.with_write_operation(|| {
+                self.create_bundle_replacement_plan(bundle_id, input_path)
+            }),
             UiIntent::ConfirmInstallPlan {
                 plan_id,
                 selected_candidate_ids,
@@ -239,6 +284,21 @@ impl SkillYardApplication {
                 selected_item_ids,
             } => self
                 .with_write_operation(|| self.confirm_batch_mount_plan(plan_id, selected_item_ids)),
+            UiIntent::CreateProjectRemovalPlan { project_id } => {
+                self.with_write_operation(|| self.create_project_removal_plan(project_id))
+            }
+            UiIntent::CreateSourceRemovalPlan { source_id } => {
+                self.with_write_operation(|| self.create_source_removal_plan(source_id))
+            }
+            UiIntent::CreateBundleRemovalPlan { bundle_id } => {
+                self.with_write_operation(|| self.create_bundle_removal_plan(bundle_id))
+            }
+            UiIntent::ConfirmRemovalPlan { plan_id } => {
+                self.with_write_operation(|| self.confirm_removal_plan(plan_id))
+            }
+            UiIntent::DiscardRemovalPlan { plan_id } => {
+                self.with_write_operation(|| self.discard_removal_plan(plan_id))
+            }
             UiIntent::CreateSourceAssociationPlan {
                 bundle_id,
                 source_id,
@@ -276,6 +336,12 @@ impl SkillYardApplication {
     fn get_startup_state(&self) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_recovered_storage()?;
         if storage.read_initial_scan()?.is_some() {
+            if let Some(plan) = read_open_removal_plan(&storage)? {
+                return Ok(UiOutcome::RemovalPlan { plan });
+            }
+            if let Some(outcome) = read_open_bundle_update_batch_outcome(&self.paths, &storage)? {
+                return Ok(outcome);
+            }
             let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
             lifecycle_lock.recheck(&self.paths)?;
             refresh_mount_health(&self.paths, &mut storage, unix_timestamp_millis())?;
@@ -346,7 +412,91 @@ impl SkillYardApplication {
             recovery_issues: saved.recovery_issues,
             projects: saved.projects,
             mounts: saved.mounts,
+            bundle_updates: storage.read_bundle_update_summaries()?,
         })
+    }
+
+    fn check_bundle_updates(&self) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let sources = storage.read_github_bundle_update_sources()?;
+        for source in sources {
+            lifecycle_lock.recheck(&self.paths)?;
+            if storage
+                .source_install_object_is_blocked(&source.source_id, Some(&source.bundle_id))?
+            {
+                // 人工恢复中的对象保持原检查状态，也不触发无意义的上游请求。
+                continue;
+            }
+            let resolved = self
+                .source_transport
+                .as_deref()
+                .ok_or(GithubSourceError::Network)
+                .and_then(|transport| {
+                    resolve_github_source(transport, &source.locator, Some(&source.tracked_ref))
+                })
+                .and_then(|resolved| {
+                    // 仓库重定向或 ref 漂移不能在一次检查中改写已登记 Source 身份。
+                    if resolved.canonical_identity != source.canonical_identity
+                        || resolved.tracked_ref != source.tracked_ref
+                    {
+                        Err(GithubSourceError::InvalidResponse)
+                    } else {
+                        Ok(resolved)
+                    }
+                });
+            lifecycle_lock.recheck(&self.paths)?;
+            let checked_at = unix_timestamp_millis();
+            match resolved {
+                Ok(resolved) => {
+                    let status = if source.adopted_marker.as_deref() == Some(&resolved.commit) {
+                        BundleUpdateStatus::UpToDate
+                    } else {
+                        BundleUpdateStatus::Available
+                    };
+                    storage.save_bundle_update_check_success(
+                        &source.source_id,
+                        &source.bundle_id,
+                        status,
+                        &resolved.commit,
+                        checked_at,
+                    )?;
+                }
+                Err(error) => storage.save_bundle_update_check_failure(
+                    &source.source_id,
+                    &source.bundle_id,
+                    checked_at,
+                    &error.to_string(),
+                )?,
+            }
+        }
+        lifecycle_lock.recheck(&self.paths)?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn check_editable_local_bundle(
+        &self,
+        bundle_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        check_editable_local_bundle_lifecycle(
+            &self.paths,
+            &lifecycle_lock,
+            &mut storage,
+            &bundle_id,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
     }
 
     fn open_source_discovery(&self) -> Result<UiOutcome, ApplicationError> {
@@ -602,6 +752,98 @@ impl SkillYardApplication {
             &mut storage,
             transport,
             &source_id,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::InstallPlan { plan })
+    }
+
+    fn create_bundle_update_plan(&self, bundle_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_bundle_update_plan(
+            &self.paths,
+            &lifecycle_lock,
+            &mut storage,
+            self.source_transport.as_deref(),
+            &bundle_id,
+            unix_timestamp_millis(),
+        )?;
+        lifecycle_lock.recheck(&self.paths)?;
+        Ok(UiOutcome::InstallPlan { plan })
+    }
+
+    fn create_bundle_update_batch_plan(&self) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let plan = create_bundle_update_batch_plan(
+            &self.paths,
+            &mut storage,
+            self.source_transport.as_deref(),
+            unix_timestamp_millis(),
+        )?;
+        Ok(UiOutcome::BundleUpdateBatchPlan { plan })
+    }
+
+    fn confirm_bundle_update_batch_plan(
+        &self,
+        plan_id: String,
+        selected_item_ids: Vec<String>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let result = confirm_bundle_update_batch_plan(
+            &self.paths,
+            &mut storage,
+            &plan_id,
+            &selected_item_ids,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
+        Ok(UiOutcome::BundleUpdateBatchResult { result })
+    }
+
+    fn discard_bundle_update_batch_plan(
+        &self,
+        plan_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        discard_bundle_update_batch_plan(&self.paths, &mut storage, &plan_id)?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn acknowledge_bundle_update_batch(
+        &self,
+        batch_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        acknowledge_bundle_update_batch(&mut storage, &batch_id)?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn create_bundle_replacement_plan(
+        &self,
+        bundle_id: String,
+        input_path: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
+        lifecycle_lock.recheck(&self.paths)?;
+        let plan = create_bundle_replacement_plan(
+            &self.paths,
+            &lifecycle_lock,
+            &mut storage,
+            &bundle_id,
+            std::path::Path::new(&input_path),
             unix_timestamp_millis(),
         )?;
         lifecycle_lock.recheck(&self.paths)?;
@@ -911,6 +1153,77 @@ impl SkillYardApplication {
             .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
     }
 
+    fn create_project_removal_plan(
+        &self,
+        project_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let plan = create_project_removal_plan(
+            &self.paths,
+            &mut storage,
+            &project_id,
+            unix_timestamp_millis(),
+        )?;
+        Ok(UiOutcome::RemovalPlan { plan })
+    }
+
+    fn create_source_removal_plan(&self, source_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let plan = create_source_removal_plan(&mut storage, &source_id, unix_timestamp_millis())?;
+        Ok(UiOutcome::RemovalPlan { plan })
+    }
+
+    fn create_bundle_removal_plan(&self, bundle_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let plan = create_bundle_removal_plan(
+            &self.paths,
+            &mut storage,
+            &bundle_id,
+            unix_timestamp_millis(),
+        )?;
+        Ok(UiOutcome::RemovalPlan { plan })
+    }
+
+    fn confirm_removal_plan(&self, plan_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let kind = confirm_removal_plan(
+            &self.paths,
+            &mut storage,
+            &plan_id,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
+        match kind {
+            crate::domain::RemovalKind::Source => Ok(UiOutcome::SourceDiscovery {
+                sources: storage.read_source_summaries()?,
+                highlighted_source_id: None,
+                highlighted_member_path: None,
+            }),
+            crate::domain::RemovalKind::Project | crate::domain::RemovalKind::Bundle => storage
+                .read_initial_scan()?
+                .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失")),
+        }
+    }
+
+    fn discard_removal_plan(&self, plan_id: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        match discard_removal_plan(&mut storage, &plan_id)? {
+            crate::domain::RemovalKind::Source => Ok(UiOutcome::SourceDiscovery {
+                sources: storage.read_source_summaries()?,
+                highlighted_source_id: None,
+                highlighted_member_path: None,
+            }),
+            crate::domain::RemovalKind::Project | crate::domain::RemovalKind::Bundle => storage
+                .read_initial_scan()?
+                .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失")),
+        }
+    }
+
     fn open_recovered_storage(&self) -> Result<Storage, ApplicationError> {
         let mut storage = self.open_storage()?;
         self.recover_storage(&mut storage)?;
@@ -934,6 +1247,18 @@ impl SkillYardApplication {
         recover_pending_mount_transactions(&self.paths, storage, unix_timestamp_millis())?;
         recover_pending_batch_mount_transactions(&self.paths, storage, unix_timestamp_millis())?;
         recover_pending_takeover_transactions(
+            &self.paths,
+            storage,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
+        recover_pending_removals(
+            &self.paths,
+            storage,
+            unix_timestamp_millis(),
+            self.lifecycle_failpoint,
+        )?;
+        recover_running_bundle_update_batch(
             &self.paths,
             storage,
             unix_timestamp_millis(),

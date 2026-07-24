@@ -54,6 +54,25 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("refresh_local_inventory");
   });
 
+  it("检查 Bundle 更新时不提交前端推断参数", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+      bundleUpdates: [],
+    });
+
+    await tauriSkillYardClient.checkBundleUpdates();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("check_bundle_updates");
+  });
+
   it("只通过任务级命令打开 Source 发现页", async () => {
     mocks.invoke.mockResolvedValue({
       type: "sourceDiscovery",
@@ -216,6 +235,215 @@ describe("Tauri IPC contract", () => {
 
     expect(mocks.invoke).toHaveBeenCalledWith("create_github_install_plan", {
       sourceId: "source-1",
+    });
+  });
+
+  it("为单个 Bundle 准备更新时只提交稳定 Bundle ID", async () => {
+    mocks.invoke.mockResolvedValue({ id: "update-plan-1" });
+
+    await tauriSkillYardClient.createBundleUpdatePlan("bundle-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_bundle_update_plan", {
+      bundleId: "bundle-1",
+    });
+  });
+
+  it("手动替换 Bundle 时只把稳定 Bundle ID 交给原生选择器", async () => {
+    mocks.invoke.mockResolvedValue(null);
+
+    await tauriSkillYardClient.chooseBundleReplacementPlan("bundle-archive");
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "choose_bundle_replacement_plan",
+      {
+        bundleId: "bundle-archive",
+      },
+    );
+  });
+
+  it("检查 Editable Local 时只提交稳定 Bundle ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+      bundleUpdates: [],
+    });
+
+    await tauriSkillYardClient.checkEditableLocalBundle("bundle-editable");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("check_editable_local_bundle", {
+      bundleId: "bundle-editable",
+    });
+  });
+
+  it("准备全部更新时不提交前端推断的 Bundle 列表", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "bundleUpdateBatchPlan",
+      plan: { id: "batch-plan-1", items: [], createdAt: 1, expiresAt: 2 },
+    });
+
+    await tauriSkillYardClient.createBundleUpdateBatchPlan();
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "create_bundle_update_batch_plan",
+    );
+  });
+
+  it("确认全部更新时只提交 Plan ID 和页面顺序中的 Bundle Item ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "bundleUpdateBatchResult",
+      result: {
+        id: "batch-1",
+        status: "completed",
+        items: [],
+        confirmedAt: 1,
+        updatedAt: 2,
+      },
+    });
+
+    await tauriSkillYardClient.confirmBundleUpdateBatchPlan("batch-plan-1", [
+      "item-beta",
+      "item-alpha",
+    ]);
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "confirm_bundle_update_batch_plan",
+      {
+        planId: "batch-plan-1",
+        selectedItemIds: ["item-beta", "item-alpha"],
+      },
+    );
+  });
+
+  it("返回全部更新预览时只提交需要清理的 Plan ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+      bundleUpdates: [],
+    });
+
+    await tauriSkillYardClient.discardBundleUpdateBatchPlan("batch-plan-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "discard_bundle_update_batch_plan",
+      {
+        planId: "batch-plan-1",
+      },
+    );
+  });
+
+  it("确认已读全部更新结果时把结果 ID 作为 batchId 提交", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+      bundleUpdates: [],
+    });
+
+    await tauriSkillYardClient.acknowledgeBundleUpdateBatchResult("batch-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "acknowledge_bundle_update_batch_result",
+      {
+        batchId: "batch-1",
+      },
+    );
+  });
+
+  it("准备移除 Project 时只提交稳定 Project ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "removalPlan",
+      plan: { id: "removal-plan-1", kind: "project" },
+    });
+
+    await tauriSkillYardClient.createProjectRemovalPlan("project-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "create_project_removal_plan",
+      {
+        projectId: "project-1",
+      },
+    );
+  });
+
+  it("准备删除 Source 时只提交稳定 Source ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "removalPlan",
+      plan: { id: "removal-plan-2", kind: "source" },
+    });
+
+    await tauriSkillYardClient.createSourceRemovalPlan("source-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_source_removal_plan", {
+      sourceId: "source-1",
+    });
+  });
+
+  it("准备删除 Bundle 时只提交稳定 Bundle ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "removalPlan",
+      plan: { id: "removal-plan-3", kind: "bundle" },
+    });
+
+    await tauriSkillYardClient.createBundleRemovalPlan("bundle-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("create_bundle_removal_plan", {
+      bundleId: "bundle-1",
+    });
+  });
+
+  it("确认 Removal Plan 时只提交 opaque Plan ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+      bundleUpdates: [],
+    });
+
+    await tauriSkillYardClient.confirmRemovalPlan("removal-plan-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("confirm_removal_plan", {
+      planId: "removal-plan-1",
+    });
+  });
+
+  it("放弃 Removal Plan 时只提交 opaque Plan ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "sourceDiscovery",
+      sources: [],
+      highlightedSourceId: null,
+      highlightedMemberPath: null,
+    });
+
+    await tauriSkillYardClient.discardRemovalPlan("removal-plan-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("discard_removal_plan", {
+      planId: "removal-plan-1",
     });
   });
 

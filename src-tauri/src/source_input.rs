@@ -138,6 +138,8 @@ pub(crate) enum SourceInputError {
     InvalidArchiveInput,
     #[error("Editable Local Source 必须是可读取的普通目录")]
     InvalidEditableLocal,
+    #[error("Editable Local Source 当前不可访问或已不是登记时的目录")]
+    EditableLocalUnavailable,
     #[error("直接下载 URL 必须是无账号信息和 fragment 的 HTTPS .zip 或 .skill 地址")]
     InvalidDirectUrl,
     #[error("直接下载 URL 重定向超出允许的 HTTPS host 边界")]
@@ -304,6 +306,46 @@ pub(crate) fn prepare_editable_local_source(
         ));
     }
     prepared.marker = marker;
+    Ok(prepared)
+}
+
+/// 已登记目录必须先匹配持久化的设备与 inode，不能因路径复用而静默改绑 Source。
+pub(crate) fn prepare_registered_editable_local_source(
+    path: &Path,
+    expected_identity: SourceFilesystemIdentity,
+    staging_root: &Path,
+    plan_id: &str,
+) -> Result<PreparedSourceSnapshot, SourceInputError> {
+    let supplied =
+        fs::symlink_metadata(path).map_err(|_| SourceInputError::EditableLocalUnavailable)?;
+    if supplied.file_type().is_symlink()
+        || !supplied.is_dir()
+        || supplied.dev() != expected_identity.device
+        || supplied.ino() != expected_identity.inode
+    {
+        return Err(SourceInputError::EditableLocalUnavailable);
+    }
+    let canonical =
+        fs::canonicalize(path).map_err(|_| SourceInputError::EditableLocalUnavailable)?;
+    let canonical_metadata =
+        fs::symlink_metadata(&canonical).map_err(|_| SourceInputError::EditableLocalUnavailable)?;
+    if canonical != path
+        || canonical_metadata.dev() != expected_identity.device
+        || canonical_metadata.ino() != expected_identity.inode
+    {
+        return Err(SourceInputError::EditableLocalUnavailable);
+    }
+
+    let prepared = prepare_editable_local_source(path, staging_root, plan_id).map_err(|error| {
+        if error == SourceInputError::InvalidEditableLocal {
+            SourceInputError::EditableLocalUnavailable
+        } else {
+            error
+        }
+    })?;
+    if prepared.filesystem_identity() != Some(expected_identity) {
+        return Err(SourceInputError::EditableLocalUnavailable);
+    }
     Ok(prepared)
 }
 

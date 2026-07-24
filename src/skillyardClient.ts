@@ -16,11 +16,36 @@ import type {
 } from "./domain";
 
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
+type BundleUpdateBatchPlanOutcome = Extract<
+  UiOutcome,
+  { type: "bundleUpdateBatchPlan" }
+>;
+type BundleUpdateBatchResultOutcome = Extract<
+  UiOutcome,
+  { type: "bundleUpdateBatchResult" }
+>;
+type RemovalPlanOutcome = Extract<UiOutcome, { type: "removalPlan" }>;
 
 export interface SkillYardClient {
   getStartupState(): Promise<UiOutcome>;
   startInitialScan(): Promise<UiOutcome>;
   refreshLocalInventory(): Promise<UiOutcome>;
+  checkBundleUpdates(): Promise<InventoryOutcome>;
+  checkEditableLocalBundle(bundleId: string): Promise<InventoryOutcome>;
+  createBundleUpdateBatchPlan(): Promise<BundleUpdateBatchPlanOutcome>;
+  confirmBundleUpdateBatchPlan(
+    planId: string,
+    selectedItemIds: string[],
+  ): Promise<BundleUpdateBatchResultOutcome>;
+  discardBundleUpdateBatchPlan(planId: string): Promise<InventoryOutcome>;
+  acknowledgeBundleUpdateBatchResult(
+    batchId: string,
+  ): Promise<InventoryOutcome>;
+  createProjectRemovalPlan(projectId: string): Promise<RemovalPlanOutcome>;
+  createSourceRemovalPlan(sourceId: string): Promise<RemovalPlanOutcome>;
+  createBundleRemovalPlan(bundleId: string): Promise<RemovalPlanOutcome>;
+  confirmRemovalPlan(planId: string): Promise<UiOutcome>;
+  discardRemovalPlan(planId: string): Promise<UiOutcome>;
   openSourceDiscovery(): Promise<
     Extract<UiOutcome, { type: "sourceDiscovery" }>
   >;
@@ -53,6 +78,8 @@ export interface SkillYardClient {
   ): Promise<InventoryOutcome>;
   discardSourceAssociationPlan(planId: string): Promise<void>;
   createGithubInstallPlan(sourceId: string): Promise<InstallPlan>;
+  createBundleUpdatePlan(bundleId: string): Promise<InstallPlan>;
+  chooseBundleReplacementPlan(bundleId: string): Promise<InstallPlan | null>;
   createUrlInstallPlan(url: string): Promise<InstallPlan>;
   discardInstallPlan(planId: string): Promise<void>;
   chooseFolderInstallPlan(): Promise<InstallPlan | null>;
@@ -89,6 +116,33 @@ export const tauriSkillYardClient: SkillYardClient = {
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),
   startInitialScan: () => invoke<UiOutcome>("start_initial_scan"),
   refreshLocalInventory: () => invoke<UiOutcome>("refresh_local_inventory"),
+  checkBundleUpdates: () =>
+    invoke<InventoryOutcome>("check_bundle_updates"),
+  checkEditableLocalBundle: (bundleId) =>
+    invoke<InventoryOutcome>("check_editable_local_bundle", { bundleId }),
+  createBundleUpdateBatchPlan: () =>
+    invoke<BundleUpdateBatchPlanOutcome>("create_bundle_update_batch_plan"),
+  confirmBundleUpdateBatchPlan: (planId, selectedItemIds) =>
+    invoke<BundleUpdateBatchResultOutcome>(
+      "confirm_bundle_update_batch_plan",
+      { planId, selectedItemIds },
+    ),
+  discardBundleUpdateBatchPlan: (planId) =>
+    invoke<InventoryOutcome>("discard_bundle_update_batch_plan", { planId }),
+  acknowledgeBundleUpdateBatchResult: (batchId) =>
+    invoke<InventoryOutcome>("acknowledge_bundle_update_batch_result", {
+      batchId,
+    }),
+  createProjectRemovalPlan: (projectId) =>
+    invoke<RemovalPlanOutcome>("create_project_removal_plan", { projectId }),
+  createSourceRemovalPlan: (sourceId) =>
+    invoke<RemovalPlanOutcome>("create_source_removal_plan", { sourceId }),
+  createBundleRemovalPlan: (bundleId) =>
+    invoke<RemovalPlanOutcome>("create_bundle_removal_plan", { bundleId }),
+  confirmRemovalPlan: (planId) =>
+    invoke<UiOutcome>("confirm_removal_plan", { planId }),
+  discardRemovalPlan: (planId) =>
+    invoke<UiOutcome>("discard_removal_plan", { planId }),
   openSourceDiscovery: () =>
     invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
       "open_source_discovery",
@@ -130,6 +184,10 @@ export const tauriSkillYardClient: SkillYardClient = {
     invoke<void>("discard_source_association_plan", { planId }),
   createGithubInstallPlan: (sourceId) =>
     invoke<InstallPlan>("create_github_install_plan", { sourceId }),
+  createBundleUpdatePlan: (bundleId) =>
+    invoke<InstallPlan>("create_bundle_update_plan", { bundleId }),
+  chooseBundleReplacementPlan: (bundleId) =>
+    invoke<InstallPlan | null>("choose_bundle_replacement_plan", { bundleId }),
   createUrlInstallPlan: (url) =>
     invoke<InstallPlan>("create_url_install_plan", { url }),
   discardInstallPlan: (planId) =>
