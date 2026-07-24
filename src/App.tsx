@@ -1743,6 +1743,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       isCheckingUpdates={isCheckingUpdates}
       isOpeningInstaller={sourceOperation?.type === "opening"}
       isAddingProject={isAddingProject}
+      isOpeningCentralStore={isOpeningCentralStore}
       isResettingApplication={isResettingApplication}
       refreshError={refreshError}
       updateError={updateError}
@@ -1752,6 +1753,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       mountError={mountError}
       takeoverError={takeoverError}
       sourceAssociationError={sourceAssociationError}
+      centralStoreError={recoveryOpenError}
       resetError={resetError}
       onRefresh={refreshLocalInventory}
       onCheckUpdates={checkBundleUpdates}
@@ -1782,6 +1784,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       }
       onInstall={openSourceDiscovery}
       onAddProject={chooseAndRegisterProject}
+      onOpenCentralStore={openCentralStore}
       onResetApplication={resetApplication}
       onAssociateSource={openSourceAssociation}
       onOpenRecovery={(issueId) => {

@@ -25,6 +25,7 @@ interface InventoryPageProps {
   removingProjectId: string | null;
   isOpeningInstaller: boolean;
   isAddingProject: boolean;
+  isOpeningCentralStore: boolean;
   isResettingApplication: boolean;
   refreshError: string | null;
   updateError: string | null;
@@ -34,6 +35,7 @@ interface InventoryPageProps {
   mountError: string | null;
   takeoverError: string | null;
   sourceAssociationError: string | null;
+  centralStoreError: string | null;
   resetError: string | null;
   onRefresh(): void;
   onCheckUpdates(): void;
@@ -45,6 +47,7 @@ interface InventoryPageProps {
   onRemoveProject(projectId: string): void;
   onInstall(): void;
   onAddProject(): void;
+  onOpenCentralStore(): void;
   onResetApplication(): void;
   onAssociateSource(bundleId: string): void;
   onOpenRecovery(issueId: string): void;
@@ -72,6 +75,7 @@ export function InventoryPage({
   removingProjectId,
   isOpeningInstaller,
   isAddingProject,
+  isOpeningCentralStore,
   isResettingApplication,
   refreshError,
   updateError,
@@ -81,6 +85,7 @@ export function InventoryPage({
   mountError,
   takeoverError,
   sourceAssociationError,
+  centralStoreError,
   resetError,
   onRefresh,
   onCheckUpdates,
@@ -92,6 +97,7 @@ export function InventoryPage({
   onRemoveProject,
   onInstall,
   onAddProject,
+  onOpenCentralStore,
   onResetApplication,
   onAssociateSource,
   onOpenRecovery,
@@ -202,6 +208,14 @@ export function InventoryPage({
             onClick={onResetApplication}
           >
             {isResettingApplication ? "正在重置…" : "重置应用"}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isOpeningCentralStore}
+            onClick={onOpenCentralStore}
+          >
+            {isOpeningCentralStore ? "正在打开…" : "打开 Central Store"}
           </button>
         </div>
       </header>
@@ -356,6 +370,13 @@ export function InventoryPage({
         <div className="inline-error" role="alert">
           <strong>重置未完成</strong>
           <span>{resetError}</span>
+        </div>
+      ) : null}
+
+      {centralStoreError ? (
+        <div className="inline-error" role="alert">
+          <strong>无法打开 Central Store</strong>
+          <span>{centralStoreError}</span>
         </div>
       ) : null}
 

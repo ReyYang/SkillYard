@@ -151,6 +151,18 @@ describe("本机清单", () => {
     expect(client.confirmMountPlan).not.toHaveBeenCalled();
   });
 
+  it("主清单可以通过固定后端入口打开 Central Store", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "打开 Central Store" }),
+    );
+
+    expect(client.openCentralStore).toHaveBeenCalledTimes(1);
+  });
+
   it("只在用户点击后检查 Bundle 更新，并在检查期间冻结写入口", async () => {
     const user = userEvent.setup();
     let finishCheck:
