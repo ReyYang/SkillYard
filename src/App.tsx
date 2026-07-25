@@ -1690,14 +1690,34 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       )
     : null;
   if (takeoverEntry) {
+    const groupedCandidates = takeoverEntry.takeoverGroupId
+      ? viewState.outcome.entries.filter(
+          (entry) =>
+            entry.managementKind === "takeoverCandidate" &&
+            entry.takeoverGroupId === takeoverEntry.takeoverGroupId,
+        )
+      : [];
+    const groupedSkillNames = new Set(
+      groupedCandidates.map((entry) => entry.skillName),
+    );
+    const takeoverCandidates = takeoverEntry.takeoverGroupId
+      ? viewState.outcome.entries.filter(
+          (entry) =>
+            entry.managementKind === "takeoverCandidate" &&
+            (entry.takeoverGroupId === takeoverEntry.takeoverGroupId ||
+              (!entry.takeoverGroupId &&
+                groupedSkillNames.has(entry.skillName))),
+        )
+      : viewState.outcome.entries.filter(
+          (entry) =>
+            entry.managementKind === "takeoverCandidate" &&
+            !entry.takeoverGroupId &&
+            entry.skillName === takeoverEntry.skillName,
+        );
     return (
       <TakeoverSelectionPage
         initialObservationId={takeoverEntry.id}
-        candidates={viewState.outcome.entries.filter(
-          (entry) =>
-            entry.managementKind === "takeoverCandidate" &&
-            entry.skillName === takeoverEntry.skillName,
-        )}
+        candidates={takeoverCandidates}
         isPlanning={isPlanningTakeover}
         error={takeoverError}
         onBack={() => {

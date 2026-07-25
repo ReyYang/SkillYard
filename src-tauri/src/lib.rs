@@ -37,8 +37,9 @@ pub use domain::{
     SourceAssociationConflict, SourceAssociationMember, SourceAssociationMemberChoice,
     SourceAssociationMode, SourceAssociationPlan, SourceCatalogMemberSummary, SourceCatalogStatus,
     SourceKind, SourceMemberMappingChoice, SourceRefChangePlan, SourceSummary, SupportedAppId,
-    TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanOrigin,
-    TakeoverPlanRequest, TakeoverPlanTarget, TakeoverSharedTargetRequest, UiIntent, UiOutcome,
+    TakeoverIdentityBasis, TakeoverMemberRequest, TakeoverOriginDisposition, TakeoverPlan,
+    TakeoverPlanMember, TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget,
+    TakeoverSharedTargetRequest, UiIntent, UiOutcome,
 };
 pub use github_source::{
     GithubSourceError, ReqwestSourceTransport, ResolvedGithubSource, SharedSourceTransport,

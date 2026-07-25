@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::{self, File},
     io::{ErrorKind, Read},
@@ -18,18 +18,20 @@ use crate::{
         validate_single_skill_folder_as,
     },
     domain::{
-        InventoryItem, ManagementKind, MountScope, ScanRootKey, SkillMetadataStatus,
-        SupportedAppId, TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlan,
-        TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget, UiOutcome,
+        InstallationChain, InventoryItem, ManagementKind, MountScope, MountSummary, ScanRootKey,
+        SkillMetadataStatus, SupportedAppId, TakeoverIdentityBasis, TakeoverMemberRequest,
+        TakeoverOriginDisposition, TakeoverPlan, TakeoverPlanMember, TakeoverPlanOrigin,
+        TakeoverPlanRequest, TakeoverPlanRetainedMember, TakeoverPlanTarget, UiOutcome,
     },
+    installation_chain::{TakeoverGroupEvidence, takeover_group_evidence},
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, OwnedTreeCleanupManifest,
         acquire_lifecycle_lock, capture_owned_tree_cleanup_manifest, ensure_entry_absent_at,
         ensure_open_directory_matches_managed_path, entry_metadata_at, mkdir_at, open_directory_at,
         open_expected_directory_at, open_managed_directory_from_root, open_regular_file_at,
         read_entry_names_from_handle, read_link_at, remove_empty_directory_at,
-        remove_owned_tree_at_with_manifest_and_hook, rename_at_no_replace, symlink_at, unlink_at,
-        validate_owned_tree_cleanup_manifest, write_atomic_at,
+        remove_owned_tree_at_with_manifest_and_hook, rename_at_no_replace, rename_at_replace,
+        symlink_at, unlink_at, validate_owned_tree_cleanup_manifest, write_atomic_at,
         write_atomic_at_with_after_temp_sync, write_notice_from_storage,
     },
     mount_lifecycle::{
@@ -39,8 +41,8 @@ use crate::{
     },
     paths::ApplicationPaths,
     storage::{
-        Storage, StorageError, StoredProject, StoredTakeoverPlanRow, StoredTakeoverTransaction,
-        takeover_reserved_paths,
+        Storage, StorageError, StoredProject, StoredTakeoverBundleSnapshot, StoredTakeoverPlanRow,
+        StoredTakeoverTransaction, takeover_reserved_paths,
     },
 };
 
@@ -86,6 +88,7 @@ struct TakeoverPlanContract {
     plan: TakeoverPlan,
     origin_snapshots: Vec<TakeoverOriginSnapshot>,
     target_snapshots: Vec<TakeoverTargetSnapshot>,
+    existing_bundle: Option<StoredTakeoverBundleSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -144,6 +147,7 @@ impl TakeoverJournalPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TakeoverJournalOrigin {
+    member_id: String,
     observation_id: String,
     original_path: String,
     recovery_name: String,
@@ -178,6 +182,7 @@ struct TakeoverCandidateCleanupIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TakeoverJournalTarget {
+    member_id: String,
     mount_id: String,
     target_path: String,
     mount_staging_name: String,
@@ -197,9 +202,12 @@ struct TakeoverJournal {
     phase: TakeoverJournalPhase,
     bundle_id: String,
     content_id: String,
-    selected_observation_id: String,
+    /// 补充接管前的完整内容目标；全新接管没有旧目标。
+    previous_current_target: Option<String>,
     // 回滚先持久化候选根目录身份，再开始可重入递归清理。
     candidate_cleanup: Option<TakeoverCandidateCleanupIntent>,
+    // 成功补充后只清理事务前的完整内容树，不保留用户可见或隐藏版本。
+    previous_content_cleanup: Option<OwnedTreeCleanupManifest>,
     origins: Vec<TakeoverJournalOrigin>,
     targets: Vec<TakeoverJournalTarget>,
 }
@@ -223,6 +231,71 @@ struct ResolvedOriginLocation {
     project: Option<StoredProject>,
 }
 
+fn member_group_evidence(
+    member: &TakeoverMemberRequest,
+    origins: &[PreparedOrigin],
+) -> Result<
+    (
+        Option<TakeoverGroupEvidence>,
+        Option<Box<InstallationChain>>,
+    ),
+    TakeoverError,
+> {
+    let mut member_evidence: Option<TakeoverGroupEvidence> = None;
+    let mut evidence_chain = None;
+    for observation_id in &member.observation_ids {
+        let origin = origins
+            .iter()
+            .find(|origin| origin.observation.id == *observation_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let Some(chain) = origin.observation.installation_chain.as_ref() else {
+            continue;
+        };
+        let Some(evidence) = takeover_group_evidence(chain) else {
+            continue;
+        };
+        match &member_evidence {
+            Some(existing) if existing.id != evidence.id => {
+                return Err(TakeoverError::InvalidRequest(
+                    "同一个 Skill Member 包含不同安装组的副本".to_owned(),
+                ));
+            }
+            None => {
+                member_evidence = Some(evidence);
+                evidence_chain = Some(Box::new(chain.clone()));
+            }
+            _ => {}
+        }
+    }
+    Ok((member_evidence, evidence_chain))
+}
+
+fn resolve_request_group_evidence(
+    request: &TakeoverPlanRequest,
+    origins: &[PreparedOrigin],
+) -> Result<Option<TakeoverGroupEvidence>, TakeoverError> {
+    let mut group_evidence: Option<TakeoverGroupEvidence> = None;
+    for member in &request.members {
+        let (member_evidence, _) = member_group_evidence(member, origins)?;
+        if request.members.len() == 1 {
+            return Ok(member_evidence);
+        }
+        let evidence = member_evidence.ok_or_else(|| {
+            TakeoverError::InvalidRequest("不同名称的 Skill 缺少同一安装组的可核验证据".to_owned())
+        })?;
+        match &group_evidence {
+            Some(existing) if existing.id != evidence.id => {
+                return Err(TakeoverError::InvalidRequest(
+                    "所选 Skill 不属于同一个可核验安装组".to_owned(),
+                ));
+            }
+            None => group_evidence = Some(evidence),
+            _ => {}
+        }
+    }
+    Ok(group_evidence)
+}
+
 /// Plan 构建只读取已保存 Inventory 与真实文件系统，并把完整合同写入 SQLite。
 pub(crate) fn create_takeover_plan(
     paths: &ApplicationPaths,
@@ -231,7 +304,12 @@ pub(crate) fn create_takeover_plan(
     now: i64,
 ) -> Result<TakeoverPlan, TakeoverError> {
     validate_plan_request(&request)?;
-    let observations = read_observations(storage, &request.observation_ids)?;
+    let observation_ids = request
+        .members
+        .iter()
+        .flat_map(|member| member.observation_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    let observations = read_observations(storage, &observation_ids)?;
     ensure_takeover_origins_are_writable(storage, &observations)?;
     let app_configs = paths.supported_apps();
     let mut prepared_origins = Vec::with_capacity(observations.len());
@@ -285,40 +363,122 @@ pub(crate) fn create_takeover_plan(
             target_observation: target_snapshot.observation().to_owned(),
         });
     }
-    let selected = prepared_origins
-        .iter()
-        .find(|origin| origin.observation.id == request.selected_observation_id)
-        .ok_or_else(|| TakeoverError::InvalidRequest("所选内容副本已经不存在".to_owned()))?;
-    let skill_name = selected.validated.name.clone();
-    let skill_description = selected.validated.description.clone();
-    let selected_warnings = selected.validated.warnings.clone();
-    if prepared_origins
-        .iter()
-        .any(|origin| origin.validated.name != skill_name)
-    {
-        return Err(TakeoverError::InvalidRequest(
-            "只有同名副本可以确认成同一个本地 Skill Identity".to_owned(),
-        ));
-    }
-    let bundle_id = Uuid::new_v4().to_string();
-    let member_id = Uuid::new_v4().to_string();
+
+    let group_evidence = resolve_request_group_evidence(&request, &prepared_origins)?;
+    let existing_bundle = group_evidence
+        .as_ref()
+        .map(|evidence| storage.read_takeover_bundle_for_group(&evidence.id))
+        .transpose()?
+        .flatten();
+    let bundle_id = existing_bundle
+        .as_ref()
+        .map(|bundle| bundle.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let content_id = Uuid::new_v4().to_string();
     let plan_id = Uuid::new_v4().to_string();
     let managed_directory = paths.bundle_directory(&bundle_id);
-    ensure_absent(&managed_directory)?;
+    if existing_bundle.is_none() {
+        ensure_absent(&managed_directory)?;
+    }
     let content_directory = managed_directory.join("contents").join(&content_id);
-    let expected_target = managed_directory
-        .join("current")
-        .join("members")
-        .join(&skill_name);
-    let expected_target_text = path_text(&expected_target)?;
+
+    let mut members = Vec::with_capacity(request.members.len());
+    let mut member_by_observation = BTreeMap::<String, usize>::new();
+    let mut skill_names = BTreeSet::new();
+    for member_request in &request.members {
+        let selected = prepared_origins
+            .iter()
+            .find(|origin| origin.observation.id == member_request.selected_observation_id)
+            .ok_or_else(|| TakeoverError::InvalidRequest("所选内容副本已经不存在".to_owned()))?;
+        let skill_name = selected.validated.name.clone();
+        if !skill_names.insert(skill_name.clone()) {
+            return Err(TakeoverError::InvalidRequest(
+                "同一个 Bundle 不能包含重复的 Skill Member".to_owned(),
+            ));
+        }
+        let member_origins = member_request
+            .observation_ids
+            .iter()
+            .map(|observation_id| {
+                prepared_origins
+                    .iter()
+                    .find(|origin| origin.observation.id == *observation_id)
+                    .ok_or(TakeoverError::InvalidPlanContract)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if member_origins
+            .iter()
+            .any(|origin| origin.validated.name != skill_name)
+        {
+            return Err(TakeoverError::InvalidRequest(
+                "同一个 Skill Member 只能包含同名本地副本".to_owned(),
+            ));
+        }
+
+        // Bundle 边界来自任一已核验安装收据，主内容仍由用户在同名副本中独立选择。
+        let (_, evidence_chain) = member_group_evidence(member_request, &prepared_origins)?;
+
+        let member_id = Uuid::new_v4().to_string();
+        let expected_target = managed_directory
+            .join("current")
+            .join("members")
+            .join(&skill_name);
+        let selected_installation_chain = selected.observation.installation_chain.clone();
+        let installation_chain = if selected_installation_chain
+            .as_ref()
+            .and_then(takeover_group_evidence)
+            .is_some()
+        {
+            selected_installation_chain.map(Box::new)
+        } else {
+            evidence_chain.or_else(|| selected_installation_chain.map(Box::new))
+        };
+        let member_index = members.len();
+        for observation_id in &member_request.observation_ids {
+            member_by_observation.insert(observation_id.clone(), member_index);
+        }
+        members.push(TakeoverPlanMember {
+            member_id,
+            identity_basis: if member_request.observation_ids.len() == 1 {
+                TakeoverIdentityBasis::SingleOrigin
+            } else {
+                TakeoverIdentityBasis::UserConfirmed
+            },
+            selected_observation_id: member_request.selected_observation_id.clone(),
+            skill_name,
+            skill_description: selected.validated.description.clone(),
+            installation_chain,
+            expected_target: path_text(&expected_target)?,
+            warnings: selected.validated.warnings.clone(),
+        });
+    }
+    if existing_bundle.as_ref().is_some_and(|bundle| {
+        bundle
+            .members
+            .iter()
+            .any(|member| skill_names.contains(&member.skill_name))
+    }) {
+        return Err(TakeoverError::InvalidRequest(
+            "该 Skill 已属于同一受管 Bundle，不能重复接管".to_owned(),
+        ));
+    }
+
     let mut origins = Vec::with_capacity(prepared_origins.len());
     let mut origin_snapshots = Vec::with_capacity(prepared_origins.len());
-    let mut targets =
-        Vec::with_capacity(request.preserved_observation_ids.len() + request.shared_targets.len());
+    let preserved_count = request
+        .members
+        .iter()
+        .map(|member| member.preserved_observation_ids.len())
+        .sum::<usize>();
+    let mut targets = Vec::with_capacity(preserved_count + request.shared_targets.len());
     let mut target_snapshots = Vec::with_capacity(targets.capacity());
     for prepared in &prepared_origins {
-        let preserve_mount = request
+        let member_index = *member_by_observation
+            .get(&prepared.observation.id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let member_request = &request.members[member_index];
+        let member = &members[member_index];
+        let preserve_mount = member_request
             .preserved_observation_ids
             .contains(&prepared.observation.id);
         if preserve_mount && prepared.app_id.is_none() {
@@ -336,6 +496,7 @@ pub(crate) fn create_takeover_plan(
             project: prepared.project.as_ref().map(project_snapshot),
         });
         origins.push(TakeoverPlanOrigin {
+            member_id: member.member_id.clone(),
             observation_id: prepared.observation.id.clone(),
             original_path: original_path.clone(),
             app_id: prepared.app_id,
@@ -358,6 +519,7 @@ pub(crate) fn create_takeover_plan(
             let scope = prepared.scope.ok_or(TakeoverError::InvalidPlanContract)?;
             let mount_id = Uuid::new_v4().to_string();
             targets.push(TakeoverPlanTarget {
+                member_id: member.member_id.clone(),
                 mount_id: mount_id.clone(),
                 app_id,
                 scope,
@@ -367,7 +529,7 @@ pub(crate) fn create_takeover_plan(
                     .as_ref()
                     .map(|project| project.display_name.clone()),
                 target_path: original_path.clone(),
-                expected_target: expected_target_text.clone(),
+                expected_target: member.expected_target.clone(),
             });
             target_snapshots.push(TakeoverTargetSnapshot {
                 mount_id,
@@ -385,6 +547,10 @@ pub(crate) fn create_takeover_plan(
             .ok_or_else(|| {
                 TakeoverError::InvalidRequest("共享目标没有对应的接管副本".to_owned())
             })?;
+        let member_index = *member_by_observation
+            .get(&prepared.observation.id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let member = &members[member_index];
         if prepared.app_id.is_some()
             || prepared.scope.is_some()
             || !prepared
@@ -408,7 +574,7 @@ pub(crate) fn create_takeover_plan(
             Some(project) => Path::new(&project.root_path).join(&app.project_relative_root),
             None => app.global_root.clone(),
         };
-        let target_path = target_root.join(&skill_name);
+        let target_path = target_root.join(&member.skill_name);
         let target_path_text = path_text(&target_path)?;
         if targets
             .iter()
@@ -423,9 +589,9 @@ pub(crate) fn create_takeover_plan(
             shared_target.app_id,
             scope,
             project,
-            &skill_name,
+            &member.skill_name,
             &target_path,
-            &expected_target_text,
+            &member.expected_target,
         )?;
         if target_kind != TargetKind::Absent {
             return Err(TakeoverError::InvalidRequest(format!(
@@ -435,13 +601,14 @@ pub(crate) fn create_takeover_plan(
         }
         let mount_id = Uuid::new_v4().to_string();
         targets.push(TakeoverPlanTarget {
+            member_id: member.member_id.clone(),
             mount_id: mount_id.clone(),
             app_id: shared_target.app_id,
             scope,
             project_id: project.map(|project| project.id.clone()),
             project_display_name: project.map(|project| project.display_name.clone()),
             target_path: target_path_text.clone(),
-            expected_target: expected_target_text.clone(),
+            expected_target: member.expected_target.clone(),
         });
         target_snapshots.push(TakeoverTargetSnapshot {
             mount_id,
@@ -451,34 +618,45 @@ pub(crate) fn create_takeover_plan(
             project: project.map(project_snapshot),
         });
     }
-    validate_scope_resolution(&origins, &targets)?;
+    for member in &members {
+        validate_member_scope_resolution(&member.member_id, &origins, &targets)?;
+    }
     let expires_at = now.saturating_add(TAKEOVER_PLAN_TTL_MILLIS);
+    let bundle_display_name = existing_bundle
+        .as_ref()
+        .map(|bundle| bundle.display_name.clone())
+        .or_else(|| {
+            group_evidence
+                .as_ref()
+                .map(|evidence| evidence.display_name.clone())
+        })
+        .unwrap_or_else(|| members[0].skill_name.clone());
+    let warnings = members
+        .iter()
+        .flat_map(|member| member.warnings.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let retained_members = existing_bundle
+        .as_ref()
+        .map(|bundle| takeover_retained_members(paths, bundle))
+        .transpose()?
+        .unwrap_or_default();
     let plan = TakeoverPlan {
         id: plan_id.clone(),
-        identity_basis: if origins.len() == 1 {
-            TakeoverIdentityBasis::SingleOrigin
-        } else {
-            TakeoverIdentityBasis::UserConfirmed
-        },
-        selected_observation_id: request.selected_observation_id,
         bundle_id,
-        member_id,
         content_id,
-        bundle_display_name: skill_name.clone(),
-        skill_name,
-        skill_description,
-        source_display_name: None,
-        installation_chain: selected
-            .observation
-            .installation_chain
-            .clone()
-            .map(Box::new),
+        bundle_display_name,
+        source_display_name: existing_bundle
+            .as_ref()
+            .and_then(|bundle| bundle.source_display_name.clone()),
         managed_directory: path_text(&managed_directory)?,
         content_directory: path_text(&content_directory)?,
-        expected_target: expected_target_text,
+        retained_members,
+        members,
         origins,
         targets,
-        warnings: selected_warnings,
+        warnings,
         created_at: now,
         expires_at,
     };
@@ -486,6 +664,7 @@ pub(crate) fn create_takeover_plan(
         plan: plan.clone(),
         origin_snapshots,
         target_snapshots,
+        existing_bundle,
     };
     persist_and_reopen_contract(storage, &contract)?;
     Ok(plan)
@@ -504,18 +683,31 @@ pub(crate) fn confirm_takeover_plan(
     let stored = storage.read_takeover_plan(plan_id)?;
     let contract = decode_plan_contract(&stored)?;
     ensure_takeover_plan_origins_are_writable(storage, &contract.plan)?;
-    validate_confirmation_contract(paths, storage, &stored, &contract, now)?;
+    validate_confirmation_contract(
+        paths,
+        lifecycle_lock.root(),
+        storage,
+        &stored,
+        &contract,
+        now,
+    )?;
 
     let transaction_id = Uuid::new_v4().to_string();
     let journal_relative = format!("journals/takeover-{transaction_id}.json");
     let reserved_paths = takeover_reserved_paths(&contract.plan)?;
     let mut journal = build_journal(&transaction_id, &contract)?;
+    let anchor_member_id = &contract
+        .plan
+        .members
+        .first()
+        .ok_or(TakeoverError::InvalidPlanContract)?
+        .member_id;
     ensure_journal_fits(&journal)?;
     let consumed = storage.begin_takeover_transaction(
         plan_id,
         &transaction_id,
         &contract.plan.bundle_id,
-        &contract.plan.member_id,
+        anchor_member_id,
         &reserved_paths,
         &journal_relative,
         now,
@@ -568,7 +760,12 @@ pub(crate) fn confirm_takeover_plan(
             error,
         );
     }
-    if let Err(error) = storage.finalize_takeover(&transaction_id, &contract.plan, now) {
+    if let Err(error) = storage.finalize_takeover(
+        &transaction_id,
+        &contract.plan,
+        contract.existing_bundle.as_ref(),
+        now,
+    ) {
         return handle_precommit_error(
             paths,
             lifecycle_lock.root(),
@@ -627,6 +824,41 @@ pub(crate) fn recover_pending_takeover_transactions(
     Ok(())
 }
 
+/// Project 删除前复用 Takeover 自己的 sealed Plan 校验，Storage 不解释领域合同。
+pub(crate) fn blocked_takeover_references_project(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    project_id: &str,
+) -> Result<bool, TakeoverError> {
+    for transaction in storage
+        .recoverable_takeover_transactions()?
+        .into_iter()
+        .filter(|transaction| transaction.status == "blocked")
+    {
+        validate_takeover_transaction_identity(&transaction)?;
+        let stored = storage.read_takeover_plan(&transaction.plan_id)?;
+        let contract = decode_plan_contract(&stored)?;
+        validate_recovery_contract(paths, storage, &transaction, &stored, &contract)?;
+        if contract
+            .plan
+            .origins
+            .iter()
+            .filter_map(|origin| origin.project_id.as_deref())
+            .chain(
+                contract
+                    .plan
+                    .targets
+                    .iter()
+                    .filter_map(|target| target.project_id.as_deref()),
+            )
+            .any(|referenced_project_id| referenced_project_id == project_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn recover_takeover_transaction(
     paths: &ApplicationPaths,
     lifecycle_lock: &LifecycleLock,
@@ -655,7 +887,12 @@ fn recover_takeover_transaction(
 
     if transaction.status == "completed" && transaction.phase == "state_committed" {
         // SQLite 已越过唯一提交点后只能向前，Journal 可能仍停在 origins_applied。
-        storage.finalize_takeover(&transaction.id, &contract.plan, now)?;
+        storage.finalize_takeover(
+            &transaction.id,
+            &contract.plan,
+            contract.existing_bundle.as_ref(),
+            now,
+        )?;
         validate_committed_takeover_content(paths, lifecycle_lock.root(), &contract, &journal)?;
         verify_takeover_targets(paths, storage, &contract, &journal)?;
         journal.phase = TakeoverJournalPhase::StateCommitted;
@@ -703,7 +940,12 @@ fn recover_takeover_without_journal(
 ) -> Result<(), TakeoverError> {
     let journal = build_journal(&transaction.id, contract)?;
     if transaction.status == "completed" && transaction.phase == "state_committed" {
-        storage.finalize_takeover(&transaction.id, &contract.plan, now)?;
+        storage.finalize_takeover(
+            &transaction.id,
+            &contract.plan,
+            contract.existing_bundle.as_ref(),
+            now,
+        )?;
         validate_committed_takeover_content(paths, lifecycle_lock.root(), contract, &journal)?;
         verify_expected_takeover_targets(paths, storage, contract, &journal)?;
         ensure_committed_cleanup_finished(
@@ -764,6 +1006,61 @@ fn validate_recovery_contract(
     contract: &TakeoverPlanContract,
 ) -> Result<(), TakeoverError> {
     let plan = &contract.plan;
+    validate_static_plan_contract(paths, contract)?;
+    let anchor_member_id = &plan
+        .members
+        .first()
+        .ok_or(TakeoverError::InvalidPlanContract)?
+        .member_id;
+    if stored.status != "consumed"
+        || transaction.plan_id != plan.id
+        || transaction.bundle_id != plan.bundle_id
+        || transaction.member_id != *anchor_member_id
+        || transaction.reserved_paths != takeover_reserved_paths(plan)?
+    {
+        return Err(TakeoverError::InvalidPlanContract);
+    }
+    for (origin, snapshot) in plan.origins.iter().zip(&contract.origin_snapshots) {
+        if snapshot.observation_id != origin.observation_id {
+            return Err(TakeoverError::InvalidPlanContract);
+        }
+        validate_origin_project_contract(storage, origin, snapshot.project.as_ref())?;
+    }
+    for (target, snapshot) in plan.targets.iter().zip(&contract.target_snapshots) {
+        if snapshot.mount_id != target.mount_id || snapshot.target_path != target.target_path {
+            return Err(TakeoverError::InvalidPlanContract);
+        }
+        validate_target_project_contract(storage, target, snapshot.project.as_ref())?;
+    }
+    Ok(())
+}
+
+/// Plan 的静态结构只校验一次；确认和恢复再分别检查各自允许变化的文件系统事实。
+fn validate_static_plan_contract(
+    paths: &ApplicationPaths,
+    contract: &TakeoverPlanContract,
+) -> Result<(), TakeoverError> {
+    let plan = &contract.plan;
+    let member_ids = plan
+        .members
+        .iter()
+        .map(|member| member.member_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let skill_names = plan
+        .members
+        .iter()
+        .map(|member| member.skill_name.as_str())
+        .collect::<BTreeSet<_>>();
+    let retained_member_ids = plan
+        .retained_members
+        .iter()
+        .map(|member| member.member_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let retained_skill_names = plan
+        .retained_members
+        .iter()
+        .map(|member| member.skill_name.as_str())
+        .collect::<BTreeSet<_>>();
     let origin_ids = plan
         .origins
         .iter()
@@ -784,66 +1081,197 @@ fn validate_recovery_contract(
         .iter()
         .map(|target| target.target_path.as_str())
         .collect::<BTreeSet<_>>();
-    let selected_count = plan
-        .origins
-        .iter()
-        .filter(|origin| origin.observation_id == plan.selected_observation_id)
-        .count();
-    let identity_basis_matches = matches!(
-        (plan.origins.len(), plan.identity_basis),
-        (1, TakeoverIdentityBasis::SingleOrigin)
-    ) || (plan.origins.len() > 1
-        && plan.identity_basis == TakeoverIdentityBasis::UserConfirmed);
-    if stored.status != "consumed"
-        || transaction.plan_id != plan.id
-        || transaction.bundle_id != plan.bundle_id
-        || transaction.member_id != plan.member_id
-        || transaction.reserved_paths != takeover_reserved_paths(plan)?
+    if plan.members.is_empty()
         || plan.origins.is_empty()
         || contract.origin_snapshots.len() != plan.origins.len()
         || contract.target_snapshots.len() != plan.targets.len()
+        || member_ids.len() != plan.members.len()
+        || skill_names.len() != plan.members.len()
+        || retained_member_ids.len() != plan.retained_members.len()
+        || retained_skill_names.len() != plan.retained_members.len()
         || origin_ids.len() != plan.origins.len()
         || origin_paths.len() != plan.origins.len()
         || target_ids.len() != plan.targets.len()
         || target_paths.len() != plan.targets.len()
-        || selected_count != 1
-        || !identity_basis_matches
     {
         return Err(TakeoverError::InvalidPlanContract);
     }
-    for id in [&plan.id, &plan.bundle_id, &plan.member_id, &plan.content_id] {
+    for id in [&plan.id, &plan.bundle_id, &plan.content_id] {
         Uuid::parse_str(id).map_err(|_| TakeoverError::InvalidPlanContract)?;
     }
     let expected_managed = paths.bundle_directory(&plan.bundle_id);
     let expected_content = expected_managed.join("contents").join(&plan.content_id);
-    let expected_target = expected_managed
-        .join("current/members")
-        .join(&plan.skill_name);
     if Path::new(&plan.managed_directory) != expected_managed
         || Path::new(&plan.content_directory) != expected_content
-        || Path::new(&plan.expected_target) != expected_target
     {
         return Err(TakeoverError::InvalidPlanContract);
     }
-    validate_scope_resolution(&plan.origins, &plan.targets)
-        .map_err(|_| TakeoverError::InvalidPlanContract)?;
-    for (origin, snapshot) in plan.origins.iter().zip(&contract.origin_snapshots) {
-        if snapshot.observation_id != origin.observation_id {
-            return Err(TakeoverError::InvalidPlanContract);
-        }
-        validate_origin_project_contract(storage, origin, snapshot.project.as_ref())?;
-    }
-    for (target, snapshot) in plan.targets.iter().zip(&contract.target_snapshots) {
-        Uuid::parse_str(&target.mount_id).map_err(|_| TakeoverError::InvalidPlanContract)?;
-        if snapshot.mount_id != target.mount_id
-            || snapshot.target_path != target.target_path
-            || target.expected_target != plan.expected_target
+
+    let mut expected_group: Option<crate::installation_chain::TakeoverGroupEvidence> = None;
+    for member in &plan.members {
+        Uuid::parse_str(&member.member_id).map_err(|_| TakeoverError::InvalidPlanContract)?;
+        let member_origins = plan
+            .origins
+            .iter()
+            .filter(|origin| origin.member_id == member.member_id)
+            .collect::<Vec<_>>();
+        let selected_count = member_origins
+            .iter()
+            .filter(|origin| origin.observation_id == member.selected_observation_id)
+            .count();
+        let identity_basis_matches = matches!(
+            (member_origins.len(), member.identity_basis),
+            (1, TakeoverIdentityBasis::SingleOrigin)
+        ) || (member_origins.len() > 1
+            && member.identity_basis == TakeoverIdentityBasis::UserConfirmed);
+        let expected_target = expected_managed
+            .join("current/members")
+            .join(&member.skill_name);
+        if member_origins.is_empty()
+            || selected_count != 1
+            || !identity_basis_matches
+            || member.skill_description.trim().is_empty()
+            || Path::new(&member.expected_target) != expected_target
+            || member
+                .installation_chain
+                .as_ref()
+                .is_some_and(|chain| !chain.is_valid())
         {
             return Err(TakeoverError::InvalidPlanContract);
         }
-        validate_target_project_contract(storage, target, snapshot.project.as_ref())?;
+        if let Some(evidence) = member
+            .installation_chain
+            .as_deref()
+            .and_then(takeover_group_evidence)
+        {
+            match &expected_group {
+                Some(existing) if existing.id != evidence.id => {
+                    return Err(TakeoverError::InvalidPlanContract);
+                }
+                None => expected_group = Some(evidence),
+                _ => {}
+            }
+        } else if plan.members.len() > 1 {
+            return Err(TakeoverError::InvalidPlanContract);
+        }
+        validate_member_scope_resolution(&member.member_id, &plan.origins, &plan.targets)
+            .map_err(|_| TakeoverError::InvalidPlanContract)?;
+    }
+    let expected_display_name = match contract.existing_bundle.as_ref() {
+        Some(existing) => {
+            let expected_retained_members = takeover_retained_members(paths, existing)?;
+            let existing_member_ids = existing
+                .members
+                .iter()
+                .map(|member| member.id.as_str())
+                .collect::<BTreeSet<_>>();
+            let existing_skill_names = existing
+                .members
+                .iter()
+                .map(|member| member.skill_name.as_str())
+                .collect::<BTreeSet<_>>();
+            let expected_group_id = expected_group
+                .as_ref()
+                .map(|evidence| evidence.id.as_str())
+                .ok_or(TakeoverError::InvalidPlanContract)?;
+            let group_matches = existing.members.iter().any(|member| {
+                member
+                    .installation_chain
+                    .as_ref()
+                    .and_then(takeover_group_evidence)
+                    .is_some_and(|evidence| evidence.id == expected_group_id)
+            });
+            if existing.id != plan.bundle_id
+                || existing.display_name != plan.bundle_display_name
+                || existing.managed_directory != format!("bundles/{}", existing.id)
+                || existing.current_target == format!("contents/{}", plan.content_id)
+                || existing.members.is_empty()
+                || existing_member_ids.len() != existing.members.len()
+                || existing_skill_names.len() != existing.members.len()
+                || plan.retained_members != expected_retained_members
+                || plan.source_display_name != existing.source_display_name
+                || existing_member_ids.iter().any(|id| member_ids.contains(id))
+                || existing_skill_names
+                    .iter()
+                    .any(|name| skill_names.contains(name))
+                || !group_matches
+            {
+                return Err(TakeoverError::InvalidPlanContract);
+            }
+            existing.display_name.clone()
+        }
+        None => {
+            if !plan.retained_members.is_empty() || plan.source_display_name.is_some() {
+                return Err(TakeoverError::InvalidPlanContract);
+            }
+            expected_group
+                .map(|evidence| evidence.display_name)
+                .unwrap_or_else(|| plan.members[0].skill_name.clone())
+        }
+    };
+    if plan.bundle_display_name != expected_display_name
+        || plan
+            .origins
+            .iter()
+            .any(|origin| !member_ids.contains(origin.member_id.as_str()))
+    {
+        return Err(TakeoverError::InvalidPlanContract);
+    }
+    for target in &plan.targets {
+        Uuid::parse_str(&target.mount_id).map_err(|_| TakeoverError::InvalidPlanContract)?;
+        let member =
+            plan_member(plan, &target.member_id).ok_or(TakeoverError::InvalidPlanContract)?;
+        if target.expected_target != member.expected_target
+            || Path::new(&target.target_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(member.skill_name.as_str())
+        {
+            return Err(TakeoverError::InvalidPlanContract);
+        }
     }
     Ok(())
+}
+
+/// 补充接管的公开预览必须包含最终 Bundle 中不会被改写的既有成员和 Mount。
+fn takeover_retained_members(
+    paths: &ApplicationPaths,
+    bundle: &StoredTakeoverBundleSnapshot,
+) -> Result<Vec<TakeoverPlanRetainedMember>, TakeoverError> {
+    let managed_directory = paths.bundle_directory(&bundle.id);
+    bundle
+        .members
+        .iter()
+        .map(|member| {
+            Ok(TakeoverPlanRetainedMember {
+                member_id: member.id.clone(),
+                skill_name: member.skill_name.clone(),
+                skill_description: member.description.clone(),
+                installation_chain: member.installation_chain.clone().map(Box::new),
+                expected_target: path_text(
+                    &managed_directory
+                        .join("current")
+                        .join(&member.stable_relative_path),
+                )?,
+                mounts: member
+                    .mounts
+                    .iter()
+                    .map(|mount| MountSummary {
+                        id: mount.id.clone(),
+                        member_id: mount.member_id.clone(),
+                        skill_name: mount.skill_name.clone(),
+                        app_id: mount.app_id,
+                        scope: mount.scope,
+                        project_id: mount.project_id.clone(),
+                        project_display_name: mount.project_display_name.clone(),
+                        target_path: mount.target_path.clone(),
+                        expected_target: mount.expected_target.clone(),
+                        health: mount.health,
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 fn read_takeover_journal(
@@ -952,6 +1380,7 @@ fn validate_takeover_journal(
                 .and_then(|intent| intent.tree.as_ref())
                 .map(|tree| &tree.manifest),
         )
+        .chain(actual.previous_content_cleanup.iter())
     {
         validate_owned_tree_cleanup_manifest(manifest)?;
     }
@@ -1005,7 +1434,10 @@ fn validate_takeover_journal(
                 && actual
                     .origins
                     .iter()
-                    .all(|origin| origin.cleanup_manifest.is_none())));
+                    .all(|origin| origin.cleanup_manifest.is_none())))
+        && (actual.previous_content_cleanup.is_none()
+            || (actual.phase == TakeoverJournalPhase::StateCommitted
+                && contract.existing_bundle.is_some()));
     if !origin_progress_is_valid
         || !target_progress_is_valid
         || !phase_progress_is_valid
@@ -1017,6 +1449,7 @@ fn validate_takeover_journal(
     }
     expected.phase = actual.phase;
     expected.candidate_cleanup = actual.candidate_cleanup.clone();
+    expected.previous_content_cleanup = actual.previous_content_cleanup.clone();
     for (expected, actual) in expected.origins.iter_mut().zip(&actual.origins) {
         expected.recovery_observation = actual.recovery_observation.clone();
         expected.cleanup_manifest = actual.cleanup_manifest.clone();
@@ -1078,9 +1511,18 @@ fn validate_committed_takeover_content(
     }
     let contents_path = bundle_path.join("contents");
     let contents = open_expected_directory_at(&bundle, OsStr::new("contents"), &contents_path)?;
+    let previous_id = journal
+        .previous_current_target
+        .as_deref()
+        .and_then(|target| Path::new(target).file_name())
+        .and_then(OsStr::to_str);
+    let mut allowed_contents = vec![journal.content_id.as_str()];
+    if let Some(previous_id) = previous_id {
+        allowed_contents.push(previous_id);
+    }
     ensure_only_entries(
         &read_entry_names_from_handle(&contents)?,
-        &[journal.content_id.as_str()],
+        &allowed_contents,
         "已提交 Bundle 包含未知内容",
     )?;
     validate_published_content(
@@ -1089,7 +1531,25 @@ fn validate_committed_takeover_content(
         &contents_path.join(&journal.content_id),
         contract,
         journal,
-    )
+    )?;
+    if let Some(existing) = contract.existing_bundle.as_ref() {
+        let previous_id = Path::new(&existing.current_target)
+            .file_name()
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        if entry_metadata_at(&contents, previous_id)
+            .map_err(|source| takeover_io("检查接管前内容", &contents_path, source))?
+            .is_some()
+        {
+            validate_existing_content_tree(
+                paths,
+                &contents,
+                &contents_path.join(previous_id),
+                previous_id,
+                existing,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn verify_expected_takeover_targets(
@@ -1104,7 +1564,9 @@ fn verify_expected_takeover_targets(
             .get(index)
             .ok_or(TakeoverError::InvalidPlanContract)?;
         let parent = open_plan_target_parent(paths, storage, target, false)?;
-        let leaf = target_leaf(target, &contract.plan.skill_name)?;
+        let member = plan_member(&contract.plan, &target.member_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let leaf = target_leaf(target, &member.skill_name)?;
         let current = snapshot_at(parent.directory(), &leaf, &target.expected_target)?;
         let staged = snapshot_at(
             parent.directory(),
@@ -1129,7 +1591,9 @@ fn ensure_committed_cleanup_finished(
     journal: &TakeoverJournal,
 ) -> Result<(), TakeoverError> {
     for (index, origin) in contract.plan.origins.iter().enumerate() {
-        let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
+        let member = plan_member(&contract.plan, &origin.member_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let parent = open_origin_parent(paths, storage, origin, &member.skill_name)?;
         let recovery_name = OsStr::new(&journal.origins[index].recovery_name);
         if snapshot_at(parent.directory(), recovery_name, "")?.kind() != TargetKind::Absent {
             return Err(TakeoverError::RecoveryBlocked(
@@ -1137,6 +1601,24 @@ fn ensure_committed_cleanup_finished(
             ));
         }
         recheck_open_parent(&parent)?;
+    }
+    if let Some(existing) = contract.existing_bundle.as_ref() {
+        let bundles = open_managed_directory_from_root(paths, managed_root, &paths.bundles_root())?;
+        let bundle_path = paths.bundle_directory(&existing.id);
+        let bundle = open_expected_directory_at(&bundles, OsStr::new(&existing.id), &bundle_path)?;
+        let contents_path = bundle_path.join("contents");
+        let contents = open_expected_directory_at(&bundle, OsStr::new("contents"), &contents_path)?;
+        let previous_id = Path::new(&existing.current_target)
+            .file_name()
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        if entry_metadata_at(&contents, previous_id)
+            .map_err(|source| takeover_io("检查旧内容清理", &contents_path, source))?
+            .is_some()
+        {
+            return Err(TakeoverError::RecoveryBlocked(
+                "Takeover Journal 已缺失，但旧内容清理尚未完成".to_owned(),
+            ));
+        }
     }
     let staging_root =
         open_managed_directory_from_root(paths, managed_root, &paths.staging_root())?;
@@ -1158,19 +1640,23 @@ fn ensure_no_takeover_effects_without_journal(
     contract: &TakeoverPlanContract,
     journal: &TakeoverJournal,
 ) -> Result<(), TakeoverError> {
-    match fs::symlink_metadata(&contract.plan.managed_directory) {
-        Ok(_) => {
-            return Err(TakeoverError::RecoveryBlocked(
-                "Takeover Journal 缺失，但受管 Bundle 已经出现".to_owned(),
-            ));
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(takeover_io(
-                "检查缺少 Journal 的 Bundle",
-                Path::new(&contract.plan.managed_directory),
-                source,
-            ));
+    if let Some(existing) = contract.existing_bundle.as_ref() {
+        validate_existing_bundle_precondition(paths, managed_root, storage, existing)?;
+    } else {
+        match fs::symlink_metadata(&contract.plan.managed_directory) {
+            Ok(_) => {
+                return Err(TakeoverError::RecoveryBlocked(
+                    "Takeover Journal 缺失，但受管 Bundle 已经出现".to_owned(),
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(takeover_io(
+                    "检查缺少 Journal 的 Bundle",
+                    Path::new(&contract.plan.managed_directory),
+                    source,
+                ));
+            }
         }
     }
     let staging_root =
@@ -1185,7 +1671,9 @@ fn ensure_no_takeover_effects_without_journal(
     }
     for (index, origin) in contract.plan.origins.iter().enumerate() {
         validate_live_origin(paths, storage, origin, &contract.origin_snapshots[index])?;
-        let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
+        let member = plan_member(&contract.plan, &origin.member_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let parent = open_origin_parent(paths, storage, origin, &member.skill_name)?;
         if snapshot_at(
             parent.directory(),
             OsStr::new(&journal.origins[index].recovery_name),
@@ -1241,6 +1729,7 @@ fn decode_plan_contract(
 
 fn validate_confirmation_contract(
     paths: &ApplicationPaths,
+    managed_root: &File,
     storage: &Storage,
     stored: &StoredTakeoverPlanRow,
     contract: &TakeoverPlanContract,
@@ -1255,67 +1744,19 @@ fn validate_confirmation_contract(
         return Err(TakeoverError::PlanExpired);
     }
     let plan = &contract.plan;
-    let origin_ids = plan
-        .origins
-        .iter()
-        .map(|origin| origin.observation_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let origin_paths = plan
-        .origins
-        .iter()
-        .map(|origin| origin.original_path.as_str())
-        .collect::<BTreeSet<_>>();
-    let target_ids = plan
-        .targets
-        .iter()
-        .map(|target| target.mount_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let target_paths = plan
-        .targets
-        .iter()
-        .map(|target| target.target_path.as_str())
-        .collect::<BTreeSet<_>>();
-    let selected_count = plan
-        .origins
-        .iter()
-        .filter(|origin| origin.observation_id == plan.selected_observation_id)
-        .count();
-    let identity_basis_matches = matches!(
-        (plan.origins.len(), plan.identity_basis),
-        (1, TakeoverIdentityBasis::SingleOrigin)
-    ) || (plan.origins.len() > 1
-        && plan.identity_basis == TakeoverIdentityBasis::UserConfirmed);
-    if plan.origins.is_empty()
-        || contract.origin_snapshots.len() != plan.origins.len()
-        || contract.target_snapshots.len() != plan.targets.len()
-        || origin_ids.len() != plan.origins.len()
-        || origin_paths.len() != plan.origins.len()
-        || target_ids.len() != plan.targets.len()
-        || target_paths.len() != plan.targets.len()
-        || selected_count != 1
-        || !identity_basis_matches
-    {
-        return Err(TakeoverError::InvalidPlanContract);
-    }
-    for id in [&plan.id, &plan.bundle_id, &plan.member_id, &plan.content_id] {
-        Uuid::parse_str(id).map_err(|_| TakeoverError::InvalidPlanContract)?;
-    }
+    validate_static_plan_contract(paths, contract)?;
     let expected_managed = paths.bundle_directory(&plan.bundle_id);
-    let expected_content = expected_managed.join("contents").join(&plan.content_id);
-    let expected_target = expected_managed
-        .join("current/members")
-        .join(&plan.skill_name);
-    if Path::new(&plan.managed_directory) != expected_managed
-        || Path::new(&plan.content_directory) != expected_content
-        || Path::new(&plan.expected_target) != expected_target
-    {
-        return Err(TakeoverError::InvalidPlanContract);
-    }
-    ensure_absent(&expected_managed)?;
-    validate_scope_resolution(&plan.origins, &plan.targets)
-        .map_err(|_| TakeoverError::InvalidPlanContract)?;
-    for target in &plan.targets {
-        Uuid::parse_str(&target.mount_id).map_err(|_| TakeoverError::InvalidPlanContract)?;
+    match contract.existing_bundle.as_ref() {
+        Some(existing) => {
+            if Path::new(&existing.managed_directory)
+                != Path::new(&format!("bundles/{}", existing.id))
+                || expected_managed != paths.data_root().join(&existing.managed_directory)
+            {
+                return Err(TakeoverError::InvalidPlanContract);
+            }
+            validate_existing_bundle_precondition(paths, managed_root, storage, existing)?;
+        }
+        None => ensure_absent(&expected_managed)?,
     }
     for (origin, snapshot) in plan.origins.iter().zip(&contract.origin_snapshots) {
         if snapshot.observation_id != origin.observation_id {
@@ -1323,13 +1764,17 @@ fn validate_confirmation_contract(
         }
         validate_origin_project_contract(storage, origin, snapshot.project.as_ref())?;
         let validated = validate_live_origin(paths, storage, origin, snapshot)?;
-        if validated.name != plan.skill_name {
+        let member =
+            plan_member(plan, &origin.member_id).ok_or(TakeoverError::InvalidPlanContract)?;
+        if validated.name != member.skill_name {
             return Err(TakeoverError::InvalidPlanContract);
         }
         let matching_targets = plan
             .targets
             .iter()
-            .filter(|target| target.target_path == origin.original_path)
+            .filter(|target| {
+                target.member_id == origin.member_id && target.target_path == origin.original_path
+            })
             .collect::<Vec<_>>();
         match (
             origin.app_id,
@@ -1338,7 +1783,7 @@ fn validate_confirmation_contract(
             matching_targets.as_slice(),
         ) {
             (Some(_), Some(_), TakeoverOriginDisposition::Mount, [target])
-                if target.expected_target == plan.expected_target
+                if target.expected_target == member.expected_target
                     && Some(target.app_id) == origin.app_id
                     && Some(target.scope) == origin.scope
                     && target.project_id == origin.project_id
@@ -1349,9 +1794,11 @@ fn validate_confirmation_contract(
         }
     }
     for (target, target_snapshot) in plan.targets.iter().zip(&contract.target_snapshots) {
+        let member =
+            plan_member(plan, &target.member_id).ok_or(TakeoverError::InvalidPlanContract)?;
         if target_snapshot.mount_id != target.mount_id
             || target_snapshot.target_path != target.target_path
-            || target.expected_target != plan.expected_target
+            || target.expected_target != member.expected_target
         {
             return Err(TakeoverError::InvalidPlanContract);
         }
@@ -1383,6 +1830,95 @@ fn validate_confirmation_contract(
             None => return Err(TakeoverError::InvalidPlanContract),
         }
     }
+    Ok(())
+}
+
+fn validate_existing_bundle_precondition(
+    paths: &ApplicationPaths,
+    managed_root: &File,
+    storage: &Storage,
+    expected: &StoredTakeoverBundleSnapshot,
+) -> Result<(), TakeoverError> {
+    validate_existing_bundle_current(paths, managed_root, storage, expected)?;
+
+    let bundles = open_managed_directory_from_root(paths, managed_root, &paths.bundles_root())?;
+    let bundle_path = paths.bundle_directory(&expected.id);
+    let bundle = open_expected_directory_at(&bundles, OsStr::new(&expected.id), &bundle_path)?;
+    ensure_open_directory_matches_managed_path(paths, &bundle, &bundle_path)?;
+    ensure_only_entries(
+        &read_entry_names_from_handle(&bundle)?,
+        &["contents", "current"],
+        "既有 Bundle 包含未知条目",
+    )?;
+    let content_id = Path::new(&expected.current_target)
+        .file_name()
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    let contents_path = bundle_path.join("contents");
+    let contents = open_expected_directory_at(&bundle, OsStr::new("contents"), &contents_path)?;
+    ensure_only_entries(
+        &read_entry_names_from_handle(&contents)?,
+        &[content_id
+            .to_str()
+            .ok_or(TakeoverError::InvalidPlanContract)?],
+        "既有 Bundle 包含未清理内容",
+    )?;
+    let content_path = contents_path.join(content_id);
+    let content = open_expected_directory_at(&contents, content_id, &content_path)?;
+    ensure_only_entries(
+        &read_entry_names_from_handle(&content)?,
+        &["members"],
+        "既有 Bundle 当前内容边界异常",
+    )?;
+    let members_path = content_path.join("members");
+    let members = open_expected_directory_at(&content, OsStr::new("members"), &members_path)?;
+    let expected_names = expected
+        .members
+        .iter()
+        .map(|member| member.skill_name.as_str())
+        .collect::<Vec<_>>();
+    ensure_only_entries(
+        &read_entry_names_from_handle(&members)?,
+        &expected_names,
+        "既有 Bundle 当前成员边界异常",
+    )?;
+    for member in &expected.members {
+        let member_path = members_path.join(&member.skill_name);
+        let validated = validate_single_skill_folder_as(&member_path, &member.skill_name)?;
+        if validated.fingerprint != member.content_fingerprint {
+            return Err(TakeoverError::InvalidRequest(
+                "Plan 生成后既有 Bundle 内容已经变化".to_owned(),
+            ));
+        }
+    }
+    ensure_open_directory_matches_managed_path(paths, &members, &members_path)?;
+    ensure_open_directory_matches_managed_path(paths, &content, &content_path)?;
+    ensure_open_directory_matches_managed_path(paths, &contents, &contents_path)?;
+    ensure_open_directory_matches_managed_path(paths, &bundle, &bundle_path)?;
+    Ok(())
+}
+
+fn validate_existing_bundle_current(
+    paths: &ApplicationPaths,
+    managed_root: &File,
+    storage: &Storage,
+    expected: &StoredTakeoverBundleSnapshot,
+) -> Result<(), TakeoverError> {
+    if storage.read_takeover_bundle_snapshot(&expected.id)? != *expected {
+        return Err(TakeoverError::InvalidRequest(
+            "Plan 生成后既有 Bundle 状态已经变化".to_owned(),
+        ));
+    }
+    let bundles = open_managed_directory_from_root(paths, managed_root, &paths.bundles_root())?;
+    let bundle_path = paths.bundle_directory(&expected.id);
+    let bundle = open_expected_directory_at(&bundles, OsStr::new(&expected.id), &bundle_path)?;
+    let current_target = read_link_at(&bundle, OsStr::new("current"))
+        .map_err(|source| takeover_io("读取既有 Bundle current", &bundle_path, source))?;
+    if current_target != Path::new(&expected.current_target) {
+        return Err(TakeoverError::InvalidRequest(
+            "Plan 生成后既有 Bundle current 已经变化".to_owned(),
+        ));
+    }
+    ensure_open_directory_matches_managed_path(paths, &bundle, &bundle_path)?;
     Ok(())
 }
 
@@ -1545,6 +2081,12 @@ fn target_leaf(
     Ok(leaf.to_owned())
 }
 
+fn plan_member<'a>(plan: &'a TakeoverPlan, member_id: &str) -> Option<&'a TakeoverPlanMember> {
+    plan.members
+        .iter()
+        .find(|member| member.member_id == member_id)
+}
+
 fn build_journal(
     transaction_id: &str,
     contract: &TakeoverPlanContract,
@@ -1560,6 +2102,7 @@ fn build_journal(
                 .get(index)
                 .ok_or(TakeoverError::InvalidPlanContract)?;
             Ok(TakeoverJournalOrigin {
+                member_id: origin.member_id.clone(),
                 observation_id: origin.observation_id.clone(),
                 original_path: origin.original_path.clone(),
                 recovery_name: format!(".skillyard-takeover-{transaction_id}-{index}"),
@@ -1580,6 +2123,7 @@ fn build_journal(
                 .get(index)
                 .ok_or(TakeoverError::InvalidPlanContract)?;
             Ok(TakeoverJournalTarget {
+                member_id: target.member_id.clone(),
                 mount_id: target.mount_id.clone(),
                 target_path: target.target_path.clone(),
                 mount_staging_name: format!(".skillyard-takeover-mount-{transaction_id}-{index}"),
@@ -1597,8 +2141,12 @@ fn build_journal(
         phase: TakeoverJournalPhase::JournalReady,
         bundle_id: plan.bundle_id.clone(),
         content_id: plan.content_id.clone(),
-        selected_observation_id: plan.selected_observation_id.clone(),
+        previous_current_target: contract
+            .existing_bundle
+            .as_ref()
+            .map(|bundle| bundle.current_target.clone()),
         candidate_cleanup: None,
+        previous_content_cleanup: None,
         origins,
         targets,
     })
@@ -1624,6 +2172,9 @@ fn execute_before_domain_commit(
         journal.phase.as_storage_str(),
         now,
     )?;
+    if let Some(existing) = contract.existing_bundle.as_ref() {
+        validate_existing_bundle_precondition(paths, managed_root, storage, existing)?;
+    }
 
     let staging_root =
         open_managed_directory_from_root(paths, managed_root, &paths.staging_root())?;
@@ -1640,25 +2191,48 @@ fn execute_before_domain_commit(
         .map_err(|source| takeover_io("创建接管成员目录", &paths.staging_root(), source))?;
     let members = open_directory_at(&candidate, OsStr::new("members"))
         .map_err(|source| takeover_io("打开接管成员目录", &paths.staging_root(), source))?;
-    let selected = contract
-        .plan
-        .origins
-        .iter()
-        .find(|origin| origin.observation_id == contract.plan.selected_observation_id)
-        .ok_or(TakeoverError::InvalidPlanContract)?;
     let members_path = paths
         .staging_root()
         .join(&journal.transaction_id)
         .join("candidate/members");
-    copy_single_skill_tree_into_open_directory(
-        Path::new(&selected.original_path),
-        &members,
-        &members_path,
-        OsStr::new(&contract.plan.skill_name),
-        &contract.plan.skill_name,
-        &selected.content_fingerprint,
-        &mut BundleCopyBudget::production(),
-    )?;
+    let mut copy_budget = BundleCopyBudget::production();
+    if let Some(existing) = contract.existing_bundle.as_ref() {
+        for member in &existing.members {
+            let source = paths
+                .bundle_directory(&existing.id)
+                .join(&existing.current_target)
+                .join(&member.stable_relative_path);
+            copy_single_skill_tree_into_open_directory(
+                &source,
+                &members,
+                &members_path,
+                OsStr::new(&member.skill_name),
+                &member.skill_name,
+                &member.content_fingerprint,
+                &mut copy_budget,
+            )?;
+        }
+    }
+    for member in &contract.plan.members {
+        let selected = contract
+            .plan
+            .origins
+            .iter()
+            .find(|origin| {
+                origin.member_id == member.member_id
+                    && origin.observation_id == member.selected_observation_id
+            })
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        copy_single_skill_tree_into_open_directory(
+            Path::new(&selected.original_path),
+            &members,
+            &members_path,
+            OsStr::new(&member.skill_name),
+            &member.skill_name,
+            &selected.content_fingerprint,
+            &mut copy_budget,
+        )?;
+    }
     sync(&members, "同步接管成员目录", &members_path)?;
     sync(&candidate, "同步接管候选目录", &members_path)?;
     sync(&staging, "同步接管临时目录", &paths.staging_root())?;
@@ -1668,15 +2242,22 @@ fn execute_before_domain_commit(
         failpoint,
         LifecycleFailpoint::HardExitAfterTakeoverCandidatePreparedBeforePublish,
     );
+    if let Some(existing) = contract.existing_bundle.as_ref() {
+        validate_existing_bundle_precondition(paths, managed_root, storage, existing)?;
+    }
 
     let bundles_root =
         open_managed_directory_from_root(paths, managed_root, &paths.bundles_root())?;
-    mkdir_at(&bundles_root, OsStr::new(&journal.bundle_id), 0o700)
-        .map_err(|source| takeover_io("创建接管 Bundle", &paths.bundles_root(), source))?;
+    if contract.existing_bundle.is_none() {
+        mkdir_at(&bundles_root, OsStr::new(&journal.bundle_id), 0o700)
+            .map_err(|source| takeover_io("创建接管 Bundle", &paths.bundles_root(), source))?;
+    }
     let bundle = open_directory_at(&bundles_root, OsStr::new(&journal.bundle_id))
         .map_err(|source| takeover_io("打开接管 Bundle", &paths.bundles_root(), source))?;
-    mkdir_at(&bundle, OsStr::new("contents"), 0o700)
-        .map_err(|source| takeover_io("创建接管内容目录", &paths.bundles_root(), source))?;
+    if contract.existing_bundle.is_none() {
+        mkdir_at(&bundle, OsStr::new("contents"), 0o700)
+            .map_err(|source| takeover_io("创建接管内容目录", &paths.bundles_root(), source))?;
+    }
     let contents = open_directory_at(&bundle, OsStr::new("contents"))
         .map_err(|source| takeover_io("打开接管内容目录", &paths.bundles_root(), source))?;
     lifecycle_lock.recheck(paths)?;
@@ -1713,8 +2294,23 @@ fn execute_before_domain_commit(
         failpoint,
         LifecycleFailpoint::HardExitAfterTakeoverTemporaryCurrentCreatedBeforeSwitch,
     );
-    rename_at_no_replace(&bundle, &temporary_current, &bundle, OsStr::new("current"))
-        .map_err(|source| takeover_io("切换 Bundle current", &paths.bundles_root(), source))?;
+    if contract.existing_bundle.is_some() {
+        validate_existing_bundle_current(
+            paths,
+            managed_root,
+            storage,
+            contract
+                .existing_bundle
+                .as_ref()
+                .ok_or(TakeoverError::InvalidPlanContract)?,
+        )?;
+        // 同一目录内原子替换 current，Host 只能看到补充前或补充后的完整 Bundle。
+        rename_at_replace(&bundle, &temporary_current, &bundle, OsStr::new("current"))
+            .map_err(|source| takeover_io("切换 Bundle current", &paths.bundles_root(), source))?;
+    } else {
+        rename_at_no_replace(&bundle, &temporary_current, &bundle, OsStr::new("current"))
+            .map_err(|source| takeover_io("切换 Bundle current", &paths.bundles_root(), source))?;
+    }
     sync(&bundle, "同步 Bundle current", &paths.bundles_root())?;
     inject_takeover_hard_exit(
         failpoint,
@@ -1789,11 +2385,24 @@ fn execute_before_domain_commit(
         failpoint,
         LifecycleFailpoint::HardExitAfterTakeoverOriginsAppliedBeforeState,
     );
-    let activated = validate_single_skill_folder(Path::new(&contract.plan.expected_target))?;
-    if activated.fingerprint != selected.content_fingerprint {
-        return Err(TakeoverError::RecoveryBlocked(
-            "Bundle current 内容与用户选择不一致".to_owned(),
-        ));
+    for member in &contract.plan.members {
+        let selected = contract
+            .plan
+            .origins
+            .iter()
+            .find(|origin| {
+                origin.member_id == member.member_id
+                    && origin.observation_id == member.selected_observation_id
+            })
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let activated = validate_single_skill_folder(Path::new(&member.expected_target))?;
+        if activated.name != member.skill_name
+            || activated.fingerprint != selected.content_fingerprint
+        {
+            return Err(TakeoverError::RecoveryBlocked(
+                "Bundle current 内容与用户选择不一致".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1817,8 +2426,10 @@ fn quarantine_takeover_origin(
         .get(index)
         .ok_or(TakeoverError::InvalidPlanContract)?;
     validate_live_origin(paths, storage, origin, snapshot)?;
-    let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
-    let leaf = origin_leaf(Path::new(&origin.original_path), &contract.plan.skill_name)?;
+    let member =
+        plan_member(&contract.plan, &origin.member_id).ok_or(TakeoverError::InvalidPlanContract)?;
+    let parent = open_origin_parent(paths, storage, origin, &member.skill_name)?;
+    let leaf = origin_leaf(Path::new(&origin.original_path), &member.skill_name)?;
     lifecycle_lock.recheck(paths)?;
     let original = snapshot_at(parent.directory(), &leaf, "")?;
     if original.observation() != journal.origins[index].original_observation {
@@ -1898,7 +2509,9 @@ fn apply_takeover_target(
         }
     }
     let parent = open_plan_target_parent(paths, storage, target, true)?;
-    let leaf = target_leaf(target, &contract.plan.skill_name)?;
+    let member =
+        plan_member(&contract.plan, &target.member_id).ok_or(TakeoverError::InvalidPlanContract)?;
+    let leaf = target_leaf(target, &member.skill_name)?;
     lifecycle_lock.recheck(paths)?;
     if snapshot_at(parent.directory(), &leaf, &target.expected_target)?.kind() != TargetKind::Absent
     {
@@ -1970,7 +2583,9 @@ fn verify_takeover_targets(
             TakeoverError::RecoveryBlocked("最终 Mount 缺少本事务的精确归属记录".to_owned())
         })?;
         let parent = open_plan_target_parent(paths, storage, target, false)?;
-        let leaf = target_leaf(target, &contract.plan.skill_name)?;
+        let member = plan_member(&contract.plan, &target.member_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let leaf = target_leaf(target, &member.skill_name)?;
         let current = snapshot_at(parent.directory(), &leaf, &target.expected_target)?;
         let staged = snapshot_at(
             parent.directory(),
@@ -2046,7 +2661,9 @@ fn rollback_before_commit(
             }
             ParentLookup::Open(parent) => parent,
         };
-        let leaf = target_leaf(target, &contract.plan.skill_name)?;
+        let member = plan_member(&contract.plan, &target.member_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let leaf = target_leaf(target, &member.skill_name)?;
         let staging_name = OsString::from(&progress.mount_staging_name);
         if progress.mount_observation.is_none() {
             let staged = snapshot_at(parent.directory(), &staging_name, &target.expected_target)?;
@@ -2123,8 +2740,10 @@ fn rollback_before_commit(
     }
     let mut first_origin_restore_seen = false;
     for (index, origin) in contract.plan.origins.iter().enumerate().rev() {
-        let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
-        let leaf = origin_leaf(Path::new(&origin.original_path), &contract.plan.skill_name)?;
+        let member = plan_member(&contract.plan, &origin.member_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let parent = open_origin_parent(paths, storage, origin, &member.skill_name)?;
+        let leaf = origin_leaf(Path::new(&origin.original_path), &member.skill_name)?;
         let recovery_name = OsString::from(&journal.origins[index].recovery_name);
         let original_observation = journal.origins[index].original_observation.clone();
         if journal.origins[index].recovery_observation.is_none() {
@@ -2191,7 +2810,7 @@ fn rollback_before_commit(
         write_journal(paths, managed_root, journal)?;
     }
     prepare_uncommitted_cleanup(paths, managed_root, contract, journal)?;
-    cleanup_uncommitted_takeover_content(paths, managed_root, journal, failpoint)?;
+    cleanup_uncommitted_takeover_content(paths, managed_root, contract, journal, failpoint)?;
     journal.candidate_cleanup = None;
     write_journal(paths, managed_root, journal)?;
     Ok(())
@@ -2209,13 +2828,13 @@ fn cleanup_committed(
     let mut first_recovery_entry_removed = false;
     for (index, origin) in contract.plan.origins.iter().enumerate() {
         let original_path = Path::new(&origin.original_path);
-        let parent = open_origin_parent(paths, storage, origin, &contract.plan.skill_name)?;
-        let leaf = origin_leaf(original_path, &contract.plan.skill_name)?;
-        let has_final_target = contract
-            .plan
-            .targets
-            .iter()
-            .any(|target| target.target_path == origin.original_path);
+        let member = plan_member(&contract.plan, &origin.member_id)
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        let parent = open_origin_parent(paths, storage, origin, &member.skill_name)?;
+        let leaf = origin_leaf(original_path, &member.skill_name)?;
+        let has_final_target = contract.plan.targets.iter().any(|target| {
+            target.member_id == origin.member_id && target.target_path == origin.original_path
+        });
         if !has_final_target
             && snapshot_at(parent.directory(), &leaf, "")?.kind() != TargetKind::Absent
         {
@@ -2252,7 +2871,7 @@ fn cleanup_committed(
         }
         let recovery = parent.path().join(&recovery_name);
         if journal.origins[index].cleanup_manifest.is_none() {
-            let validated = validate_single_skill_folder_as(&recovery, &contract.plan.skill_name)?;
+            let validated = validate_single_skill_folder_as(&recovery, &member.skill_name)?;
             if validated.fingerprint != journal.origins[index].expected_fingerprint {
                 return Err(TakeoverError::RecoveryBlocked(
                     "事务恢复内容与 Plan 不一致".to_owned(),
@@ -2260,8 +2879,7 @@ fn cleanup_committed(
             }
             let manifest =
                 capture_owned_tree_cleanup_manifest(parent.directory(), &recovery_name, &recovery)?;
-            let revalidated =
-                validate_single_skill_folder_as(&recovery, &contract.plan.skill_name)?;
+            let revalidated = validate_single_skill_folder_as(&recovery, &member.skill_name)?;
             if revalidated.fingerprint != journal.origins[index].expected_fingerprint {
                 return Err(TakeoverError::RecoveryBlocked(
                     "旧副本在封存清理边界时发生变化".to_owned(),
@@ -2302,6 +2920,7 @@ fn cleanup_committed(
         write_journal(paths, managed_root, journal)?;
         recheck_open_parent(&parent)?;
     }
+    cleanup_previous_takeover_content(paths, managed_root, contract, journal, failpoint)?;
     let staging_root =
         open_managed_directory_from_root(paths, managed_root, &paths.staging_root())?;
     if entry_metadata_at(&staging_root, OsStr::new(&journal.transaction_id))
@@ -2320,6 +2939,170 @@ fn cleanup_committed(
         LifecycleFailpoint::HardExitAfterTakeoverJournalRemovedBeforeForget,
     );
     storage.forget_terminal_takeover_transaction(&journal.transaction_id)?;
+    Ok(())
+}
+
+fn cleanup_previous_takeover_content(
+    paths: &ApplicationPaths,
+    managed_root: &File,
+    contract: &TakeoverPlanContract,
+    journal: &mut TakeoverJournal,
+    failpoint: LifecycleFailpoint,
+) -> Result<(), TakeoverError> {
+    let Some(existing) = contract.existing_bundle.as_ref() else {
+        return Ok(());
+    };
+    let previous_target = journal
+        .previous_current_target
+        .as_deref()
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    if previous_target == format!("contents/{}", journal.content_id) {
+        return Err(TakeoverError::RecoveryBlocked(
+            "补充接管的新旧 current 目标相同".to_owned(),
+        ));
+    }
+    let previous_id = Path::new(previous_target)
+        .file_name()
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    let bundles = open_managed_directory_from_root(paths, managed_root, &paths.bundles_root())?;
+    let bundle_path = paths.bundle_directory(&journal.bundle_id);
+    let bundle =
+        open_expected_directory_at(&bundles, OsStr::new(&journal.bundle_id), &bundle_path)?;
+    let contents_path = bundle_path.join("contents");
+    let contents = open_expected_directory_at(&bundle, OsStr::new("contents"), &contents_path)?;
+    let previous_path = contents_path.join(previous_id);
+
+    let staging_root =
+        open_managed_directory_from_root(paths, managed_root, &paths.staging_root())?;
+    let staging_path = paths.staging_root().join(&journal.transaction_id);
+    let staging = match open_directory_at(&staging_root, OsStr::new(&journal.transaction_id)) {
+        Ok(staging) => staging,
+        Err(source) if source.kind() == ErrorKind::NotFound => {
+            mkdir_at(&staging_root, OsStr::new(&journal.transaction_id), 0o700)
+                .map_err(|source| takeover_io("重建接管清理目录", &staging_path, source))?;
+            sync(&staging_root, "同步接管清理目录", &staging_path)?;
+            open_expected_directory_at(
+                &staging_root,
+                OsStr::new(&journal.transaction_id),
+                &staging_path,
+            )?
+        }
+        Err(source) => return Err(takeover_io("打开接管清理目录", &staging_path, source)),
+    };
+    let discard_name = OsStr::new("discarding-previous");
+    let discard_path = staging_path.join(discard_name);
+    ensure_only_entries(
+        &read_entry_names_from_handle(&staging)?,
+        &["discarding-previous"],
+        "接管清理目录包含未知内容",
+    )?;
+
+    let previous_exists = entry_metadata_at(&contents, previous_id)
+        .map_err(|source| takeover_io("检查接管前内容", &previous_path, source))?
+        .is_some();
+    let discard_exists = entry_metadata_at(&staging, discard_name)
+        .map_err(|source| takeover_io("检查已隔离旧内容", &discard_path, source))?
+        .is_some();
+    if previous_exists && discard_exists {
+        return Err(TakeoverError::RecoveryBlocked(
+            "接管前内容同时出现在原位置与清理区".to_owned(),
+        ));
+    }
+
+    if journal.previous_content_cleanup.is_none() {
+        if !previous_exists {
+            if discard_exists {
+                return Err(TakeoverError::RecoveryBlocked(
+                    "已隔离旧内容缺少持久化清理意图".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
+        validate_existing_content_tree(paths, &contents, &previous_path, previous_id, existing)?;
+        let manifest = capture_owned_tree_cleanup_manifest(&contents, previous_id, &previous_path)?;
+        validate_existing_content_tree(paths, &contents, &previous_path, previous_id, existing)?;
+        journal.previous_content_cleanup = Some(manifest);
+        write_journal(paths, managed_root, journal)?;
+    }
+    let manifest = journal
+        .previous_content_cleanup
+        .clone()
+        .ok_or(TakeoverError::InvalidPlanContract)?;
+    if previous_exists {
+        validate_existing_content_tree(paths, &contents, &previous_path, previous_id, existing)?;
+        rename_at_no_replace(&contents, previous_id, &staging, discard_name)
+            .map_err(|source| takeover_io("隔离接管前内容", &discard_path, source))?;
+        sync(&contents, "同步接管前内容隔离", &contents_path)?;
+        sync(&staging, "同步接管清理目录", &staging_path)?;
+        inject_takeover_hard_exit(
+            failpoint,
+            LifecycleFailpoint::HardExitAfterTakeoverPreviousContentIsolated,
+        );
+    } else if !discard_exists {
+        journal.previous_content_cleanup = None;
+        write_journal(paths, managed_root, journal)?;
+        return Ok(());
+    }
+
+    let mut first_entry_removed = false;
+    remove_owned_tree_at_with_manifest_and_hook(
+        &staging,
+        discard_name,
+        &discard_path,
+        &manifest,
+        &mut || {
+            if !first_entry_removed {
+                first_entry_removed = true;
+                inject_takeover_hard_exit(
+                    failpoint,
+                    LifecycleFailpoint::HardExitDuringTakeoverPreviousContentRemoval,
+                );
+            }
+        },
+    )?;
+    sync(&staging, "同步接管前内容清理", &staging_path)?;
+    journal.previous_content_cleanup = None;
+    write_journal(paths, managed_root, journal)?;
+    Ok(())
+}
+
+fn validate_existing_content_tree(
+    paths: &ApplicationPaths,
+    contents: &File,
+    content_path: &Path,
+    content_id: &OsStr,
+    existing: &StoredTakeoverBundleSnapshot,
+) -> Result<(), TakeoverError> {
+    let content = open_expected_directory_at(contents, content_id, content_path)?;
+    ensure_open_directory_matches_managed_path(paths, &content, content_path)?;
+    ensure_only_entries(
+        &read_entry_names_from_handle(&content)?,
+        &["members"],
+        "接管前内容包含未知顶层条目",
+    )?;
+    let members_path = content_path.join("members");
+    let members = open_expected_directory_at(&content, OsStr::new("members"), &members_path)?;
+    let expected_names = existing
+        .members
+        .iter()
+        .map(|member| member.skill_name.as_str())
+        .collect::<Vec<_>>();
+    ensure_only_entries(
+        &read_entry_names_from_handle(&members)?,
+        &expected_names,
+        "接管前内容包含未知成员",
+    )?;
+    for member in &existing.members {
+        let member_path = members_path.join(&member.skill_name);
+        let validated = validate_single_skill_folder_as(&member_path, &member.skill_name)?;
+        if validated.fingerprint != member.content_fingerprint {
+            return Err(TakeoverError::RecoveryBlocked(
+                "接管前内容已被外部修改".to_owned(),
+            ));
+        }
+    }
+    ensure_open_directory_matches_managed_path(paths, &members, &members_path)?;
+    ensure_open_directory_matches_managed_path(paths, &content, content_path)?;
     Ok(())
 }
 
@@ -2635,9 +3418,10 @@ fn validate_staging_candidate_boundary(
         }
     };
     ensure_open_directory_matches_managed_path(paths, &members, &members_path)?;
+    let expected_members = takeover_candidate_member_names(contract);
     ensure_only_entries(
         &read_entry_names_from_handle(&members)?,
-        &[contract.plan.skill_name.as_str()],
+        &expected_members,
         "待清理 candidate members 包含未知成员",
     )
 }
@@ -2645,6 +3429,7 @@ fn validate_staging_candidate_boundary(
 fn cleanup_uncommitted_takeover_content(
     paths: &ApplicationPaths,
     managed_root: &File,
+    contract: &TakeoverPlanContract,
     journal: &TakeoverJournal,
     failpoint: LifecycleFailpoint,
 ) -> Result<(), TakeoverError> {
@@ -2661,13 +3446,20 @@ fn cleanup_uncommitted_takeover_content(
             );
         }
     };
-    cleanup_uncommitted_bundle(paths, managed_root, journal, &mut after_entry_removed)?;
+    cleanup_uncommitted_bundle(
+        paths,
+        managed_root,
+        contract,
+        journal,
+        &mut after_entry_removed,
+    )?;
     cleanup_uncommitted_staging(paths, managed_root, journal, &mut after_entry_removed)
 }
 
 fn cleanup_uncommitted_bundle(
     paths: &ApplicationPaths,
     managed_root: &File,
+    contract: &TakeoverPlanContract,
     journal: &TakeoverJournal,
     after_entry_removed: &mut impl FnMut(),
 ) -> Result<(), TakeoverError> {
@@ -2682,9 +3474,15 @@ fn cleanup_uncommitted_bundle(
     };
     ensure_open_directory_matches_managed_path(paths, &bundle, &bundle_path)?;
     let temporary_current = format!(".current-{}", journal.transaction_id);
+    let restore_current = format!(".restore-current-{}", journal.transaction_id);
     ensure_only_entries(
         &read_entry_names_from_handle(&bundle)?,
-        &["contents", "current", temporary_current.as_str()],
+        &[
+            "contents",
+            "current",
+            temporary_current.as_str(),
+            restore_current.as_str(),
+        ],
         "待清理 Bundle 包含未知条目",
     )?;
     let contents_path = bundle_path.join("contents");
@@ -2692,24 +3490,62 @@ fn cleanup_uncommitted_bundle(
     let contents_exists = entry_metadata_at(&bundle, OsStr::new("contents"))
         .map_err(|source| takeover_io("检查待清理 contents", &contents_path, source))?
         .is_some();
-    let _current_exists = validate_optional_current(
-        &bundle,
-        OsStr::new("current"),
-        &Path::new("contents").join(&journal.content_id),
-        &bundle_path.join("current"),
-    )?;
-    let _temporary_exists = validate_optional_current(
+    let temporary_exists = validate_optional_current(
         &bundle,
         OsStr::new(&temporary_current),
         &Path::new("contents").join(&journal.content_id),
         &bundle_path.join(&temporary_current),
     )?;
-    for name in ["current", temporary_current.as_str()] {
-        if entry_metadata_at(&bundle, OsStr::new(name))
-            .map_err(|source| takeover_io("重新检查待清理 current", &bundle_path, source))?
-            .is_some()
-        {
-            unlink_at(&bundle, OsStr::new(name), false)
+    if temporary_exists {
+        unlink_at(&bundle, OsStr::new(&temporary_current), false)
+            .map_err(|source| takeover_io("清理未提交临时 current", &bundle_path, source))?;
+    }
+    if let Some(previous_target) = journal.previous_current_target.as_deref() {
+        let current_target = read_link_at(&bundle, OsStr::new("current"))
+            .map_err(|source| takeover_io("读取待回滚 current", &bundle_path, source))?;
+        let restore_exists = validate_optional_current(
+            &bundle,
+            OsStr::new(&restore_current),
+            Path::new(previous_target),
+            &bundle_path.join(&restore_current),
+        )?;
+        if current_target == Path::new(previous_target) {
+            if restore_exists {
+                unlink_at(&bundle, OsStr::new(&restore_current), false).map_err(|source| {
+                    takeover_io("清理已完成回滚的临时 current", &bundle_path, source)
+                })?;
+            }
+        } else if current_target == Path::new(&format!("contents/{}", journal.content_id)) {
+            if !restore_exists {
+                symlink_at(
+                    Path::new(previous_target),
+                    &bundle,
+                    OsStr::new(&restore_current),
+                )
+                .map_err(|source| takeover_io("创建回滚临时 current", &bundle_path, source))?;
+                sync(&bundle, "同步回滚临时 current", &bundle_path)?;
+            }
+            rename_at_replace(
+                &bundle,
+                OsStr::new(&restore_current),
+                &bundle,
+                OsStr::new("current"),
+            )
+            .map_err(|source| takeover_io("恢复接管前 current", &bundle_path, source))?;
+        } else {
+            return Err(TakeoverError::RecoveryBlocked(
+                "待回滚 current 指向未知内容".to_owned(),
+            ));
+        }
+    } else {
+        let current_exists = validate_optional_current(
+            &bundle,
+            OsStr::new("current"),
+            &Path::new("contents").join(&journal.content_id),
+            &bundle_path.join("current"),
+        )?;
+        if current_exists {
+            unlink_at(&bundle, OsStr::new("current"), false)
                 .map_err(|source| takeover_io("清理未提交 current", &bundle_path, source))?;
         }
     }
@@ -2717,9 +3553,18 @@ fn cleanup_uncommitted_bundle(
     if contents_exists {
         let contents = open_expected_directory_at(&bundle, OsStr::new("contents"), &contents_path)?;
         ensure_open_directory_matches_managed_path(paths, &contents, &contents_path)?;
+        let mut allowed_contents = vec![journal.content_id.as_str()];
+        let previous_id = journal
+            .previous_current_target
+            .as_deref()
+            .and_then(|target| Path::new(target).file_name())
+            .and_then(OsStr::to_str);
+        if let Some(previous_id) = previous_id {
+            allowed_contents.push(previous_id);
+        }
         ensure_only_entries(
             &read_entry_names_from_handle(&contents)?,
-            &[journal.content_id.as_str()],
+            &allowed_contents,
             "待清理 contents 包含未知内容",
         )?;
         let candidate_exists = entry_metadata_at(&contents, OsStr::new(&journal.content_id))
@@ -2741,12 +3586,30 @@ fn cleanup_uncommitted_bundle(
                 after_entry_removed,
             )?;
         }
+        if let Some(existing) = contract.existing_bundle.as_ref() {
+            let previous_id = Path::new(&existing.current_target)
+                .file_name()
+                .ok_or(TakeoverError::InvalidPlanContract)?;
+            validate_existing_content_tree(
+                paths,
+                &contents,
+                &contents_path.join(previous_id),
+                previous_id,
+                existing,
+            )?;
+        }
         drop(contents);
-        remove_empty_directory_at(&bundle, OsStr::new("contents"), &contents_path)?;
+        if contract.existing_bundle.is_none() {
+            remove_empty_directory_at(&bundle, OsStr::new("contents"), &contents_path)?;
+        }
     }
     drop(bundle);
-    remove_empty_directory_at(&bundles, OsStr::new(&journal.bundle_id), &bundle_path)
-        .map_err(Into::into)
+    if contract.existing_bundle.is_none() {
+        remove_empty_directory_at(&bundles, OsStr::new(&journal.bundle_id), &bundle_path)
+            .map_err(Into::into)
+    } else {
+        Ok(())
+    }
 }
 
 fn candidate_cleanup_tree(
@@ -2777,27 +3640,60 @@ fn validate_published_content(
     let members_path = content_path.join("members");
     let members = open_expected_directory_at(&content, OsStr::new("members"), &members_path)?;
     ensure_open_directory_matches_managed_path(paths, &members, &members_path)?;
+    let expected_members = takeover_candidate_member_names(contract);
     ensure_only_entries(
         &read_entry_names_from_handle(&members)?,
-        &[contract.plan.skill_name.as_str()],
+        &expected_members,
         "待清理候选成员边界异常",
     )?;
-    let member_path = members_path.join(&contract.plan.skill_name);
-    let validated = validate_single_skill_folder(&member_path)?;
-    let selected = contract
-        .plan
-        .origins
-        .iter()
-        .find(|origin| origin.observation_id == contract.plan.selected_observation_id)
-        .ok_or(TakeoverError::InvalidPlanContract)?;
-    if validated.name != contract.plan.skill_name
-        || validated.fingerprint != selected.content_fingerprint
-    {
-        return Err(TakeoverError::RecoveryBlocked(
-            "待清理候选内容已被外部修改".to_owned(),
-        ));
+    for member in &contract.plan.members {
+        let member_path = members_path.join(&member.skill_name);
+        let validated = validate_single_skill_folder(&member_path)?;
+        let selected = contract
+            .plan
+            .origins
+            .iter()
+            .find(|origin| {
+                origin.member_id == member.member_id
+                    && origin.observation_id == member.selected_observation_id
+            })
+            .ok_or(TakeoverError::InvalidPlanContract)?;
+        if validated.name != member.skill_name
+            || validated.fingerprint != selected.content_fingerprint
+        {
+            return Err(TakeoverError::RecoveryBlocked(
+                "待清理候选内容已被外部修改".to_owned(),
+            ));
+        }
+    }
+    if let Some(existing) = contract.existing_bundle.as_ref() {
+        for member in &existing.members {
+            let member_path = members_path.join(&member.skill_name);
+            let validated = validate_single_skill_folder_as(&member_path, &member.skill_name)?;
+            if validated.fingerprint != member.content_fingerprint {
+                return Err(TakeoverError::RecoveryBlocked(
+                    "待清理候选中的既有成员已被外部修改".to_owned(),
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn takeover_candidate_member_names(contract: &TakeoverPlanContract) -> Vec<&str> {
+    contract
+        .existing_bundle
+        .iter()
+        .flat_map(|bundle| bundle.members.iter())
+        .map(|member| member.skill_name.as_str())
+        .chain(
+            contract
+                .plan
+                .members
+                .iter()
+                .map(|member| member.skill_name.as_str()),
+        )
+        .collect()
 }
 
 fn cleanup_uncommitted_staging(
@@ -2910,16 +3806,31 @@ fn inject_takeover_hard_exit(actual: LifecycleFailpoint, expected: LifecycleFail
 }
 
 fn validate_plan_request(request: &TakeoverPlanRequest) -> Result<(), TakeoverError> {
-    let observation_ids = request.observation_ids.iter().collect::<BTreeSet<_>>();
-    let preserved_ids = request
-        .preserved_observation_ids
+    let observation_ids = request
+        .members
         .iter()
+        .flat_map(|member| member.observation_ids.iter())
         .collect::<BTreeSet<_>>();
-    if request.observation_ids.is_empty()
-        || observation_ids.len() != request.observation_ids.len()
-        || !observation_ids.contains(&request.selected_observation_id)
-        || preserved_ids.len() != request.preserved_observation_ids.len()
-        || !preserved_ids.is_subset(&observation_ids)
+    let member_selections_are_invalid = request.members.is_empty()
+        || request.members.iter().any(|member| {
+            let member_observations = member.observation_ids.iter().collect::<BTreeSet<_>>();
+            let preserved = member
+                .preserved_observation_ids
+                .iter()
+                .collect::<BTreeSet<_>>();
+            member.observation_ids.is_empty()
+                || member_observations.len() != member.observation_ids.len()
+                || !member_observations.contains(&member.selected_observation_id)
+                || preserved.len() != member.preserved_observation_ids.len()
+                || !preserved.is_subset(&member_observations)
+        })
+        || observation_ids.len()
+            != request
+                .members
+                .iter()
+                .map(|member| member.observation_ids.len())
+                .sum::<usize>();
+    if member_selections_are_invalid
         || request
             .shared_targets
             .iter()
@@ -3092,23 +4003,33 @@ fn validate_scope_topology(targets: &[TakeoverPlanTarget]) -> Result<(), Takeove
     Ok(())
 }
 
-fn validate_scope_resolution(
+fn validate_member_scope_resolution(
+    member_id: &str,
     origins: &[TakeoverPlanOrigin],
     targets: &[TakeoverPlanTarget],
 ) -> Result<(), TakeoverError> {
-    validate_scope_topology(targets)?;
+    let member_targets = targets
+        .iter()
+        .filter(|target| target.member_id == member_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    validate_scope_topology(&member_targets)?;
     for app_id in [
         SupportedAppId::Codex,
         SupportedAppId::ClaudeCode,
         SupportedAppId::GitHubCopilot,
     ] {
         let has_global_origin = origins.iter().any(|origin| {
-            origin.app_id == Some(app_id) && origin.scope == Some(MountScope::Global)
+            origin.member_id == member_id
+                && origin.app_id == Some(app_id)
+                && origin.scope == Some(MountScope::Global)
         });
         let has_project_origin = origins.iter().any(|origin| {
-            origin.app_id == Some(app_id) && origin.scope == Some(MountScope::Project)
+            origin.member_id == member_id
+                && origin.app_id == Some(app_id)
+                && origin.scope == Some(MountScope::Project)
         });
-        let keeps_scope = targets.iter().any(|target| target.app_id == app_id);
+        let keeps_scope = member_targets.iter().any(|target| target.app_id == app_id);
         if has_global_origin && has_project_origin && !keeps_scope {
             return Err(TakeoverError::InvalidRequest(
                 "同一应用存在 global/project 冲突时必须保留其中一种 scope".to_owned(),

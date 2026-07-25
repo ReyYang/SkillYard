@@ -19,14 +19,14 @@ export function TakeoverPlanPage({
   onBack,
   onConfirm,
 }: TakeoverPlanPageProps) {
-  const selectedOrigin = plan.origins.find(
-    (origin) => origin.observationId === plan.selectedObservationId,
+  const retainedMounts = plan.retainedMembers.flatMap((member) =>
+    member.mounts.map((mount) => ({ member, mount })),
   );
 
   return (
     <main className="mount-shell">
       <p className="eyebrow">SKILLYARD · CONFIRM TAKEOVER</p>
-      <h1>{`确认接管 ${plan.skillName}`}</h1>
+      <h1>{`确认接管 Bundle：${plan.bundleDisplayName}`}</h1>
       <p className="lead">
         下面是 Rust 根据当前文件状态封存的完整影响。确认开始后不能取消；如果应用意外退出，
         下次启动会继续恢复到一致状态。
@@ -34,31 +34,85 @@ export function TakeoverPlanPage({
 
       <section className="install-plan" aria-label="接管影响预览">
         <PlanRow label="Bundle" value={plan.bundleDisplayName} />
-        <PlanRow label="Skill Member" value={plan.skillName} />
         <PlanRow
           label="更新来源"
           value={plan.sourceDisplayName ?? "没有更新来源"}
         />
-        <PlanRow
-          label="Installation Chain"
-          // Source 不能代替安装履历；lock 也不能被推断成具体外部 CLI。
-          value={installationChainLabel(plan.installationChain)}
-        />
-        <PlanRow
-          label="采用内容"
-          value={selectedOrigin?.originalPath ?? plan.selectedObservationId}
-          code
-        />
         <PlanRow label="Central Store" value={plan.managedDirectory} code />
+
+        <section className="batch-plan" aria-label="Bundle 成员预览">
+          <p className="section-eyebrow">BUNDLE MEMBERS</p>
+          <ul className="batch-plan-list">
+            {plan.retainedMembers.map((member) => (
+              <li key={member.memberId} className="is-ready">
+                <span className="batch-plan-copy">
+                  <span className="batch-plan-heading">
+                    <strong>{member.skillName}</strong>
+                    <small className="batch-disposition ready">
+                      保留现有 Skill
+                    </small>
+                  </span>
+                  <span>
+                    {`Installation Chain: ${installationChainLabel(member.installationChain)}`}
+                  </span>
+                  <code title={member.expectedTarget}>
+                    {`继续使用：${member.expectedTarget}`}
+                  </code>
+                </span>
+              </li>
+            ))}
+            {plan.members.map((member) => {
+              const selectedOrigin = plan.origins.find(
+                (origin) =>
+                  origin.memberId === member.memberId &&
+                  origin.observationId === member.selectedObservationId,
+              );
+              return (
+                <li key={member.memberId} className="is-ready">
+                  <span className="batch-plan-copy">
+                    <span className="batch-plan-heading">
+                      <strong>{member.skillName}</strong>
+                      <small className="batch-disposition ready">
+                        Skill Member
+                      </small>
+                    </span>
+                    <span>
+                      {`Installation Chain: ${installationChainLabel(member.installationChain)}`}
+                    </span>
+                    <code
+                      title={
+                        selectedOrigin?.originalPath ??
+                        member.selectedObservationId
+                      }
+                    >
+                      {`采用内容：${selectedOrigin?.originalPath ?? member.selectedObservationId}`}
+                    </code>
+                    <code title={member.expectedTarget}>
+                      {`受管目标：${member.expectedTarget}`}
+                    </code>
+                    {member.warnings.map((warning) => (
+                      <em key={warning}>{warning}</em>
+                    ))}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
 
         <div className="batch-plan" aria-label="原有位置处理">
           <p className="section-eyebrow">EXISTING LOCATIONS</p>
           <ul className="batch-plan-list">
             {plan.origins.map((origin) => (
-              <li key={origin.observationId} className="is-ready">
+              <li
+                key={`${origin.memberId}:${origin.observationId}`}
+                className="is-ready"
+              >
                 <span className="batch-plan-copy">
                   <span className="batch-plan-heading">
-                    <strong>{originLabel(origin)}</strong>
+                    <strong>
+                      {`${memberName(plan, origin.memberId)} · ${originLabel(origin)}`}
+                    </strong>
                     <small className="batch-disposition ready">
                       {origin.finalDisposition === "mount"
                         ? "替换为 Mount"
@@ -77,13 +131,36 @@ export function TakeoverPlanPage({
 
         <div className="batch-plan" aria-label="最终挂载位置">
           <p className="section-eyebrow">FINAL MOUNTS</p>
-          {plan.targets.length > 0 ? (
+          {retainedMounts.length > 0 || plan.targets.length > 0 ? (
             <ul className="batch-plan-list">
-              {plan.targets.map((target) => (
-                <li key={target.mountId} className="is-ready">
+              {retainedMounts.map(({ member, mount }) => (
+                <li key={mount.id} className="is-ready">
                   <span className="batch-plan-copy">
                     <span className="batch-plan-heading">
-                      <strong>{targetLabel(target)}</strong>
+                      <strong>
+                        {`${member.skillName} · ${targetLabel(mount)}`}
+                      </strong>
+                      <small className="batch-disposition ready">
+                        保留 Mount
+                      </small>
+                    </span>
+                    <code title={mount.targetPath}>{mount.targetPath}</code>
+                    <code title={mount.expectedTarget}>
+                      → {mount.expectedTarget}
+                    </code>
+                  </span>
+                </li>
+              ))}
+              {plan.targets.map((target) => (
+                <li
+                  key={`${target.memberId}:${target.mountId}`}
+                  className="is-ready"
+                >
+                  <span className="batch-plan-copy">
+                    <span className="batch-plan-heading">
+                      <strong>
+                        {`${memberName(plan, target.memberId)} · ${targetLabel(target)}`}
+                      </strong>
                       <small className="batch-disposition ready">创建 Mount</small>
                     </span>
                     <code title={target.targetPath}>{target.targetPath}</code>
@@ -147,6 +224,15 @@ export function TakeoverPlanPage({
   );
 }
 
+function memberName(plan: TakeoverPlan, memberId: string): string {
+  return (
+    plan.members.find((member) => member.memberId === memberId)?.skillName ??
+    plan.retainedMembers.find((member) => member.memberId === memberId)
+      ?.skillName ??
+    "Skill"
+  );
+}
+
 function PlanRow({
   label,
   value,
@@ -177,7 +263,12 @@ function originLabel(origin: TakeoverPlanOrigin): string {
     : `${supportedAppLabel(origin.appId)} · ${origin.projectDisplayName ?? "已登记项目"}`;
 }
 
-function targetLabel(target: TakeoverPlanTarget): string {
+function targetLabel(
+  target: Pick<
+    TakeoverPlanTarget,
+    "appId" | "scope" | "projectDisplayName"
+  >,
+): string {
   return target.scope === "global"
     ? `${supportedAppLabel(target.appId)} · 全局`
     : `${supportedAppLabel(target.appId)} · ${target.projectDisplayName ?? "已登记项目"}`;

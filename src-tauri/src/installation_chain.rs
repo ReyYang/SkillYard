@@ -4,8 +4,16 @@ use serde::Deserialize;
 
 use crate::{
     domain::{InstallationChain, InstallationChainKind},
+    github_source::parse_github_source,
     paths::ApplicationPaths,
 };
+
+/// 分组证据只来自能够规范化的来源身份，成员路径、hash 和安装时间都不能改变 Bundle 边界。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TakeoverGroupEvidence {
+    pub id: String,
+    pub display_name: String,
+}
 
 #[derive(Debug, Deserialize)]
 struct LockV3File {
@@ -61,4 +69,22 @@ pub(crate) fn read_lock_v3_installation_chains(
             (!skill_name.trim().is_empty() && chain.is_valid()).then_some((skill_name, chain))
         })
         .collect()
+}
+
+/// lock v3 目前只对 SkillYard 已支持的 GitHub 来源提供确定性 Bundle 分组。
+pub(crate) fn takeover_group_evidence(chain: &InstallationChain) -> Option<TakeoverGroupEvidence> {
+    if chain.kind != InstallationChainKind::LockV3
+        || !chain.source_type.eq_ignore_ascii_case("github")
+    {
+        return None;
+    }
+    let parsed = parse_github_source(&chain.source_locator, None).ok()?;
+    Some(TakeoverGroupEvidence {
+        id: format!(
+            "github:{}/{}",
+            parsed.owner.to_ascii_lowercase(),
+            parsed.repository.to_ascii_lowercase()
+        ),
+        display_name: format!("{}/{}", parsed.owner, parsed.repository),
+    })
 }

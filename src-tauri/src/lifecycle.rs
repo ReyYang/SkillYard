@@ -125,6 +125,8 @@ pub enum LifecycleFailpoint {
     HardExitAfterTakeoverOriginsAppliedBeforeState,
     HardExitAfterTakeoverStateCommittedBeforeJournal,
     HardExitAfterFirstTakeoverRecoveryRemovedBeforeProgress,
+    HardExitAfterTakeoverPreviousContentIsolated,
+    HardExitDuringTakeoverPreviousContentRemoval,
     HardExitAfterTakeoverJournalRemovedBeforeForget,
     HardExitAfterFirstTakeoverRollbackMountRemovedBeforeProgress,
     HardExitAfterFirstTakeoverRollbackOriginRestoredBeforeProgress,

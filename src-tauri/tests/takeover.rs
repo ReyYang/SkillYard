@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     os::unix::fs::{MetadataExt, symlink},
     path::{Path, PathBuf},
@@ -9,7 +10,7 @@ use rusqlite::Connection;
 use skillyard_lib::{
     ApplicationPaths, InstallationChainKind, InventoryLocationKind, LifecycleFailpoint,
     ManagementKind, MountHealth, MountScope, PlatformInfo, SkillYardApplication, SupportedAppId,
-    TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlanRequest,
+    TakeoverIdentityBasis, TakeoverMemberRequest, TakeoverOriginDisposition, TakeoverPlanRequest,
     TakeoverSharedTargetRequest, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
@@ -19,6 +20,34 @@ const HARD_EXIT_TAKEOVER_DATA_ROOT: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_DATA_RO
 const HARD_EXIT_TAKEOVER_HOME: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_HOME";
 const HARD_EXIT_TAKEOVER_PLAN_ID: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_PLAN_ID";
 const HARD_EXIT_TAKEOVER_POINT: &str = "SKILLYARD_TAKEOVER_HARD_EXIT_POINT";
+
+/// 绝大多数测试仍描述单个 Member；宏只把它们投影到新的 Bundle 请求合同。
+macro_rules! takeover_plan_request {
+    (
+        observation_ids: $observation_ids:expr,
+        selected_observation_id: $selected_observation_id:expr,
+        preserved_observation_ids: $preserved_observation_ids:expr,
+        shared_targets: $shared_targets:expr $(,)?
+    ) => {
+        TakeoverPlanRequest {
+            members: vec![TakeoverMemberRequest {
+                observation_ids: $observation_ids,
+                selected_observation_id: $selected_observation_id,
+                preserved_observation_ids: $preserved_observation_ids,
+            }],
+            shared_targets: $shared_targets,
+        }
+    };
+    (
+        members: $members:expr,
+        shared_targets: $shared_targets:expr $(,)?
+    ) => {
+        TakeoverPlanRequest {
+            members: $members,
+            shared_targets: $shared_targets,
+        }
+    };
+}
 
 #[test]
 fn single_existing_skill_produces_a_read_only_takeover_plan() {
@@ -50,7 +79,7 @@ fn single_existing_skill_produces_a_read_only_takeover_plan() {
 
     let outcome = application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: vec![observation_id],
@@ -62,7 +91,7 @@ fn single_existing_skill_produces_a_read_only_takeover_plan() {
         panic!("应返回 Takeover Plan");
     };
 
-    assert_eq!(plan.skill_name, "alpha");
+    assert_eq!(plan.members[0].skill_name, "alpha");
     assert_eq!(plan.origins.len(), 1);
     assert_eq!(
         plan.origins[0].final_disposition,
@@ -198,7 +227,7 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
 
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observed.id.clone()],
                 selected_observation_id: observed.id.clone(),
                 preserved_observation_ids: vec![observed.id.clone()],
@@ -211,7 +240,7 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
         _ => panic!("应返回 Takeover Plan"),
     };
     assert_eq!(
-        plan.installation_chain.as_deref(),
+        plan.members[0].installation_chain.as_deref(),
         Some(installation_chain),
         "接管计划必须封存扫描时的安装履历"
     );
@@ -245,6 +274,736 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
         Some(installation_chain),
         "外部 lock 后续不再控制已保存的安装履历"
     );
+}
+
+#[test]
+fn verified_lock_v3_bundle_can_plan_all_installed_members_together() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let shared_root = home.join(".agents/skills");
+    write_skill(&shared_root.join("alpha"), "alpha", "Bundle 成员 alpha");
+    write_skill(&shared_root.join("beta"), "beta", "Bundle 成员 beta");
+    write_global_lock_v3_for(&home, &["alpha", "beta"]);
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    let entries = match application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("首次扫描应返回 Inventory"),
+    };
+    let alpha = entries
+        .iter()
+        .find(|entry| entry.skill_name == "alpha")
+        .expect("应发现 alpha");
+    let beta = entries
+        .iter()
+        .find(|entry| entry.skill_name == "beta")
+        .expect("应发现 beta");
+
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: takeover_plan_request! {
+                members: vec![
+                    TakeoverMemberRequest {
+                        observation_ids: vec![alpha.id.clone()],
+                        selected_observation_id: alpha.id.clone(),
+                        preserved_observation_ids: Vec::new(),
+                    },
+                    TakeoverMemberRequest {
+                        observation_ids: vec![beta.id.clone()],
+                        selected_observation_id: beta.id.clone(),
+                        preserved_observation_ids: Vec::new(),
+                    },
+                ],
+                shared_targets: vec![
+                    TakeoverSharedTargetRequest {
+                        shared_observation_id: alpha.id.clone(),
+                        app_id: SupportedAppId::Codex,
+                    },
+                    TakeoverSharedTargetRequest {
+                        shared_observation_id: beta.id.clone(),
+                        app_id: SupportedAppId::Codex,
+                    },
+                ],
+            },
+        })
+        .expect("同一 lock v3 来源中的已安装成员应生成一个 Bundle 接管计划")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("接管计划必须覆盖整个待接管 Bundle"),
+    };
+    assert_eq!(plan.bundle_display_name, "owner/repository");
+    assert_eq!(plan.members.len(), 2);
+    assert_eq!(
+        plan.members
+            .iter()
+            .map(|member| member.skill_name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["alpha", "beta"])
+    );
+    assert_eq!(plan.targets.len(), 2);
+    assert!(plan.source_display_name.is_none());
+
+    let entries = match application
+        .handle(UiIntent::ConfirmTakeoverPlan {
+            plan_id: plan.id.clone(),
+        })
+        .expect("应原子接管整个 Bundle")
+    {
+        UiOutcome::Inventory {
+            entries, mounts, ..
+        } => {
+            assert_eq!(mounts.len(), 2);
+            assert!(mounts.iter().all(|mount| {
+                mount.health == MountHealth::Healthy && mount.app_id == SupportedAppId::Codex
+            }));
+            entries
+        }
+        _ => panic!("确认后应返回 Inventory"),
+    };
+    let managed = entries
+        .iter()
+        .filter(|entry| entry.bundle_id.as_deref() == Some(plan.bundle_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(managed.len(), 2);
+    assert!(
+        managed
+            .iter()
+            .all(|entry| entry.bundle_display_name.as_deref() == Some("owner/repository"))
+    );
+    for member in &plan.members {
+        assert!(
+            !shared_root.join(&member.skill_name).exists(),
+            "共享目录原入口应在全部目标验证后移除"
+        );
+        assert_eq!(
+            fs::read_link(home.join(".codex/skills").join(&member.skill_name))
+                .expect("Codex 位置应成为 Mount"),
+            Path::new(&member.expected_target)
+        );
+    }
+
+    drop(application);
+    let restarted = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    let restarted_entries = match restarted
+        .handle(UiIntent::GetStartupState)
+        .expect("重启后应读取受管 Bundle")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("重启后应返回 Inventory"),
+    };
+    assert_eq!(
+        restarted_entries
+            .iter()
+            .filter(|entry| entry.bundle_id.as_deref() == Some(plan.bundle_id.as_str()))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn bundle_evidence_is_independent_from_the_selected_member_content() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let shared_root = home.join(".agents/skills");
+    let project_root = sandbox.path().join("project");
+    let project_alpha = project_root.join(".codex/skills/alpha");
+    write_skill(&shared_root.join("alpha"), "alpha", "带安装收据的 alpha");
+    write_skill(&shared_root.join("beta"), "beta", "带安装收据的 beta");
+    write_skill(&project_alpha, "alpha", "用户选择的本地 alpha");
+    let project_alpha = fs::canonicalize(&project_alpha).expect("应解析 Project Skill 路径");
+    write_global_lock_v3_for(&home, &["alpha", "beta"]);
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+    let entries = match application
+        .handle(UiIntent::RegisterProject {
+            root_path: path_text(&project_root),
+        })
+        .expect("应登记包含同名副本的 Project")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("登记 Project 后应返回 Inventory"),
+    };
+    let shared_alpha_id = observation_id_at(&entries, &shared_root.join("alpha"));
+    let shared_beta_id = observation_id_at(&entries, &shared_root.join("beta"));
+    let project_alpha_id = observation_id_at(&entries, &project_alpha);
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.id == project_alpha_id)
+            .expect("应发现 Project alpha")
+            .installation_chain
+            .is_none(),
+        "Project 副本不能继承 global lock"
+    );
+
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: takeover_plan_request! {
+                members: vec![
+                    TakeoverMemberRequest {
+                        observation_ids: vec![
+                            shared_alpha_id.clone(),
+                            project_alpha_id.clone(),
+                        ],
+                        selected_observation_id: project_alpha_id.clone(),
+                        preserved_observation_ids: Vec::new(),
+                    },
+                    TakeoverMemberRequest {
+                        observation_ids: vec![shared_beta_id.clone()],
+                        selected_observation_id: shared_beta_id.clone(),
+                        preserved_observation_ids: Vec::new(),
+                    },
+                ],
+                shared_targets: vec![
+                    TakeoverSharedTargetRequest {
+                        shared_observation_id: shared_alpha_id,
+                        app_id: SupportedAppId::Codex,
+                    },
+                    TakeoverSharedTargetRequest {
+                        shared_observation_id: shared_beta_id,
+                        app_id: SupportedAppId::Codex,
+                    },
+                ],
+            },
+        })
+        .expect("Bundle 证据不应强迫用户选择带收据的内容副本")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    let alpha = plan
+        .members
+        .iter()
+        .find(|member| member.skill_name == "alpha")
+        .expect("Plan 应包含 alpha");
+    assert_eq!(alpha.selected_observation_id, project_alpha_id);
+    assert!(
+        alpha.installation_chain.is_some(),
+        "Member 应保留证明 Bundle 边界的安装履历"
+    );
+    assert_eq!(plan.bundle_display_name, "owner/repository");
+
+    let UiOutcome::Inventory {
+        entries, mounts, ..
+    } = application
+        .handle(UiIntent::ConfirmTakeoverPlan { plan_id: plan.id })
+        .expect("应一次接管整个 Bundle")
+    else {
+        panic!("接管后应返回 Inventory");
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+            .count(),
+        2
+    );
+    assert_eq!(mounts.len(), 2);
+    assert_eq!(
+        read_skill_file(&home.join(".codex/skills/alpha")),
+        "---\nname: alpha\ndescription: 用户选择的本地 alpha\n---\n# alpha\n".as_bytes()
+    );
+}
+
+#[test]
+fn later_valid_member_reuses_the_managed_bundle_for_the_same_installation_group() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let shared_root = home.join(".agents/skills");
+    let alpha_root = shared_root.join("alpha");
+    let beta_root = shared_root.join("beta");
+    write_skill(&alpha_root, "alpha", "先接管的有效成员");
+    fs::create_dir_all(&beta_root).expect("应创建无效 beta");
+    fs::write(beta_root.join("SKILL.md"), "---\nname: beta\n---\n# beta\n")
+        .expect("应写入缺少 description 的 beta");
+    write_global_lock_v3_for(&home, &["alpha", "beta"]);
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    let entries = match application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("首次扫描应返回 Inventory"),
+    };
+    let alpha_id = observation_id_at(&entries, &alpha_root);
+    let first_plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: takeover_plan_request! {
+                observation_ids: vec![alpha_id.clone()],
+                selected_observation_id: alpha_id.clone(),
+                preserved_observation_ids: Vec::new(),
+                shared_targets: vec![TakeoverSharedTargetRequest {
+                    shared_observation_id: alpha_id,
+                    app_id: SupportedAppId::Codex,
+                }],
+            },
+        })
+        .expect("有效 alpha 应能先接管")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    let bundle_id = first_plan.bundle_id.clone();
+    application
+        .handle(UiIntent::ConfirmTakeoverPlan {
+            plan_id: first_plan.id,
+        })
+        .expect("应先接管 alpha");
+    // 这里只封装既有 Source 前置状态；待验证的补充 Plan 仍完全通过应用公开入口生成。
+    let source_connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开测试 SQLite");
+    source_connection
+        .execute(
+            "INSERT INTO sources (
+                id, kind, canonical_identity, owner, repository, display_name,
+                locator, tracked_ref, sort_order, created_at, updated_at
+             ) SELECT
+                'source-owner-repository', 'github', 'github:owner/repository',
+                'owner', 'repository', 'owner/repository',
+                'https://github.com/owner/repository', 'main',
+                COALESCE(MAX(sort_order), -1) + 1, 100, 100
+             FROM sources",
+            [],
+        )
+        .expect("应准备既有 Source");
+    source_connection
+        .execute(
+            "INSERT INTO source_bundle_links (source_id, bundle_id, adopted_marker, linked_at)
+             VALUES ('source-owner-repository', ?1, NULL, 100)",
+            [bundle_id.as_str()],
+        )
+        .expect("应准备既有 Source 与 Bundle 关系");
+    drop(source_connection);
+
+    write_skill(&beta_root, "beta", "修复后补充进同一 Bundle");
+    let entries = match application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("修复 beta 后应刷新本机")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("刷新应返回 Inventory"),
+    };
+    let beta_id = observation_id_at(&entries, &beta_root);
+    let second_plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: takeover_plan_request! {
+                observation_ids: vec![beta_id.clone()],
+                selected_observation_id: beta_id.clone(),
+                preserved_observation_ids: Vec::new(),
+                shared_targets: vec![TakeoverSharedTargetRequest {
+                    shared_observation_id: beta_id,
+                    app_id: SupportedAppId::Codex,
+                }],
+            },
+        })
+        .expect("修复后的 beta 应能补充接管")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    assert_eq!(
+        second_plan.bundle_id, bundle_id,
+        "同一确定性安装组必须复用既有 Bundle"
+    );
+    assert_eq!(
+        second_plan.source_display_name.as_deref(),
+        Some("owner/repository"),
+        "补充接管预览必须保留既有 Bundle 的更新来源"
+    );
+    assert_eq!(
+        second_plan
+            .retained_members
+            .iter()
+            .map(|member| member.skill_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha"],
+        "补充接管的预览必须展示最终 Bundle 中保留的既有成员"
+    );
+    assert_eq!(second_plan.retained_members[0].mounts.len(), 1);
+
+    let UiOutcome::Inventory {
+        entries, mounts, ..
+    } = application
+        .handle(UiIntent::ConfirmTakeoverPlan {
+            plan_id: second_plan.id,
+        })
+        .expect("补充接管应通过同一 Takeover 事务完成")
+    else {
+        panic!("补充接管后应返回 Inventory");
+    };
+    let managed = entries
+        .iter()
+        .filter(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+        .collect::<Vec<_>>();
+    assert_eq!(managed.len(), 2);
+    assert!(
+        managed
+            .iter()
+            .all(|entry| entry.bundle_id.as_deref() == Some(bundle_id.as_str()))
+    );
+    assert_eq!(mounts.len(), 2);
+    assert_eq!(
+        read_skill_file(&home.join(".codex/skills/alpha")),
+        "---\nname: alpha\ndescription: 先接管的有效成员\n---\n# alpha\n".as_bytes()
+    );
+    assert_eq!(
+        read_skill_file(&home.join(".codex/skills/beta")),
+        "---\nname: beta\ndescription: 修复后补充进同一 Bundle\n---\n# beta\n".as_bytes()
+    );
+    let content_count = fs::read_dir(data_root.join("bundles").join(bundle_id).join("contents"))
+        .expect("应读取 Bundle contents")
+        .count();
+    assert_eq!(content_count, 1, "成功补充后不保留可回滚旧内容");
+}
+
+#[test]
+fn supplementing_existing_bundle_recovers_across_the_commit_point() {
+    for (point, should_commit) in [
+        ("transaction-only", false),
+        ("current-before-phase", false),
+        ("state-before-journal", true),
+        ("previous-content-isolated", true),
+        ("previous-content-removal", true),
+    ] {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let home = sandbox.path().join("home");
+        let data_root = sandbox.path().join("application-support/SkillYard");
+        let shared_root = home.join(".agents/skills");
+        let alpha_root = shared_root.join("alpha");
+        let beta_root = shared_root.join("beta");
+        write_skill(&alpha_root, "alpha", "先接管的 alpha");
+        fs::create_dir_all(&beta_root).expect("应创建无效 beta");
+        fs::write(beta_root.join("SKILL.md"), "---\nname: beta\n---\n# beta\n")
+            .expect("应写入缺少 description 的 beta");
+        write_global_lock_v3_for(&home, &["alpha", "beta"]);
+
+        let application = SkillYardApplication::new(
+            ApplicationPaths::for_home(data_root.clone(), home.clone()),
+            PlatformInfo::supported_for_test(),
+        );
+        let entries = match application
+            .handle(UiIntent::StartInitialScan)
+            .expect("首次扫描应成功")
+        {
+            UiOutcome::Inventory { entries, .. } => entries,
+            _ => panic!("首次扫描应返回 Inventory"),
+        };
+        let alpha_id = observation_id_at(&entries, &alpha_root);
+        let first_plan = match application
+            .handle(UiIntent::CreateTakeoverPlan {
+                request: takeover_plan_request! {
+                    observation_ids: vec![alpha_id.clone()],
+                    selected_observation_id: alpha_id.clone(),
+                    preserved_observation_ids: Vec::new(),
+                    shared_targets: vec![TakeoverSharedTargetRequest {
+                        shared_observation_id: alpha_id,
+                        app_id: SupportedAppId::Codex,
+                    }],
+                },
+            })
+            .expect("应生成 alpha 接管计划")
+        {
+            UiOutcome::TakeoverPlan { plan } => plan,
+            _ => panic!("应返回 Takeover Plan"),
+        };
+        let bundle_id = first_plan.bundle_id.clone();
+        application
+            .handle(UiIntent::ConfirmTakeoverPlan {
+                plan_id: first_plan.id,
+            })
+            .expect("应先接管 alpha");
+
+        write_skill(&beta_root, "beta", "后补充的 beta");
+        let entries = match application
+            .handle(UiIntent::RefreshLocalInventory)
+            .expect("修复 beta 后应刷新")
+        {
+            UiOutcome::Inventory { entries, .. } => entries,
+            _ => panic!("刷新应返回 Inventory"),
+        };
+        let beta_id = observation_id_at(&entries, &beta_root);
+        let second_plan = match application
+            .handle(UiIntent::CreateTakeoverPlan {
+                request: takeover_plan_request! {
+                    observation_ids: vec![beta_id.clone()],
+                    selected_observation_id: beta_id.clone(),
+                    preserved_observation_ids: Vec::new(),
+                    shared_targets: vec![TakeoverSharedTargetRequest {
+                        shared_observation_id: beta_id,
+                        app_id: SupportedAppId::Codex,
+                    }],
+                },
+            })
+            .expect("应生成 beta 补充接管计划")
+        {
+            UiOutcome::TakeoverPlan { plan } => plan,
+            _ => panic!("应返回 Takeover Plan"),
+        };
+        assert_eq!(second_plan.bundle_id, bundle_id);
+        let plan_id = second_plan.id;
+        drop(application);
+
+        run_hard_exit_takeover_worker(&data_root, &home, &plan_id, point);
+        let reopened = SkillYardApplication::new(
+            ApplicationPaths::for_home(data_root.clone(), home.clone()),
+            PlatformInfo::supported_for_test(),
+        );
+        let UiOutcome::Inventory {
+            entries,
+            mounts,
+            recovery_issues,
+            ..
+        } = reopened
+            .handle(UiIntent::GetStartupState)
+            .unwrap_or_else(|error| panic!("{point} 重启后应自动恢复：{error}"))
+        else {
+            panic!("恢复后应返回 Inventory");
+        };
+        assert!(
+            recovery_issues.is_empty(),
+            "{point} 不应需要人工恢复：{recovery_issues:?}"
+        );
+        let managed = entries
+            .iter()
+            .filter(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+            .collect::<Vec<_>>();
+        let expected_count = if should_commit { 2 } else { 1 };
+        assert_eq!(managed.len(), expected_count, "{point} 成员提交方向错误");
+        assert!(
+            managed
+                .iter()
+                .all(|entry| entry.bundle_id.as_deref() == Some(bundle_id.as_str()))
+        );
+        assert_eq!(mounts.len(), expected_count, "{point} Mount 提交方向错误");
+        assert_eq!(
+            read_skill_file(&home.join(".codex/skills/alpha")),
+            "---\nname: alpha\ndescription: 先接管的 alpha\n---\n# alpha\n".as_bytes()
+        );
+        if should_commit {
+            assert_eq!(
+                read_skill_file(&home.join(".codex/skills/beta")),
+                "---\nname: beta\ndescription: 后补充的 beta\n---\n# beta\n".as_bytes()
+            );
+            assert!(!beta_root.exists());
+        } else {
+            assert_eq!(
+                read_skill_file(&beta_root),
+                "---\nname: beta\ndescription: 后补充的 beta\n---\n# beta\n".as_bytes()
+            );
+            assert!(!home.join(".codex/skills/beta").exists());
+        }
+        assert_eq!(
+            fs::read_dir(data_root.join("bundles").join(&bundle_id).join("contents"),)
+                .expect("应读取 Bundle contents")
+                .count(),
+            1,
+            "{point} 恢复后只保留一份当前内容"
+        );
+        drop(reopened);
+
+        let reopened_again = SkillYardApplication::new(
+            ApplicationPaths::for_home(data_root.clone(), home.clone()),
+            PlatformInfo::supported_for_test(),
+        );
+        let UiOutcome::Inventory {
+            entries,
+            mounts,
+            recovery_issues,
+            ..
+        } = reopened_again
+            .handle(UiIntent::GetStartupState)
+            .unwrap_or_else(|error| panic!("{point} 第二次启动仍应保持已恢复状态：{error}"))
+        else {
+            panic!("第二次启动仍应返回 Inventory");
+        };
+        assert!(
+            recovery_issues.is_empty(),
+            "{point} 第二次启动不应重新产生恢复问题"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.management_kind == ManagementKind::SkillYardManaged)
+                .count(),
+            expected_count,
+            "{point} 第二次启动不能改变成员结果"
+        );
+        assert_eq!(
+            mounts.len(),
+            expected_count,
+            "{point} 第二次启动不能改变 Mount 结果"
+        );
+        assert_eq!(
+            fs::read_dir(data_root.join("bundles").join(&bundle_id).join("contents"))
+                .expect("第二次启动后应读取 Bundle contents")
+                .count(),
+            1,
+            "{point} 第二次启动仍只能保留一份当前内容"
+        );
+        drop(reopened_again);
+
+        let connection =
+            Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开恢复后的 SQLite");
+        let transaction_count = connection
+            .query_row("SELECT COUNT(*) FROM takeover_transactions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("应读取 Takeover 事务数量");
+        assert_eq!(
+            transaction_count, 0,
+            "{point} 第二次启动后不能残留已完成 Takeover 事务"
+        );
+    }
+}
+
+#[test]
+fn multi_member_bundle_recovers_atomically_across_the_commit_point() {
+    for (point, should_commit) in [
+        ("origin-before-progress", false),
+        ("state-before-journal", true),
+    ] {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let home = sandbox.path().join("home");
+        let data_root = sandbox.path().join("application-support/SkillYard");
+        let shared_root = home.join(".agents/skills");
+        let alpha_root = shared_root.join("alpha");
+        let beta_root = shared_root.join("beta");
+        write_skill(&alpha_root, "alpha", "Bundle 中断测试 alpha");
+        write_skill(&beta_root, "beta", "Bundle 中断测试 beta");
+        let alpha_content = read_skill_file(&alpha_root);
+        let beta_content = read_skill_file(&beta_root);
+        write_global_lock_v3_for(&home, &["alpha", "beta"]);
+
+        let application = SkillYardApplication::new(
+            ApplicationPaths::for_home(data_root.clone(), home.clone()),
+            PlatformInfo::supported_for_test(),
+        );
+        let entries = match application
+            .handle(UiIntent::StartInitialScan)
+            .expect("首次扫描应成功")
+        {
+            UiOutcome::Inventory { entries, .. } => entries,
+            _ => panic!("首次扫描应返回 Inventory"),
+        };
+        let alpha_id = observation_id_at(&entries, &alpha_root);
+        let beta_id = observation_id_at(&entries, &beta_root);
+        let plan = match application
+            .handle(UiIntent::CreateTakeoverPlan {
+                request: takeover_plan_request! {
+                    members: vec![
+                        TakeoverMemberRequest {
+                            observation_ids: vec![alpha_id.clone()],
+                            selected_observation_id: alpha_id.clone(),
+                            preserved_observation_ids: Vec::new(),
+                        },
+                        TakeoverMemberRequest {
+                            observation_ids: vec![beta_id.clone()],
+                            selected_observation_id: beta_id.clone(),
+                            preserved_observation_ids: Vec::new(),
+                        },
+                    ],
+                    shared_targets: vec![
+                        TakeoverSharedTargetRequest {
+                            shared_observation_id: alpha_id,
+                            app_id: SupportedAppId::Codex,
+                        },
+                        TakeoverSharedTargetRequest {
+                            shared_observation_id: beta_id,
+                            app_id: SupportedAppId::Codex,
+                        },
+                    ],
+                },
+            })
+            .expect("应生成 Bundle 接管计划")
+        {
+            UiOutcome::TakeoverPlan { plan } => plan,
+            _ => panic!("应返回 Takeover Plan"),
+        };
+        let plan_id = plan.id.clone();
+        let bundle_id = plan.bundle_id.clone();
+        let expected_targets = plan
+            .members
+            .iter()
+            .map(|member| (member.skill_name.clone(), member.expected_target.clone()))
+            .collect::<Vec<_>>();
+        drop(application);
+
+        run_hard_exit_takeover_worker(&data_root, &home, &plan_id, point);
+
+        let reopened = SkillYardApplication::new(
+            ApplicationPaths::for_home(data_root.clone(), home.clone()),
+            PlatformInfo::supported_for_test(),
+        );
+        let UiOutcome::Inventory {
+            entries,
+            mounts,
+            recovery_issues,
+            ..
+        } = reopened
+            .handle(UiIntent::GetStartupState)
+            .unwrap_or_else(|error| panic!("{point} 重启后应自动恢复：{error}"))
+        else {
+            panic!("恢复后应返回 Inventory");
+        };
+        assert!(recovery_issues.is_empty(), "{point} 不应需要人工恢复");
+
+        if should_commit {
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.bundle_id.as_deref() == Some(bundle_id.as_str()))
+                    .count(),
+                2,
+                "{point} 必须完整保留两个受管 Member"
+            );
+            assert_eq!(mounts.len(), 2, "{point} 必须完整保留两个 Mount");
+            assert!(!alpha_root.exists());
+            assert!(!beta_root.exists());
+            for (skill_name, expected_target) in &expected_targets {
+                assert_eq!(
+                    fs::read_link(home.join(".codex/skills").join(skill_name))
+                        .expect("提交后的 Host 位置应为 Mount"),
+                    Path::new(expected_target)
+                );
+            }
+            assert_takeover_database_counts(&data_root, (1, 2, 0, 0));
+        } else {
+            assert!(
+                entries
+                    .iter()
+                    .all(|entry| entry.management_kind != ManagementKind::SkillYardManaged),
+                "{point} 不能只接管 Bundle 的部分成员"
+            );
+            assert!(mounts.is_empty(), "{point} 不能留下部分 Mount");
+            assert_eq!(read_skill_file(&alpha_root), alpha_content);
+            assert_eq!(read_skill_file(&beta_root), beta_content);
+            assert!(!contains_entries(&data_root.join("bundles")));
+            assert_takeover_database_counts(&data_root, (0, 0, 0, 0));
+        }
+        assert_clean_takeover_artifacts(&data_root, &[&alpha_root, &beta_root]);
+    }
 }
 
 #[test]
@@ -286,7 +1045,7 @@ fn user_selected_origins_form_one_identity_with_one_selected_content() {
 
     let outcome = application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![codex_id.clone(), claude_id.clone()],
                 selected_observation_id: codex_id.clone(),
                 preserved_observation_ids: vec![codex_id.clone(), claude_id.clone()],
@@ -298,9 +1057,12 @@ fn user_selected_origins_form_one_identity_with_one_selected_content() {
         panic!("应返回 Takeover Plan");
     };
 
-    assert_eq!(plan.identity_basis, TakeoverIdentityBasis::UserConfirmed);
-    assert_eq!(plan.selected_observation_id, codex_id);
-    assert_eq!(plan.skill_description, "采用这份内容");
+    assert_eq!(
+        plan.members[0].identity_basis,
+        TakeoverIdentityBasis::UserConfirmed
+    );
+    assert_eq!(plan.members[0].selected_observation_id, codex_id);
+    assert_eq!(plan.members[0].skill_description, "采用这份内容");
     assert_eq!(plan.origins.len(), 2);
     assert_eq!(plan.targets.len(), 2);
     assert!(
@@ -322,7 +1084,7 @@ fn user_selected_origins_form_one_identity_with_one_selected_content() {
     assert!(
         plan.targets
             .iter()
-            .all(|target| target.expected_target == plan.expected_target)
+            .all(|target| target.expected_target == plan.members[0].expected_target)
     );
     assert!(!data_root.join("bundles").join(&plan.bundle_id).exists());
     assert_eq!(read_skill_file(&codex_root), original_files[0]);
@@ -352,11 +1114,13 @@ fn blocked_takeover_reserves_only_its_original_skill_for_plan_and_confirmation()
     };
     let alpha_id = observation_id_at(&entries, &fixture.skill_root);
     let beta_id = observation_id_at(&entries, &beta_root);
-    let create_plan = |observation_id: &str| TakeoverPlanRequest {
-        observation_ids: vec![observation_id.to_owned()],
-        selected_observation_id: observation_id.to_owned(),
-        preserved_observation_ids: vec![observation_id.to_owned()],
-        shared_targets: Vec::new(),
+    let create_plan = |observation_id: &str| {
+        takeover_plan_request! {
+            observation_ids: vec![observation_id.to_owned()],
+            selected_observation_id: observation_id.to_owned(),
+            preserved_observation_ids: vec![observation_id.to_owned()],
+            shared_targets: Vec::new(),
+        }
     };
     let pending_same_origin = match application
         .handle(UiIntent::CreateTakeoverPlan {
@@ -424,6 +1188,87 @@ fn blocked_takeover_reserves_only_its_original_skill_for_plan_and_confirmation()
 }
 
 #[test]
+fn blocked_takeover_prevents_removing_its_registered_project() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let project_root = sandbox.path().join("workspace/project");
+    let skill_root = project_root.join(".codex/skills/alpha");
+    write_skill(&skill_root, "alpha", "Project 接管恢复依赖原项目身份");
+    let skill_root = fs::canonicalize(&skill_root).expect("应解析 Project Skill 路径");
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功");
+    let (project_id, observation_id) = match application
+        .handle(UiIntent::RegisterProject {
+            root_path: path_text(&project_root),
+        })
+        .expect("应登记包含待接管 Skill 的 Project")
+    {
+        UiOutcome::Inventory {
+            entries, projects, ..
+        } => (
+            projects.first().expect("应返回已登记 Project").id.clone(),
+            observation_id_at(&entries, &skill_root),
+        ),
+        _ => panic!("登记 Project 后应返回 Inventory"),
+    };
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: takeover_plan_request! {
+                observation_ids: vec![observation_id.clone()],
+                selected_observation_id: observation_id.clone(),
+                preserved_observation_ids: vec![observation_id],
+                shared_targets: Vec::new(),
+            },
+        })
+        .expect("应生成 Project Takeover Plan")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    let removal_plan_id = match application
+        .handle(UiIntent::CreateProjectRemovalPlan {
+            project_id: project_id.clone(),
+        })
+        .expect("Takeover 尚未阻塞时应允许生成 Project Removal Plan")
+    {
+        UiOutcome::RemovalPlan { plan } => plan.id,
+        _ => panic!("应返回 Project Removal Plan"),
+    };
+    drop(application);
+
+    run_hard_exit_takeover_worker(&data_root, &home, &plan.id, "current-before-phase");
+    run_hard_exit_takeover_worker(&data_root, &home, &plan.id, "candidate-cleanup");
+    let candidate = only_takeover_candidate_content(&data_root);
+    fs::remove_dir_all(&candidate).expect("应替换待清理候选根目录");
+    fs::create_dir(&candidate).expect("应创建同名未知候选根目录");
+    fs::write(candidate.join("unknown.txt"), "等待人工处理").expect("应写入未知内容");
+
+    let reopened = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("候选目录身份变化应进入人工恢复");
+    reopened
+        .handle(UiIntent::CreateProjectRemovalPlan {
+            project_id: project_id.clone(),
+        })
+        .expect_err("blocked Takeover 必须阻止删除恢复仍依赖的 Project");
+    reopened
+        .handle(UiIntent::ConfirmRemovalPlan {
+            plan_id: removal_plan_id,
+        })
+        .expect_err("旧 Project Removal Plan 确认时也必须重新检查 blocked Takeover");
+}
+
+#[test]
 fn precommit_blocked_takeover_reserves_its_host_path_from_other_members() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
@@ -482,7 +1327,7 @@ fn precommit_blocked_takeover_reserves_its_host_path_from_other_members() {
     let observation_id = observation_id_at(&entries, &takeover_root);
     let takeover_plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: vec![observation_id],
@@ -560,7 +1405,7 @@ fn confirming_one_origin_installs_one_bundle_and_preserves_its_mount() {
     };
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: vec![observation_id],
@@ -587,7 +1432,7 @@ fn confirming_one_origin_installs_one_bundle_and_preserves_its_mount() {
 
     let managed = entries
         .iter()
-        .find(|entry| entry.member_id.as_deref() == Some(&plan.member_id))
+        .find(|entry| entry.member_id.as_deref() == Some(&plan.members[0].member_id))
         .expect("Inventory 应展示接管后的受管成员");
     assert_eq!(managed.bundle_id.as_deref(), Some(plan.bundle_id.as_str()));
     assert_eq!(managed.management_kind, ManagementKind::SkillYardManaged);
@@ -601,7 +1446,7 @@ fn confirming_one_origin_installs_one_bundle_and_preserves_its_mount() {
     assert!(root_metadata.file_type().is_symlink());
     assert_eq!(
         fs::read_link(&skill_root).expect("应读取 Host Mount"),
-        Path::new(&plan.expected_target)
+        Path::new(&plan.members[0].expected_target)
     );
     assert!(skill_root.parent().expect("应有 Host 根目录").is_dir());
     assert_eq!(read_skill_file(&skill_root), original_content);
@@ -688,7 +1533,7 @@ fn confirming_one_origin_can_remove_its_existing_mount() {
     };
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id,
                 preserved_observation_ids: Vec::new(),
@@ -721,7 +1566,7 @@ fn confirming_one_origin_can_remove_its_existing_mount() {
     assert!(
         entries
             .iter()
-            .any(|entry| entry.member_id.as_deref() == Some(plan.member_id.as_str())),
+            .any(|entry| entry.member_id.as_deref() == Some(plan.members[0].member_id.as_str())),
         "中央主副本仍应出现在 Inventory"
     );
     assert_eq!(
@@ -794,7 +1639,7 @@ fn confirming_multiple_origins_uses_one_selected_content_everywhere() {
     let copilot_id = observation_id_at(&entries, &copilot_root);
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 // 选中内容故意不放在第一项，确认流程必须按 ID 选择，不能依赖列表顺序。
                 observation_ids: vec![claude_id.clone(), codex_id.clone(), copilot_id],
                 selected_observation_id: codex_id.clone(),
@@ -822,7 +1667,7 @@ fn confirming_multiple_origins_uses_one_selected_content_everywhere() {
     for root in [&codex_root, &claude_root] {
         assert_eq!(
             fs::read_link(root).expect("保留位置应成为 Mount"),
-            Path::new(&plan.expected_target)
+            Path::new(&plan.members[0].expected_target)
         );
         assert_eq!(read_skill_file(root), selected_content);
         assert_no_takeover_artifacts(root.parent().expect("应有 Host Skill 根目录"));
@@ -836,12 +1681,12 @@ fn confirming_multiple_origins_uses_one_selected_content_everywhere() {
     assert!(
         mounts
             .iter()
-            .all(|mount| mount.expected_target == plan.expected_target)
+            .all(|mount| mount.expected_target == plan.members[0].expected_target)
     );
     assert_eq!(
         entries
             .iter()
-            .filter(|entry| entry.member_id.as_deref() == Some(plan.member_id.as_str()))
+            .filter(|entry| entry.member_id.as_deref() == Some(plan.members[0].member_id.as_str()))
             .count(),
         1
     );
@@ -918,7 +1763,7 @@ fn interruption_after_first_origin_restores_every_origin_as_one_atomic_takeover(
     let claude_id = observation_id_at(&entries, &claude_root);
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![codex_id.clone(), claude_id.clone()],
                 selected_observation_id: codex_id.clone(),
                 preserved_observation_ids: vec![codex_id, claude_id],
@@ -993,7 +1838,7 @@ fn preprogress_interruptions_restore_the_original_and_remove_hidden_artifacts() 
         };
         let plan = match application
             .handle(UiIntent::CreateTakeoverPlan {
-                request: TakeoverPlanRequest {
+                request: takeover_plan_request! {
                     observation_ids: vec![observation_id.clone()],
                     selected_observation_id: observation_id.clone(),
                     preserved_observation_ids: vec![observation_id],
@@ -1100,7 +1945,7 @@ fn takeover_resolves_global_project_scope_conflicts_before_one_atomic_confirmati
 
     application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![global_id.clone(), project_a_id.clone()],
                 selected_observation_id: project_a_id.clone(),
                 preserved_observation_ids: vec![global_id.clone(), project_a_id.clone()],
@@ -1110,7 +1955,7 @@ fn takeover_resolves_global_project_scope_conflicts_before_one_atomic_confirmati
         .expect_err("同一应用不能同时保留 global 与 project scope");
     application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![global_id.clone(), project_a_id.clone()],
                 selected_observation_id: project_a_id.clone(),
                 preserved_observation_ids: Vec::new(),
@@ -1124,7 +1969,7 @@ fn takeover_resolves_global_project_scope_conflicts_before_one_atomic_confirmati
 
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![
                     global_id,
                     project_a_id.clone(),
@@ -1172,13 +2017,13 @@ fn takeover_resolves_global_project_scope_conflicts_before_one_atomic_confirmati
     for root in [&project_a_root, &project_b_root] {
         assert_eq!(
             fs::read_link(root).expect("保留的 project 位置应成为 Mount"),
-            Path::new(&plan.expected_target)
+            Path::new(&plan.members[0].expected_target)
         );
         assert_eq!(read_skill_file(root), selected_content);
     }
     assert_eq!(
         fs::read_link(&claude_global_root).expect("Claude global 位置应成为 Mount"),
-        Path::new(&plan.expected_target)
+        Path::new(&plan.members[0].expected_target)
     );
     assert!(matches!(
         fs::symlink_metadata(&claude_project_root),
@@ -1233,7 +2078,7 @@ fn project_root_key_owns_the_app_and_project_replacement_invalidates_the_plan() 
     let observation_id = observation_id_at(&entries, &canonical_skill_root);
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: vec![observation_id],
@@ -1294,7 +2139,7 @@ fn shared_global_takeover_creates_only_selected_compatible_app_mounts() {
     let occupied_content = read_skill_file(&codex_target);
     application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: Vec::new(),
@@ -1310,7 +2155,7 @@ fn shared_global_takeover_creates_only_selected_compatible_app_mounts() {
 
     application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: Vec::new(),
@@ -1326,7 +2171,7 @@ fn shared_global_takeover_creates_only_selected_compatible_app_mounts() {
 
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: Vec::new(),
@@ -1372,7 +2217,7 @@ fn shared_global_takeover_creates_only_selected_compatible_app_mounts() {
     for target in [&codex_target, &copilot_target] {
         assert_eq!(
             fs::read_link(target).expect("选中的应用位置应成为 Mount"),
-            Path::new(&plan.expected_target)
+            Path::new(&plan.members[0].expected_target)
         );
         assert_eq!(read_skill_file(target), selected_content);
     }
@@ -1413,7 +2258,7 @@ fn shared_project_takeover_derives_target_from_the_registered_project() {
     let observation_id = observation_id_at(&entries, &shared_root);
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: Vec::new(),
@@ -1485,7 +2330,7 @@ fn shared_target_failure_keeps_the_shared_entry_and_removes_new_mounts() {
         };
         let plan = match application
             .handle(UiIntent::CreateTakeoverPlan {
-                request: TakeoverPlanRequest {
+                request: takeover_plan_request! {
                     observation_ids: vec![observation_id.clone()],
                     selected_observation_id: observation_id.clone(),
                     preserved_observation_ids: Vec::new(),
@@ -1789,7 +2634,7 @@ fn real_process_exit_after_shared_origin_move_restores_shared_entry_and_new_moun
     };
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: Vec::new(),
@@ -1900,7 +2745,7 @@ fn real_process_exit_during_committed_cleanup_continues_remaining_recoveries() {
     let claude_id = observation_id_at(&entries, &claude_root);
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![codex_id.clone(), claude_id.clone()],
                 selected_observation_id: codex_id.clone(),
                 preserved_observation_ids: vec![codex_id, claude_id],
@@ -1927,8 +2772,8 @@ fn real_process_exit_during_committed_cleanup_continues_remaining_recoveries() {
     let first = reopened
         .handle(UiIntent::GetStartupState)
         .expect("重启应继续剩余清理");
-    assert_managed_takeover_state(&first, &codex_root, &plan.expected_target);
-    assert_managed_takeover_state(&first, &claude_root, &plan.expected_target);
+    assert_managed_takeover_state(&first, &codex_root, &plan.members[0].expected_target);
+    assert_managed_takeover_state(&first, &claude_root, &plan.members[0].expected_target);
     assert_eq!(read_skill_file(&codex_root), selected_content);
     assert_eq!(read_skill_file(&claude_root), selected_content);
     assert_clean_takeover_artifacts(&data_root, &[&codex_root, &claude_root]);
@@ -1938,8 +2783,8 @@ fn real_process_exit_during_committed_cleanup_continues_remaining_recoveries() {
     let second = reopened_again
         .handle(UiIntent::GetStartupState)
         .expect("清理完成后的再次启动必须幂等");
-    assert_managed_takeover_state(&second, &codex_root, &plan.expected_target);
-    assert_managed_takeover_state(&second, &claude_root, &plan.expected_target);
+    assert_managed_takeover_state(&second, &codex_root, &plan.members[0].expected_target);
+    assert_managed_takeover_state(&second, &claude_root, &plan.members[0].expected_target);
 }
 
 #[test]
@@ -2096,6 +2941,12 @@ fn hard_exit_takeover_worker() {
         "first-recovery-removed" => {
             LifecycleFailpoint::HardExitAfterFirstTakeoverRecoveryRemovedBeforeProgress
         }
+        "previous-content-isolated" => {
+            LifecycleFailpoint::HardExitAfterTakeoverPreviousContentIsolated
+        }
+        "previous-content-removal" => {
+            LifecycleFailpoint::HardExitDuringTakeoverPreviousContentRemoval
+        }
         "journal-removed" => LifecycleFailpoint::HardExitAfterTakeoverJournalRemovedBeforeForget,
         "rollback-mount-before-progress" => {
             LifecycleFailpoint::HardExitAfterFirstTakeoverRollbackMountRemovedBeforeProgress
@@ -2148,7 +2999,7 @@ fn confirmation_rejects_a_host_ancestor_replaced_by_a_symlink() {
     };
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: vec![observation_id],
@@ -2204,7 +3055,7 @@ fn prepare_hard_exit_takeover(base: &Path, skill_name: &str) -> TakeoverCrashFix
     };
     let plan = match application
         .handle(UiIntent::CreateTakeoverPlan {
-            request: TakeoverPlanRequest {
+            request: takeover_plan_request! {
                 observation_ids: vec![observation_id.clone()],
                 selected_observation_id: observation_id.clone(),
                 preserved_observation_ids: vec![observation_id],
@@ -2221,7 +3072,7 @@ fn prepare_hard_exit_takeover(base: &Path, skill_name: &str) -> TakeoverCrashFix
         data_root,
         home,
         plan_id: plan.id,
-        expected_target: plan.expected_target,
+        expected_target: plan.members[0].expected_target.clone(),
         skill_root,
         original_content,
         original_identity,
@@ -2370,27 +3221,37 @@ fn write_skill(root: &Path, name: &str, description: &str) {
 }
 
 fn write_global_lock_v3(home: &Path, skill_name: &str) {
+    write_global_lock_v3_for(home, &[skill_name]);
+}
+
+fn write_global_lock_v3_for(home: &Path, skill_names: &[&str]) {
     let lock_directory = home.join(".agents");
     fs::create_dir_all(&lock_directory).expect("应创建 lock 目录");
+    let skills = skill_names
+        .iter()
+        .map(|skill_name| {
+            (
+                (*skill_name).to_owned(),
+                serde_json::json!({
+                    "source": "owner/repository",
+                    "sourceType": "github",
+                    "sourceUrl": "https://github.com/owner/repository.git",
+                    "pinnedRef": "release-2026-07",
+                    "skillPath": format!("skills/{skill_name}/SKILL.md"),
+                    "skillFolderHash": "0123456789abcdef0123456789abcdef01234567",
+                    "installedAt": "2026-07-01T00:00:00.000Z",
+                    "updatedAt": "2026-07-02T00:00:00.000Z"
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
     fs::write(
         lock_directory.join(".skill-lock.json"),
-        format!(
-            r#"{{
-  "version": 3,
-  "skills": {{
-    "{skill_name}": {{
-      "source": "owner/repository",
-      "sourceType": "github",
-      "sourceUrl": "https://github.com/owner/repository.git",
-      "pinnedRef": "release-2026-07",
-      "skillPath": "skills/{skill_name}/SKILL.md",
-      "skillFolderHash": "0123456789abcdef0123456789abcdef01234567",
-      "installedAt": "2026-07-01T00:00:00.000Z",
-      "updatedAt": "2026-07-02T00:00:00.000Z"
-    }}
-  }}
-}}"#
-        ),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 3,
+            "skills": skills
+        }))
+        .expect("应序列化 lock v3"),
     )
     .expect("应写入 lock v3");
 }

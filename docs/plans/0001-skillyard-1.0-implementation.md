@@ -177,7 +177,7 @@
 
 ### 目标
 
-把扫描发现的待接管 Skill 安全迁入 Central Store，同时保持用户已有使用关系。
+把扫描发现的待接管 Skill 或确定性安装组安全迁入 Central Store，同时保持用户已有使用关系。
 
 ### 重做实施边界
 
@@ -186,7 +186,7 @@ Stage 4 在提交 `9abc7d0` 后从 Stage 3 已验收基线重新实现。此前�
 新实现必须遵守以下边界：
 
 - 只有一套不带版本后缀的 `TakeoverPlan`、`TakeoverTransaction`、Filesystem Transaction Journal 和生产确认入口。
-- 一个 Plan 表达一个待接管 Skill Identity、一个最终 Bundle Member、一个被用户选中的内容副本、多个原始位置和多个最终 Mount；单副本、重复副本、scope 冲突与共享目录都是同一模型的不同输入，不建立特殊的第二套事务。
+- 一个 Plan 表达一个最终 Bundle。Bundle 可以包含一个或多个 Skill Member；每个 Member 分别保存一个 Skill Identity、一个被用户选中的内容副本、多个原始位置和多个最终 Mount。单成员、多成员、重复副本、scope 冲突与共享目录都是同一模型的不同输入，不建立特殊的第二套事务。
 - 创建 Plan 时冻结全部用户选择和后端派生路径；确认接口只接收 opaque `plan_id`，不能在确认时再次提交路径、Mount 或内容选择。
 - Plan 和扫描完全只读。确认后才建立一个接管事务；SQLite 记录总体阶段，Journal 记录完整文件操作合同和逐路径进度。
 - 领域状态提交前发生正常失败或中断时，恢复原始位置并移除本次候选与新增 Mount；领域状态提交后只向前完成验证和清理。未知占用、路径身份变化或权限异常进入 blocked recovery，不能猜测。
@@ -212,16 +212,16 @@ TakeoverPlan（只读、已封存）
   -> 隔离全部原始 Skill 目录
   -> 在用户确认的 Supported App 位置建立全部 Mount
   -> 验证 current、内容和 Mount
-  -> 一次 SQLite 事务提交 Bundle、Member、Selection、Mount 并消费 Plan
+  -> 一次 SQLite 事务提交 Bundle、全部 Member、Selection、Mount 并消费 Plan
   -> 清理隔离内容、Journal 和 Transaction
 ```
 
 模型与职责固定如下：
 
-- `TakeoverPlan`：保存扫描证据、用户选择、全部原始位置、最终 Mount 和后端派生路径。创建后不可修改；确认只传 `plan_id`。
+- `TakeoverPlan`：保存一个 Bundle 的成员边界、扫描证据、每个成员的内容选择、全部原始位置、最终 Mount 和后端派生路径。创建后不可修改；确认只传 `plan_id`。
 - `TakeoverTransaction`：SQLite 中唯一的接管总体状态，负责回答操作是否已经越过领域提交点。
 - `TakeoverJournal`：文件系统事务合同，保存候选内容、原始位置、隔离位置、最终 Mount 和逐项进度；它不是第二套领域状态。
-- `takeover.rs`：编排上述单一路径。单副本、多副本、scope 冲突和共享目录只能改变 Plan 输入，不能改变事务协议。
+- `takeover.rs`：编排上述单一路径。单成员、多成员、重复副本、scope 冲突和共享目录只能改变 Plan 输入，不能改变事务协议。
 - `storage.rs` 与 `0011_takeover_transactions.sql`：保存唯一接管事务，并在一个 SQLite 事务中提交完整受管领域状态；不引入 Source 或 Stage 5 schema。
 - `application.rs`、typed Tauri command/client 与 UI：只暴露创建 Plan、确认 Plan、读取持久状态三个生产动作，不暴露内部文件步骤。
 
@@ -247,20 +247,20 @@ Stage 3 能力按以下方式直接复用：
 
 | 切片 | 新增产品输入或观察点 | 不变的生产路径 |
 | --- | --- | --- |
-| Plan | 单副本、多副本、唯一内容选择 | 只生成封存 Plan，不写文件 |
+| Plan | 单成员、确定性多成员组、重复副本和唯一内容选择 | 只生成封存 Plan，不写文件 |
 | 单副本确认 | 一个原位置和保留／排除 Mount | 唯一 TakeoverTransaction 与 Journal |
-| 多副本确认 | 多个原位置、一个选中内容 | 同一候选发布、隔离、Mount 和提交顺序 |
+| Bundle 确认 | 一个或多个 Member，各自包含唯一选中内容和原始位置 | 同一候选发布、隔离、Mount 和提交顺序 |
 | scope／共享目录 | 不同最终 Mount 拓扑 | 同一事务，仅共享入口最后隔离 |
 | 恢复 | 各持久化阶段的硬退出 | 同一 Journal 按提交点前后恢复 |
 | UI | typed IPC 与用户影响预览 | 调用同一创建／确认生产入口 |
 
-例如，同一 Skill 同时存在于 Codex global 与 Claude Code project 时，Plan 只会多出两个 origin 和两个最终 Mount；确认后仍然只创建一个候选 Bundle、一个 `current`、一个 TakeoverTransaction 和一个 Journal，不会先执行“安装事务”再执行“挂载事务”。
+例如，同一 Skill 同时存在于 Codex global 与 Claude Code project 时，Plan 会为同一个 Member 保存两个 origin 和两个最终 Mount；同一 lock v3 来源下的多个不同 Skill 则会形成多个 Member。两种情况确认后都只创建一个候选 Bundle、一个 `current`、一个 TakeoverTransaction 和一个 Journal，不会按 Member 拆成多条生命周期事务。
 
 实现只允许按以下纵向切片推进，每片先出现公开 seam 的失败测试，再写最少实现，并独立提交、推送：
 
-1. 单一 Takeover Plan：单副本、多副本显式身份确认、唯一内容选择和零文件修改。
+1. 单一 Takeover Plan：单成员、确定性多成员组、重复副本显式身份确认、每个成员的唯一内容选择和零文件修改。
 2. 单副本确认：进入一个新 Bundle，并保留或排除已有 Mount。
-3. 多副本确认：所有位置统一使用唯一内容，未选内容不形成历史版本。
+3. Bundle 确认：全部 Member 一次进入同一个 Bundle；每个 Member 的所有位置统一使用其唯一内容，未选内容不形成历史版本。
 4. scope 冲突与共享目录：形成用户选择的最终 Mount 拓扑。
 5. 硬中断恢复：生效前恢复、提交后向前完成、重复启动幂等和未知内容阻塞。
 6. UI 与 typed IPC：完整用户主流程和失败后持久状态重读。
@@ -275,6 +275,7 @@ Stage 3 能力按以下方式直接复用：
 - 散落内容通过临时恢复内容、按需搬迁、Mount 重建和验证进入受管状态。
 - 默认保留已有 global 或 project 使用位置，用户可以在确认前排除不需要的 Mount。
 - 相同副本合并为一个主副本；不同副本由用户选择唯一内容，所有 Mount 最终统一使用它。
+- receipt、lock、安装 manifest 或 Adapter 结果能证明同一安装组时，多个不同 Skill 在一个 Plan 和一个事务中进入同一 Bundle。
 - 处理同一 Skill 的 global／project scope 冲突。
 - 处理 `.agents/skills` 等共享目录：用户选择目标 Supported App，新 Mount 全部验证后才移除原共享入口。
 - 没有 Source 也可以完成 Takeover，并显示“没有更新来源”。
@@ -291,6 +292,7 @@ Stage 3 能力按以下方式直接复用：
 - 不同副本选择完成后只有一个当前内容，未选内容不形成历史版本。
 - 只替换用户明确选择的 Skill 根目录，绝不替换整个 Supported App Skill 根目录。
 - Takeover 重启恢复不会产生重复 Mount、重复成员或额外删除。
+- 多成员 Bundle 在提交点前完整回滚、提交点后完整向前恢复，不能出现只接管部分 Member。
 
 ## 阶段 5：GitHub Source
 

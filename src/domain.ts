@@ -65,6 +65,9 @@ export interface InventoryObservation {
   managementEvidence?: ManagementEvidence | null;
   // lock v3 只证明这份安装记录，不证明具体由哪个外部 CLI 执行。
   installationChain: InstallationChain | null;
+  // 后端只有在存在确定性来源证据时才提供分组；null 仍表示独立待接管候选。
+  takeoverGroupId: string | null;
+  takeoverGroupDisplayName: string | null;
   // 受管安装由 Rust 投影真实 Bundle；扫描观察保持这些关系为空。
   bundleId?: string | null;
   bundleDisplayName?: string | null;
@@ -456,10 +459,14 @@ export interface SkillsShSearchSource {
 
 // Takeover 的全部选择在创建 Plan 时冻结；最终确认只再提交 Plan ID。
 export interface TakeoverPlanRequest {
+  members: TakeoverMemberRequest[];
+  sharedTargets: TakeoverSharedTargetRequest[];
+}
+
+export interface TakeoverMemberRequest {
   observationIds: string[];
   selectedObservationId: string;
   preservedObservationIds: string[];
-  sharedTargets: TakeoverSharedTargetRequest[];
 }
 
 export interface TakeoverSharedTargetRequest {
@@ -471,6 +478,7 @@ export type TakeoverIdentityBasis = "singleOrigin" | "userConfirmed";
 export type TakeoverOriginDisposition = "mount" | "remove";
 
 export interface TakeoverPlanOrigin {
+  memberId: string;
   observationId: string;
   originalPath: string;
   appId: SupportedAppId | null;
@@ -483,6 +491,7 @@ export interface TakeoverPlanOrigin {
 }
 
 export interface TakeoverPlanTarget {
+  memberId: string;
   mountId: string;
   appId: SupportedAppId;
   scope: MountScope;
@@ -494,24 +503,39 @@ export interface TakeoverPlanTarget {
 
 export interface TakeoverPlan {
   id: string;
-  identityBasis: TakeoverIdentityBasis;
-  selectedObservationId: string;
   bundleId: string;
-  memberId: string;
   contentId: string;
   bundleDisplayName: string;
-  skillName: string;
-  skillDescription: string;
   sourceDisplayName: string | null;
-  installationChain: InstallationChain | null;
   managedDirectory: string;
   contentDirectory: string;
-  expectedTarget: string;
+  retainedMembers: TakeoverPlanRetainedMember[];
+  members: TakeoverPlanMember[];
   origins: TakeoverPlanOrigin[];
   targets: TakeoverPlanTarget[];
   warnings: string[];
   createdAt: number;
   expiresAt: number;
+}
+
+export interface TakeoverPlanRetainedMember {
+  memberId: string;
+  skillName: string;
+  skillDescription: string;
+  installationChain: InstallationChain | null;
+  expectedTarget: string;
+  mounts: MountSummary[];
+}
+
+export interface TakeoverPlanMember {
+  memberId: string;
+  identityBasis: TakeoverIdentityBasis;
+  selectedObservationId: string;
+  skillName: string;
+  skillDescription: string;
+  installationChain: InstallationChain | null;
+  expectedTarget: string;
+  warnings: string[];
 }
 
 export type UiOutcome =

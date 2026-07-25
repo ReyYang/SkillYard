@@ -917,9 +917,11 @@ mod tests {
             &application,
             UiIntent::CreateTakeoverPlan {
                 request: TakeoverPlanRequest {
-                    observation_ids: vec![observation_id.clone()],
-                    selected_observation_id: observation_id.clone(),
-                    preserved_observation_ids: vec![observation_id],
+                    members: vec![crate::domain::TakeoverMemberRequest {
+                        observation_ids: vec![observation_id.clone()],
+                        selected_observation_id: observation_id.clone(),
+                        preserved_observation_ids: vec![observation_id],
+                    }],
                     shared_targets: Vec::new(),
                 },
             },
@@ -945,7 +947,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_link(&skill_root).expect("原使用位置应成为 Mount"),
-            Path::new(&plan.expected_target)
+            Path::new(&plan.members[0].expected_target)
         );
     }
 }

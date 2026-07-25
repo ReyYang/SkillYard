@@ -31,6 +31,32 @@ button:focus-visible {
   outline-offset: 3px;
 }
 
+/* 确定分组使用独立边界，避免用户把 Bundle 成员误认成多个接管任务。 */
+.takeover-bundle {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid rgb(59 84 65 / 16%);
+  border-radius: 18px;
+  background: rgb(247 250 246 / 78%);
+}
+
+.takeover-bundle > header {
+  display: flex;
+  gap: 1rem;
+  align-items: end;
+  justify-content: space-between;
+}
+
+.takeover-bundle h3 {
+  margin: 0;
+  color: #263a2c;
+  font-size: 1.2rem;
+}
+
+.takeover-bundle .inventory-list {
+  margin-top: 0.85rem;
+}
+
 .onboarding-shell,
 .inventory-shell,
 .install-shell,
@@ -70,6 +96,13 @@ button:focus-visible {
   font-size: 0.92rem;
   font-weight: 850;
   letter-spacing: -0.04em;
+}
+
+@media (max-width: 700px) {
+  .takeover-bundle > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 
 .eyebrow,
@@ -1468,6 +1501,29 @@ code {
   color: #707a72;
   font-size: 0.76rem;
   font-weight: 500;
+}
+
+/* Bundle 可以批量选择 Host，但成员级复选框仍保留独立调整入口。 */
+.takeover-member-target-option {
+  grid-template-columns: minmax(0, 1fr);
+  cursor: default;
+}
+
+.takeover-member-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+}
+
+.takeover-member-targets label {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  cursor: pointer;
+}
+
+.takeover-member-targets input {
+  margin: 0;
 }
 
 .batch-plan {

@@ -549,9 +549,13 @@ describe("Tauri IPC contract", () => {
   it("创建 Takeover Plan 时提交完整且明确的用户选择", async () => {
     mocks.invoke.mockResolvedValue({ id: "takeover-plan-1" });
     const request = {
-      observationIds: ["origin-1", "origin-2"],
-      selectedObservationId: "origin-2",
-      preservedObservationIds: ["origin-1"],
+      members: [
+        {
+          observationIds: ["origin-1", "origin-2"],
+          selectedObservationId: "origin-2",
+          preservedObservationIds: ["origin-1"],
+        },
+      ],
       sharedTargets: [
         { sharedObservationId: "origin-2", appId: "claudeCode" as const },
       ],

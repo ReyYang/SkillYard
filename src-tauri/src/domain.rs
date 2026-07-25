@@ -180,14 +180,21 @@ pub enum MountScope {
     Project,
 }
 
-/// 创建 Plan 时一次冻结全部用户选择；确认阶段只再接收不透明 Plan ID。
+/// 创建 Plan 时一次冻结整个 Bundle 的全部成员选择；确认阶段只再接收不透明 Plan ID。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TakeoverPlanRequest {
+    pub members: Vec<TakeoverMemberRequest>,
+    pub shared_targets: Vec<TakeoverSharedTargetRequest>,
+}
+
+/// 每个 Member 独立选择主内容和需要保留的既有位置，不能让一个选择覆盖整个 Bundle。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverMemberRequest {
     pub observation_ids: Vec<String>,
     pub selected_observation_id: String,
     pub preserved_observation_ids: Vec<String>,
-    pub shared_targets: Vec<TakeoverSharedTargetRequest>,
 }
 
 /// 共享目录不能继续作为 Mount，用户要明确选择应用专属目标。
@@ -216,6 +223,7 @@ pub enum TakeoverOriginDisposition {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TakeoverPlanOrigin {
+    pub member_id: String,
     pub observation_id: String,
     pub original_path: String,
     pub app_id: Option<SupportedAppId>,
@@ -231,6 +239,7 @@ pub struct TakeoverPlanOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TakeoverPlanTarget {
+    pub member_id: String,
     pub mount_id: String,
     pub app_id: SupportedAppId,
     pub scope: MountScope,
@@ -240,24 +249,45 @@ pub struct TakeoverPlanTarget {
     pub expected_target: String,
 }
 
-/// 一套 Plan 同时覆盖单副本、重复副本、scope 冲突与共享目录输入。
+/// 一个 Member 在同一 Bundle 事务中保留自己的内容选择、履历和稳定目标。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverPlanMember {
+    pub member_id: String,
+    pub identity_basis: TakeoverIdentityBasis,
+    pub selected_observation_id: String,
+    pub skill_name: String,
+    pub skill_description: String,
+    pub installation_chain: Option<Box<InstallationChain>>,
+    pub expected_target: String,
+    pub warnings: Vec<String>,
+}
+
+/// 补充接管时只读展示已经属于目标 Bundle、且本次事务会原样保留的成员。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverPlanRetainedMember {
+    pub member_id: String,
+    pub skill_name: String,
+    pub skill_description: String,
+    pub installation_chain: Option<Box<InstallationChain>>,
+    pub expected_target: String,
+    pub mounts: Vec<MountSummary>,
+}
+
+/// 一套 Plan 同时覆盖整个 Bundle 的成员、现有位置和最终 Mount。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TakeoverPlan {
     pub id: String,
-    pub identity_basis: TakeoverIdentityBasis,
-    pub selected_observation_id: String,
     pub bundle_id: String,
-    pub member_id: String,
     pub content_id: String,
     pub bundle_display_name: String,
-    pub skill_name: String,
-    pub skill_description: String,
     pub source_display_name: Option<String>,
-    pub installation_chain: Option<Box<InstallationChain>>,
     pub managed_directory: String,
     pub content_directory: String,
-    pub expected_target: String,
+    pub retained_members: Vec<TakeoverPlanRetainedMember>,
+    pub members: Vec<TakeoverPlanMember>,
     pub origins: Vec<TakeoverPlanOrigin>,
     pub targets: Vec<TakeoverPlanTarget>,
     pub warnings: Vec<String>,
@@ -611,6 +641,9 @@ pub struct InventoryItem {
     pub management_kind: ManagementKind,
     pub management_evidence: Option<ManagementEvidence>,
     pub installation_chain: Option<InstallationChain>,
+    /// 待接管分组只表达经安装记录证明的边界，不能冒充已经创建的 Bundle。
+    pub takeover_group_id: Option<String>,
+    pub takeover_group_display_name: Option<String>,
     pub bundle_id: Option<String>,
     /// 受管条目公开稳定 Member ID；扫描观察保持为空，前端不能解析展示 ID。
     pub member_id: Option<String>,
@@ -1553,9 +1586,11 @@ mod tests {
     fn takeover_plan_request_uses_the_frontend_camel_case_contract() {
         let intent = UiIntent::CreateTakeoverPlan {
             request: TakeoverPlanRequest {
-                observation_ids: vec!["observation-1".to_owned()],
-                selected_observation_id: "observation-1".to_owned(),
-                preserved_observation_ids: vec!["observation-1".to_owned()],
+                members: vec![TakeoverMemberRequest {
+                    observation_ids: vec!["observation-1".to_owned()],
+                    selected_observation_id: "observation-1".to_owned(),
+                    preserved_observation_ids: vec!["observation-1".to_owned()],
+                }],
                 shared_targets: vec![TakeoverSharedTargetRequest {
                     shared_observation_id: "shared-1".to_owned(),
                     app_id: SupportedAppId::ClaudeCode,
@@ -1566,12 +1601,15 @@ mod tests {
         let value = serde_json::to_value(intent).expect("应序列化 Takeover Plan 请求");
         assert_eq!(value["type"], "createTakeoverPlan");
         assert_eq!(
-            value["request"]["observationIds"],
+            value["request"]["members"][0]["observationIds"],
             serde_json::json!(["observation-1"])
         );
-        assert_eq!(value["request"]["selectedObservationId"], "observation-1");
         assert_eq!(
-            value["request"]["preservedObservationIds"],
+            value["request"]["members"][0]["selectedObservationId"],
+            "observation-1"
+        );
+        assert_eq!(
+            value["request"]["members"][0]["preservedObservationIds"],
             serde_json::json!(["observation-1"])
         );
         assert_eq!(

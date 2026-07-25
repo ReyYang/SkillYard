@@ -850,7 +850,7 @@ fn blocked_batch_reserves_related_members_and_targets_but_allows_unrelated_mount
 }
 
 #[test]
-fn blocked_takeover_reserves_its_member_but_allows_unrelated_mount_plans() {
+fn committed_blocked_takeover_reserves_its_bundle_but_allows_unrelated_bundles() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let harness = ready_harness(sandbox.path());
     let bundle = install_bundle(
@@ -923,13 +923,34 @@ fn blocked_takeover_reserves_its_member_but_allows_unrelated_mount_plans() {
     assert_eq!(reserved.disposition, BatchMountDisposition::PathConflict);
     assert!(!reserved.selectable);
     assert!(reserved.conflict_reason.is_some());
-    assert_eq!(free.disposition, BatchMountDisposition::Ready);
-    assert!(free.selectable);
+    assert_eq!(free.disposition, BatchMountDisposition::PathConflict);
+    assert!(!free.selectable);
+    assert!(free.conflict_reason.is_some());
 
-    let mounted = confirm_batch_plan(&harness.application, &plan, vec![free.id.clone()]);
+    let unrelated = install_bundle(&harness, "unrelated-bundle", &["unrelated-skill"]);
+    let UiOutcome::MountPlan {
+        plan: unrelated_plan,
+    } = harness
+        .application
+        .handle(UiIntent::CreateMountPlan {
+            member_id: unrelated.member("unrelated-skill").id.clone(),
+            app_id: SupportedAppId::ClaudeCode,
+            scope: MountScope::Global,
+            project_id: None,
+        })
+        .expect("blocked Takeover 不能冻结无关 Bundle")
+    else {
+        panic!("应返回无关 Bundle 的 Mount Plan");
+    };
+    let mounted = harness
+        .application
+        .handle(UiIntent::ConfirmMountPlan {
+            plan_id: unrelated_plan.id,
+        })
+        .expect("无关 Bundle 的 Mount 应正常完成");
     assert_link(
-        Path::new(&free.target_path),
-        &bundle.member("free-skill").expected_target,
+        Path::new(&unrelated_plan.target_path),
+        &unrelated.member("unrelated-skill").expected_target,
     );
     assert_eq!(inventory_mounts(&mounted).len(), 2);
 }

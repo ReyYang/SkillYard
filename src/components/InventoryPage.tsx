@@ -129,6 +129,10 @@ export function InventoryPage({
   const takeoverEntries = visibleEntries.filter(
     (entry) => entry.managementKind === "takeoverCandidate",
   );
+  const takeoverGroups = useMemo(
+    () => groupTakeoverEntries(takeoverEntries),
+    [takeoverEntries],
+  );
   const agentEntries = visibleEntries.filter(
     (entry) => entry.managementKind === "agentManaged",
   );
@@ -445,10 +449,9 @@ export function InventoryPage({
             onRemoveBundle={onRemoveBundle}
           />
         ))}
-        <InventorySection
-          title="待接管"
-          eyebrow="本机已有 · 只读"
-          entries={takeoverEntries}
+        <TakeoverInventorySection
+          groups={takeoverGroups.groups}
+          ungrouped={takeoverGroups.ungrouped}
           actionsDisabled={isWriteBlocked}
           onTakeover={onTakeover}
         />
@@ -610,6 +613,90 @@ function InventorySection({
   );
 }
 
+function TakeoverInventorySection({
+  groups,
+  ungrouped,
+  actionsDisabled,
+  onTakeover,
+}: {
+  groups: Array<{
+    id: string;
+    title: string;
+    entries: InventoryObservation[];
+  }>;
+  ungrouped: InventoryObservation[];
+  actionsDisabled: boolean;
+  onTakeover?(observationId: string): void;
+}) {
+  const entryCount =
+    ungrouped.length +
+    groups.reduce((count, group) => count + group.entries.length, 0);
+  if (entryCount === 0) return null;
+
+  return (
+    <section className="inventory-section" aria-label="待接管">
+      <header>
+        <div>
+          <p className="section-eyebrow">本机已有 · 只读</p>
+          <h2>待接管</h2>
+        </div>
+        <div className="inventory-section-actions">
+          <span>{entryCount}</span>
+        </div>
+      </header>
+      {groups.map((group) => (
+        <section
+          className="takeover-bundle"
+          aria-label={group.title}
+          key={group.id}
+        >
+          <header>
+            <div>
+              <p className="section-eyebrow">待接管 Bundle</p>
+              <h3>{group.title}</h3>
+            </div>
+            <button
+              className="compact-action"
+              type="button"
+              disabled={actionsDisabled}
+              aria-label={`接管 Bundle ${group.title}`}
+              onClick={() => onTakeover?.(group.entries[0]!.id)}
+            >
+              接管 Bundle
+            </button>
+          </header>
+          <ul className="inventory-list">
+            {group.entries.map((entry) => (
+              <SkillCard
+                key={entry.id}
+                entry={entry}
+                mounts={[]}
+                actionsDisabled={actionsDisabled}
+                allowReadOnlyDetails={false}
+                showTakeoverAction={false}
+              />
+            ))}
+          </ul>
+        </section>
+      ))}
+      {ungrouped.length > 0 ? (
+        <ul className="inventory-list">
+          {ungrouped.map((entry) => (
+            <SkillCard
+              key={entry.id}
+              entry={entry}
+              mounts={[]}
+              actionsDisabled={actionsDisabled}
+              allowReadOnlyDetails={false}
+              onTakeover={onTakeover}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
 function BundleUpdateStatusView({
   update,
   bundleDisplayName,
@@ -712,6 +799,7 @@ function SkillCard({
   allowReadOnlyDetails,
   onManageMount,
   onTakeover,
+  showTakeoverAction = true,
 }: {
   entry: InventoryObservation;
   mounts: MountSummary[];
@@ -719,6 +807,7 @@ function SkillCard({
   allowReadOnlyDetails: boolean;
   onManageMount?(memberId: string): void;
   onTakeover?(observationId: string): void;
+  showTakeoverAction?: boolean;
 }) {
   return (
     <li className="skill-card">
@@ -774,7 +863,8 @@ function SkillCard({
           </button>
         </div>
       ) : null}
-      {entry.managementKind === "takeoverCandidate" ? (
+      {entry.managementKind === "takeoverCandidate" &&
+      showTakeoverAction ? (
         <div className="mount-card-controls">
           <span className="mount-empty">确认后才会移动或替换文件</span>
           <button
@@ -851,6 +941,49 @@ function groupManagedEntries(
   );
 }
 
+function groupTakeoverEntries(entries: InventoryObservation[]): {
+  groups: Array<{
+    id: string;
+    title: string;
+    entries: InventoryObservation[];
+  }>;
+  ungrouped: InventoryObservation[];
+} {
+  const grouped = new Map<
+    string,
+    {
+      id: string;
+      title: string;
+      entries: InventoryObservation[];
+    }
+  >();
+  const ungrouped: InventoryObservation[] = [];
+  for (const entry of entries) {
+    // 缺少确定性分组证据时保持独立，不能用 skillName 或展示名冒充分组 ID。
+    if (!entry.takeoverGroupId) {
+      ungrouped.push(entry);
+      continue;
+    }
+    const current = grouped.get(entry.takeoverGroupId);
+    grouped.set(entry.takeoverGroupId, {
+      id: entry.takeoverGroupId,
+      title:
+        entry.takeoverGroupDisplayName ??
+        current?.title ??
+        "本地 Bundle",
+      entries: [...(current?.entries ?? []), entry],
+    });
+  }
+  return {
+    groups: [...grouped.values()].sort(
+      (left, right) =>
+        left.title.localeCompare(right.title, "zh-CN") ||
+        left.id.localeCompare(right.id),
+    ),
+    ungrouped,
+  };
+}
+
 function matchesFilter(
   entry: InventoryObservation,
   filter: ManagementFilter,
@@ -870,6 +1003,7 @@ function matchesQuery(entry: InventoryObservation, query: string): boolean {
     entry.skillName,
     entry.declaredName,
     entry.bundleDisplayName,
+    entry.takeoverGroupDisplayName,
     entry.sourceDisplayName,
     entry.installationChain?.source,
     entry.installationChain?.sourceLocator,

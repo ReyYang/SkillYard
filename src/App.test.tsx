@@ -2852,6 +2852,570 @@ describe("本机清单", () => {
 });
 
 describe("接管已有 Skill", () => {
+  it("把确定分组的不同 Skill 显示为一个待接管 Bundle，并一次生成多成员 Plan", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "origin-review",
+          skillName: "review",
+          declaredName: "review",
+          skillRoot: "/tmp/home/.codex/skills/review",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "origin-release",
+          skillName: "release",
+          declaredName: "release",
+          skillRoot: "/tmp/home/.codex/skills/release",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", { name: "工具套件" });
+    expect(within(bundle).getByText("review")).toBeInTheDocument();
+    expect(within(bundle).getByText("release")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: "接管 Bundle 工具套件" }),
+    ).toHaveLength(1);
+
+    await user.click(
+      screen.getByRole("button", { name: "接管 Bundle 工具套件" }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      members: [
+        {
+          observationIds: ["origin-review"],
+          selectedObservationId: "origin-review",
+          preservedObservationIds: ["origin-review"],
+        },
+        {
+          observationIds: ["origin-release"],
+          selectedObservationId: "origin-release",
+          preservedObservationIds: ["origin-release"],
+        },
+      ],
+      sharedTargets: [],
+    });
+  });
+
+  it("Bundle 中同名多副本分别选择成员主内容，不影响其他成员", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "review-codex",
+          skillName: "review",
+          skillRoot: "/tmp/codex/review",
+          observedFingerprint: "review-a",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "review-claude",
+          skillName: "review",
+          skillRoot: "/tmp/claude/review",
+          observedBy: ["claudeCode"],
+          observedFingerprint: "review-b",
+          rootKey: "claudeCodeGlobal",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "release-codex",
+          skillName: "release",
+          skillRoot: "/tmp/codex/release",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "接管 Bundle 工具套件",
+      }),
+    );
+    expect(
+      screen.getByRole("heading", {
+        name: "请选择 review 的唯一一份内容",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成影响预览" })).toBeDisabled();
+
+    await user.click(
+      screen.getByRole("radio", {
+        name: "使用 /tmp/claude/review 作为主副本",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      members: [
+        {
+          observationIds: ["review-codex", "review-claude"],
+          selectedObservationId: "review-claude",
+          preservedObservationIds: ["review-codex", "review-claude"],
+        },
+        {
+          observationIds: ["release-codex"],
+          selectedObservationId: "release-codex",
+          preservedObservationIds: ["release-codex"],
+        },
+      ],
+      sharedTargets: [],
+    });
+  });
+
+  it("Bundle 成员可以把没有安装收据的同名位置选为主内容", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "review-receipt",
+          skillName: "review",
+          skillRoot: "/tmp/shared/review",
+          observedFingerprint: "review-from-install",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "review-project",
+          skillName: "review",
+          skillRoot: "/tmp/project/.codex/skills/review",
+          observedFingerprint: "review-edited-locally",
+          rootKey: "claudeCodeProject",
+          locationKind: "appProject",
+          projectId: "project-1",
+          projectDisplayName: "本地项目",
+        }),
+        createEntry({
+          id: "release-receipt",
+          skillName: "release",
+          skillRoot: "/tmp/shared/release",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "接管 Bundle 工具套件",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "确认同一 Skill：/tmp/project/.codex/skills/review",
+      }),
+    );
+    await user.click(
+      screen.getByRole("radio", {
+        name: "使用 /tmp/project/.codex/skills/review 作为主副本",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      members: [
+        {
+          observationIds: ["review-receipt", "review-project"],
+          selectedObservationId: "review-project",
+          preservedObservationIds: ["review-receipt", "review-project"],
+        },
+        {
+          observationIds: ["release-receipt"],
+          selectedObservationId: "release-receipt",
+          preservedObservationIds: ["release-receipt"],
+        },
+      ],
+      sharedTargets: [],
+    });
+  });
+
+  it("Bundle 中无效成员保持未选，其他有效成员仍能接管", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "origin-review",
+          skillName: "review",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "origin-release",
+          skillName: "release",
+          metadataStatus: "invalid",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "接管 Bundle 工具套件",
+      }),
+    );
+    expect(
+      screen.getByRole("checkbox", {
+        name: "接管 Bundle 成员：release",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("checkbox", {
+        name: "接管 Bundle 成员：release",
+      }),
+    ).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      members: [
+        {
+          observationIds: ["origin-review"],
+          selectedObservationId: "origin-review",
+          preservedObservationIds: ["origin-review"],
+        },
+      ],
+      sharedTargets: [],
+    });
+  });
+
+  it("Bundle 级 Supported App 选择一次应用到全部兼容共享成员", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "shared-review",
+          skillName: "review",
+          skillRoot: "/tmp/shared/review",
+          locationKind: "sharedReadOnly",
+          rootKey: "sharedAgents",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "shared-release",
+          skillName: "release",
+          skillRoot: "/tmp/shared/release",
+          locationKind: "sharedReadOnly",
+          rootKey: "sharedAgents",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "接管 Bundle 工具套件",
+      }),
+    );
+    expect(
+      screen.getAllByRole("checkbox", {
+        name: "将 Bundle 中的共享目录挂载到 Codex",
+      }),
+    ).toHaveLength(1);
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "将 Bundle 中的共享目录挂载到 Codex",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      members: [
+        {
+          observationIds: ["shared-review"],
+          selectedObservationId: "shared-review",
+          preservedObservationIds: [],
+        },
+        {
+          observationIds: ["shared-release"],
+          selectedObservationId: "shared-release",
+          preservedObservationIds: [],
+        },
+      ],
+      sharedTargets: [
+        { sharedObservationId: "shared-review", appId: "codex" },
+        { sharedObservationId: "shared-release", appId: "codex" },
+      ],
+    });
+  });
+
+  it("Bundle 批量选择 Supported App 后仍可按成员调整", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "shared-review",
+          skillName: "review",
+          skillRoot: "/tmp/shared/review",
+          locationKind: "sharedReadOnly",
+          rootKey: "sharedAgents",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "shared-release",
+          skillName: "release",
+          skillRoot: "/tmp/shared/release",
+          locationKind: "sharedReadOnly",
+          rootKey: "sharedAgents",
+          observedBy: ["codex", "gitHubCopilot"],
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "接管 Bundle 工具套件",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "将 Bundle 中的共享目录挂载到 Codex",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "将 release 挂载到 GitHub Copilot",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "将 release 挂载到 Codex",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      members: [
+        {
+          observationIds: ["shared-review"],
+          selectedObservationId: "shared-review",
+          preservedObservationIds: [],
+        },
+        {
+          observationIds: ["shared-release"],
+          selectedObservationId: "shared-release",
+          preservedObservationIds: [],
+        },
+      ],
+      sharedTargets: [
+        { sharedObservationId: "shared-review", appId: "codex" },
+        {
+          sharedObservationId: "shared-release",
+          appId: "gitHubCopilot",
+        },
+      ],
+    });
+  });
+
+  it("其他成员的既有 Mount 不会吞掉共享成员的新目标", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "alpha-codex",
+          skillName: "alpha",
+          skillRoot: "/tmp/codex/alpha",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "beta-shared",
+          skillName: "beta",
+          skillRoot: "/tmp/shared/beta",
+          locationKind: "sharedReadOnly",
+          rootKey: "sharedAgents",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "接管 Bundle 工具套件",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "将 beta 挂载到 Codex",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(client.createTakeoverPlan).toHaveBeenCalledWith({
+      members: [
+        {
+          observationIds: ["alpha-codex"],
+          selectedObservationId: "alpha-codex",
+          preservedObservationIds: ["alpha-codex"],
+        },
+        {
+          observationIds: ["beta-shared"],
+          selectedObservationId: "beta-shared",
+          preservedObservationIds: [],
+        },
+      ],
+      sharedTargets: [
+        { sharedObservationId: "beta-shared", appId: "codex" },
+      ],
+    });
+  });
+
+  it("接管预览按 Bundle 展示多个成员各自的内容与目标", async () => {
+    const user = userEvent.setup();
+    const basePlan = createTakeoverPlan();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "origin-review",
+          skillName: "review",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+        createEntry({
+          id: "origin-release",
+          skillName: "release",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue({
+      ...basePlan,
+      bundleDisplayName: "工具套件",
+      members: [
+        {
+          ...basePlan.members[0]!,
+          memberId: "member-review",
+          selectedObservationId: "origin-review",
+          skillName: "review",
+          expectedTarget: "/tmp/central/current/members/review",
+        },
+        {
+          ...basePlan.members[0]!,
+          memberId: "member-release",
+          selectedObservationId: "origin-release",
+          skillName: "release",
+          expectedTarget: "/tmp/central/current/members/release",
+        },
+      ],
+      origins: [
+        {
+          ...basePlan.origins[0]!,
+          memberId: "member-review",
+          observationId: "origin-review",
+          originalPath: "/tmp/review",
+        },
+        {
+          ...basePlan.origins[0]!,
+          memberId: "member-release",
+          observationId: "origin-release",
+          originalPath: "/tmp/release",
+        },
+      ],
+      targets: [],
+    });
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "接管 Bundle 工具套件",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "确认接管 Bundle：工具套件",
+      }),
+    ).toBeInTheDocument();
+    const members = screen.getByRole("region", {
+      name: "Bundle 成员预览",
+    });
+    expect(within(members).getByText("review")).toBeInTheDocument();
+    expect(within(members).getByText("release")).toBeInTheDocument();
+    expect(members).toHaveTextContent("/tmp/review");
+    expect(members).toHaveTextContent("/tmp/release");
+  });
+
+  it("补充接管预览同时展示既有成员和保留的 Mount", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createEntry({
+          id: "origin-beta",
+          skillName: "beta",
+          takeoverGroupId: "group-toolkit",
+          takeoverGroupDisplayName: "工具套件",
+        }),
+      ]),
+    );
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(
+      createTakeoverPlan({
+        bundleDisplayName: "工具套件",
+        sourceDisplayName: "owner/toolkit",
+        retainedMembers: [
+          {
+            memberId: "member-alpha",
+            skillName: "alpha",
+            skillDescription: "已经接管的成员",
+            installationChain: null,
+            expectedTarget: "/tmp/central/current/members/alpha",
+            mounts: [
+              {
+                id: "mount-alpha",
+                memberId: "member-alpha",
+                skillName: "alpha",
+                appId: "codex",
+                scope: "global",
+                projectId: null,
+                projectDisplayName: null,
+                targetPath: "/tmp/.codex/skills/alpha",
+                expectedTarget: "/tmp/central/current/members/alpha",
+                health: "healthy",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "接管 Bundle 工具套件" }),
+    );
+    await user.click(screen.getByRole("button", { name: "生成影响预览" }));
+
+    const preview = await screen.findByRole("region", {
+      name: "接管影响预览",
+    });
+    expect(preview).toHaveTextContent("owner/toolkit");
+    expect(preview).toHaveTextContent("alpha");
+    expect(preview).toHaveTextContent("保留现有 Skill");
+    expect(preview).toHaveTextContent("/tmp/.codex/skills/alpha");
+    expect(preview).toHaveTextContent("保留 Mount");
+  });
+
   it("从待接管卡片进入选择页，并且不会仅凭同名自动合并副本", async () => {
     const user = userEvent.setup();
     const client = createClient(
@@ -2954,9 +3518,13 @@ describe("接管已有 Skill", () => {
     await user.click(screen.getByRole("button", { name: "生成影响预览" }));
 
     expect(client.createTakeoverPlan).toHaveBeenCalledWith({
-      observationIds: ["origin-global", "origin-project", "origin-shared"],
-      selectedObservationId: "origin-project",
-      preservedObservationIds: ["origin-project"],
+      members: [
+        {
+          observationIds: ["origin-global", "origin-project", "origin-shared"],
+          selectedObservationId: "origin-project",
+          preservedObservationIds: ["origin-project"],
+        },
+      ],
       sharedTargets: [
         { sharedObservationId: "origin-shared", appId: "claudeCode" },
       ],
@@ -2999,9 +3567,13 @@ describe("接管已有 Skill", () => {
     await user.click(screen.getByRole("button", { name: "生成影响预览" }));
 
     expect(client.createTakeoverPlan).toHaveBeenCalledWith({
-      observationIds: ["origin-codex", "origin-shared"],
-      selectedObservationId: "origin-codex",
-      preservedObservationIds: ["origin-codex"],
+      members: [
+        {
+          observationIds: ["origin-codex", "origin-shared"],
+          selectedObservationId: "origin-codex",
+          preservedObservationIds: ["origin-codex"],
+        },
+      ],
       sharedTargets: [],
     });
   });
@@ -3071,18 +3643,23 @@ describe("接管已有 Skill", () => {
     vi.mocked(client.createTakeoverPlan).mockResolvedValue(
       createTakeoverPlan({
         sourceDisplayName: "已登记 Source",
-        installationChain: {
-          kind: "lockV3",
-          recordPath: "/tmp/.agents/.skill-lock.json",
-          source: "owner/repository",
-          sourceType: "github",
-          sourceLocator: "https://github.com/owner/repository.git",
-          skillPath: "skills/example/SKILL.md",
-          trackedRef: "main",
-          contentMarker: "0123456789abcdef0123456789abcdef01234567",
-          installedAt: "2026-07-01T00:00:00.000Z",
-          updatedAt: "2026-07-02T00:00:00.000Z",
-        },
+        members: [
+          {
+            ...createTakeoverPlan().members[0]!,
+            installationChain: {
+              kind: "lockV3",
+              recordPath: "/tmp/.agents/.skill-lock.json",
+              source: "owner/repository",
+              sourceType: "github",
+              sourceLocator: "https://github.com/owner/repository.git",
+              skillPath: "skills/example/SKILL.md",
+              trackedRef: "main",
+              contentMarker: "0123456789abcdef0123456789abcdef01234567",
+              installedAt: "2026-07-01T00:00:00.000Z",
+              updatedAt: "2026-07-02T00:00:00.000Z",
+            },
+          },
+        ],
       }),
     );
     vi.mocked(client.confirmTakeoverPlan).mockImplementation(
@@ -5306,23 +5883,30 @@ function createTakeoverPlan(
 ): TakeoverPlan {
   return {
     id: "takeover-plan-1",
-    identityBasis: "singleOrigin",
-    selectedObservationId: "origin-1",
     bundleId: "bundle-takeover",
-    memberId: "member-takeover",
     contentId: "content-takeover",
     bundleDisplayName: "example-bundle",
-    skillName: "example",
-    skillDescription: "test skill",
     sourceDisplayName: null,
-    installationChain: null,
     managedDirectory: "/tmp/central/bundles/bundle-takeover",
     contentDirectory:
       "/tmp/central/bundles/bundle-takeover/contents/content-takeover",
-    expectedTarget:
-      "/tmp/central/bundles/bundle-takeover/current/members/example",
+    retainedMembers: [],
+    members: [
+      {
+        memberId: "member-takeover",
+        identityBasis: "singleOrigin",
+        selectedObservationId: "origin-1",
+        skillName: "example",
+        skillDescription: "test skill",
+        installationChain: null,
+        expectedTarget:
+          "/tmp/central/bundles/bundle-takeover/current/members/example",
+        warnings: [],
+      },
+    ],
     origins: [
       {
+        memberId: "member-takeover",
         observationId: "origin-1",
         originalPath: "/tmp/example",
         appId: "codex",
@@ -5336,6 +5920,7 @@ function createTakeoverPlan(
     ],
     targets: [
       {
+        memberId: "member-takeover",
         mountId: "mount-takeover",
         appId: "codex",
         scope: "global",
@@ -5371,6 +5956,8 @@ function createEntry(
     stale: false,
     managementKind: "takeoverCandidate",
     installationChain: null,
+    takeoverGroupId: null,
+    takeoverGroupDisplayName: null,
     ...overrides,
   };
 }

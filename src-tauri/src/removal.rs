@@ -34,6 +34,7 @@ use crate::{
         NewRemovalPlan, Storage, StorageError, StoredMount, StoredProject, StoredRemovalPlan,
         StoredRemovalTransaction, StoredSourceAssociationBundle,
     },
+    takeover::{TakeoverError, blocked_takeover_references_project},
 };
 
 const REMOVAL_PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
@@ -49,6 +50,8 @@ pub enum RemovalError {
     Lifecycle(#[from] LifecycleError),
     #[error(transparent)]
     Mount(#[from] MountLifecycleError),
+    #[error(transparent)]
+    Takeover(#[from] TakeoverError),
     #[error("Removal Plan 数据无法解析：{0}")]
     InvalidPlanJson(#[source] serde_json::Error),
     #[error("Removal Journal 数据无法解析：{0}")]
@@ -169,7 +172,7 @@ pub(crate) fn create_project_removal_plan(
     project_id: &str,
     now: i64,
 ) -> Result<RemovalPlan, RemovalError> {
-    ensure_target_available(storage, "project", project_id)?;
+    ensure_project_target_available(paths, storage, project_id)?;
     let lifecycle_lock = acquire_lifecycle_lock(paths)?;
     lifecycle_lock.recheck(paths)?;
     let project = storage.read_project(project_id)?;
@@ -932,11 +935,15 @@ fn validate_live_plan(
     storage: &mut Storage,
     sealed: &SealedRemovalPlan,
 ) -> Result<(), RemovalError> {
-    ensure_target_available(
-        storage,
-        sealed.plan.kind.storage_kind(),
-        &sealed.plan.target_id,
-    )?;
+    if sealed.plan.kind == RemovalKind::Project {
+        ensure_project_target_available(paths, storage, &sealed.plan.target_id)?;
+    } else {
+        ensure_target_available(
+            storage,
+            sealed.plan.kind.storage_kind(),
+            &sealed.plan.target_id,
+        )?;
+    }
     match sealed.plan.kind {
         RemovalKind::Project => {
             let expected = sealed
@@ -1268,6 +1275,21 @@ fn ensure_target_available(
     target_id: &str,
 ) -> Result<(), RemovalError> {
     if storage.removal_object_is_blocked(kind, target_id)? {
+        Err(RemovalError::RecoveryBlocked(
+            "目标对象正等待人工恢复，不能同时删除".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_project_target_available(
+    paths: &ApplicationPaths,
+    storage: &Storage,
+    project_id: &str,
+) -> Result<(), RemovalError> {
+    ensure_target_available(storage, "project", project_id)?;
+    if blocked_takeover_references_project(paths, storage, project_id)? {
         Err(RemovalError::RecoveryBlocked(
             "目标对象正等待人工恢复，不能同时删除".to_owned(),
         ))

@@ -21,6 +21,7 @@ use crate::domain::{
     SourceCatalogStatus, SourceKind, SourceRefChangePlan, SourceSummary, SupportedAppId,
     SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
+use crate::installation_chain::takeover_group_evidence;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
@@ -738,6 +739,53 @@ pub(crate) struct StoredSourceAssociationBundleMember {
     pub content_fingerprint: String,
     pub source_relative_path: Option<String>,
     pub mounts: Vec<StoredMount>,
+}
+
+/// Takeover 补充既有 Bundle 时封存完整 SQLite 前置状态，确认与恢复只接受这一个快照。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoredTakeoverBundleSnapshot {
+    pub id: String,
+    pub display_name: String,
+    pub managed_directory: String,
+    pub current_target: String,
+    pub source_id: Option<String>,
+    pub source_display_name: Option<String>,
+    pub adopted_marker: Option<String>,
+    pub members: Vec<StoredTakeoverBundleMemberSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoredTakeoverBundleMemberSnapshot {
+    pub id: String,
+    pub skill_name: String,
+    pub description: String,
+    pub stable_relative_path: String,
+    pub content_fingerprint: String,
+    pub source_relative_path: Option<String>,
+    pub installation_chain: Option<InstallationChain>,
+    pub mounts: Vec<StoredTakeoverMountSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoredTakeoverMountSnapshot {
+    pub id: String,
+    pub member_id: String,
+    pub bundle_id: String,
+    pub skill_name: String,
+    pub member_fingerprint: String,
+    pub app_id: SupportedAppId,
+    pub scope: MountScope,
+    pub project_id: Option<String>,
+    pub project_display_name: Option<String>,
+    pub project_root_path: Option<String>,
+    pub project_root_device: Option<u64>,
+    pub project_root_inode: Option<u64>,
+    pub target_path: String,
+    pub expected_target: String,
+    pub health: MountHealth,
 }
 
 /// 直接关联在同一个 SQLite 事务中重检这份完整成员快照。
@@ -1721,10 +1769,15 @@ impl Storage {
         &mut self,
         transaction_id: &str,
         plan: &TakeoverPlan,
+        existing_bundle: Option<&StoredTakeoverBundleSnapshot>,
         now: i64,
     ) -> Result<(), StorageError> {
-        let (fingerprint, managed_directory, current_target, stable_relative_path) =
-            validate_takeover_domain_contract(&self.data_root, plan)?;
+        let validated = validate_takeover_domain_contract(&self.data_root, plan)?;
+        let anchor_member_id = &plan
+            .members
+            .first()
+            .ok_or(StorageError::InvalidTakeoverPlan)?
+            .member_id;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1745,7 +1798,7 @@ impl Storage {
         if state.id != transaction_id
             || state.plan_id != plan.id
             || state.bundle_id != plan.bundle_id
-            || state.member_id != plan.member_id
+            || state.member_id != *anchor_member_id
             || state.reserved_paths != expected_reserved_paths
             || !is_normalized_relative_path(&state.journal_path)
         {
@@ -1754,43 +1807,92 @@ impl Storage {
             ));
         }
         if state.phase == "origins_applied" && state.status == "in_progress" {
-            // 首次提交必须认领一组全新的领域 ID；任一冲突都会让整个 SQLite 事务回滚。
-            transaction
-                .execute(
-                    "INSERT INTO bundles (id, display_name, managed_directory, current_target, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![plan.bundle_id, plan.bundle_display_name, managed_directory, current_target, now],
-                )
-                .map_err(StorageError::SaveTakeoverTransaction)?;
-            transaction
-                .execute(
-                    "INSERT INTO skill_members
-                        (id, bundle_id, skill_name, description, stable_relative_path, content_fingerprint, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![plan.member_id, plan.bundle_id, plan.skill_name, plan.skill_description, stable_relative_path, fingerprint, now],
-                )
-                .map_err(StorageError::SaveTakeoverTransaction)?;
-            if let Some(chain) = &plan.installation_chain {
-                insert_member_installation_chain(&transaction, &plan.member_id, chain)
+            if let Some(existing) = existing_bundle {
+                let current = read_takeover_bundle_snapshot_from(
+                    &transaction,
+                    &self.data_root,
+                    &existing.id,
+                )?;
+                if current != *existing
+                    || existing.id != plan.bundle_id
+                    || existing.display_name != plan.bundle_display_name
+                    || existing.managed_directory != validated.managed_directory
+                {
+                    return Err(StorageError::TakeoverStateConflict(
+                        transaction_id.to_owned(),
+                    ));
+                }
+                let changed = transaction
+                    .execute(
+                        "UPDATE bundles SET current_target = ?2
+                         WHERE id = ?1 AND current_target = ?3",
+                        params![
+                            plan.bundle_id,
+                            validated.current_target,
+                            existing.current_target
+                        ],
+                    )
+                    .map_err(StorageError::SaveTakeoverTransaction)?;
+                ensure_one_takeover_row(changed, transaction_id)?;
+            } else {
+                // 全新接管必须认领一组新领域 ID；任一冲突都会让整个 SQLite 事务回滚。
+                transaction
+                    .execute(
+                        "INSERT INTO bundles (id, display_name, managed_directory, current_target, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![plan.bundle_id, plan.bundle_display_name, validated.managed_directory, validated.current_target, now],
+                    )
                     .map_err(StorageError::SaveTakeoverTransaction)?;
             }
-            transaction
-                .execute(
-                    "INSERT INTO member_selections (bundle_id, member_id, selected_at) VALUES (?1, ?2, ?3)",
-                    params![plan.bundle_id, plan.member_id, now],
-                )
-                .map_err(StorageError::SaveTakeoverTransaction)?;
+            for member in &plan.members {
+                let validated_member = validated
+                    .members
+                    .get(&member.member_id)
+                    .ok_or(StorageError::InvalidTakeoverPlan)?;
+                transaction
+                    .execute(
+                        "INSERT INTO skill_members
+                            (id, bundle_id, skill_name, description, stable_relative_path, content_fingerprint, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            member.member_id,
+                            plan.bundle_id,
+                            member.skill_name,
+                            member.skill_description,
+                            validated_member.stable_relative_path,
+                            validated_member.fingerprint,
+                            now
+                        ],
+                    )
+                    .map_err(StorageError::SaveTakeoverTransaction)?;
+                if let Some(chain) = &member.installation_chain {
+                    insert_member_installation_chain(&transaction, &member.member_id, chain)
+                        .map_err(StorageError::SaveTakeoverTransaction)?;
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO member_selections (bundle_id, member_id, selected_at) VALUES (?1, ?2, ?3)",
+                        params![plan.bundle_id, member.member_id, now],
+                    )
+                    .map_err(StorageError::SaveTakeoverTransaction)?;
+            }
             for target in &plan.targets {
                 transaction
                     .execute(
                         "INSERT INTO mounts
                         (id, member_id, app_id, scope, project_id, target_path, expected_target, health, created_at, updated_at)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'healthy', ?8, ?8)",
-                        params![target.mount_id, plan.member_id, target.app_id.as_str(), target.scope.as_str(), target.project_id, target.target_path, target.expected_target, now],
+                        params![target.mount_id, target.member_id, target.app_id.as_str(), target.scope.as_str(), target.project_id, target.target_path, target.expected_target, now],
                     )
                     .map_err(StorageError::SaveTakeoverTransaction)?;
             }
-            ensure_takeover_domain_matches(&transaction, &self.data_root, plan, &fingerprint)?;
+            ensure_takeover_domain_matches(
+                &transaction,
+                &self.data_root,
+                plan,
+                &validated,
+                existing_bundle,
+            )?;
             for origin in &plan.origins {
                 let deleted = transaction
                     .execute(
@@ -1810,7 +1912,13 @@ impl Storage {
             ensure_one_takeover_row(changed, transaction_id)?;
         } else if state.phase == "state_committed" && state.status == "completed" {
             // 重放只验证已提交事实，不能把外部删除的领域行静默补回。
-            ensure_takeover_domain_matches(&transaction, &self.data_root, plan, &fingerprint)?;
+            ensure_takeover_domain_matches(
+                &transaction,
+                &self.data_root,
+                plan,
+                &validated,
+                existing_bundle,
+            )?;
         } else {
             return Err(StorageError::TakeoverStateConflict(
                 transaction_id.to_owned(),
@@ -2746,6 +2854,42 @@ impl Storage {
         let bundle = read_source_association_bundle_from(&transaction, &self.data_root, bundle_id)?;
         transaction.commit().map_err(StorageError::ReadSources)?;
         Ok(bundle)
+    }
+
+    /// 同一确定性安装组只能补充一个既有 Bundle；重复历史状态必须阻止继续拆分。
+    pub(crate) fn read_takeover_bundle_for_group(
+        &self,
+        group_id: &str,
+    ) -> Result<Option<StoredTakeoverBundleSnapshot>, StorageError> {
+        let bundle_ids = read_managed_entries_from(&self.connection, &self.data_root)?
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .installation_chain
+                    .as_ref()
+                    .and_then(takeover_group_evidence)
+                    .is_some_and(|evidence| evidence.id == group_id)
+            })
+            .filter_map(|entry| entry.bundle_id)
+            .collect::<BTreeSet<_>>();
+        match bundle_ids.len() {
+            0 => Ok(None),
+            1 => {
+                let bundle_id = bundle_ids
+                    .first()
+                    .ok_or_else(|| StorageError::TakeoverStateConflict(group_id.to_owned()))?;
+                read_takeover_bundle_snapshot_from(&self.connection, &self.data_root, bundle_id)
+                    .map(Some)
+            }
+            _ => Err(StorageError::TakeoverStateConflict(group_id.to_owned())),
+        }
+    }
+
+    pub(crate) fn read_takeover_bundle_snapshot(
+        &self,
+        bundle_id: &str,
+    ) -> Result<StoredTakeoverBundleSnapshot, StorageError> {
+        read_takeover_bundle_snapshot_from(&self.connection, &self.data_root, bundle_id)
     }
 
     /// 直接关联只写元数据，并在一个事务中消费 Plan，不能留下半条一对一关系。
@@ -7613,10 +7757,10 @@ fn mount_object_is_blocked(
         return Ok(true);
     }
 
-    // Takeover 的领域 Member 可能尚未创建，因此 blocked 隔离必须同时按路径判断。
+    // 提交前 Member 尚未创建，只能按锚点和路径隔离；提交后整个新 Bundle 都属于同一恢复对象。
     let mut statement = connection
         .prepare(
-            "SELECT id, member_id, reserved_paths_json
+            "SELECT id, bundle_id, member_id, reserved_paths_json
              FROM takeover_transactions
              WHERE status = 'blocked'",
         )
@@ -7627,14 +7771,16 @@ fn mount_object_is_blocked(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })
         .map_err(StorageError::ReadTakeoverTransaction)?;
     for row in rows {
-        let (transaction_id, reserved_member_id, reserved_paths_json) =
+        let (transaction_id, reserved_bundle_id, reserved_member_id, reserved_paths_json) =
             row.map_err(StorageError::ReadTakeoverTransaction)?;
         let reserved_paths = decode_takeover_reserved_paths(&transaction_id, &reserved_paths_json)?;
-        if reserved_member_id == member_id
+        if bundle_id.as_deref() == Some(reserved_bundle_id.as_str())
+            || reserved_member_id == member_id
             || reserved_paths
                 .binary_search_by(|reserved| reserved.as_str().cmp(target_path))
                 .is_ok()
@@ -10068,15 +10214,21 @@ fn ensure_final_source_association_merge_matches(
     Ok(())
 }
 
+struct ValidatedTakeoverMember {
+    fingerprint: String,
+    stable_relative_path: String,
+}
+
+struct ValidatedTakeoverDomain {
+    managed_directory: String,
+    current_target: String,
+    members: BTreeMap<String, ValidatedTakeoverMember>,
+}
+
 fn validate_takeover_domain_contract(
     data_root: &Path,
     plan: &TakeoverPlan,
-) -> Result<(String, String, String, String), StorageError> {
-    let selected = plan
-        .origins
-        .iter()
-        .filter(|origin| origin.observation_id == plan.selected_observation_id)
-        .collect::<Vec<_>>();
+) -> Result<ValidatedTakeoverDomain, StorageError> {
     let origin_ids = plan
         .origins
         .iter()
@@ -10094,8 +10246,60 @@ fn validate_takeover_domain_contract(
         .collect::<BTreeSet<_>>();
     let managed_directory = format!("bundles/{}", plan.bundle_id);
     let current_target = format!("contents/{}", plan.content_id);
-    let stable_relative_path = format!("members/{}", plan.skill_name);
+    let mut validated_members = BTreeMap::new();
+    let member_ids = plan
+        .members
+        .iter()
+        .map(|member| member.member_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let skill_names = plan
+        .members
+        .iter()
+        .map(|member| member.skill_name.as_str())
+        .collect::<BTreeSet<_>>();
+    for member in &plan.members {
+        let selected = plan
+            .origins
+            .iter()
+            .filter(|origin| {
+                origin.member_id == member.member_id
+                    && origin.observation_id == member.selected_observation_id
+            })
+            .collect::<Vec<_>>();
+        let stable_relative_path = format!("members/{}", member.skill_name);
+        if !is_single_path_component(&member.member_id)
+            || !is_single_path_component(&member.skill_name)
+            || member.skill_description.trim().is_empty()
+            || member
+                .installation_chain
+                .as_ref()
+                .is_some_and(|chain| !chain.is_valid())
+            || selected.len() != 1
+            || selected[0].content_fingerprint.is_empty()
+            || Path::new(&member.expected_target)
+                != data_root
+                    .join(&managed_directory)
+                    .join("current")
+                    .join(&stable_relative_path)
+        {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
+        validated_members.insert(
+            member.member_id.clone(),
+            ValidatedTakeoverMember {
+                fingerprint: selected[0].content_fingerprint.clone(),
+                stable_relative_path,
+            },
+        );
+    }
     let targets_are_valid = plan.targets.iter().all(|target| {
+        let Some(member) = plan
+            .members
+            .iter()
+            .find(|member| member.member_id == target.member_id)
+        else {
+            return false;
+        };
         let project_is_valid = match target.scope {
             MountScope::Global => {
                 target.project_id.is_none() && target.project_display_name.is_none()
@@ -10108,29 +10312,28 @@ fn validate_takeover_domain_contract(
         is_single_path_component(&target.mount_id)
             && project_is_valid
             && is_normalized_absolute_path(&target.target_path)
-            && target.expected_target == plan.expected_target
+            && target.expected_target == member.expected_target
             && Path::new(&target.target_path)
                 .file_name()
                 .and_then(|name| name.to_str())
-                == Some(plan.skill_name.as_str())
+                == Some(member.skill_name.as_str())
     });
     if !is_single_path_component(&plan.id)
         || !is_single_path_component(&plan.bundle_id)
-        || !is_single_path_component(&plan.member_id)
         || !is_single_path_component(&plan.content_id)
-        || !is_single_path_component(&plan.skill_name)
+        || plan.members.is_empty()
+        || member_ids.len() != plan.members.len()
+        || skill_names.len() != plan.members.len()
         || plan.bundle_display_name.trim().is_empty()
-        || plan.skill_description.trim().is_empty()
-        || plan.source_display_name.is_some()
         || plan
-            .installation_chain
-            .as_ref()
-            .is_some_and(|chain| !chain.is_valid())
-        || selected.len() != 1
-        || selected[0].content_fingerprint.is_empty()
+            .source_display_name
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty())
         || origin_ids.len() != plan.origins.len()
         || plan.origins.iter().any(|origin| {
-            origin.observation_id.is_empty() || !is_normalized_absolute_path(&origin.original_path)
+            !member_ids.contains(origin.member_id.as_str())
+                || origin.observation_id.is_empty()
+                || !is_normalized_absolute_path(&origin.original_path)
         })
         || mount_ids.len() != plan.targets.len()
         || target_paths.len() != plan.targets.len()
@@ -10138,77 +10341,127 @@ fn validate_takeover_domain_contract(
         || Path::new(&plan.managed_directory) != data_root.join(&managed_directory)
         || Path::new(&plan.content_directory)
             != data_root.join(&managed_directory).join(&current_target)
-        || Path::new(&plan.expected_target)
-            != data_root
-                .join(&managed_directory)
-                .join("current")
-                .join(&stable_relative_path)
     {
         return Err(StorageError::InvalidTakeoverPlan);
     }
-    Ok((
-        selected[0].content_fingerprint.clone(),
+    Ok(ValidatedTakeoverDomain {
         managed_directory,
         current_target,
-        stable_relative_path,
-    ))
+        members: validated_members,
+    })
 }
 
 fn ensure_takeover_domain_matches(
     transaction: &Transaction<'_>,
     data_root: &Path,
     plan: &TakeoverPlan,
-    fingerprint: &str,
+    validated: &ValidatedTakeoverDomain,
+    existing_bundle: Option<&StoredTakeoverBundleSnapshot>,
 ) -> Result<(), StorageError> {
-    let member = read_managed_member_from(transaction, data_root, &plan.member_id)?
-        .ok_or(StorageError::InvalidTakeoverPlan)?;
-    let installation_chain = read_member_installation_chain_from(transaction, &plan.member_id)?;
     let bundle = transaction
         .query_row(
             "SELECT display_name, managed_directory, current_target,
-                    (SELECT description FROM skill_members WHERE id = ?2),
-                    EXISTS(SELECT 1 FROM member_selections WHERE bundle_id = ?1 AND member_id = ?2),
                     (SELECT COUNT(*) FROM skill_members WHERE bundle_id = ?1),
                     (SELECT COUNT(*) FROM member_selections WHERE bundle_id = ?1),
-                    (SELECT COUNT(*) FROM mounts WHERE member_id = ?2)
+                    (SELECT COUNT(*) FROM mounts
+                     WHERE member_id IN (SELECT id FROM skill_members WHERE bundle_id = ?1))
              FROM bundles WHERE id = ?1",
-            params![plan.bundle_id, plan.member_id],
+            [plan.bundle_id.as_str()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, bool>(4)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
                 ))
             },
         )
         .optional()
         .map_err(StorageError::SaveTakeoverTransaction)?
         .ok_or(StorageError::InvalidTakeoverPlan)?;
-    if member.bundle_id != plan.bundle_id
-        || member.skill_name != plan.skill_name
-        || member.content_fingerprint != fingerprint
-        || member.expected_target != plan.expected_target
-        || installation_chain.as_ref() != plan.installation_chain.as_deref()
-        || bundle.0 != plan.bundle_display_name
-        || bundle.1 != member.managed_directory
-        || bundle.2 != member.current_target
-        || bundle.3 != plan.skill_description
-        || !bundle.4
-        || bundle.5 != 1
-        || bundle.6 != 1
-        || bundle.7 != plan.targets.len() as i64
+    let retained_member_count = existing_bundle.map_or(0, |bundle| bundle.members.len());
+    let retained_mount_count = existing_bundle.map_or(0, |bundle| {
+        bundle
+            .members
+            .iter()
+            .map(|member| member.mounts.len())
+            .sum()
+    });
+    if bundle.0 != plan.bundle_display_name
+        || bundle.1 != validated.managed_directory
+        || bundle.2 != validated.current_target
+        || bundle.3 != (retained_member_count + plan.members.len()) as i64
+        || bundle.4 != (retained_member_count + plan.members.len()) as i64
+        || bundle.5 != (retained_mount_count + plan.targets.len()) as i64
     {
         return Err(StorageError::InvalidTakeoverPlan);
+    }
+    if let Some(existing) = existing_bundle {
+        let actual = read_takeover_bundle_snapshot_from(transaction, data_root, &plan.bundle_id)?;
+        if actual.id != existing.id
+            || actual.display_name != existing.display_name
+            || actual.managed_directory != existing.managed_directory
+            || actual.current_target != validated.current_target
+            || actual.source_id != existing.source_id
+            || actual.source_display_name != existing.source_display_name
+            || actual.adopted_marker != existing.adopted_marker
+        {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
+        for expected in &existing.members {
+            let Some(member) = actual
+                .members
+                .iter()
+                .find(|member| member.id == expected.id)
+            else {
+                return Err(StorageError::InvalidTakeoverPlan);
+            };
+            if member != expected {
+                return Err(StorageError::InvalidTakeoverPlan);
+            }
+        }
+    }
+    for planned in &plan.members {
+        let expected = validated
+            .members
+            .get(&planned.member_id)
+            .ok_or(StorageError::InvalidTakeoverPlan)?;
+        let member = read_managed_member_from(transaction, data_root, &planned.member_id)?
+            .ok_or(StorageError::InvalidTakeoverPlan)?;
+        let installation_chain =
+            read_member_installation_chain_from(transaction, &planned.member_id)?;
+        let (description, selected) = transaction
+            .query_row(
+                "SELECT description,
+                        EXISTS(
+                            SELECT 1 FROM member_selections
+                            WHERE bundle_id = ?1 AND member_id = ?2
+                        )
+                 FROM skill_members WHERE id = ?2 AND bundle_id = ?1",
+                params![plan.bundle_id, planned.member_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveTakeoverTransaction)?
+            .ok_or(StorageError::InvalidTakeoverPlan)?;
+        if member.bundle_id != plan.bundle_id
+            || member.skill_name != planned.skill_name
+            || member.content_fingerprint != expected.fingerprint
+            || member.stable_relative_path != expected.stable_relative_path
+            || member.expected_target != planned.expected_target
+            || installation_chain.as_ref() != planned.installation_chain.as_deref()
+            || description != planned.skill_description
+            || !selected
+        {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
     }
     for target in &plan.targets {
         let mount = read_mount_from(transaction, data_root, &target.mount_id)?
             .ok_or(StorageError::InvalidTakeoverPlan)?;
-        if mount.member_id != plan.member_id
+        if mount.member_id != target.member_id
             || mount.app_id != target.app_id
             || mount.scope != target.scope
             || mount.project_id != target.project_id
@@ -11390,6 +11643,74 @@ fn read_source_association_bundle_from(
     })
 }
 
+fn read_takeover_bundle_snapshot_from(
+    connection: &Connection,
+    data_root: &Path,
+    bundle_id: &str,
+) -> Result<StoredTakeoverBundleSnapshot, StorageError> {
+    let bundle = read_source_association_bundle_from(connection, data_root, bundle_id)?;
+    let source_display_name = bundle
+        .source_id
+        .as_deref()
+        .map(|source_id| {
+            connection.query_row(
+                "SELECT display_name FROM sources WHERE id = ?1",
+                [source_id],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .transpose()
+        .map_err(StorageError::ReadSources)?;
+    let members = bundle
+        .members
+        .into_iter()
+        .map(|member| {
+            let installation_chain = read_member_installation_chain_from(connection, &member.id)?;
+            let mounts = member
+                .mounts
+                .into_iter()
+                .map(|mount| StoredTakeoverMountSnapshot {
+                    id: mount.id,
+                    member_id: mount.member_id,
+                    bundle_id: mount.bundle_id,
+                    skill_name: mount.skill_name,
+                    member_fingerprint: mount.member_fingerprint,
+                    app_id: mount.app_id,
+                    scope: mount.scope,
+                    project_id: mount.project_id,
+                    project_display_name: mount.project_display_name,
+                    project_root_path: mount.project_root_path,
+                    project_root_device: mount.project_root_device,
+                    project_root_inode: mount.project_root_inode,
+                    target_path: mount.target_path,
+                    expected_target: mount.expected_target,
+                    health: mount.health,
+                })
+                .collect();
+            Ok(StoredTakeoverBundleMemberSnapshot {
+                id: member.id,
+                skill_name: member.skill_name,
+                description: member.description,
+                stable_relative_path: member.stable_relative_path,
+                content_fingerprint: member.content_fingerprint,
+                source_relative_path: member.source_relative_path,
+                installation_chain,
+                mounts,
+            })
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+    Ok(StoredTakeoverBundleSnapshot {
+        id: bundle.id,
+        display_name: bundle.display_name,
+        managed_directory: bundle.managed_directory,
+        current_target: bundle.current_target,
+        source_id: bundle.source_id,
+        source_display_name,
+        adopted_marker: bundle.adopted_marker,
+        members,
+    })
+}
+
 fn read_source_catalog_members_from(
     connection: &Connection,
     source_id: &str,
@@ -11603,6 +11924,10 @@ fn inventory_item_from_observation(
     observation: InventoryObservation,
     project_display_name: Option<String>,
 ) -> InventoryItem {
+    let takeover_group = observation
+        .installation_chain
+        .as_ref()
+        .and_then(takeover_group_evidence);
     InventoryItem {
         id: observation.id,
         skill_name: observation.skill_name,
@@ -11619,6 +11944,8 @@ fn inventory_item_from_observation(
         management_kind: observation.management_kind,
         management_evidence: observation.management_evidence,
         installation_chain: observation.installation_chain,
+        takeover_group_id: takeover_group.as_ref().map(|group| group.id.clone()),
+        takeover_group_display_name: takeover_group.map(|group| group.display_name),
         bundle_id: None,
         member_id: None,
         bundle_display_name: None,
@@ -11701,6 +12028,8 @@ fn read_managed_entries_from(
             management_kind: ManagementKind::SkillYardManaged,
             management_evidence: None,
             installation_chain,
+            takeover_group_id: None,
+            takeover_group_display_name: None,
             bundle_id: Some(bundle_id),
             member_id: Some(member_id),
             bundle_display_name: Some(bundle_display_name),
@@ -12712,7 +13041,8 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlanOrigin, TakeoverPlanTarget,
+        TakeoverIdentityBasis, TakeoverOriginDisposition, TakeoverPlanMember, TakeoverPlanOrigin,
+        TakeoverPlanTarget,
     };
 
     fn open_test_storage(root: &Path) -> Storage {
@@ -12738,20 +13068,25 @@ mod tests {
         let expected_target = managed_directory.join("current/members").join(&skill_name);
         TakeoverPlan {
             id: format!("takeover-plan-{suffix}"),
-            identity_basis: TakeoverIdentityBasis::SingleOrigin,
-            selected_observation_id: observation_id.clone(),
             bundle_id,
-            member_id,
             content_id,
             bundle_display_name: format!("Takeover {suffix}"),
-            skill_name: skill_name.clone(),
-            skill_description: "接管持久化测试 Skill".to_owned(),
             source_display_name: None,
-            installation_chain: None,
             managed_directory: managed_directory.to_string_lossy().into_owned(),
             content_directory: content_directory.to_string_lossy().into_owned(),
-            expected_target: expected_target.to_string_lossy().into_owned(),
+            retained_members: Vec::new(),
+            members: vec![TakeoverPlanMember {
+                member_id: member_id.clone(),
+                identity_basis: TakeoverIdentityBasis::SingleOrigin,
+                selected_observation_id: observation_id.clone(),
+                skill_name: skill_name.clone(),
+                skill_description: "接管持久化测试 Skill".to_owned(),
+                installation_chain: None,
+                expected_target: expected_target.to_string_lossy().into_owned(),
+                warnings: Vec::new(),
+            }],
             origins: vec![TakeoverPlanOrigin {
+                member_id: member_id.clone(),
                 observation_id,
                 original_path: original_path.to_string_lossy().into_owned(),
                 app_id: Some(SupportedAppId::Codex),
@@ -12763,6 +13098,7 @@ mod tests {
                 final_disposition: TakeoverOriginDisposition::Mount,
             }],
             targets: vec![TakeoverPlanTarget {
+                member_id,
                 mount_id,
                 app_id: SupportedAppId::Codex,
                 scope: MountScope::Global,
@@ -12789,7 +13125,7 @@ mod tests {
                            'codex_global', NULL, 0, 'takeover_candidate')",
                 params![
                     plan.origins[0].observation_id,
-                    plan.skill_name,
+                    plan.members[0].skill_name,
                     plan.origins[0].original_path,
                     Path::new(&plan.origins[0].original_path)
                         .join("SKILL.md")
@@ -12813,7 +13149,7 @@ mod tests {
                 &plan.id,
                 transaction_id,
                 &plan.bundle_id,
-                &plan.member_id,
+                &plan.members[0].member_id,
                 &takeover_reserved_paths(plan).expect("测试 Plan 应产生合法保留路径"),
                 &format!("journals/{transaction_id}.json"),
                 200,
@@ -16368,16 +16704,24 @@ mod tests {
             .expect("应读取 Takeover 恢复对象");
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0].bundle_id, plan.bundle_id);
-        assert_eq!(transactions[0].member_id, plan.member_id);
+        assert_eq!(transactions[0].member_id, plan.members[0].member_id);
         assert_eq!(
             transactions[0].reserved_paths,
             takeover_reserved_paths(&plan).expect("测试 Plan 应产生合法保留路径")
         );
 
         let mut mismatched = plan.clone();
-        mismatched.member_id = "different-member".to_owned();
+        // 使用另一个合法 ID，只验证事务锚点不匹配，避免把无效 Plan 与状态冲突混在一起。
+        let mismatched_member_id = "00000000-0000-4000-8000-000000000001".to_owned();
+        mismatched.members[0].member_id = mismatched_member_id.clone();
+        for origin in &mut mismatched.origins {
+            origin.member_id = mismatched_member_id.clone();
+        }
+        for target in &mut mismatched.targets {
+            target.member_id = mismatched_member_id.clone();
+        }
         assert!(matches!(
-            storage.finalize_takeover("takeover-txn-subject", &mismatched, 202),
+            storage.finalize_takeover("takeover-txn-subject", &mismatched, None, 202),
             Err(StorageError::TakeoverStateConflict(id)) if id == "takeover-txn-subject"
         ));
 
@@ -16397,7 +16741,7 @@ mod tests {
             )
             .expect("应能模拟 SQLite 中与 Plan 不一致的保留路径");
         assert!(matches!(
-            storage.finalize_takeover("takeover-txn-subject", &plan, 203),
+            storage.finalize_takeover("takeover-txn-subject", &plan, None, 203),
             Err(StorageError::TakeoverStateConflict(id)) if id == "takeover-txn-subject"
         ));
 
@@ -16447,7 +16791,7 @@ mod tests {
                     id,
                     plan.id,
                     plan.bundle_id,
-                    plan.member_id,
+                    plan.members[0].member_id,
                     reserved_paths_json,
                     format!("journals/{id}.json"),
                     phase,
@@ -16467,7 +16811,12 @@ mod tests {
                     'blocked-after-commit', ?1, ?2, ?3, ?4, 'journals/blocked.json',
                     'state_committed', 'blocked', 1, 1
                  )",
-                params![plan.id, plan.bundle_id, plan.member_id, reserved_paths_json],
+                params![
+                    plan.id,
+                    plan.bundle_id,
+                    plan.members[0].member_id,
+                    reserved_paths_json
+                ],
             )
             .expect("提交后的人工恢复必须可以保持 blocked");
     }
@@ -16496,7 +16845,7 @@ mod tests {
             .expect("应预置冲突 Bundle");
 
         assert!(matches!(
-            storage.finalize_takeover("takeover-txn-conflict", &plan, 206),
+            storage.finalize_takeover("takeover-txn-conflict", &plan, None, 206),
             Err(StorageError::SaveTakeoverTransaction(_))
         ));
         let (display_name, member_count, mount_count, observation_count, phase, status) = storage
@@ -16511,7 +16860,7 @@ mod tests {
                     (SELECT status FROM takeover_transactions WHERE id = 'takeover-txn-conflict')",
                 params![
                     plan.bundle_id,
-                    plan.member_id,
+                    plan.members[0].member_id,
                     plan.targets[0].mount_id,
                     plan.origins[0].observation_id,
                 ],
@@ -16542,7 +16891,7 @@ mod tests {
         let plan = takeover_plan_for(&storage, sandbox.path(), "completed-replay");
         begin_test_takeover(&mut storage, &plan, "takeover-txn-replay");
         storage
-            .finalize_takeover("takeover-txn-replay", &plan, 205)
+            .finalize_takeover("takeover-txn-replay", &plan, None, 205)
             .expect("首次 Takeover 提交应成功");
         storage
             .connection
@@ -16553,7 +16902,7 @@ mod tests {
             .expect("应模拟提交后的领域记录丢失");
 
         assert!(matches!(
-            storage.finalize_takeover("takeover-txn-replay", &plan, 206),
+            storage.finalize_takeover("takeover-txn-replay", &plan, None, 206),
             Err(StorageError::InvalidTakeoverPlan)
         ));
         let mount_count = storage
