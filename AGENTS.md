@@ -1,5 +1,8 @@
 # SkillYard 实施约束
 
+>SkillYard 1.0 优先保证真实用户路径，而不是理论完备性。任何修复如果需要扩大领域模型或生命周期协议，必须首先证明它违反了已承诺的 Product Contract，并证明它能够在正常生产路径中自然发生。否则应记录为 Future Consideration，而不是进入当前实现。
+>当发现一个新的问题时，默认假设它“不应该修”，而不是默认假设“应该修”。只有在证据足以推翻这个假设时，才允许进入实现。
+
 本文件约束后续在本仓库工作的编码 Agent。产品行为仍以 `docs/1.0-product-contract.md` 为准，实施顺序以 `docs/plans/0001-skillyard-1.0-implementation.md` 为准。
 
 ## 单一实现原则
@@ -35,3 +38,7 @@
 - 主验收测试只通过 `SkillYardApplication`、typed Tauri command/client、真实临时文件系统和重启后的持久状态观察行为。
 - 私有函数测试只能补充算法边界，不能代替真实生产入口测试。
 - 提交前检查 diff 范围、相关测试、类型检查和格式；阶段完成时运行全量测试、`clippy -D warnings`、生产构建和独立代码审查。
+
+## 测试条件
+
+- 优先使用 tart 在沙箱 VM 中测试。
