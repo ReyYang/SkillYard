@@ -1,6 +1,6 @@
 # SkillYard 1.0 PRD
 
-> 状态：已确认。本文只描述已经确认的 SkillYard 1.0 产品边界；已从工作区删除的旧 Python 原型、已撤回设计和后续版本设想不构成 1.0 需求。
+> 状态：已确认。本文只描述已经确认的 SkillYard 1.0 产品边界；已撤回设计和后续版本设想不构成 1.0 需求。
 
 ## Problem Statement
 
@@ -16,7 +16,7 @@ SkillYard 1.0 因此必须在保持产品简单的同时完成完整主流程：
 
 ## Solution
 
-SkillYard 1.0 是只在产品所有者个人 Apple Silicon Mac 上使用的本地桌面应用，目标系统为 macOS 14 及以上。它使用 Tauri 2、TypeScript 界面和封闭的 Rust Lifecycle Core，在这台 Mac 上本地构建并运行 `SkillYard.app`。1.0 不承担公开分发、第三方安装体验或 Apple 开发者身份验证。
+SkillYard 1.0 是面向 Apple Silicon Mac 的本地桌面应用，目标系统为 macOS 14 及以上。它使用 Tauri 2、TypeScript 界面和封闭的 Rust Lifecycle Core，并通过 GitHub Releases 提供 ad-hoc signed ZIP。1.0 不加入 Apple Developer Program，也不承诺 notarization 或无警告的 Gatekeeper 安装体验。
 
 首次启动时，应用先说明扫描范围、只读性质和不会自动接管，再由用户点击“开始扫描”。扫描完成后，主界面第一层以 Bundle 为列表；进入 Bundle 后查看 Skill 成员，再进入单个 Skill 查看来源、路径和 Mount。其他内容明确区分为“待接管”“Agent 应用管理”和“项目仓库管理”的只读分组。
 
@@ -44,8 +44,8 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 
 ### 构建应用与首次使用
 
-1. 作为 SkillYard 1.0 的唯一用户，我希望在自己的 Apple Silicon Mac 上本地构建并运行 `SkillYard.app`，从而不需要购买 Apple Developer Program。
-2. 作为唯一用户，我希望构建或启动时明确检查 macOS 14 和 `arm64` 环境，从而不会在未支持的环境中进入不可依赖的运行状态。
+1. 作为用户，我希望从 GitHub Releases 下载并运行 Apple Silicon 版 `SkillYard.app`，从而无需购买 Apple Developer Program 或自行签名。
+2. 作为用户，我希望启动时明确检查 macOS 14 和 `arm64` 环境，从而不会在未支持的环境中进入不可依赖的运行状态。
 3. 作为首次用户，我希望先看到扫描范围、只读性质和不会自动接管的说明，从而知道应用准备读取什么。
 4. 作为首次用户，我希望由自己点击“开始扫描”，从而在明确同意前应用不会读取本机 Skill 目录。
 5. 作为首次用户，我希望首次扫描不访问 GitHub、`skills.sh` 或其他上游，从而本地盘点不会产生意外网络请求。
@@ -233,17 +233,17 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 157. 作为用户，我希望 Central Store 固定在本机 Application Support 并可从 Finder 打开，从而知道受管主副本在哪里。
 158. 作为用户，我希望 Central Store 中持续存在 `SKILLYARD-INFO.md`，说明这里不是缓存并列出已知 Source 和 Mount，从而手工查看时不容易误删。
 159. 作为用户，我希望删除或移动 `SkillYard.app` 后 Central Store、SQLite、`current` 和 Mount 全部保留，从而 Agent 中已经挂载的 Skill 继续可用。
-160. 作为重新构建或重新放置应用的用户，我希望应用检测既有状态并恢复管理能力，从而无需重新接管全部 Skill。
+160. 作为重新安装或重新放置应用的用户，我希望应用检测既有状态并恢复管理能力，从而无需重新接管全部 Skill。
 161. 作为用户，我希望在设置页打开 Central Store，或使用只清除偏好、窗口状态和缓存的“重置应用”，从而主界面只保留日常管理入口，并且不会删除任何受管内容或使用关系。
 
-### 个人使用与隐私
+### 发布与隐私
 
-162. 作为唯一用户，我希望 1.0 只服务当前这台个人 Mac，从而不需要为公开发布建设安装、签名、公证和兼容支持流程。
-163. 作为唯一用户，我希望需要新版本时重新本地构建并手动替换 `SkillYard.app`，从而 1.0 不需要应用自更新系统。
-164. 作为唯一用户，我希望手动替换或删除应用本体不影响 Central Store、SQLite、Journal 和 Mount，从而已经挂载的 Skill 继续工作。
-165. 作为唯一用户，我希望所有管理数据、路径、Skill 名称和崩溃信息留在本机，从而不需要遥测同意或隐私开关。
-166. 作为唯一用户，我希望只有主动触发 Source 获取、搜索、Update Check 或 Bundle Update 时才发生必要网络请求，从而联网行为与我的动作一致。
-167. 作为唯一用户，我希望 SkillYard 无法以当前用户权限访问目标路径时在首次变更前失败，从而应用不会提权、绕过系统保护或留下半完成状态。
+162. 作为用户，我希望从 GitHub Releases 下载面向 Apple Silicon 的官方 ZIP 并核对 SHA-256，从而明确安装包来源和完整性。
+163. 作为用户，我希望需要新版本时下载新的官方 ZIP 并手动替换 `SkillYard.app`，从而 1.0 不需要应用自更新系统。
+164. 作为用户，我希望手动替换或删除应用本体不影响 Central Store、SQLite、Journal 和 Mount，从而已经挂载的 Skill 继续工作。
+165. 作为用户，我希望所有管理数据、路径、Skill 名称和崩溃信息留在本机，从而不需要遥测同意或隐私开关。
+166. 作为用户，我希望只有主动触发 Source 获取、搜索、Update Check 或 Bundle Update 时才发生必要网络请求，从而联网行为与我的动作一致。
+167. 作为用户，我希望 SkillYard 无法以当前用户权限访问目标路径时在首次变更前失败，从而应用不会提权、绕过系统保护或留下半完成状态。
 
 ## Implementation Decisions
 
@@ -253,8 +253,8 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 - `SkillYard.app` 是唯一用户入口；不提供 CLI、headless 模式、daemon、localhost API、公开 Rust API 或独立恢复工具。
 - 使用 Tauri 2 和 TypeScript 构建桌面界面，前端静态资源打包进应用并由 WKWebView 加载。
 - 生产应用不启动 localhost Server，不捆绑 Chromium、Python runtime 或 Python sidecar。
-- 1.0 在产品所有者的个人 Mac 上本地构建和运行，不制作面向公众的 DMG、ZIP、GitHub Release 或其他安装包。
-- 1.0 不加入 Apple Developer Program，不承诺 Developer ID、Hardened Runtime、notarization、stapling 或无警告的 Gatekeeper 安装体验；本地构建可以使用 macOS／Tauri 所需的 ad-hoc signing，但它不代表 Apple 验证身份。
+- 官方发布物是 GitHub Releases 中面向 Apple Silicon 的 ZIP 和对应 `SHA256SUMS.txt`。
+- 1.0 不加入 Apple Developer Program，不承诺 Developer ID、Hardened Runtime、notarization、stapling 或无警告的 Gatekeeper 安装体验；发布构建使用 ad-hoc signing，但它不代表 Apple 验证身份。
 - 1.0 不进入 Mac App Store，也不启用 App Sandbox。
 - 所有扫描和生命周期操作只使用当前登录用户权限；TCC、POSIX permission、ACL、System Integrity Protection 或只读文件系统拒绝访问时，必须在首次变更前失败。SkillYard 不提权，也不绕过系统保护。
 
@@ -305,7 +305,7 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 | Claude Code | `~/.claude/skills` | `<project>/.claude/skills` | Claude Code 官方 Skill 路径 |
 | GitHub Copilot | `~/.copilot/skills` | `<project>/.github/skills` | GitHub Copilot 官方 Skill 路径 |
 
-- Codex 的当前官方推荐路径是用户级和项目级 `.agents/skills`；SkillYard 使用仍受支持的 `.codex/skills` 兼容路径，是为了保留按应用选择 Mount 的能力。它必须针对当前个人电脑安装的 Codex 版本做兼容性测试，而不能被描述为长期稳定的官方路径。
+- Codex 的当前官方推荐路径是用户级和项目级 `.agents/skills`；SkillYard 使用仍受支持的 `.codex/skills` 兼容路径，是为了保留按应用选择 Mount 的能力。它必须针对受支持的当前 Codex 版本做兼容性测试，而不能被描述为长期稳定的官方路径。
 - 用户级和项目级 `.agents/skills` 会被 Codex 与 GitHub Copilot 扫描；Claude Code 官方文档没有声明直接扫描这些目录。
 - 项目级 `.claude/skills` 会被 Claude Code 和 GitHub Copilot 共同扫描。创建 Claude Code project Mount 前必须提示这项交叉可见性。
 - `.agents/skills` 等多应用共享目录只用于只读扫描、Management Evidence 和 Takeover，不能作为 Central Store 或新 Mount 目标。
@@ -313,7 +313,7 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 - “Host 可以发现 Skill”的 1.0 验收定义是：目标路径正确、Mount 指向预期稳定成员路径、成员包含有效 `SKILL.md`，以及应用配置声明会扫描该路径；自动化测试不启动或操控 Agent 应用本体。
 - Host 内置或 Plugin Skill 只有在 Host、Plugin manifest、安装记录或受支持目录提供确定性证据时才只读展示并标注原管理方；1.0 不承诺仅靠文件扫描完整枚举 Claude Code 或 GitHub Copilot 的全部 bundled skills。
 - Project 只能由用户选择或 Takeover 时确认加入，不能通过全盘扫描自动发现。
-- 1.0 假设 Project 位于当前 Mac 的本地、持续可访问目录，不建立外置磁盘和离线 Project 状态机。
+- 1.0 假设 Project 位于本地、持续可访问的目录，不建立外置磁盘和离线 Project 状态机。
 
 ### 首次扫描、Local Refresh 与所有权分类
 
@@ -426,11 +426,11 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 
 ### 应用本体、数据生命周期与隐私
 
-- 1.0 不提供 Application Update、更新源、下载安装器或 GitHub Releases 发布流程；“检查更新”和 Bundle Update 只指 Skill Source 内容。
-- 需要更新应用本体时，由产品所有者在同一台 Mac 上重新构建并手动替换 `SkillYard.app`。
+- 1.0 不提供 Application Update、应用内更新源或下载安装器；“检查更新”和 Bundle Update 只指 Skill Source 内容。
+- 需要更新应用本体时，用户从 GitHub Releases 下载新的官方 ZIP 并手动替换 `SkillYard.app`。
 - 手动替换应用本体不能修改 Central Store、SQLite、Current Content、Journal 或 Mount；新构建启动后仍先执行普通事务恢复。
 - 删除或移动应用本体不会删除托管数据，也不会把 Mount 转换成普通文件。
-- 重新构建或重新放置应用后，使用固定 Central Store 恢复原管理状态。
+- 重新安装或重新放置应用后，使用固定 Central Store 恢复原管理状态。
 - App Reset 只能删除偏好、窗口状态和缓存，不能删除生命周期数据。
 - SkillYard 采用 Zero Telemetry，不上传分析事件、设备标识、崩溃信息、Skill 名称、Source URL、Project 路径或本机管理状态。
 - 网络请求只在用户主动触发 Source 获取、搜索、Update Check 或 Bundle Update 时发起，并只携带对应协议所需信息。
@@ -488,21 +488,21 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 - IPC contract tests 验证 TypeScript 与 Rust 的命令名称、序列化类型和错误映射一致，不重复业务规则。
 - Tauri smoke test 验证 WKWebView 加载打包资源、关键命令可调用、生产应用不启动 localhost。
 - Supported App 的自动化验收通过固定路径、有效 `SKILL.md` 和软链接目标完成，不把启动真实 Agent 应用作为测试依赖。
-- Codex 专属 `.codex/skills` global 和 project 路径必须对当前个人电脑安装的 Codex 版本执行兼容性 contract test；任一路径不再被扫描时，Codex Mount 支持不能仅凭旧文档判定通过。
-- 本机构建 smoke test 验证 `.app` 为 `arm64`、最低 macOS 14，并能在产品所有者当前 Mac 上直接启动。
-- 应用本体替换测试验证重新构建并手动替换 `.app` 后，原 Central Store、SQLite、Journal 和 Mount 仍被识别且保持不变。
+- Codex 专属 `.codex/skills` global 和 project 路径必须对受支持的当前 Codex 版本执行兼容性 contract test；任一路径不再被扫描时，Codex Mount 支持不能仅凭旧文档判定通过。
+- 发布候选 smoke test 验证 `.app` 为 `arm64`、最低 macOS 14，并能在干净的 Apple Silicon macOS VM 中启动。
+- 应用本体替换测试验证安装新版并手动替换 `.app` 后，原 Central Store、SQLite、Journal 和 Mount 仍被识别且保持不变。
 
-### 从旧原型提炼的测试先例
+### 可重复测试契约
 
-- 旧原型验证过的“真实临时 SQLite、文件系统和 symlink”测试方式可以在 Rust 中重建。
-- “Plan 或预览不修改状态”“未签发或过期 Plan 不可执行”“确认绑定已预览候选”等不变量可以迁移。
-- “Mount Conflict 在首次写入前阻止操作”“外部替换软链接后报告 Drift”“同一内容服务多个应用和项目”等场景可以迁移。
-- 旧 CLI、HTTP、HTML、旧领域模型、copy fallback、自动改名、Cursor、执行外部命令、AI Assist、启动自动扫描、本地版本和日志行为不能迁移为 1.0 需求。
+- 使用真实临时 SQLite、文件系统和 symlink 验证生命周期结果。
+- 保持“Plan 或预览不修改状态”“未签发或过期 Plan 不可执行”“确认绑定已预览候选”等不变量。
+- 覆盖“Mount Conflict 在首次写入前阻止操作”“外部替换软链接后报告 Drift”“同一内容服务多个应用和项目”等场景。
+- CLI、HTTP、copy fallback、自动改名、执行外部命令、AI Assist、启动自动扫描、本地版本和日志行为不属于 1.0 需求。
 
 ## Out of Scope
 
 - Intel、Universal 2、macOS 13 及更早系统。
-- 面向其他用户的公开分发、安装文档、DMG／ZIP 发布包和 GitHub Releases。
+- DMG、Homebrew Cask、Mac App Store 包或 GitHub Releases ZIP 之外的安装渠道。
 - Apple Developer Program、Developer ID、notarization、stapling，以及无警告 Gatekeeper 安装体验。
 - Mac App Store 和 App Sandbox 分发。
 - 独立 CLI、headless 模式、daemon、localhost Server、公开 API 和第三方自动化接口。
@@ -570,14 +570,14 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 
 ### Supported App 当前事实依据
 
-- Codex 官方文档将用户级和项目级 `.agents/skills` 作为推荐发现路径；当前开源 loader 仍兼容 `.codex/skills`，但明确标为 deprecated。因此 Codex 专属 Mount 需要对当前个人电脑实际安装的 Codex 版本做兼容性测试。[Codex Skills 文档](https://learn.chatgpt.com/docs/build-skills)；[Codex loader 源码](https://github.com/openai/codex/blob/main/codex-rs/core-skills/src/loader.rs)
+- Codex 官方文档将用户级和项目级 `.agents/skills` 作为推荐发现路径；当前开源 loader 仍兼容 `.codex/skills`，但明确标为 deprecated。因此 Codex 专属 Mount 需要对受支持的当前 Codex 版本做兼容性测试。[Codex Skills 文档](https://learn.chatgpt.com/docs/build-skills)；[Codex loader 源码](https://github.com/openai/codex/blob/main/codex-rs/core-skills/src/loader.rs)
 - Claude Code 官方确认用户级和项目级 `.claude/skills` 以及 Plugin Skill，并支持 Skill 目录软链接；没有官方证据表明它直接扫描 `.agents/skills`。[Claude Code Skills 文档](https://code.claude.com/docs/en/skills)
 - GitHub Copilot 官方确认用户级 `.copilot/skills`、`.agents/skills`，以及项目级 `.github/skills`、`.agents/skills`、`.claude/skills`。这构成 Codex／Copilot 共享 `.agents/skills` 和 Claude Code／Copilot 共享项目 `.claude/skills` 的交叉可见性。[GitHub Copilot Agent Skills 文档](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
 - Codex、Claude Code 和 GitHub Copilot 都存在可由 Plugin manifest 或安装记录确认归属的 Plugin Skill，但 Claude Code 与 GitHub Copilot 的 bundled skills 没有已证实的稳定逐成员文件清单；1.0 只展示能够以确定性证据发现的内容。
 
 ### 交付解释
 
-- Python CLI、Local Server 和旧测试已经从当前工作区删除。1.0 实施只根据本文记录重建有效场景和不变量，不兼容旧 API、旧数据库或旧运行方式；历史实现由 Git 保存。
+- `SkillYard.app` 是唯一产品入口；1.0 不兼容未发布的旧 API、旧数据库或旧运行方式。
 - Central Store 是持久用户内容。删除应用、重置设置和手动替换本地构建都不能把它当作缓存清理。
 - Filesystem Transaction Journal 和事务临时恢复内容只保证当前操作安全，不构成用户可见的备份、版本或回滚功能。
-- 1.0 的目标不是功能演示，而是在产品所有者的一台个人 Mac、三个 Supported App 和本地单用户环境中，把核心 Skill 生命周期做到可预测、可恢复和日常可用。公开分发和 Application Update 在后续确实需要其他用户安装时再单独设计。
+- 1.0 的目标不是功能演示，而是在 Apple Silicon Mac、三个 Supported App 和本地单用户环境中，把核心 Skill 生命周期做到可预测、可恢复和日常可用。公开发布不改变 1.0 不提供 Application Update 的边界。

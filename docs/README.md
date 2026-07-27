@@ -14,11 +14,11 @@
 
 如果文档之间出现冲突，应先修正低层文档，不能通过继续增加补丁式决策文件来维持两套说法。
 
-## 当前状态
+## 当前版本
 
-SkillYard 1.0 的十个实施阶段已经进入最终验收。自动化回归和当前个人 Mac 的应用构建、真实启动、Codex 路径及应用替换契约均已验证；全部 167 条 User Story 已建立证据映射。当前只剩产品所有者完成关键文案审阅与一份真实 Bundle 的最终日常流程体验，具体状态记录在 [1.0 User Story 验收证据](acceptance/1.0-user-story-evidence.md)。
+SkillYard 1.0 面向 macOS 14 及以上的 Apple Silicon Mac，支持 Codex、Claude Code 和 GitHub Copilot。官方发布物是 GitHub Releases 中的 ZIP 与对应 SHA-256 校验文件；应用使用 ad-hoc signing，未经过 Apple notarization，也不提供应用自动更新。
 
-旧 Python CLI、本地 HTTP Server、HTML View 和对应测试已经从当前工作区删除；适用于 1.0 的行为约束保留在 PRD 和实施计划中，历史实现由 Git 记录保存。
+可重复的自动化、macOS 应用契约和人工流程验收仍记录在 [1.0 User Story 验收证据](acceptance/1.0-user-story-evidence.md)，这些证据只验证现有产品承诺，不增加新的产品能力。
 
 ## 研究资料
 

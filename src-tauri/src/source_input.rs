@@ -662,14 +662,16 @@ mod tests {
         )]);
         let transport = FixtureTransport::new([Ok(SourceResponse {
             status: 200,
-            final_url: Url::parse("https://downloads.example.com/remote.zip?token=one")
-                .expect("fixture URL 应合法"),
+            final_url: Url::parse(
+                "https://downloads.example.com/remote.zip?fixture_query=preserve-identity",
+            )
+            .expect("fixture URL 应合法"),
             body: Box::new(Cursor::new(bytes.clone())),
         })]);
         let sandbox = tempdir().expect("应创建隔离目录");
         let prepared = prepare_direct_url_source(
             &transport,
-            "https://downloads.example.com/remote.zip?token=one",
+            "https://downloads.example.com/remote.zip?fixture_query=preserve-identity",
             &sandbox.path().join("staging"),
             "22222222-2222-4222-8222-222222222222",
         )
@@ -678,11 +680,11 @@ mod tests {
         assert_eq!(prepared.kind(), PreparedSourceKind::DirectUrl);
         assert_eq!(
             prepared.canonical_identity(),
-            "direct-url:https://downloads.example.com/remote.zip?token=one"
+            "direct-url:https://downloads.example.com/remote.zip?fixture_query=preserve-identity"
         );
         assert_eq!(
             prepared.locator(),
-            "https://downloads.example.com/remote.zip?token=one"
+            "https://downloads.example.com/remote.zip?fixture_query=preserve-identity"
         );
         assert_eq!(prepared.marker(), sha256(&bytes));
         let requests = transport.requests.lock().expect("应读取请求");

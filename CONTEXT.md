@@ -6,9 +6,9 @@ SkillYard 1.0 is a macOS desktop application that takes over user-selected AI ag
 
 ## Language
 
-**Personal Local Build**:
-The SkillYard 1.0 delivery boundary: the product owner builds and runs `SkillYard.app` on one personal Apple silicon Mac. Version 1.0 has no public installer, GitHub Release, Developer ID, notarization, App Store submission, or Application Update flow.
-_Avoid_: public distribution, paid Apple signing, release feed, multi-user installation support
+**Public Release Package**:
+The official SkillYard 1.0 download is the Apple silicon ZIP published on GitHub Releases with its SHA-256 checksum. The app uses ad-hoc signing and is not notarized, so macOS may require the normal Gatekeeper confirmation on first launch.
+_Avoid_: Developer ID claim, notarized claim, DMG, Homebrew Cask, App Store distribution
 
 **Application Architecture**:
 The SkillYard 1.0 implementation boundary: a Tauri 2 desktop shell loads bundled TypeScript web assets in the system WKWebView and communicates through typed, task-specific commands with a small Rust Lifecycle Core. The production app has no localhost server, bundled Chromium runtime, Python runtime, or Python sidecar.
@@ -27,8 +27,8 @@ The complete operating-system and processor support promise for SkillYard 1.0: A
 _Avoid_: every Mac, Rosetta support, build-host architecture
 
 **Manual App Replacement**:
-The only SkillYard 1.0 application upgrade path: the product owner rebuilds `SkillYard.app` on the same personal Mac and replaces the app manually. Central Store, SQLite, Current Content, Journals, and Mounts remain untouched.
-_Avoid_: Application Update, updater feed, installer download, Developer ID verification
+The only SkillYard 1.0 application upgrade path: the user downloads a newer official ZIP from GitHub Releases and replaces `SkillYard.app` manually. Central Store, SQLite, Current Content, Journals, and Mounts remain untouched.
+_Avoid_: Application Update, updater feed, Homebrew upgrade, Developer ID verification
 
 **Zero Telemetry**:
 The SkillYard 1.0 privacy contract that analytics, identifiers, crash reports, managed inventory, Source URLs, Skill names, local paths, and SQLite state never leave the Mac. Explicitly user-triggered network requests for Source, catalog, search, Update Check, or Bundle Update operations are functional requests and carry no analytics payload. Local SQLite transaction state and Filesystem Transaction Journals are correctness mechanisms, not telemetry.

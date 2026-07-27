@@ -9,3 +9,35 @@ target/
 src-tauri/gen/
 .DS_Store
 .idea/
+
+# 本地环境文件和私密凭据不能进入源码历史。
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.mobileprovision
+*.provisionprofile
+
+# 本地状态、诊断信息和临时数据库不属于源码。
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+logs/
+
+# 本机打包与发布候选物由 CI 管理，不提交到仓库。
+artifacts/
+release/
+*.app/
+*.dmg
+*.pkg
+*.zip
+*.tar.gz
+SHA256SUMS.txt
