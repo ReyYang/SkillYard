@@ -538,12 +538,21 @@ describe("Tauri IPC contract", () => {
     });
   });
 
-  it("只通过原生任务命令选择并登记 Project", async () => {
-    mocks.invoke.mockResolvedValue(null);
+  it("先选择 Project，再通过独立命令提交确认后的路径", async () => {
+    mocks.invoke
+      .mockResolvedValueOnce({
+        displayName: "project",
+        rootPath: "/tmp/project",
+      })
+      .mockResolvedValueOnce({ type: "inventory" });
 
-    await tauriSkillYardClient.chooseAndRegisterProject();
+    await tauriSkillYardClient.chooseProjectDirectory();
+    await tauriSkillYardClient.registerProject("/tmp/project");
 
-    expect(mocks.invoke).toHaveBeenCalledWith("choose_and_register_project");
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "choose_project_directory");
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "register_project", {
+      rootPath: "/tmp/project",
+    });
   });
 
   it("创建 Takeover Plan 时提交完整且明确的用户选择", async () => {

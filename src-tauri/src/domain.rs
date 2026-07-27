@@ -412,6 +412,13 @@ pub struct ProjectSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectSelection {
+    pub display_name: String,
+    pub root_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MountSummary {
     pub id: String,
     pub member_id: String,
@@ -648,6 +655,8 @@ pub struct InventoryItem {
     /// 待接管分组只表达经安装记录证明的边界，不能冒充已经创建的 Bundle。
     pub takeover_group_id: Option<String>,
     pub takeover_group_display_name: Option<String>,
+    /// 只读内容按原管理方的真实容器分组；Codex 官方插件使用插件名。
+    pub external_group_display_name: Option<String>,
     pub bundle_id: Option<String>,
     /// 受管条目公开稳定 Member ID；扫描观察保持为空，前端不能解析展示 ID。
     pub member_id: Option<String>,
@@ -1108,6 +1117,7 @@ pub struct SkillsShSearchMember {
 #[serde(rename_all = "camelCase")]
 pub enum ScanRootKey {
     CodexGlobal,
+    CodexOfficialPlugins,
     ClaudeCodeGlobal,
     GitHubCopilotGlobal,
     SharedAgents,
@@ -1121,6 +1131,7 @@ impl ScanRootKey {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CodexGlobal => "codex_global",
+            Self::CodexOfficialPlugins => "codex_official_plugins",
             Self::ClaudeCodeGlobal => "claude_code_global",
             Self::GitHubCopilotGlobal => "github_copilot_global",
             Self::SharedAgents => "shared_agents",
@@ -1134,6 +1145,7 @@ impl ScanRootKey {
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
             "codex_global" => Some(Self::CodexGlobal),
+            "codex_official_plugins" => Some(Self::CodexOfficialPlugins),
             "claude_code_global" => Some(Self::ClaudeCodeGlobal),
             "github_copilot_global" => Some(Self::GitHubCopilotGlobal),
             "shared_agents" => Some(Self::SharedAgents),

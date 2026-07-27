@@ -362,6 +362,7 @@ function SourceCard({
   onRelink(): void;
   onRemove(): void;
 }) {
+  const [isExpanded, setIsExpanded] = useState(false);
   const available = source.members.filter(
     (member) => member.selectable && !member.installedMemberId,
   );
@@ -447,43 +448,58 @@ function SourceCard({
         </p>
       ) : null}
 
-      {source.members.length === 0 ? (
-        <p className="source-empty">当前没有发现可展示的 Skill。</p>
-      ) : (
-        <ul className="source-members">
-          {source.members.map((member) => (
-            <li
-              key={member.id}
-              className={
-                member.relativePath === highlightedMemberPath
-                  ? "is-highlighted"
-                  : undefined
-              }
-            >
-              <div>
-                <strong>{member.skillName ?? member.relativePath}</strong>
-                <code>{member.relativePath}</code>
-              </div>
-              <span>
-                {member.installedMemberId
-                  ? installedMemberStatus(mounts, member.installedMemberId)
-                  : !member.selectable
-                    ? "不可安装"
-                    : source.catalogStatus === "fresh"
-                      ? "可安装"
-                      : "等待重新加载"}
-              </span>
-              {member.validationErrors.map((message) => (
-                <small className="candidate-error" key={message}>
-                  {message}
-                </small>
+      <button
+        className="source-members-toggle"
+        type="button"
+        aria-expanded={isExpanded}
+        onClick={() => setIsExpanded((expanded) => !expanded)}
+      >
+        {isExpanded
+          ? "收起 Skill"
+          : `查看 ${source.members.length} 个 Skill`}
+      </button>
+
+      {isExpanded ? (
+        source.members.length === 0 ? (
+          <p className="source-empty">当前没有发现可展示的 Skill。</p>
+        ) : (
+          <>
+            <ul className="source-members">
+              {source.members.map((member) => (
+                <li
+                  key={member.id}
+                  className={
+                    member.relativePath === highlightedMemberPath
+                      ? "is-highlighted"
+                      : undefined
+                  }
+                >
+                  <div>
+                    <strong>{member.skillName ?? member.relativePath}</strong>
+                    <code>{member.relativePath}</code>
+                  </div>
+                  <span>
+                    {member.installedMemberId
+                      ? installedMemberStatus(mounts, member.installedMemberId)
+                      : !member.selectable
+                        ? "不可安装"
+                        : source.catalogStatus === "fresh"
+                          ? "可安装"
+                          : "等待重新加载"}
+                  </span>
+                  {member.validationErrors.map((message) => (
+                    <small className="candidate-error" key={message}>
+                      {message}
+                    </small>
+                  ))}
+                </li>
               ))}
-            </li>
-          ))}
-        </ul>
-      )}
-      {source.catalogStatus === "fresh" && available.length === 0 ? (
-        <p className="source-empty">没有尚未安装的有效 Skill。</p>
+            </ul>
+            {source.catalogStatus === "fresh" && available.length === 0 ? (
+              <p className="source-empty">没有尚未安装的有效 Skill。</p>
+            ) : null}
+          </>
+        )
       ) : null}
     </article>
   );

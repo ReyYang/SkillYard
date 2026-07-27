@@ -149,7 +149,7 @@
 ### 范围
 
 - 实施顺序为 Codex global Mount、Project 登记与 project Mount、Claude Code 和 GitHub Copilot。
-- 用户可以主动添加 Project；添加时只读扫描已支持的项目 Skill 目录。
+- 用户可以主动添加 Project；原生选择器返回路径后先显示应用内确认弹窗，用户确认才登记并只读扫描已支持的项目 Skill 目录。
 - 用户为每个 Skill 选择 Supported App，以及 global 或已登记 Project scope。
 - Mount 叶子目录固定使用 Skill Name，并指向 Bundle `current` 下的稳定成员路径。
 - 同一 Skill 可以挂载到多个 Supported App，也可以在同一应用的多个不同 Project 中使用 project Mount。
@@ -279,7 +279,7 @@ Stage 3 能力按以下方式直接复用：
 - 处理同一 Skill 的 global／project scope 冲突。
 - 处理 `.agents/skills` 等共享目录：用户选择目标 Supported App，新 Mount 全部验证后才移除原共享入口。
 - 已核验的 GitHub lock v3 在接管确认时自动创建或复用 Source 并关联 Bundle；没有可确认 Source 的内容仍可完成 Takeover，并显示“没有更新来源”。
-- Agent-managed、Plugin-managed 和 Project-managed 内容继续只读展示，不生成接管写入计划。
+- Agent-managed、Plugin-managed 和 Project-managed 内容继续只读展示，不生成接管写入计划。Codex 官方插件从三个固定官方缓存根扫描，同一插件取最近缓存版本，并以插件名形成只读 Bundle 分组。
 
 ### 不包含
 
@@ -354,7 +354,7 @@ Stage 3 能力按以下方式直接复用：
 - HTTP body 流式写入应用控制的临时区，下一字节超过 100 MiB 时立即停止。Archive 在写出前拒绝绝对路径、`..`、规范化重复路径、symlink 和其他特殊类型，并同时限制 20,000 个条目、512 MiB 实际展开总量和 100 MiB 实际单文件大小。
 - Archive 必须具有一个共同顶层目录，剥离后再复用阶段 2 的严格 YAML、名称、重复名称、嵌套成员、特殊文件和脚本风险验证。
 - 合法 archive 中没有 `SKILL.md` 是 fresh empty Catalog；零字节、断流、损坏 JSON/ZIP 或危险 archive 是 reload failure。失败清理临时内容且不改变 Bundle。
-- 第一次进入发现页才自动 reload 当前 Source；同一应用会话之后再次进入只读取 SQLite，只有用户点击“重新加载来源”才再次联网。启动、首次扫描和 Local Refresh 始终为零 Source 请求。
+- 进入发现页始终只读取 SQLite 中的 Source 摘要和上次成功目录，不自动 reload；成员列表默认折叠。只有用户点击具体 Source 的“重新加载来源”才联网。启动、首次扫描、Local Refresh 和打开发现页始终为零 Source 请求。
 
 #### 唯一安装事务与生效点
 
@@ -378,7 +378,7 @@ Stage 3 能力按以下方式直接复用：
 
 ### 阶段 5 切片
 
-1. **Source 基线与零启动网络**：migration 建立四个普通 Source；公开 seam 证明启动、扫描和刷新不联网，进入发现页才返回 Source 状态。
+1. **Source 基线与零隐式网络**：migration 建立四个普通 Source；公开 seam 证明启动、扫描、刷新和进入发现页都不联网，发现页先返回 SQLite 中的 Source 摘要。
 2. **canonical 输入与 Tracked Ref**：四种常用输入去重；default branch、显式 ref 和 ref 切换均使用真实 GitHub 协议 fixture，切换失败不改旧状态。
 3. **Catalog 原子 reload**：真实 ZIP fixture 穿过生产 archive 和内容验证；成功整体替换，失败保留 Stale，资源和路径风险在写出边界被拒绝。
 4. **GitHub 全新安装**：fresh Catalog 生成通用 Plan，确认后创建一个 Source-backed Bundle、adopted commit 和零 Mount，并覆盖生效前后中断恢复。

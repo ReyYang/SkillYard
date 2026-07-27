@@ -2375,23 +2375,6 @@ impl Storage {
             .map_err(StorageError::ReadSources)
     }
 
-    pub fn read_github_sources(&self) -> Result<Vec<StoredGithubSource>, StorageError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT id, canonical_identity, owner, repository, display_name, tracked_ref
-                 FROM sources
-                 WHERE kind = 'github'
-                 ORDER BY sort_order, id",
-            )
-            .map_err(StorageError::ReadSources)?;
-        let rows = statement
-            .query_map([], stored_github_source_from_row)
-            .map_err(StorageError::ReadSources)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::ReadSources)
-    }
-
     pub fn read_github_source(&self, source_id: &str) -> Result<StoredGithubSource, StorageError> {
         self.connection
             .query_row(
@@ -12479,6 +12462,7 @@ fn inventory_item_from_observation(
     observation: InventoryObservation,
     project_display_name: Option<String>,
 ) -> InventoryItem {
+    let external_group_display_name = official_plugin_display_name(&observation);
     let takeover_group = observation
         .installation_chain
         .as_ref()
@@ -12501,12 +12485,26 @@ fn inventory_item_from_observation(
         installation_chain: observation.installation_chain,
         takeover_group_id: takeover_group.as_ref().map(|group| group.id.clone()),
         takeover_group_display_name: takeover_group.map(|group| group.display_name),
+        external_group_display_name,
         bundle_id: None,
         member_id: None,
         bundle_display_name: None,
         source_display_name: None,
         project_display_name,
     }
+}
+
+fn official_plugin_display_name(observation: &InventoryObservation) -> Option<String> {
+    if observation.root_key != ScanRootKey::CodexOfficialPlugins {
+        return None;
+    }
+    // 固定缓存结构为 <marketplace>/<plugin>/<version>/skills/<skill>。
+    Path::new(&observation.skill_root)
+        .parent()?
+        .parent()?
+        .parent()?
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 fn read_managed_entries_from(
@@ -12585,6 +12583,7 @@ fn read_managed_entries_from(
             installation_chain,
             takeover_group_id: None,
             takeover_group_display_name: None,
+            external_group_display_name: None,
             bundle_id: Some(bundle_id),
             member_id: Some(member_id),
             bundle_display_name: Some(bundle_display_name),

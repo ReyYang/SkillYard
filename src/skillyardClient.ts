@@ -7,6 +7,7 @@ import type {
   InstallPlan,
   MountPlan,
   MountScope,
+  ProjectSelection,
   SourceAssociationContentChoice,
   SourceAssociationPlan,
   SourceMemberMappingChoice,
@@ -101,7 +102,8 @@ export interface SkillYardClient {
     planId: string,
     selectedCandidateIds: string[],
   ): Promise<UiOutcome>;
-  chooseAndRegisterProject(): Promise<UiOutcome | null>;
+  chooseProjectDirectory(): Promise<ProjectSelection | null>;
+  registerProject(rootPath: string): Promise<UiOutcome>;
   createTakeoverPlan(request: TakeoverPlanRequest): Promise<TakeoverPlan>;
   confirmTakeoverPlan(planId: string): Promise<UiOutcome>;
   createMountPlan(
@@ -235,8 +237,10 @@ export const tauriSkillYardClient: SkillYardClient = {
       planId,
       selectedCandidateIds,
     }),
-  chooseAndRegisterProject: () =>
-    invoke<UiOutcome | null>("choose_and_register_project"),
+  chooseProjectDirectory: () =>
+    invoke<ProjectSelection | null>("choose_project_directory"),
+  registerProject: (rootPath) =>
+    invoke<UiOutcome>("register_project", { rootPath }),
   createTakeoverPlan: (request) =>
     invoke<TakeoverPlan>("create_takeover_plan", { request }),
   confirmTakeoverPlan: (planId) =>

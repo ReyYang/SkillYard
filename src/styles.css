@@ -173,7 +173,7 @@ h1 {
 }
 
 .primary-action:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.62;
 }
 
@@ -883,7 +883,7 @@ code {
 }
 
 .secondary-action:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.58;
 }
 
@@ -993,6 +993,76 @@ code {
   align-items: baseline;
   color: #7a3529;
   background: #f6ded6;
+}
+
+.inline-error-dismiss {
+  margin-left: auto;
+  padding: 0.2rem 0.45rem;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 720;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  padding: 1.5rem;
+  place-items: center;
+  background: rgb(19 28 21 / 42%);
+  backdrop-filter: blur(4px);
+}
+
+.confirmation-dialog {
+  width: min(520px, 100%);
+  padding: 1.5rem;
+  border: 1px solid rgb(50 70 56 / 14%);
+  border-radius: 20px;
+  background: #fbfbf5;
+  box-shadow: 0 28px 80px rgb(22 37 26 / 24%);
+}
+
+.confirmation-dialog h2 {
+  margin: 0;
+  font-size: 1.8rem;
+}
+
+.confirmation-dialog > p:not(.eyebrow) {
+  color: #5e695f;
+  line-height: 1.6;
+}
+
+.confirmation-dialog-path {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 0.8rem;
+  border-radius: 10px;
+  color: #2c4933;
+  background: #edf2e9;
+}
+
+.confirmation-dialog-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  margin-top: 1.25rem;
+}
+
+.source-members-toggle {
+  width: 100%;
+  margin-top: 1rem;
+  padding: 0.72rem 0.9rem;
+  border: 1px solid rgb(53 78 59 / 14%);
+  border-radius: 10px;
+  color: #35573e;
+  background: #edf3e8;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 720;
 }
 
 .scan-warning {

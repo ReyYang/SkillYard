@@ -646,6 +646,9 @@ describe("本机清单", () => {
     expect(
       screen.getByRole("button", { name: "更新 superpowers" }),
     ).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "关闭更新提示" }));
+    expect(screen.queryByText("更新未完成")).not.toBeInTheDocument();
   });
 
   it("从更新预览返回时复用安装 Plan 的真实丢弃流程", async () => {
@@ -1846,14 +1849,44 @@ describe("本机清单", () => {
     const client = createClient(
       inventoryOutcome([createEntry({ skillName: "preserved" })]),
     );
-    vi.mocked(client.chooseAndRegisterProject).mockResolvedValue(null);
+    vi.mocked(client.chooseProjectDirectory).mockResolvedValue(null);
     render(<App client={client} />);
 
     await user.click(await screen.findByRole("button", { name: "添加项目" }));
 
-    expect(client.chooseAndRegisterProject).toHaveBeenCalledTimes(1);
+    expect(client.chooseProjectDirectory).toHaveBeenCalledTimes(1);
     expect(screen.getByText("preserved")).toBeInTheDocument();
-    expect(client.createMountPlan).not.toHaveBeenCalled();
+    expect(client.registerProject).not.toHaveBeenCalled();
+  });
+
+  it("选择 Project 后必须在弹窗中二次确认才登记", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createEntry({ skillName: "preserved" })]),
+    );
+    vi.mocked(client.chooseProjectDirectory).mockResolvedValue({
+      displayName: "example-project",
+      rootPath: "/tmp/example-project",
+    });
+    vi.mocked(client.registerProject).mockResolvedValue(
+      inventoryOutcome([createEntry({ skillName: "project-skill" })]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "添加项目" }));
+
+    const dialog = screen.getByRole("dialog", { name: "确认添加项目" });
+    expect(dialog).toHaveTextContent("/tmp/example-project");
+    expect(client.registerProject).not.toHaveBeenCalled();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "确认添加" }),
+    );
+
+    expect(client.registerProject).toHaveBeenCalledWith("/tmp/example-project");
+    expect(screen.queryByRole("dialog", { name: "确认添加项目" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("project-skill")).toBeInTheDocument();
   });
 
   it("Skill 详情显示三个应用的真实 Mount", async () => {
@@ -2790,6 +2823,7 @@ describe("本机清单", () => {
           skillName: "plugin-skill",
           managementKind: "agentManaged",
           observedBy: ["codex"],
+          externalGroupDisplayName: "browser",
         }),
         createEntry({
           id: "project",
@@ -2835,7 +2869,7 @@ describe("本机清单", () => {
     expect(screen.getByRole("region", { name: "local-copy" })).toHaveTextContent(
       "待接管",
     );
-    expect(screen.getByRole("region", { name: "Codex 管理" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "browser" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "SkillYard" })).toBeInTheDocument();
   });
 
@@ -4093,7 +4127,7 @@ describe("GitHub Source 安装", () => {
     expect(client.getStartupState).toHaveBeenCalledTimes(1);
   });
 
-  it("首次加载 Source 期间保留清单浏览，但禁用全部写入口", async () => {
+  it("打开安装页期间保留清单浏览，但禁用全部写入口", async () => {
     const user = userEvent.setup();
     let finishOpening:
       | ((outcome: Extract<UiOutcome, { type: "sourceDiscovery" }>) => void)
@@ -4111,7 +4145,7 @@ describe("GitHub Source 安装", () => {
 
     await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
 
-    expect(screen.getByRole("button", { name: "正在加载来源…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在打开…" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
@@ -4176,6 +4210,9 @@ describe("GitHub Source 安装", () => {
     expect(within(freshCard).getByRole("button", { name: "安装 Bundle" })).toBeEnabled();
     expect(within(staleCard).getByText("上次目录已过期")).toBeInTheDocument();
     expect(within(staleCard).getByText(/上次成功加载/)).toBeInTheDocument();
+    await user.click(
+      within(staleCard).getByRole("button", { name: "查看 1 个 Skill" }),
+    );
     expect(within(staleCard).getByText("等待重新加载")).toBeInTheDocument();
     expect(within(staleCard).getByText(/GitHub 暂时不可用/)).toBeInTheDocument();
     expect(within(staleCard).getByRole("button", { name: "安装 Bundle" })).toBeDisabled();
@@ -4193,6 +4230,43 @@ describe("GitHub Source 安装", () => {
         { name: "安装 Bundle" },
       ),
     ).toBeEnabled();
+  });
+
+  it("Source 默认只展示摘要，用户查看后才展开 Skill 成员", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.openSourceDiscovery).mockResolvedValue(
+      sourceDiscoveryOutcome([
+        createSource({
+          members: [
+            createSourceMember({
+              id: "catalog-member-alpha",
+              relativePath: "skills/alpha",
+              skillName: "alpha",
+            }),
+            createSourceMember({
+              id: "catalog-member-beta",
+              relativePath: "skills/beta",
+              skillName: "beta",
+            }),
+          ],
+        }),
+      ]),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+
+    const card = screen.getByRole("article", { name: "anthropics/skills" });
+    expect(within(card).queryByText("alpha")).not.toBeInTheDocument();
+    expect(within(card).queryByText("beta")).not.toBeInTheDocument();
+
+    await user.click(
+      within(card).getByRole("button", { name: "查看 2 个 Skill" }),
+    );
+
+    expect(within(card).getByText("alpha")).toBeInTheDocument();
+    expect(within(card).getByText("beta")).toBeInTheDocument();
   });
 
   it("本地 Source 只展示来源和已安装状态，不误显示 GitHub 操作", async () => {
@@ -4221,6 +4295,9 @@ describe("GitHub Source 安装", () => {
 
     const card = screen.getByRole("article", { name: "superpowers" });
     expect(within(card).getByText("/tmp/superpowers.skill")).toBeInTheDocument();
+    await user.click(
+      within(card).getByRole("button", { name: "查看 1 个 Skill" }),
+    );
     expect(within(card).getByText("已安装 · 未挂载")).toBeInTheDocument();
     expect(
       within(card).queryByRole("button", { name: "重新加载来源" }),
@@ -4681,6 +4758,9 @@ describe("GitHub Source 安装", () => {
     render(<App client={client} />);
 
     await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(
+      screen.getByRole("button", { name: "查看 2 个 Skill" }),
+    );
     expect(screen.getByText("已安装 · 已挂载 1 处")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "补装 Skill" }));
 
@@ -4727,6 +4807,9 @@ describe("GitHub Source 安装", () => {
     render(<App client={client} />);
 
     await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    await user.click(
+      screen.getByRole("button", { name: "查看 1 个 Skill" }),
+    );
 
     expect(screen.getByText("已安装 · 挂载异常 2 处")).toBeInTheDocument();
     expect(screen.queryByText(/已安装 · 已挂载/)).not.toBeInTheDocument();
@@ -6016,7 +6099,8 @@ function createClient(startup: UiOutcome): SkillYardClient {
     chooseArchiveInstallPlan: vi.fn(),
     chooseEditableLocalInstallPlan: vi.fn(),
     confirmInstallPlan: vi.fn(),
-    chooseAndRegisterProject: vi.fn(),
+    chooseProjectDirectory: vi.fn(),
+    registerProject: vi.fn(),
     createTakeoverPlan: vi.fn(),
     confirmTakeoverPlan: vi.fn(),
     createMountPlan: vi.fn(),

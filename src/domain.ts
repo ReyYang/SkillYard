@@ -14,6 +14,7 @@ export type InventoryLocationKind =
 
 export type ScanRootKey =
   | "codexGlobal"
+  | "codexOfficialPlugins"
   | "claudeCodeGlobal"
   | "gitHubCopilotGlobal"
   | "sharedAgents"
@@ -68,6 +69,8 @@ export interface InventoryObservation {
   // 后端只有在存在确定性来源证据时才提供分组；null 仍表示独立待接管候选。
   takeoverGroupId: string | null;
   takeoverGroupDisplayName: string | null;
+  // 只读 Skill 可按原管理方的真实容器分组，例如 Codex 官方插件名。
+  externalGroupDisplayName?: string | null;
   // 受管安装由 Rust 投影真实 Bundle；扫描观察保持这些关系为空。
   bundleId?: string | null;
   bundleDisplayName?: string | null;
@@ -133,6 +136,11 @@ export type MountHealth = "healthy" | "missing" | "conflict";
 
 export interface ProjectSummary {
   id: string;
+  displayName: string;
+  rootPath: string;
+}
+
+export interface ProjectSelection {
   displayName: string;
   rootPath: string;
 }

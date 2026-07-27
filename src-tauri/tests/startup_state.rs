@@ -158,6 +158,41 @@ fn scan_discovers_only_fixed_global_and_shared_roots_without_modifying_content()
 }
 
 #[test]
+fn scan_discovers_official_codex_plugin_skills_as_read_only_inventory() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let plugin_skill = home
+        .join(".codex/plugins/cache/openai-bundled/browser/1.0.0/skills/control-in-app-browser");
+    write_skill(
+        &plugin_skill,
+        "control-in-app-browser",
+        "official plugin fixture",
+    );
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(sandbox.path().join("data"), home),
+        PlatformInfo::supported_for_test(),
+    );
+
+    let UiOutcome::Inventory { entries, .. } = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    else {
+        panic!("扫描后应进入 Inventory");
+    };
+    let plugin_entry = entries
+        .iter()
+        .find(|entry| entry.skill_name == "control-in-app-browser")
+        .expect("官方 Codex 插件 Skill 应进入只读 Inventory");
+
+    assert_eq!(plugin_entry.management_kind, ManagementKind::AgentManaged);
+    assert_eq!(plugin_entry.observed_by, vec![SupportedAppId::Codex]);
+    assert_eq!(
+        plugin_entry.external_group_display_name.as_deref(),
+        Some("browser")
+    );
+}
+
+#[test]
 fn scan_marks_invalid_frontmatter_without_trusting_the_declared_name() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");

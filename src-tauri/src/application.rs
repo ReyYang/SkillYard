@@ -1,9 +1,6 @@
 use std::{
     path::Path,
-    sync::{
-        Arc, Mutex, TryLockError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, TryLockError},
 };
 
 use thiserror::Error;
@@ -106,7 +103,6 @@ pub struct SkillYardApplication {
     operation_gate: Mutex<()>,
     lifecycle_failpoint: LifecycleFailpoint,
     source_transport: Option<SharedSourceTransport>,
-    source_discovery_loaded: AtomicBool,
 }
 
 impl SkillYardApplication {
@@ -167,7 +163,6 @@ impl SkillYardApplication {
             operation_gate: Mutex::new(()),
             lifecycle_failpoint,
             source_transport,
-            source_discovery_loaded: AtomicBool::new(false),
         }
     }
 
@@ -536,19 +531,8 @@ impl SkillYardApplication {
     fn open_source_discovery(&self) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_recovered_storage()?;
         ensure_onboarding_completed(&storage)?;
-        let should_reload = !self.source_discovery_loaded.load(Ordering::Acquire);
-        if should_reload {
-            let lifecycle_lock = acquire_lifecycle_lock(&self.paths)?;
-            lifecycle_lock.recheck(&self.paths)?;
-            for source in storage.read_github_sources()? {
-                self.reload_source_catalog(&mut storage, &source, &lifecycle_lock)?;
-                lifecycle_lock.recheck(&self.paths)?;
-            }
-        }
+        // 打开安装页只读取已保存的目录摘要；网络刷新必须由用户对具体 Source 主动触发。
         let sources = storage.read_source_summaries()?;
-        if should_reload {
-            self.source_discovery_loaded.store(true, Ordering::Release);
-        }
         Ok(UiOutcome::SourceDiscovery {
             sources,
             highlighted_source_id: None,

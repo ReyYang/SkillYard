@@ -119,6 +119,16 @@ impl ApplicationPaths {
         self.home.join(".agents/skills")
     }
 
+    /// 1.0 只展示 Codex 自己维护的三个官方插件来源，不把个人插件误认为官方内容。
+    pub(crate) fn codex_official_plugin_cache_roots(&self) -> [PathBuf; 3] {
+        [
+            self.home
+                .join(".codex/plugins/cache/openai-primary-runtime"),
+            self.home.join(".codex/plugins/cache/openai-bundled"),
+            self.home.join(".codex/plugins/cache/openai-curated-remote"),
+        ]
+    }
+
     pub(crate) fn skill_lock_path(&self) -> &Path {
         &self.skill_lock_path
     }

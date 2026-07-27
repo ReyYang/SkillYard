@@ -39,8 +39,8 @@ fn recommended_github_sources_exist_without_creating_bundles_and_survive_restart
     let first = open_source_discovery(&application);
     assert_eq!(
         transport.request_count(),
-        4,
-        "首次打开应逐个尝试加载当前四个 Source"
+        0,
+        "进入安装页只读取本地 Source 摘要，不能自动访问 GitHub"
     );
     assert_eq!(
         first
@@ -79,7 +79,11 @@ fn recommended_github_sources_exist_without_creating_bundles_and_survive_restart
         restarted_transport.clone(),
     );
     let restarted_sources = open_source_discovery(&restarted);
-    assert_eq!(restarted_transport.request_count(), 4);
+    assert_eq!(
+        restarted_transport.request_count(),
+        0,
+        "应用重启后进入安装页也不能自动访问 GitHub"
+    );
     assert_eq!(
         restarted_sources
             .iter()
@@ -134,7 +138,7 @@ fn deleting_a_recommended_source_does_not_seed_it_again_on_restart() {
         restarted_transport.clone(),
     );
     let sources = open_source_discovery(&restarted);
-    assert_eq!(restarted_transport.request_count(), 3);
+    assert_eq!(restarted_transport.request_count(), 0);
     assert_eq!(sources.len(), 3);
     assert!(
         sources
@@ -394,14 +398,24 @@ fn a_different_tracked_ref_requires_confirmation_before_source_changes() {
 }
 
 #[test]
-fn first_discovery_reloads_every_catalog_once_and_restart_preserves_failed_catalogs() {
+fn catalogs_reload_only_after_explicit_requests_and_failures_preserve_previous_members() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let transport = Arc::new(RecordingTransport::default());
     let application = ready_application_with_transport(sandbox.path(), transport.clone());
     let archive = catalog_archive();
     transport.enqueue_seed_catalogs(&archive);
 
-    let first = open_source_discovery(&application);
+    let initial = open_source_discovery(&application);
+    assert_eq!(transport.request_count(), 0);
+    assert!(
+        initial
+            .iter()
+            .all(|source| source.catalog_status == SourceCatalogStatus::Unloaded)
+    );
+    let mut first = initial.clone();
+    for source in initial {
+        first = reload_source(&application, &source.id);
+    }
     assert_eq!(transport.request_count(), 12);
     assert!(first.iter().all(|source| {
         source.catalog_status == SourceCatalogStatus::Fresh
@@ -414,12 +428,22 @@ fn first_discovery_reloads_every_catalog_once_and_restart_preserves_failed_catal
 
     let second = open_source_discovery(&application);
     assert_eq!(second, first);
-    assert_eq!(transport.request_count(), 12, "同一会话不能再次自动联网");
+    assert_eq!(transport.request_count(), 12, "浏览页面不能再次自动联网");
 
     drop(application);
     let failing_transport = Arc::new(RecordingTransport::default());
     let restarted = ready_application_with_transport(sandbox.path(), failing_transport.clone());
-    let stale = open_source_discovery(&restarted);
+    let restored = open_source_discovery(&restarted);
+    assert_eq!(failing_transport.request_count(), 0);
+    assert!(
+        restored
+            .iter()
+            .all(|source| source.catalog_status == SourceCatalogStatus::Fresh)
+    );
+    let mut stale = restored.clone();
+    for source in restored {
+        stale = reload_source(&restarted, &source.id);
+    }
     assert_eq!(failing_transport.request_count(), 4);
     assert!(stale.iter().all(|source| {
         source.catalog_status == SourceCatalogStatus::Stale
@@ -452,9 +476,10 @@ fn catalog_network_fetch_holds_the_cross_process_lifecycle_lock() {
         .handle(UiIntent::StartInitialScan)
         .expect("首次扫描应成功");
 
+    let source_id = open_source_discovery(&loading_application)[0].id.clone();
     let loading_thread = {
         let application = loading_application.clone();
-        thread::spawn(move || application.handle(UiIntent::OpenSourceDiscovery))
+        thread::spawn(move || application.handle(UiIntent::ReloadGitHubSource { source_id }))
     };
     transport.wait_until_request();
 
@@ -480,13 +505,19 @@ fn dangerous_reload_keeps_the_old_catalog_and_valid_empty_archive_replaces_it() 
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let transport = Arc::new(RecordingTransport::default());
     let application = ready_application_with_transport(sandbox.path(), transport.clone());
-    transport.enqueue_seed_catalogs(&catalog_archive());
-    let first = open_source_discovery(&application);
-    let source_id = first[0].id.clone();
-    let tracked_ref = first[0]
+    let initial = open_source_discovery(&application);
+    let source_id = initial[0].id.clone();
+    let tracked_ref = initial[0]
         .tracked_ref
         .clone()
         .expect("GitHub Source 应保存 Tracked Ref");
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        &tracked_ref,
+        "dddddddddddddddddddddddddddddddddddddddd",
+        &catalog_archive(),
+    );
+    let first = reload_source(&application, &source_id);
     let old_commit = first[0]
         .catalog_marker
         .clone()
@@ -533,9 +564,15 @@ fn catalog_database_failure_rolls_back_the_complete_previous_snapshot() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let transport = Arc::new(RecordingTransport::default());
     let application = ready_application_with_transport(sandbox.path(), transport.clone());
-    transport.enqueue_seed_catalogs(&catalog_archive());
-    let first = open_source_discovery(&application);
-    let source_id = first[0].id.clone();
+    let initial = open_source_discovery(&application);
+    let source_id = initial[0].id.clone();
+    transport.enqueue_catalog(
+        "anthropics/skills",
+        "main",
+        "dddddddddddddddddddddddddddddddddddddddd",
+        &catalog_archive(),
+    );
+    let first = reload_source(&application, &source_id);
     let old_commit = first[0]
         .catalog_marker
         .clone()

@@ -44,6 +44,7 @@ interface InventoryPageProps {
   resetError: string | null;
   onRefresh(): void;
   onCheckUpdates(): void;
+  onDismissUpdateError(): void;
   onUpdateBundle(bundleId: string): void;
   onChooseBundleReplacement(bundleId: string): void;
   onCheckEditableLocalBundle(bundleId: string): void;
@@ -120,6 +121,7 @@ export function InventoryPage({
   resetError,
   onRefresh,
   onCheckUpdates,
+  onDismissUpdateError,
   onUpdateBundle,
   onChooseBundleReplacement,
   onCheckEditableLocalBundle,
@@ -269,7 +271,7 @@ export function InventoryPage({
             disabled={isWriteBlocked || isOpeningInstaller}
             onClick={onInstall}
           >
-            {isOpeningInstaller ? "正在加载来源…" : "安装 Skill"}
+            {isOpeningInstaller ? "正在打开…" : "安装 Skill"}
           </button>
           <button
             className="secondary-action"
@@ -404,6 +406,14 @@ export function InventoryPage({
         <div className="inline-error" role="alert">
           <strong>更新未完成</strong>
           <span>{updateError}</span>
+          <button
+            className="inline-error-dismiss"
+            type="button"
+            aria-label="关闭更新提示"
+            onClick={onDismissUpdateError}
+          >
+            关闭
+          </button>
         </div>
       ) : null}
 
@@ -1217,13 +1227,12 @@ function groupInventoryEntries(
     const isAgentManaged = entry.managementKind === "agentManaged";
     const appKey = entry.observedBy.slice().sort().join(":");
     const id = isAgentManaged
-      ? `agent:${appKey || entry.id}`
+      ? `agent:${entry.externalGroupDisplayName || appKey || entry.id}`
       : `project:${entry.projectId ?? entry.id}`;
     const appNames = entry.observedBy.map(supportedAppLabel).join("、");
     const title = isAgentManaged
-      ? appNames
-        ? `${appNames} 管理`
-        : "Agent 应用管理"
+      ? entry.externalGroupDisplayName ??
+        (appNames ? `${appNames} 管理` : "Agent 应用管理")
       : entry.projectDisplayName ?? "项目仓库管理";
     const current = external.get(id);
     external.set(id, {
@@ -1286,6 +1295,7 @@ function matchesQuery(entry: InventoryObservation, query: string): boolean {
     entry.declaredName,
     entry.bundleDisplayName,
     entry.takeoverGroupDisplayName,
+    entry.externalGroupDisplayName,
     entry.sourceDisplayName,
     entry.installationChain?.source,
     entry.installationChain?.sourceLocator,

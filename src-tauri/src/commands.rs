@@ -5,9 +5,9 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     BatchMountPlan, BatchMountRequest, EditableLocalRelinkPlan, InstallPlan, MergeContentChoice,
-    MountPlan, MountScope, SkillYardApplication, SourceAssociationPlan, SourceMemberMappingChoice,
-    SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome,
-    application::ApplicationError,
+    MountPlan, MountScope, ProjectSelection, SkillYardApplication, SourceAssociationPlan,
+    SourceMemberMappingChoice, SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent,
+    UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -576,12 +576,9 @@ pub fn discard_source_association_plan(
     }
 }
 
-/// Project 路径与安装文件夹一样，只能由 Rust 原生选择器签发。
+/// Project 路径只能由 Rust 原生选择器签发；此步不写入任何项目状态。
 #[tauri::command(async)]
-pub fn choose_and_register_project(
-    app: AppHandle,
-    application: State<'_, SkillYardApplication>,
-) -> Result<Option<UiOutcome>, UiError> {
+pub fn choose_project_directory(app: AppHandle) -> Result<Option<ProjectSelection>, UiError> {
     let Some(folder) = app
         .dialog()
         .file()
@@ -598,13 +595,24 @@ pub fn choose_and_register_project(
         code: "invalidPath",
         message: "所选 Project 名称包含 SkillYard 1.0 无法保存的字符".to_owned(),
     })?;
-    dispatch(
-        &application,
-        UiIntent::RegisterProject {
-            root_path: root_path.to_owned(),
-        },
-    )
-    .map(Some)
+    let display_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| root_path.to_owned());
+    Ok(Some(ProjectSelection {
+        display_name,
+        root_path: root_path.to_owned(),
+    }))
+}
+
+/// 用户在应用内确认后，路径才进入既有 Project 登记入口。
+#[tauri::command(async)]
+pub fn register_project(
+    application: State<'_, SkillYardApplication>,
+    root_path: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(&application, UiIntent::RegisterProject { root_path })
 }
 
 /// 创建 command 只拆出已封存 Plan，不暴露 Takeover 内部文件步骤。

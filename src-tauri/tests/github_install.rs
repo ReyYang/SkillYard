@@ -35,7 +35,7 @@ fn fresh_github_catalog_installs_one_unmounted_source_backed_bundle() {
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("第一个 Source 应加载 Fresh Catalog")
@@ -155,7 +155,7 @@ fn supplement_keeps_existing_content_mount_and_adopted_marker_while_adding_selec
         commit_a,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("第一个 Source 应加载 commit A")
@@ -313,7 +313,7 @@ fn bundle_update_replaces_all_current_source_members_and_preserves_removed_membe
         commit_a,
         &bundle_archive("alpha-old", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应加载更新基线")
@@ -521,7 +521,7 @@ fn bundle_update_rejects_partial_member_selection_without_changing_current_or_ma
         commit_a,
         &bundle_archive("alpha-old", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应加载更新基线")
@@ -604,7 +604,7 @@ fn catalog_failures_keep_the_old_catalog_and_installed_bundle_unchanged() {
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应先建立 Fresh Catalog")
@@ -715,7 +715,7 @@ fn confirmed_tracked_ref_change_keeps_installed_content_and_mount_unchanged() {
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应先建立 Fresh Catalog")
@@ -797,7 +797,7 @@ fn a_source_with_every_valid_member_installed_rejects_an_empty_supplement_withou
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
@@ -841,7 +841,7 @@ fn changing_the_catalog_after_plan_creation_rejects_confirmation_before_a_transa
         commit_a,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应建立 commit A Catalog")
@@ -895,7 +895,7 @@ fn an_expired_github_plan_discards_its_snapshot_before_returning() {
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
@@ -946,7 +946,7 @@ fn startup_discards_an_expired_github_plan_without_reopening_its_confirmation() 
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
@@ -997,7 +997,7 @@ fn creating_a_new_plan_for_the_same_source_replaces_the_old_pending_snapshot() {
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
@@ -1031,7 +1031,7 @@ fn user_can_discard_a_pending_github_plan_and_its_snapshot() {
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应建立 Fresh Catalog")
@@ -1269,7 +1269,7 @@ fn blocked_github_supplement_isolates_its_source_and_bundle_but_not_independent_
         commit_a,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应加载 commit A")
@@ -1457,7 +1457,7 @@ fn prepare_github_create_hard_exit(base: &Path) -> PreparedHardExit {
         commit,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit))
         .expect("应加载 hard-exit Source")
@@ -1485,7 +1485,7 @@ fn prepare_github_supplement_hard_exit(base: &Path) -> (PreparedHardExit, String
         commit_a,
         &bundle_archive("alpha-original", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应加载 commit A")
@@ -1546,7 +1546,7 @@ fn prepare_github_update_hard_exit(base: &Path) -> (PreparedHardExit, String, St
         commit_a,
         &bundle_archive("alpha-old", true),
     );
-    let source_id = open_sources(&application)
+    let source_id = reload_first_source(&application)
         .into_iter()
         .find(|source| source.catalog_marker.as_deref() == Some(commit_a))
         .expect("应加载更新 hard-exit 基线")
@@ -1709,6 +1709,16 @@ fn open_sources(application: &SkillYardApplication) -> Vec<skillyard_lib::Source
         panic!("应返回 Source 发现状态");
     };
     sources
+}
+
+/// 安装测试显式模拟用户重新加载，不能再依赖“打开页面即联网”的旧行为。
+fn reload_first_source(application: &SkillYardApplication) -> Vec<skillyard_lib::SourceSummary> {
+    let source_id = open_sources(application)
+        .first()
+        .expect("推荐 Source 应存在")
+        .id
+        .clone();
+    reload_sources(application, &source_id)
 }
 
 fn reload_sources(

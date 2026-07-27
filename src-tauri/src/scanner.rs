@@ -5,6 +5,7 @@ use std::{
     io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use serde::Deserialize;
@@ -134,6 +135,14 @@ pub fn scan_excluding(
         }
         Err(error) => issues.push(error.as_issue(ScanRootKey::SharedAgents, None)),
     }
+
+    match scan_codex_official_plugins(paths, &context) {
+        Ok(root_entries) => {
+            entries.extend(root_entries);
+            successful_roots.push(ScanRootIdentity::global(ScanRootKey::CodexOfficialPlugins));
+        }
+        Err(error) => issues.push(error.as_issue(ScanRootKey::CodexOfficialPlugins, None)),
+    }
     entries.sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
 
     ScanResult {
@@ -142,6 +151,90 @@ pub fn scan_excluding(
         successful_roots,
         issues,
     }
+}
+
+/// Codex 官方插件由 Codex 自己维护；SkillYard 只读取当前缓存版本并按插件展示。
+fn scan_codex_official_plugins(
+    paths: &ApplicationPaths,
+    context: &ScanContext<'_>,
+) -> Result<Vec<InventoryObservation>, ScanError> {
+    let mut observations = Vec::new();
+    for marketplace_root in paths.codex_official_plugin_cache_roots() {
+        for plugin_root in child_directories(&marketplace_root)? {
+            let Some(version_root) = newest_child_directory(&plugin_root)? else {
+                continue;
+            };
+            let mut plugin_observations = scan_optional_root(
+                &version_root.join("skills"),
+                ScanRootKey::CodexOfficialPlugins,
+                InventoryLocationKind::SharedReadOnly,
+                vec![SupportedAppId::Codex],
+                None,
+                None,
+                context,
+            )?;
+            for observation in &mut plugin_observations {
+                observation.management_kind = ManagementKind::AgentManaged;
+            }
+            observations.extend(plugin_observations);
+        }
+    }
+    Ok(observations)
+}
+
+fn child_directories(path: &Path) -> Result<Vec<PathBuf>, ScanError> {
+    if !path_exists(path)? {
+        return Ok(Vec::new());
+    }
+    let metadata = fs::metadata(path).map_err(|source| ScanError::ReadRoot {
+        path: path.display().to_string(),
+        source,
+    })?;
+    if !metadata.is_dir() {
+        return Err(ScanError::RootIsNotDirectory(path.display().to_string()));
+    }
+
+    let directory = fs::read_dir(path).map_err(|source| ScanError::ReadRoot {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut children = Vec::new();
+    for child in directory {
+        let child = child.map_err(|source| ScanError::ReadRoot {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let child_path = child.path();
+        let child_metadata = fs::metadata(&child_path).map_err(|source| ScanError::ReadRoot {
+            path: child_path.display().to_string(),
+            source,
+        })?;
+        if child_metadata.is_dir() {
+            children.push(child_path);
+        }
+    }
+    children.sort();
+    Ok(children)
+}
+
+fn newest_child_directory(path: &Path) -> Result<Option<PathBuf>, ScanError> {
+    let mut versions = child_directories(path)?
+        .into_iter()
+        .map(|version_path| {
+            let modified = fs::metadata(&version_path)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            (modified, version_path)
+        })
+        .collect::<Vec<_>>();
+    versions.sort_by(|left, right| {
+        left.0
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .cmp(&right.0.duration_since(UNIX_EPOCH).unwrap_or_default())
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    Ok(versions.pop().map(|(_, path)| path))
 }
 
 /// Local Refresh 在固定用户级根之外，只扫描用户明确登记且身份未变化的 Project。

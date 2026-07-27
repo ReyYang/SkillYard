@@ -13,6 +13,7 @@ import { InstallPlanPage } from "./components/InstallPlanPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
 import { OnboardingPage } from "./components/OnboardingPage";
+import { ProjectConfirmationDialog } from "./components/ProjectConfirmationDialog";
 import { RecoveryPage } from "./components/RecoveryPage";
 import { RemovalPlanPage } from "./components/RemovalPlanPage";
 import { SourceAssociationPlanPage } from "./components/SourceAssociationPlanPage";
@@ -28,6 +29,7 @@ import type {
   InstallPlan,
   MountPlan,
   MountScope,
+  ProjectSelection,
   RemovalKind,
   RemovalPlan,
   SourceAssociationContentChoice,
@@ -154,6 +156,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [isDiscardingInstallPlan, setIsDiscardingInstallPlan] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [isAddingProject, setIsAddingProject] = useState(false);
+  const [pendingProjectSelection, setPendingProjectSelection] =
+    useState<ProjectSelection | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [takeoverObservationId, setTakeoverObservationId] = useState<
     string | null
@@ -280,6 +284,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     checkingEditableBundleId !== null ||
     isPreparingBundleUpdateBatch ||
     isAddingProject ||
+    pendingProjectSelection !== null ||
     removalOperation !== null ||
     sourceOperation?.type === "opening";
 
@@ -1131,15 +1136,33 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
-  const chooseAndRegisterProject = async () => {
+  const chooseProjectDirectory = async () => {
     if (isAddingProject) return;
     setIsAddingProject(true);
     setProjectError(null);
     try {
-      const outcome = await client.chooseAndRegisterProject();
-      // 取消原生选择器返回 null；现有清单和登记状态保持不变。
-      if (outcome) setViewState({ status: "ready", outcome });
+      const selection = await client.chooseProjectDirectory();
+      // 取消原生选择器返回 null；只有明确选择后才显示应用内确认弹窗。
+      if (selection) setPendingProjectSelection(selection);
     } catch (error) {
+      setProjectError(formatError(error));
+    } finally {
+      setIsAddingProject(false);
+    }
+  };
+
+  const confirmProjectRegistration = async () => {
+    if (!pendingProjectSelection || isAddingProject) return;
+    setIsAddingProject(true);
+    setProjectError(null);
+    try {
+      const outcome = await client.registerProject(
+        pendingProjectSelection.rootPath,
+      );
+      setPendingProjectSelection(null);
+      setViewState({ status: "ready", outcome });
+    } catch (error) {
+      // 登记失败时保留用户选中的路径，允许用户直接重试或取消。
       setProjectError(formatError(error));
     } finally {
       setIsAddingProject(false);
@@ -1377,6 +1400,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       resetError={null}
       onRefresh={() => undefined}
       onCheckUpdates={() => undefined}
+      onDismissUpdateError={() => undefined}
       onUpdateBundle={() => undefined}
       onChooseBundleReplacement={() => undefined}
       onCheckEditableLocalBundle={() => undefined}
@@ -1820,7 +1844,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   }
 
   return (
-    <InventoryPage
+    <>
+      <InventoryPage
       key={inventoryPresentationKey}
       outcome={viewState.outcome}
       screen={inventoryScreen}
@@ -1846,6 +1871,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       resetError={resetError}
       onRefresh={refreshLocalInventory}
       onCheckUpdates={checkBundleUpdates}
+      onDismissUpdateError={() => setUpdateError(null)}
       preparingBundleUpdateId={preparingBundleUpdateId}
       checkingEditableBundleId={checkingEditableBundleId}
       isPreparingBundleUpdateBatch={isPreparingBundleUpdateBatch}
@@ -1881,7 +1907,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         createRemovalPlan("project", projectId)
       }
       onInstall={openSourceDiscovery}
-      onAddProject={chooseAndRegisterProject}
+      onAddProject={chooseProjectDirectory}
       onOpenCentralStore={openCentralStore}
       onResetApplication={resetApplication}
       onAssociateSource={openSourceAssociation}
@@ -1892,7 +1918,20 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onTakeover={openTakeover}
       onManageMount={openMountManager}
       onBatchMount={openBatchMount}
-    />
+      />
+      {pendingProjectSelection ? (
+        <ProjectConfirmationDialog
+          selection={pendingProjectSelection}
+          isConfirming={isAddingProject}
+          error={projectError}
+          onCancel={() => {
+            setProjectError(null);
+            setPendingProjectSelection(null);
+          }}
+          onConfirm={confirmProjectRegistration}
+        />
+      ) : null}
+    </>
   );
 }
 
