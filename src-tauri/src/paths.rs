@@ -1,0 +1,135 @@
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
+
+use crate::domain::{ScanRootKey, SupportedAppId};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupportedAppPathConfig {
+    pub id: SupportedAppId,
+    pub display_name: &'static str,
+    pub global_root: PathBuf,
+    pub project_relative_root: PathBuf,
+    pub detection_root: PathBuf,
+    pub root_key: ScanRootKey,
+    pub project_root_key: ScanRootKey,
+}
+
+/// 生产路径固定，测试只能通过构造隔离实例替换根目录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationPaths {
+    data_root: PathBuf,
+    home: PathBuf,
+    skill_lock_path: PathBuf,
+}
+
+impl ApplicationPaths {
+    pub fn for_home(data_root: PathBuf, home: PathBuf) -> Self {
+        let skill_lock_path = home.join(".agents/.skill-lock.json");
+        Self {
+            data_root,
+            home,
+            skill_lock_path,
+        }
+    }
+
+    /// 正式 App 遵循 lock v3 的 XDG state 优先级；隔离测试仍使用传入 home 的默认位置。
+    pub(crate) fn for_current_user(data_root: PathBuf, home: PathBuf) -> Self {
+        let mut paths = Self::for_home(data_root, home);
+        if let Some(state_home) = env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            paths.skill_lock_path = state_home.join("skills/.skill-lock.json");
+        }
+        paths
+    }
+
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
+    pub(crate) fn database(&self) -> PathBuf {
+        self.data_root.join("skillyard.sqlite3")
+    }
+
+    pub(crate) fn bundles_root(&self) -> PathBuf {
+        self.data_root.join("bundles")
+    }
+
+    pub(crate) fn staging_root(&self) -> PathBuf {
+        self.data_root.join("staging")
+    }
+
+    pub(crate) fn journals_root(&self) -> PathBuf {
+        self.data_root.join("journals")
+    }
+
+    pub(crate) fn trash_root(&self) -> PathBuf {
+        self.data_root.join("trash")
+    }
+
+    pub(crate) fn central_store_notice(&self) -> PathBuf {
+        self.data_root.join("SKILLYARD-INFO.md")
+    }
+
+    pub(crate) fn bundle_directory(&self, bundle_id: &str) -> PathBuf {
+        self.bundles_root().join(bundle_id)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
+    }
+
+    pub(crate) fn supported_apps(&self) -> Vec<SupportedAppPathConfig> {
+        vec![
+            SupportedAppPathConfig {
+                id: SupportedAppId::Codex,
+                display_name: "Codex",
+                global_root: self.home.join(".codex/skills"),
+                project_relative_root: PathBuf::from(".codex/skills"),
+                detection_root: self.home.join(".codex"),
+                root_key: ScanRootKey::CodexGlobal,
+                project_root_key: ScanRootKey::CodexProject,
+            },
+            SupportedAppPathConfig {
+                id: SupportedAppId::ClaudeCode,
+                display_name: "Claude Code",
+                global_root: self.home.join(".claude/skills"),
+                project_relative_root: PathBuf::from(".claude/skills"),
+                detection_root: self.home.join(".claude"),
+                root_key: ScanRootKey::ClaudeCodeGlobal,
+                project_root_key: ScanRootKey::ClaudeCodeProject,
+            },
+            SupportedAppPathConfig {
+                id: SupportedAppId::GitHubCopilot,
+                display_name: "GitHub Copilot",
+                global_root: self.home.join(".copilot/skills"),
+                project_relative_root: PathBuf::from(".github/skills"),
+                detection_root: self.home.join(".copilot"),
+                root_key: ScanRootKey::GitHubCopilotGlobal,
+                project_root_key: ScanRootKey::GitHubCopilotProject,
+            },
+        ]
+    }
+
+    pub(crate) fn shared_read_only_root(&self) -> PathBuf {
+        self.home.join(".agents/skills")
+    }
+
+    /// 1.0 只展示 Codex 自己维护的三个官方插件来源，不把个人插件误认为官方内容。
+    pub(crate) fn codex_official_plugin_cache_roots(&self) -> [PathBuf; 3] {
+        [
+            self.home
+                .join(".codex/plugins/cache/openai-primary-runtime"),
+            self.home.join(".codex/plugins/cache/openai-bundled"),
+            self.home.join(".codex/plugins/cache/openai-curated-remote"),
+        ]
+    }
+
+    pub(crate) fn skill_lock_path(&self) -> &Path {
+        &self.skill_lock_path
+    }
+}

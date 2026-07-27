@@ -1,0 +1,1509 @@
+//! GitHub public Source 的最外层网络协议、确定性输入解析与 Catalog 归档边界。
+
+use std::{
+    fs::{self, OpenOptions, Permissions},
+    io::{Read, Write},
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+use reqwest::{
+    blocking::{Client, Response},
+    header::{ACCEPT, USER_AGENT},
+    redirect::Policy,
+};
+use serde::Deserialize;
+use thiserror::Error;
+use url::Url;
+use uuid::Uuid;
+
+use crate::content::{
+    ContentValidationError, DiscoveredBundleCandidate, validate_skill_bundle_folder,
+};
+use crate::source_archive::{ArchiveWrapperPolicy, SourceArchiveError, extract_zip_archive};
+
+/// 一次 Source 获取收到的 metadata、commit 与 archive 总量不能超过这个固定上限。
+pub const MAX_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
+const GITHUB_ACCEPT: &str = "application/vnd.github+json";
+const GITHUB_USER_AGENT: &str = "SkillYard/1.0";
+const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
+const STREAM_BUFFER_BYTES: usize = 8 * 1024;
+
+/// 可替换的 HTTP 请求，避免测试替换 GitHub 解析或 JSON 协议代码。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRequest {
+    pub url: Url,
+    pub accept: String,
+}
+
+/// 可替换网络边界返回的最小真实 HTTP 信息。
+pub struct SourceResponse {
+    pub status: u16,
+    pub final_url: Url,
+    pub body: Box<dyn Read + Send>,
+}
+
+/// GitHub Source 的唯一可替换网络边界。
+pub trait SourceTransport: Send + Sync {
+    fn get(&self, request: SourceRequest) -> Result<SourceResponse, SourceTransportError>;
+}
+
+/// 生产使用的无认证 blocking HTTPS client。
+#[derive(Clone)]
+pub struct ReqwestSourceTransport {
+    client: Client,
+}
+
+impl ReqwestSourceTransport {
+    pub fn new() -> Result<Self, SourceTransportError> {
+        let client = Client::builder()
+            .timeout(GITHUB_TIMEOUT)
+            // GitHub 可在官方域名间跳转；普通直接下载只能留在最初的 HTTPS origin。
+            .redirect(Policy::custom(|attempt| {
+                let initial_url = attempt.previous().first();
+                if attempt.previous().len() > 5
+                    || initial_url
+                        .is_none_or(|initial| !is_allowed_redirect(initial, attempt.url()))
+                {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
+            .build()
+            .map_err(|_| SourceTransportError::Unavailable)?;
+        Ok(Self { client })
+    }
+}
+
+impl SourceTransport for ReqwestSourceTransport {
+    fn get(&self, request: SourceRequest) -> Result<SourceResponse, SourceTransportError> {
+        let response = self
+            .client
+            .get(request.url)
+            .header(ACCEPT, request.accept)
+            .header(USER_AGENT, GITHUB_USER_AGENT)
+            .send()
+            .map_err(|_| SourceTransportError::Unavailable)?;
+        Ok(response_from_reqwest(response))
+    }
+}
+
+fn response_from_reqwest(response: Response) -> SourceResponse {
+    SourceResponse {
+        status: response.status().as_u16(),
+        final_url: response.url().clone(),
+        body: Box::new(response),
+    }
+}
+
+fn is_allowed_redirect(initial_url: &Url, target_url: &Url) -> bool {
+    if initial_url.scheme() != "https" || target_url.scheme() != "https" {
+        return false;
+    }
+    if is_github_redirect_host(initial_url.host_str()) {
+        return is_github_redirect_host(target_url.host_str());
+    }
+    initial_url.host_str() == target_url.host_str()
+        && initial_url.port_or_known_default() == target_url.port_or_known_default()
+}
+
+fn is_github_redirect_host(host: Option<&str>) -> bool {
+    matches!(
+        host,
+        Some("api.github.com" | "github.com" | "codeload.github.com")
+    )
+}
+
+#[derive(Debug, Error, Clone, Eq, PartialEq)]
+pub enum SourceTransportError {
+    #[error("GitHub 网络请求失败")]
+    Unavailable,
+}
+
+#[derive(Debug, Error, Clone, Eq, PartialEq)]
+pub enum GithubSourceError {
+    #[error("不支持的 GitHub 来源输入")]
+    UnsupportedInput,
+    #[error("GitHub Tracked Ref 不合法")]
+    InvalidTrackedRef,
+    #[error("GitHub Install Plan commit SHA 不合法")]
+    InvalidCommitSha,
+    #[error("GitHub Install Plan ID 不合法")]
+    InvalidInstallPlanId,
+    #[error("GitHub URL 与 Tracked Ref 冲突")]
+    RefConflict,
+    #[error("GitHub 网络请求失败")]
+    Network,
+    #[error("GitHub 返回了不支持的 HTTP 状态")]
+    HttpStatus,
+    #[error("GitHub 响应超过固定上限 {limit} bytes：已检测到 {actual} bytes")]
+    ResponseTooLarge { limit: u64, actual: u64 },
+    #[error("GitHub 返回了无效响应")]
+    InvalidResponse,
+    #[error("GitHub 仓库不是公开仓库")]
+    PrivateRepository,
+    #[error("GitHub 临时区不可用")]
+    StagingUnavailable,
+    #[error("GitHub 临时内容清理失败")]
+    StagingCleanupFailed,
+    #[error("GitHub 返回了无效 ZIP archive")]
+    InvalidArchive,
+    #[error("GitHub archive 必须只有一个共同顶层目录")]
+    InvalidArchiveRoot,
+    #[error("GitHub archive 包含不安全路径：{path}")]
+    UnsafeArchivePath { path: String },
+    #[error("GitHub archive 包含重复规范化路径：{path}")]
+    DuplicateArchivePath { path: String },
+    #[error("GitHub archive 包含加密条目：{path}")]
+    EncryptedArchiveEntry { path: String },
+    #[error("GitHub archive 包含不支持的特殊条目：{path}")]
+    UnsupportedArchiveEntry { path: String },
+    #[error("GitHub archive 包含不支持的压缩格式：{path}")]
+    UnsupportedArchiveCompression { path: String },
+    #[error("GitHub archive 条目数超过固定上限 {limit}：已检测到 {actual}")]
+    ArchiveEntryLimitExceeded { limit: usize, actual: usize },
+    #[error("GitHub archive 普通文件总量超过固定上限 {limit} bytes：已检测到 {actual} bytes")]
+    ArchiveTotalSizeLimitExceeded { limit: u64, actual: u64 },
+    #[error("GitHub archive 普通文件超过固定单文件上限 {limit} bytes：{path} 为 {actual} bytes")]
+    ArchiveFileSizeLimitExceeded {
+        path: String,
+        limit: u64,
+        actual: u64,
+    },
+    #[error("GitHub Catalog 内容验证失败：{0}")]
+    ContentValidation(String),
+}
+
+impl From<SourceArchiveError> for GithubSourceError {
+    fn from(error: SourceArchiveError) -> Self {
+        match error {
+            SourceArchiveError::InvalidArchive => Self::InvalidArchive,
+            SourceArchiveError::InvalidArchiveRoot => Self::InvalidArchiveRoot,
+            SourceArchiveError::UnsafeArchivePath { path } => Self::UnsafeArchivePath { path },
+            SourceArchiveError::DuplicateArchivePath { path } => {
+                Self::DuplicateArchivePath { path }
+            }
+            SourceArchiveError::EncryptedArchiveEntry { path } => {
+                Self::EncryptedArchiveEntry { path }
+            }
+            SourceArchiveError::UnsupportedArchiveEntry { path } => {
+                Self::UnsupportedArchiveEntry { path }
+            }
+            SourceArchiveError::UnsupportedArchiveCompression { path } => {
+                Self::UnsupportedArchiveCompression { path }
+            }
+            SourceArchiveError::ArchiveEntryLimitExceeded { limit, actual } => {
+                Self::ArchiveEntryLimitExceeded { limit, actual }
+            }
+            SourceArchiveError::ArchiveTotalSizeLimitExceeded { limit, actual } => {
+                Self::ArchiveTotalSizeLimitExceeded { limit, actual }
+            }
+            SourceArchiveError::ArchiveFileSizeLimitExceeded {
+                path,
+                limit,
+                actual,
+            } => Self::ArchiveFileSizeLimitExceeded {
+                path,
+                limit,
+                actual,
+            },
+            SourceArchiveError::ArchiveUnavailable => Self::StagingUnavailable,
+            SourceArchiveError::DestinationUnavailable => Self::StagingUnavailable,
+            SourceArchiveError::CleanupFailed => Self::StagingCleanupFailed,
+        }
+    }
+}
+
+/// 解析完输入、尚未联网的仓库定位信息。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParsedGithubSource {
+    pub owner: String,
+    pub repository: String,
+    pub tracked_ref: Option<String>,
+    pub member_hint: Option<String>,
+}
+
+/// 已由 GitHub metadata 和 commit API 确认的 Source 身份。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedGithubSource {
+    pub owner: String,
+    pub repository: String,
+    pub display_name: String,
+    pub canonical_identity: String,
+    pub repository_url: Url,
+    pub tracked_ref: String,
+    pub commit: String,
+    pub member_hint: Option<String>,
+}
+
+/// Catalog reload 只接收已经持久化并规范化的仓库 metadata。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GithubCatalogTarget<'a> {
+    pub owner: &'a str,
+    pub repository: &'a str,
+    pub canonical_identity: &'a str,
+    pub display_name: &'a str,
+    pub tracked_ref: &'a str,
+}
+
+/// 一次完整 Catalog 获取绑定的不可移动 commit 与候选 metadata。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchedGithubCatalog {
+    pub commit_sha: String,
+    pub candidates: Vec<DiscoveredBundleCandidate>,
+}
+
+/// 固定 commit 的受管安装快照；未显式持久化时离开作用域会自动清理。
+#[derive(Debug)]
+pub struct PreparedGithubInstallSnapshot {
+    snapshot_root: PathBuf,
+    repository_root: PathBuf,
+    candidates: Vec<DiscoveredBundleCandidate>,
+    persisted: bool,
+}
+
+impl PreparedGithubInstallSnapshot {
+    #[cfg(test)]
+    pub fn snapshot_root(&self) -> &Path {
+        &self.snapshot_root
+    }
+
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    #[cfg(test)]
+    pub fn candidates(&self) -> &[DiscoveredBundleCandidate] {
+        &self.candidates
+    }
+
+    /// 将快照所有权交给现有 Plan 生命周期，后续不再由本 guard 清理。
+    pub fn persist(mut self) -> PathBuf {
+        self.persisted = true;
+        self.snapshot_root.clone()
+    }
+
+    fn create(
+        staging_root: &Path,
+        repository_name: &str,
+        plan_id: &str,
+    ) -> Result<Self, GithubSourceError> {
+        fs::create_dir_all(staging_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+        let snapshot_root = staging_root.join(format!(".install-plan-{plan_id}"));
+        fs::create_dir(&snapshot_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+        let snapshot = Self {
+            repository_root: snapshot_root.join(repository_name),
+            snapshot_root,
+            candidates: Vec::new(),
+            persisted: false,
+        };
+        fs::set_permissions(&snapshot.snapshot_root, Permissions::from_mode(0o700))
+            .map_err(|_| GithubSourceError::StagingUnavailable)?;
+        Ok(snapshot)
+    }
+}
+
+impl Drop for PreparedGithubInstallSnapshot {
+    fn drop(&mut self) {
+        if !self.persisted {
+            // Drop 只能尽力清理；准备过程中的显式清理失败仍会作为正常错误返回。
+            let _ = fs::remove_dir_all(&self.snapshot_root);
+        }
+    }
+}
+
+/// `Arc<dyn SourceTransport>` 便于 application 只持有一个可替换的外部网络能力。
+pub type SharedSourceTransport = Arc<dyn SourceTransport>;
+
+/// 只接受产品契约列出的 GitHub 写法，并在联网前拒绝歧义和危险路径。
+pub fn parse_github_source(
+    input: &str,
+    explicit_ref: Option<&str>,
+) -> Result<ParsedGithubSource, GithubSourceError> {
+    // 粘贴输入常带首尾空白；只清理外围，不改写仓库名、ref 或成员路径本身。
+    let input = input.trim();
+    let explicit_ref = explicit_ref
+        .map(str::trim)
+        .map(validate_tracked_ref)
+        .transpose()?;
+    // `url` 会规范化 dot segment；在此之前拒绝原始危险写法，避免它变成另一条合法 URL。
+    if input.contains('\\')
+        || input.split('/').any(|segment| {
+            decode_url_path_segment(segment)
+                .is_ok_and(|decoded| matches!(decoded.as_str(), "." | ".."))
+        })
+    {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    if let Ok(url) = Url::parse(input) {
+        return parse_github_url(url, explicit_ref);
+    }
+
+    let segments = input.split('/').collect::<Vec<_>>();
+    if segments.len() != 2
+        || !valid_name_segment(segments[0])
+        || !valid_repository_segment(segments[1])
+    {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    Ok(ParsedGithubSource {
+        owner: segments[0].to_owned(),
+        repository: strip_git_suffix(segments[1])?.to_owned(),
+        tracked_ref: explicit_ref,
+        member_hint: None,
+    })
+}
+
+/// 先确认公开 metadata，再将目标 ref 固定解析成不可移动的 commit SHA。
+pub fn resolve_github_source(
+    transport: &dyn SourceTransport,
+    input: &str,
+    explicit_ref: Option<&str>,
+) -> Result<ResolvedGithubSource, GithubSourceError> {
+    let mut receive_budget = ReceiveBudget::production();
+    let parsed = parse_github_source(input, explicit_ref)?;
+    let metadata_url = api_url(&["repos", &parsed.owner, &parsed.repository])?;
+    let metadata: RepositoryMetadata = read_json(transport, metadata_url, &mut receive_budget)?;
+    if metadata.private {
+        return Err(GithubSourceError::PrivateRepository);
+    }
+    let (owner, repository) = parse_full_name(&metadata.full_name)?;
+    let tracked_ref = parsed
+        .tracked_ref
+        .unwrap_or_else(|| metadata.default_branch.clone());
+    validate_tracked_ref(&tracked_ref)?;
+
+    // 每个 path segment 单独编码，禁止 ref 中的 `/`、`?`、`#` 改写 REST 路由。
+    let commit_url = api_url(&["repos", &owner, &repository, "commits", &tracked_ref])?;
+    let commit: CommitMetadata = read_json(transport, commit_url, &mut receive_budget)?;
+    if !is_commit_sha(&commit.sha) {
+        return Err(GithubSourceError::InvalidResponse);
+    }
+    let repository_url = Url::parse(&format!("https://github.com/{owner}/{repository}"))
+        .map_err(|_| GithubSourceError::InvalidResponse)?;
+    Ok(ResolvedGithubSource {
+        canonical_identity: format!(
+            "github:{}/{}",
+            owner.to_ascii_lowercase(),
+            repository.to_ascii_lowercase()
+        ),
+        owner,
+        repository,
+        display_name: metadata.full_name,
+        repository_url,
+        tracked_ref,
+        commit: commit.sha,
+        member_hint: parsed.member_hint,
+    })
+}
+
+/// 重新验证持久化仓库 metadata，并把同一 Tracked Ref 固定到 SHA 后获取完整 Catalog。
+pub fn fetch_github_catalog(
+    transport: &dyn SourceTransport,
+    target: GithubCatalogTarget<'_>,
+    staging_root: &Path,
+) -> Result<FetchedGithubCatalog, GithubSourceError> {
+    validate_catalog_target(target)?;
+    let mut receive_budget = ReceiveBudget::production();
+    let metadata_url = api_url(&["repos", target.owner, target.repository])?;
+    let metadata: RepositoryMetadata = read_json(transport, metadata_url, &mut receive_budget)?;
+    if metadata.private {
+        return Err(GithubSourceError::PrivateRepository);
+    }
+    let (owner, repository) = parse_full_name(&metadata.full_name)?;
+    let remote_identity = format!(
+        "github:{}/{}",
+        owner.to_ascii_lowercase(),
+        repository.to_ascii_lowercase()
+    );
+    if remote_identity != target.canonical_identity {
+        // 1.0 不跟随仓库改名或重定向，避免一次 reload 静默改变 Source 身份。
+        return Err(GithubSourceError::InvalidResponse);
+    }
+
+    let commit_url = api_url(&["repos", &owner, &repository, "commits", target.tracked_ref])?;
+    let commit: CommitMetadata = read_json(transport, commit_url, &mut receive_budget)?;
+    if !is_commit_sha(&commit.sha) {
+        return Err(GithubSourceError::InvalidResponse);
+    }
+
+    let temporary = CatalogTempTree::create(staging_root)?;
+    let result = fetch_catalog_into_temporary_tree(
+        transport,
+        &owner,
+        &repository,
+        target.repository,
+        &commit.sha,
+        &temporary.path,
+        &mut receive_budget,
+    );
+    let cleanup = temporary.cleanup();
+    match cleanup {
+        Ok(()) => result,
+        Err(error) => Err(error),
+    }
+}
+
+/// 只按 Catalog 已固定的 commit 获取内容，并交给现有 Plan 生命周期管理快照目录。
+pub fn prepare_github_install_snapshot(
+    transport: &dyn SourceTransport,
+    target: GithubCatalogTarget<'_>,
+    expected_commit_sha: &str,
+    staging_root: &Path,
+    plan_id: &str,
+) -> Result<PreparedGithubInstallSnapshot, GithubSourceError> {
+    validate_catalog_target(target)?;
+    if !is_commit_sha(expected_commit_sha) {
+        return Err(GithubSourceError::InvalidCommitSha);
+    }
+    let parsed_plan_id =
+        Uuid::parse_str(plan_id).map_err(|_| GithubSourceError::InvalidInstallPlanId)?;
+    if parsed_plan_id.hyphenated().to_string() != plan_id {
+        // 只接受产品内部生成的 canonical UUID，避免同一 Plan 对应多个目录名。
+        return Err(GithubSourceError::InvalidInstallPlanId);
+    }
+
+    let mut snapshot =
+        PreparedGithubInstallSnapshot::create(staging_root, target.repository, plan_id)?;
+    let mut receive_budget = ReceiveBudget::production();
+    let fetched = fetch_catalog_into_temporary_tree(
+        transport,
+        target.owner,
+        target.repository,
+        target.repository,
+        expected_commit_sha,
+        &snapshot.snapshot_root,
+        &mut receive_budget,
+    )?;
+    fs::remove_file(snapshot.snapshot_root.join("source.zip"))
+        .map_err(|_| GithubSourceError::StagingCleanupFailed)?;
+    snapshot.candidates = fetched.candidates;
+    Ok(snapshot)
+}
+
+fn validate_catalog_target(target: GithubCatalogTarget<'_>) -> Result<(), GithubSourceError> {
+    if !valid_name_segment(target.owner)
+        || !valid_repository_segment(target.repository)
+        || target.repository.ends_with(".git")
+    {
+        return Err(GithubSourceError::InvalidResponse);
+    }
+    validate_tracked_ref(target.tracked_ref)?;
+    let expected_identity = format!(
+        "github:{}/{}",
+        target.owner.to_ascii_lowercase(),
+        target.repository.to_ascii_lowercase()
+    );
+    let (display_owner, display_repository) = parse_full_name(target.display_name)?;
+    if target.canonical_identity != expected_identity
+        || !display_owner.eq_ignore_ascii_case(target.owner)
+        || !display_repository.eq_ignore_ascii_case(target.repository)
+    {
+        return Err(GithubSourceError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn fetch_catalog_into_temporary_tree(
+    transport: &dyn SourceTransport,
+    owner: &str,
+    repository: &str,
+    repository_root_name: &str,
+    commit_sha: &str,
+    temporary_root: &Path,
+    receive_budget: &mut ReceiveBudget,
+) -> Result<FetchedGithubCatalog, GithubSourceError> {
+    let archive_url = api_url(&["repos", owner, repository, "zipball", commit_sha])?;
+    let archive_path = temporary_root.join("source.zip");
+    download_archive(transport, archive_url, &archive_path, receive_budget)?;
+
+    let repository_root = temporary_root.join(repository_root_name);
+    extract_zip_archive(
+        &archive_path,
+        &repository_root,
+        ArchiveWrapperPolicy::RequiredCommonWrapper,
+    )?;
+
+    let canonical_repository_root =
+        fs::canonicalize(&repository_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+    let mut candidates = match validate_skill_bundle_folder(&canonical_repository_root) {
+        Ok(validated) => validated.candidates,
+        Err(ContentValidationError::NoSkillMetadataFound) => Vec::new(),
+        Err(error) => {
+            return Err(GithubSourceError::ContentValidation(
+                normalize_temporary_error(
+                    &error.to_string(),
+                    temporary_root,
+                    &canonical_repository_root,
+                    repository_root_name,
+                ),
+            ));
+        }
+    };
+    for candidate in &mut candidates {
+        for error in &mut candidate.validation_errors {
+            *error = normalize_temporary_error(
+                error,
+                temporary_root,
+                &canonical_repository_root,
+                repository_root_name,
+            );
+        }
+    }
+    Ok(FetchedGithubCatalog {
+        commit_sha: commit_sha.to_owned(),
+        candidates,
+    })
+}
+
+fn download_archive(
+    transport: &dyn SourceTransport,
+    url: Url,
+    archive_path: &Path,
+    receive_budget: &mut ReceiveBudget,
+) -> Result<(), GithubSourceError> {
+    let mut response = transport
+        .get(SourceRequest {
+            url,
+            accept: GITHUB_ACCEPT.to_owned(),
+        })
+        .map_err(|_| GithubSourceError::Network)?;
+    if !(200..300).contains(&response.status) {
+        return Err(GithubSourceError::HttpStatus);
+    }
+    let mut archive_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(archive_path)
+        .map_err(|_| GithubSourceError::StagingUnavailable)?;
+    match copy_with_budget(&mut response.body, &mut archive_file, receive_budget) {
+        Ok(_) => archive_file
+            .flush()
+            .map_err(|_| GithubSourceError::StagingUnavailable),
+        Err(StreamCopyError::Read) => Err(GithubSourceError::InvalidResponse),
+        Err(StreamCopyError::Write) => Err(GithubSourceError::StagingUnavailable),
+        Err(StreamCopyError::LimitExceeded { limit, actual }) => {
+            Err(GithubSourceError::ResponseTooLarge { limit, actual })
+        }
+    }
+}
+
+fn normalize_temporary_error(
+    error: &str,
+    temporary_root: &Path,
+    repository_root: &Path,
+    repository_name: &str,
+) -> String {
+    let mut normalized = error.replace(repository_root.to_string_lossy().as_ref(), repository_name);
+    if let Ok(original_repository_root) = temporary_root.join(repository_name).canonicalize() {
+        normalized = normalized.replace(
+            original_repository_root.to_string_lossy().as_ref(),
+            repository_name,
+        );
+    }
+    normalized = normalized.replace(temporary_root.to_string_lossy().as_ref(), "<temporary>");
+    if let Ok(canonical_temporary_root) = temporary_root.canonicalize() {
+        normalized = normalized.replace(
+            canonical_temporary_root.to_string_lossy().as_ref(),
+            "<temporary>",
+        );
+    }
+    normalized
+}
+
+struct CatalogTempTree {
+    path: PathBuf,
+    cleaned: bool,
+}
+
+impl CatalogTempTree {
+    fn create(staging_root: &Path) -> Result<Self, GithubSourceError> {
+        fs::create_dir_all(staging_root).map_err(|_| GithubSourceError::StagingUnavailable)?;
+        for _ in 0..8 {
+            let path = staging_root.join(format!(".github-catalog-{}", Uuid::new_v4()));
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    let temporary = Self {
+                        path,
+                        cleaned: false,
+                    };
+                    fs::set_permissions(&temporary.path, Permissions::from_mode(0o700))
+                        .map_err(|_| GithubSourceError::StagingUnavailable)?;
+                    return Ok(temporary);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(GithubSourceError::StagingUnavailable),
+            }
+        }
+        Err(GithubSourceError::StagingUnavailable)
+    }
+
+    fn cleanup(mut self) -> Result<(), GithubSourceError> {
+        fs::remove_dir_all(&self.path).map_err(|_| GithubSourceError::StagingCleanupFailed)?;
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+impl Drop for CatalogTempTree {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            // 显式清理会报告失败；Drop 只负责异常返回路径上的最后一次尽力清理。
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(
+    transport: &dyn SourceTransport,
+    url: Url,
+    receive_budget: &mut ReceiveBudget,
+) -> Result<T, GithubSourceError> {
+    let mut response = transport
+        .get(SourceRequest {
+            url,
+            accept: GITHUB_ACCEPT.to_owned(),
+        })
+        .map_err(|_| GithubSourceError::Network)?;
+    if !(200..300).contains(&response.status) {
+        return Err(GithubSourceError::HttpStatus);
+    }
+    let mut bytes = Vec::new();
+    match copy_with_budget(&mut response.body, &mut bytes, receive_budget) {
+        Ok(_) => {}
+        Err(StreamCopyError::Read | StreamCopyError::Write) => {
+            return Err(GithubSourceError::InvalidResponse);
+        }
+        Err(StreamCopyError::LimitExceeded { limit, actual }) => {
+            return Err(GithubSourceError::ResponseTooLarge { limit, actual });
+        }
+    }
+    serde_json::from_slice(&bytes).map_err(|_| GithubSourceError::InvalidResponse)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamCopyError {
+    Read,
+    Write,
+    LimitExceeded { limit: u64, actual: u64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReceiveBudget {
+    // 同一用户操作复用一个计数器，多个 HTTP body 不能分别消耗 100 MiB。
+    limit: u64,
+    received: u64,
+}
+
+impl ReceiveBudget {
+    fn production() -> Self {
+        Self::new(MAX_RESPONSE_BYTES)
+    }
+
+    fn new(limit: u64) -> Self {
+        Self { limit, received: 0 }
+    }
+}
+
+#[cfg(test)]
+fn copy_with_limit(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    limit: u64,
+) -> Result<u64, StreamCopyError> {
+    let mut budget = ReceiveBudget::new(limit);
+    copy_with_budget(reader, writer, &mut budget)
+}
+
+fn copy_with_budget(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    budget: &mut ReceiveBudget,
+) -> Result<u64, StreamCopyError> {
+    let started_at = budget.received;
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    loop {
+        // 达到上限后只探测下一字节，不能用一个完整 chunk 越过固定接收边界。
+        let remaining = budget.limit.saturating_sub(budget.received);
+        let probe = if remaining == 0 {
+            1
+        } else {
+            remaining.min(STREAM_BUFFER_BYTES as u64) as usize
+        };
+        let count = reader
+            .read(&mut buffer[..probe])
+            .map_err(|_| StreamCopyError::Read)?;
+        if count == 0 {
+            return Ok(budget.received - started_at);
+        }
+        let next = budget.received.saturating_add(count as u64);
+        if next > budget.limit {
+            return Err(StreamCopyError::LimitExceeded {
+                limit: budget.limit,
+                actual: next,
+            });
+        }
+        writer
+            .write_all(&buffer[..count])
+            .map_err(|_| StreamCopyError::Write)?;
+        budget.received = next;
+    }
+}
+
+fn parse_github_url(
+    url: Url,
+    explicit_ref: Option<String>,
+) -> Result<ParsedGithubSource, GithubSourceError> {
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    let segments = url
+        .path_segments()
+        .ok_or(GithubSourceError::UnsupportedInput)?
+        .filter(|segment| !segment.is_empty())
+        .map(decode_url_path_segment)
+        .collect::<Result<Vec<_>, _>>()?;
+    if segments.len() < 2
+        || !valid_name_segment(&segments[0])
+        || !valid_repository_segment(&segments[1])
+    {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    let repository = strip_git_suffix(&segments[1])?.to_owned();
+    if segments.len() == 2 {
+        return Ok(ParsedGithubSource {
+            owner: segments[0].clone(),
+            repository,
+            tracked_ref: explicit_ref,
+            member_hint: None,
+        });
+    }
+    if segments.len() < 4 || !matches!(segments[2].as_str(), "tree" | "blob") {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    let kind = segments[2].as_str();
+    let tail = segments[3..].iter().map(String::as_str).collect::<Vec<_>>();
+    let (tracked_ref, member_segments) = split_ref_and_member(&tail, explicit_ref)?;
+    if member_segments
+        .iter()
+        .any(|segment| !valid_path_segment(segment))
+        || (kind == "blob"
+            && (member_segments.is_empty() || member_segments.last() != Some(&"SKILL.md")))
+    {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    if kind == "tree" && member_segments.is_empty() {
+        return Ok(ParsedGithubSource {
+            owner: segments[0].clone(),
+            repository,
+            tracked_ref: Some(tracked_ref),
+            member_hint: None,
+        });
+    }
+    let member_hint = if kind == "blob" {
+        member_segments[..member_segments.len() - 1].join("/")
+    } else {
+        member_segments.join("/")
+    };
+    if member_hint.is_empty() && kind != "blob" {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    Ok(ParsedGithubSource {
+        owner: segments[0].clone(),
+        repository,
+        tracked_ref: Some(tracked_ref),
+        member_hint: Some(member_hint),
+    })
+}
+
+fn split_ref_and_member<'a>(
+    tail: &'a [&'a str],
+    explicit_ref: Option<String>,
+) -> Result<(String, &'a [&'a str]), GithubSourceError> {
+    if let Some(explicit_ref) = explicit_ref {
+        let ref_segments = explicit_ref.split('/').collect::<Vec<_>>();
+        if tail.len() < ref_segments.len() || tail[..ref_segments.len()] != ref_segments[..] {
+            return Err(GithubSourceError::RefConflict);
+        }
+        let member_start = ref_segments.len();
+        return Ok((explicit_ref, &tail[member_start..]));
+    }
+    if !valid_path_segment(tail[0]) {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    Ok((tail[0].to_owned(), &tail[1..]))
+}
+
+fn api_url(segments: &[&str]) -> Result<Url, GithubSourceError> {
+    let mut url =
+        Url::parse("https://api.github.com/").map_err(|_| GithubSourceError::InvalidResponse)?;
+    let mut path = url
+        .path_segments_mut()
+        .map_err(|_| GithubSourceError::InvalidResponse)?;
+    path.pop_if_empty();
+    for segment in segments {
+        path.push(segment);
+    }
+    drop(path);
+    Ok(url)
+}
+
+fn parse_full_name(full_name: &str) -> Result<(String, String), GithubSourceError> {
+    let parts = full_name.split('/').collect::<Vec<_>>();
+    if parts.len() != 2 || !valid_name_segment(parts[0]) || !valid_repository_segment(parts[1]) {
+        return Err(GithubSourceError::InvalidResponse);
+    }
+    Ok((parts[0].to_owned(), parts[1].to_owned()))
+}
+
+fn validate_tracked_ref(reference: &str) -> Result<String, GithubSourceError> {
+    if reference.is_empty()
+        || reference
+            .split('/')
+            .any(|segment| !valid_path_segment(segment))
+    {
+        return Err(GithubSourceError::InvalidTrackedRef);
+    }
+    Ok(reference.to_owned())
+}
+
+fn valid_name_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn valid_repository_segment(segment: &str) -> bool {
+    strip_git_suffix(segment).is_ok_and(|repository| {
+        !repository.is_empty()
+            && repository
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            && repository != "."
+            && repository != ".."
+    })
+}
+
+fn strip_git_suffix(segment: &str) -> Result<&str, GithubSourceError> {
+    let repository = segment.strip_suffix(".git").unwrap_or(segment);
+    if repository.is_empty() || repository.contains(".git.git") {
+        return Err(GithubSourceError::UnsupportedInput);
+    }
+    Ok(repository)
+}
+
+fn valid_path_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains(['/', '\\', '\0'])
+        && !segment.chars().any(char::is_control)
+}
+
+/// `url` 保留 path segment 的百分号编码；这里只解码一次，禁止编码后的分隔符改变层级。
+fn decode_url_path_segment(segment: &str) -> Result<String, GithubSourceError> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        if index + 2 >= bytes.len() {
+            return Err(GithubSourceError::UnsupportedInput);
+        }
+        let high = decode_hex_digit(bytes[index + 1])?;
+        let low = decode_hex_digit(bytes[index + 2])?;
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    String::from_utf8(decoded).map_err(|_| GithubSourceError::UnsupportedInput)
+}
+
+fn decode_hex_digit(byte: u8) -> Result<u8, GithubSourceError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(GithubSourceError::UnsupportedInput),
+    }
+}
+
+fn is_commit_sha(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[derive(Deserialize)]
+struct RepositoryMetadata {
+    full_name: String,
+    default_branch: String,
+    private: bool,
+}
+
+#[derive(Deserialize)]
+struct CommitMetadata {
+    sha: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        io::{Cursor, Write},
+        sync::Mutex,
+    };
+
+    use tempfile::tempdir;
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+    use super::*;
+
+    #[test]
+    fn redirect_policy_keeps_generic_downloads_on_the_original_https_origin() {
+        let initial =
+            Url::parse("https://downloads.example.com:8443/skill.zip").expect("初始 URL 应合法");
+        let same_origin = Url::parse("https://downloads.example.com:8443/releases/skill.zip")
+            .expect("同 origin URL 应合法");
+        let changed_port =
+            Url::parse("https://downloads.example.com/skill.zip").expect("不同端口 URL 应合法");
+        let changed_host =
+            Url::parse("https://cdn.example.com/skill.zip").expect("不同 host URL 应合法");
+        let downgraded =
+            Url::parse("http://downloads.example.com:8443/skill.zip").expect("HTTP URL 应合法");
+
+        assert!(is_allowed_redirect(&initial, &same_origin));
+        assert!(!is_allowed_redirect(&initial, &changed_port));
+        assert!(!is_allowed_redirect(&initial, &changed_host));
+        assert!(!is_allowed_redirect(&initial, &downgraded));
+    }
+
+    #[test]
+    fn redirect_policy_allows_only_the_fixed_github_https_hosts() {
+        let initial =
+            Url::parse("https://api.github.com/repos/Owner/Repo/zipball/main").expect("URL 应合法");
+        let codeload = Url::parse("https://codeload.github.com/Owner/Repo/legacy.zip/main")
+            .expect("URL 应合法");
+        let unrelated = Url::parse("https://objects.example.com/repo.zip").expect("URL 应合法");
+
+        assert!(is_allowed_redirect(&initial, &codeload));
+        assert!(!is_allowed_redirect(&initial, &unrelated));
+    }
+
+    #[test]
+    fn parses_supported_repository_forms() {
+        let bare = parse_github_source("Owner/repo", None).expect("裸仓库应可解析");
+        assert_eq!(bare.owner, "Owner");
+        assert_eq!(bare.repository, "repo");
+        assert_eq!(bare.tracked_ref, None);
+
+        let root = parse_github_source("https://github.com/Owner/repo.git/", Some("main"))
+            .expect("根 URL 应可解析");
+        assert_eq!(root.tracked_ref.as_deref(), Some("main"));
+
+        let tree = parse_github_source(
+            "https://github.com/Owner/repo/tree/main/examples/demo",
+            None,
+        )
+        .expect("tree URL 应可解析");
+        assert_eq!(tree.tracked_ref.as_deref(), Some("main"));
+        assert_eq!(tree.member_hint.as_deref(), Some("examples/demo"));
+
+        let tree_root = parse_github_source("https://github.com/Owner/repo/tree/main", None)
+            .expect("只含 ref 的 tree URL 应可解析");
+        assert_eq!(tree_root.tracked_ref.as_deref(), Some("main"));
+        assert_eq!(tree_root.member_hint, None);
+
+        let blob = parse_github_source(
+            "https://github.com/Owner/repo/blob/main/demo/SKILL.md",
+            None,
+        )
+        .expect("成员 URL 应可解析");
+        assert_eq!(blob.member_hint.as_deref(), Some("demo"));
+
+        let encoded = parse_github_source(
+            "https://github.com/Owner/repo/tree/%E5%8F%91%E5%B8%83/skills/my%20skill",
+            None,
+        )
+        .expect("URL path 应严格解码一次");
+        assert_eq!(encoded.tracked_ref.as_deref(), Some("发布"));
+        assert_eq!(encoded.member_hint.as_deref(), Some("skills/my skill"));
+
+        let root_blob =
+            parse_github_source("https://github.com/Owner/repo/blob/main/SKILL.md", None)
+                .expect("仓库根部的 SKILL.md 也是成员 URL");
+        assert_eq!(root_blob.member_hint.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn explicit_slash_ref_separates_member_hint() {
+        let parsed = parse_github_source(
+            "https://github.com/Owner/repo/tree/feature/skill/demo",
+            Some("feature/skill"),
+        )
+        .expect("显式斜杠 ref 应能消除 URL 歧义");
+        assert_eq!(parsed.tracked_ref.as_deref(), Some("feature/skill"));
+        assert_eq!(parsed.member_hint.as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn rejects_conflicting_and_unsupported_inputs() {
+        assert_eq!(
+            parse_github_source(
+                "https://github.com/Owner/repo/tree/main/demo",
+                Some("release")
+            ),
+            Err(GithubSourceError::RefConflict)
+        );
+        for input in [
+            "git@github.com:Owner/repo.git",
+            "https://github.example.com/Owner/repo",
+            "https://github.com/Owner/repo?tab=readme",
+            "https://github.com/Owner/repo/tree/main/../demo",
+            "https://github.com/Owner/repo/tree/main/demo%2Fchild",
+            "https://github.com/Owner/repo/tree/main/demo%5Cchild",
+            "https://github.com/Owner/repo/tree/main/%00",
+            "https://github.com/Owner/repo/blob/main/demo/README.md",
+        ] {
+            assert_eq!(
+                parse_github_source(input, None),
+                Err(GithubSourceError::UnsupportedInput)
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_metadata_and_commit_through_transport_boundary() {
+        let transport = FixtureTransport::new([
+            fixture(
+                200,
+                r#"{"full_name":"Owner/Repo","default_branch":"main","private":false}"#,
+            ),
+            fixture(200, r#"{"sha":"0123456789abcdef0123456789abcdef01234567"}"#),
+        ]);
+        let resolved = resolve_github_source(&transport, "owner/repo", None)
+            .expect("公开仓库应解析成固定 commit");
+        assert_eq!(resolved.canonical_identity, "github:owner/repo");
+        assert_eq!(resolved.display_name, "Owner/Repo");
+        assert_eq!(resolved.tracked_ref, "main");
+        assert_eq!(resolved.commit, "0123456789abcdef0123456789abcdef01234567");
+        let requests = transport.requests.lock().expect("应读取请求记录");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].url.path().ends_with("/repos/owner/repo"));
+        assert!(requests[1].url.path().ends_with("/commits/main"));
+    }
+
+    #[test]
+    fn encodes_commit_ref_as_one_api_path_segment() {
+        let url = api_url(&["repos", "owner", "repo", "commits", "feature/next"])
+            .expect("API URL 应能建立");
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/owner/repo/commits/feature%2Fnext"
+        );
+    }
+
+    #[test]
+    fn fetches_sha_archive_preserves_candidate_errors_and_cleans_staging() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let archive = zip_fixture(&[
+            (
+                "repository-sha/skills/alpha/SKILL.md",
+                "---\nname: alpha\ndescription: alpha catalog skill\n---\n",
+            ),
+            (
+                "repository-sha/skills/parent/SKILL.md",
+                "---\nname: parent\ndescription: parent catalog skill\n---\n",
+            ),
+            (
+                "repository-sha/skills/parent/child/SKILL.md",
+                "---\nname: child\ndescription: child catalog skill\n---\n",
+            ),
+        ]);
+        let transport = FixtureTransport::new([
+            fixture(
+                200,
+                r#"{"full_name":"Owner/Repo","default_branch":"main","private":false}"#,
+            ),
+            fixture(200, &format!(r#"{{"sha":"{sha}"}}"#)),
+            binary_fixture(200, archive),
+        ]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("catalog-staging");
+
+        let fetched = fetch_github_catalog(
+            &transport,
+            GithubCatalogTarget {
+                owner: "Owner",
+                repository: "Repo",
+                canonical_identity: "github:owner/repo",
+                display_name: "Owner/Repo",
+                tracked_ref: "main",
+            },
+            &staging,
+        )
+        .expect("有效 SHA archive 应返回 Catalog");
+
+        assert_eq!(fetched.commit_sha, sha);
+        assert_eq!(fetched.candidates.len(), 3);
+        assert!(
+            fetched
+                .candidates
+                .iter()
+                .any(|candidate| candidate.name.as_deref() == Some("alpha")
+                    && candidate.selectable())
+        );
+        let nested_errors = fetched
+            .candidates
+            .iter()
+            .flat_map(|candidate| &candidate.validation_errors)
+            .collect::<Vec<_>>();
+        assert!(!nested_errors.is_empty(), "嵌套成员错误必须保留在 metadata");
+        assert!(
+            nested_errors
+                .iter()
+                .all(|error| !error.contains(staging.to_string_lossy().as_ref()))
+        );
+        assert!(
+            nested_errors
+                .iter()
+                .any(|error| error.contains("Repo/skills"))
+        );
+        assert_eq!(
+            fs::read_dir(&staging)
+                .expect("staging 根应保留且可读")
+                .count(),
+            0,
+            "成功后不能保留 archive 或展开树"
+        );
+        let requests = transport.requests.lock().expect("应读取请求记录");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].url.path().ends_with(&format!("/zipball/{sha}")));
+    }
+
+    #[test]
+    fn valid_archive_without_skill_metadata_is_an_empty_catalog() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let transport = FixtureTransport::new([
+            fixture(
+                200,
+                r#"{"full_name":"Owner/Repo","default_branch":"main","private":false}"#,
+            ),
+            fixture(200, &format!(r#"{{"sha":"{sha}"}}"#)),
+            binary_fixture(
+                200,
+                zip_fixture(&[("repository-sha/README.md", "# repository\n")]),
+            ),
+        ]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("catalog-staging");
+
+        let fetched = fetch_github_catalog(
+            &transport,
+            GithubCatalogTarget {
+                owner: "Owner",
+                repository: "Repo",
+                canonical_identity: "github:owner/repo",
+                display_name: "Owner/Repo",
+                tracked_ref: "main",
+            },
+            &staging,
+        )
+        .expect("没有 SKILL.md 的合法仓库仍是成功 Catalog");
+
+        assert!(fetched.candidates.is_empty());
+        assert_eq!(fs::read_dir(staging).expect("staging 应可读").count(), 0);
+    }
+
+    #[test]
+    fn prepares_install_snapshot_from_exact_sha_with_one_archive_request() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let plan_id = "11111111-1111-4111-8111-111111111111";
+        let transport = FixtureTransport::new([binary_fixture(
+            200,
+            zip_fixture(&[(
+                "repository-sha/skills/alpha/SKILL.md",
+                "---\nname: alpha\ndescription: installable skill\n---\n",
+            )]),
+        )]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        let snapshot = prepare_github_install_snapshot(
+            &transport,
+            install_catalog_target(),
+            sha,
+            &staging,
+            plan_id,
+        )
+        .expect("固定 commit archive 应生成安装快照");
+
+        assert_eq!(
+            snapshot.snapshot_root(),
+            staging.join(format!(".install-plan-{plan_id}"))
+        );
+        assert_eq!(
+            snapshot.repository_root(),
+            snapshot.snapshot_root().join("Repo")
+        );
+        assert_eq!(snapshot.candidates().len(), 1);
+        assert!(!snapshot.snapshot_root().join("source.zip").exists());
+        let requests = transport.requests.lock().expect("应读取请求记录");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .url
+                .path()
+                .ends_with(&format!("/repos/Owner/Repo/zipball/{sha}"))
+        );
+    }
+
+    #[test]
+    fn removes_install_snapshot_when_guard_drops_without_persist() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let plan_id = "22222222-2222-4222-8222-222222222222";
+        let transport = FixtureTransport::new([binary_fixture(
+            200,
+            zip_fixture(&[("repository-sha/README.md", "# repository\n")]),
+        )]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        let snapshot = prepare_github_install_snapshot(
+            &transport,
+            install_catalog_target(),
+            sha,
+            &staging,
+            plan_id,
+        )
+        .expect("合法 archive 应生成安装快照");
+        let snapshot_root = snapshot.snapshot_root().to_owned();
+        assert!(snapshot_root.exists());
+
+        drop(snapshot);
+
+        assert!(!snapshot_root.exists(), "未持久化的安装快照必须自动清理");
+    }
+
+    #[test]
+    fn persisted_install_snapshot_keeps_only_repository_tree() {
+        let sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let plan_id = "33333333-3333-4333-8333-333333333333";
+        let transport = FixtureTransport::new([binary_fixture(
+            200,
+            zip_fixture(&[
+                ("repository-sha/README.md", "# repository\n"),
+                (
+                    "repository-sha/skills/alpha/SKILL.md",
+                    "---\nname: alpha\ndescription: installable skill\n---\n",
+                ),
+            ]),
+        )]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        let snapshot = prepare_github_install_snapshot(
+            &transport,
+            install_catalog_target(),
+            sha,
+            &staging,
+            plan_id,
+        )
+        .expect("合法 archive 应生成安装快照");
+        let snapshot_root = snapshot.persist();
+        let entries = fs::read_dir(&snapshot_root)
+            .expect("持久化快照应可读")
+            .map(|entry| entry.expect("目录项应可读").file_name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(entries, vec![std::ffi::OsString::from("Repo")]);
+        assert!(snapshot_root.join("Repo/README.md").is_file());
+        assert!(snapshot_root.join("Repo/skills/alpha/SKILL.md").is_file());
+        assert!(!snapshot_root.join("source.zip").exists());
+    }
+
+    #[test]
+    fn rejects_invalid_install_snapshot_inputs_without_leaving_staging() {
+        let transport = FixtureTransport::new([]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        assert_eq!(
+            prepare_github_install_snapshot(
+                &transport,
+                install_catalog_target(),
+                "moving-ref",
+                &staging,
+                "44444444-4444-4444-8444-444444444444",
+            )
+            .expect_err("移动 ref 不能替代固定 SHA"),
+            GithubSourceError::InvalidCommitSha
+        );
+        assert_eq!(
+            prepare_github_install_snapshot(
+                &transport,
+                install_catalog_target(),
+                "cccccccccccccccccccccccccccccccccccccccc",
+                &staging,
+                "../plan",
+            )
+            .expect_err("Plan ID 不能改写 staging 路径"),
+            GithubSourceError::InvalidInstallPlanId
+        );
+        assert!(!staging.exists(), "输入校验失败前不能创建 staging");
+        assert!(
+            transport
+                .requests
+                .lock()
+                .expect("应读取请求记录")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn removes_fixed_install_snapshot_after_archive_error() {
+        let plan_id = "55555555-5555-4555-8555-555555555555";
+        let transport = FixtureTransport::new([binary_fixture(200, b"not-a-zip".to_vec())]);
+        let sandbox = tempdir().expect("应创建隔离目录");
+        let staging = sandbox.path().join("install-staging");
+
+        assert_eq!(
+            prepare_github_install_snapshot(
+                &transport,
+                install_catalog_target(),
+                "dddddddddddddddddddddddddddddddddddddddd",
+                &staging,
+                plan_id,
+            )
+            .expect_err("无效 archive 必须失败"),
+            GithubSourceError::InvalidArchive
+        );
+        assert!(
+            !staging.join(format!(".install-plan-{plan_id}")).exists(),
+            "准备失败时必须清理已创建的固定快照目录"
+        );
+    }
+
+    #[test]
+    fn receive_limit_accepts_exact_bytes_and_rejects_the_next_byte() {
+        let mut exact_source = Cursor::new(b"12345".to_vec());
+        let mut exact_destination = Vec::new();
+        assert_eq!(
+            copy_with_limit(&mut exact_source, &mut exact_destination, 5),
+            Ok(5)
+        );
+        assert_eq!(exact_destination, b"12345");
+
+        let mut source = Cursor::new(b"123456".to_vec());
+        let mut destination = Vec::new();
+        assert_eq!(
+            copy_with_limit(&mut source, &mut destination, 5),
+            Err(StreamCopyError::LimitExceeded {
+                limit: 5,
+                actual: 6,
+            })
+        );
+        assert_eq!(destination, b"12345");
+        assert_eq!(source.position(), 6);
+    }
+
+    #[test]
+    fn receive_budget_is_shared_across_one_source_operation() {
+        let mut budget = ReceiveBudget::new(5);
+        let mut metadata = Cursor::new(b"123".to_vec());
+        let mut metadata_output = Vec::new();
+        assert_eq!(
+            copy_with_budget(&mut metadata, &mut metadata_output, &mut budget),
+            Ok(3)
+        );
+
+        let mut archive = Cursor::new(b"456".to_vec());
+        let mut archive_output = Vec::new();
+        assert_eq!(
+            copy_with_budget(&mut archive, &mut archive_output, &mut budget),
+            Err(StreamCopyError::LimitExceeded {
+                limit: 5,
+                actual: 6,
+            })
+        );
+        assert_eq!(metadata_output, b"123");
+        assert_eq!(archive_output, b"45");
+    }
+
+    struct FixtureTransport {
+        responses: Mutex<VecDeque<Result<SourceResponse, SourceTransportError>>>,
+        requests: Mutex<Vec<SourceRequest>>,
+    }
+
+    impl FixtureTransport {
+        fn new(
+            responses: impl IntoIterator<Item = Result<SourceResponse, SourceTransportError>>,
+        ) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SourceTransport for FixtureTransport {
+        fn get(&self, request: SourceRequest) -> Result<SourceResponse, SourceTransportError> {
+            self.requests.lock().expect("应记录请求").push(request);
+            self.responses
+                .lock()
+                .expect("应读取 fixture")
+                .pop_front()
+                .expect("fixture 应足够")
+        }
+    }
+
+    fn fixture(status: u16, json: &str) -> Result<SourceResponse, SourceTransportError> {
+        binary_fixture(status, json.as_bytes().to_vec())
+    }
+
+    fn binary_fixture(status: u16, body: Vec<u8>) -> Result<SourceResponse, SourceTransportError> {
+        Ok(SourceResponse {
+            status,
+            final_url: Url::parse("https://api.github.com/fixture").expect("fixture URL 应合法"),
+            body: Box::new(Cursor::new(body)),
+        })
+    }
+
+    fn install_catalog_target() -> GithubCatalogTarget<'static> {
+        GithubCatalogTarget {
+            owner: "Owner",
+            repository: "Repo",
+            canonical_identity: "github:owner/repo",
+            display_name: "Owner/Repo",
+            tracked_ref: "main",
+        }
+    }
+
+    fn zip_fixture(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        for (path, contents) in entries {
+            archive
+                .start_file(*path, options)
+                .expect("应创建 ZIP entry");
+            archive
+                .write_all(contents.as_bytes())
+                .expect("应写入 ZIP 内容");
+        }
+        archive.finish().expect("应完成 ZIP fixture").into_inner()
+    }
+}

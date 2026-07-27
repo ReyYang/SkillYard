@@ -2,213 +2,51 @@
 
 默认语言：中文 | [English](./README.en.md)
 
-SkillYard 是一个 Mac-first 的本机 Skill Library Manager，面向同时使用多个 AI coding agent 的用户。它把 skill 的来源管理和不同 Host 的暴露入口分开：本机只维护一份可追踪、可更新的 Library，再按需把 Library Entry 暴露给 Codex、Claude Code、Cursor、GitHub Copilot 等 Host。
+SkillYard 是一个面向 macOS 的本地 AI Agent Skill 管理应用。它让用户看清本机有哪些 Skill、来自哪里、被哪些项目和 Agent 应用使用，并把用户明确交付管理的内容统一安装、接管、挂载、更新和删除。
 
-## 解决什么问题
+## SkillYard 1.0
 
-多 agent 用户经常会遇到这些问题：
+1.0 的核心形态已经确定：
 
-- skill 分散在 `.codex/skills`、`.claude/skills`、项目目录和各种工具目录里。
-- 很多 skill 是通过 `npx`、`gh skill`、复制目录或历史脚本安装的，后来很难知道来源。
-- 同一个 skill 被复制到多个 Host 后，远端更新无法自动同步。
-- Host Entry 名称冲突、broken symlink、snapshot 漂移、Dirty Source Tree 等问题很难集中检查。
-- 项目级 skill 和用户级 skill 混在一起，难以判断到底应该全局暴露还是只暴露给某个项目。
-
-SkillYard 的核心思路是：把 skill 作为 Library Entry 管理，把 Host 目录里的入口作为 Exposure 管理。默认使用 symlink Exposure；当 symlink 不适合时再使用 snapshot fallback。
-
-## 核心概念
-
-- **Library**：本机统一的 skill source library。
-- **Source Tree**：一个 Git repo、本地 personal 目录、npm package materialization 或 captured source。
-- **Library Entry**：一个可管理的 skill，通常对应某个 `SKILL.md`。
-- **Library Identity**：管理身份，格式是 `namespace/name`，例如 `mattpocock/review`。
-- **Exposure**：把某个 Library Entry 暴露给某个 Host/scope 的关系。
-- **Host Entry Name**：Host skill 目录里的真实目录名，默认等于 skill 自己声明的 `name`。
-- **Plan / Apply**：所有写操作先生成 Plan；只有确认后才 Apply。
-
-更多术语见 [CONTEXT.md](./CONTEXT.md)。
+- 1.0 只在产品所有者的个人 Apple Silicon Mac 上本地构建和使用，`SkillYard.app` 是唯一入口；
+- 不提供公开安装包、Apple 付费签名或应用自更新，也不提供 CLI、后台服务或 localhost API；
+- 使用 Tauri 2、TypeScript Web UI 和小而封闭的 Rust Lifecycle Core；
+- 1.0 仅支持 Apple Silicon 与 macOS 14 及以上系统；
+- Supported Apps 固定为 Codex、Claude Code 和 GitHub Copilot；
+- `Source` 表示远端来源，`Bundle` 表示本地已安装组，`Skill` 是 Bundle 成员，`Mount` 是到 Agent 应用目录的软链接；
+- 扫描只产生 Inventory，不静默接管或移动文件；
+- 直接安装后保持“已安装、未挂载”，由用户选择挂载目标；
+- Bundle 更新采用完整候选内容验证和原子切换，不提供用户可见的版本历史或回滚；
+- Central Store 与 SQLite 是持久用户内容，删除应用本体不会删除已托管 Skill；
+- 不执行 `npx skills`、`gh skill`、Lark CLI 等外部安装命令，这些工具只作为 Installation Chain 和来源证据；
+- 不收集遥测或上传崩溃报告。
 
 ## 当前状态
 
-这是 SkillYard 的首个可运行实现，包含：
+SkillYard 1.0 的十个实施阶段已经进入最终验收。当前仓库包含完整的 Tauri 2 桌面应用、Rust 生命周期核心、SQLite 持久化、Central Store 与三种 Supported App 的 Mount 管理；自动化回归和当前个人 Mac 的应用构建、真实启动、Codex 路径及应用替换契约均已验证。
 
-- CLI：`init`、`import`、`expose`、`doctor`、`update`、`serve`
-- SQLite State File
-- Git / local / package / captured Source Tree
-- symlink-first Exposure，snapshot fallback
-- Codex、Claude Code、Cursor、GitHub Copilot Host Adapters
-- Local Server + HTML View
-- doctor 健康检查
-- Update Impact preview
-- Captured Install，用于捕获 `npx` 等外部 installer 的安装结果
-- `gh skill` discovery
-- 可选 AI Assist，用于解释 skill 和推断未知 provenance
+全部 167 条 User Story 已映射到自动化、本机契约或人工验收。代码还不能标记为最终完成：产品所有者仍需确认关键文案是否易懂，并用一份真实 Bundle 完成最终日常流程体验。执行状态见 [1.0 User Story 验收证据](./docs/acceptance/1.0-user-story-evidence.md)。
 
-## 安装
+旧 Python CLI、HTML View、Local Server 和对应测试已经从当前工作区删除。仍然适用于 1.0 的行为约束已经写入 PRD 和实施计划，历史实现只通过 Git 记录保留。
 
-从源码运行：
+## 本地开发
 
 ```bash
-git clone https://github.com/ReyYang/SkillYard.git
-cd SkillYard
-python3 -m skillyard --help
+pnpm install
+pnpm test
+cargo test --workspace
+pnpm tauri build --bundles app
 ```
 
-如果希望安装 `skillyard` 命令：
-
-```bash
-python3 -m pip install -e .
-skillyard --help
-```
-
-默认 State File 位于：
-
-```text
-~/.skillyard/state.sqlite3
-```
-
-默认 Library 位于：
-
-```text
-~/.skillyard/library/
-```
-
-开发和测试时建议使用 `--home` 指向临时目录，避免影响真实本机 Library。
-
-## 快速开始
-
-初始化本机 Library：
-
-```bash
-python3 -m skillyard init
-python3 -m skillyard init --yes
-```
-
-不带 `--yes` 时只输出 Plan，不会 Apply。带 `--yes` 才会写入 State File 和 Library 目录。
-
-导入 Git repo：
-
-```bash
-python3 -m skillyard import https://github.com/example/agent-skills --namespace example
-python3 -m skillyard import https://github.com/example/agent-skills --namespace example --yes
-```
-
-导入本地 personal skill 目录：
-
-```bash
-python3 -m skillyard import --local ~/GitHub/my-personal-skills --namespace personal --yes
-```
-
-暴露某个 skill 给 Codex：
-
-```bash
-python3 -m skillyard expose example/review --host codex --scope user
-python3 -m skillyard expose example/review --host codex --scope user --yes
-```
-
-暴露给项目级 scope：
-
-```bash
-python3 -m skillyard expose example/review \
-  --host codex \
-  --scope project \
-  --project-root /path/to/project \
-  --yes
-```
-
-运行健康检查：
-
-```bash
-python3 -m skillyard doctor
-```
-
-预览 Source Tree 更新影响：
-
-```bash
-python3 -m skillyard update 1
-python3 -m skillyard update 1 --apply --yes
-```
-
-启动本地 HTML View：
-
-```bash
-python3 -m skillyard serve --port 8765
-```
-
-Local Server 只允许绑定 localhost。
-
-## Captured Install
-
-如果用户仍想用原来的 installer，例如 `npx`，可以让 SkillYard 捕获安装前后的 Host 目录变化：
-
-```bash
-python3 -m skillyard import \
-  --capture \
-  --host codex \
-  --host-dir /tmp/codex-skills \
-  --yes \
-  -- npx some-skill-installer
-```
-
-SkillYard 会：
-
-1. 快照 Host skill 目录。
-2. 执行真实 installer command。
-3. 再次快照 Host skill 目录。
-4. 识别 added / changed / deleted Host Entries。
-5. 记录 Install Receipt。
-6. 在证据足够时创建 Package Source Tree；证据不足时创建 Source Candidate。
-
-## `gh skill` discovery
-
-搜索公共 skill：
-
-```bash
-python3 -m skillyard import --gh-search review
-```
-
-从 discovery result 中拿到 repo URL 后，可以转为 SkillYard import plan：
-
-```bash
-python3 -m skillyard import --import-url https://github.com/example/agent-skills --namespace example
-```
-
-`gh skill` 只作为 Discovery Provider，不接管本地 Library state。
-
-## AI Assist
-
-AI Assist 是显式、可选能力，不参与核心写入流程。
-
-解释一个 skill：
-
-```bash
-python3 -m skillyard doctor --explain-skill /path/to/skill
-```
-
-推断未知来源：
-
-```bash
-python3 -m skillyard doctor --infer-provenance /path/to/skill
-```
-
-推断结果是 Provenance Inference，不会自动写成 confirmed provenance。
-
-## 开发
-
-运行测试：
-
-```bash
-python3 -m unittest discover
-```
-
-编译检查：
-
-```bash
-python3 -m compileall skillyard tests
-```
+生产构建生成在 `target/release/bundle/macos/SkillYard.app`。这是个人电脑上的本地构建，不包含公开分发、Developer ID 签名或 notarization。
 
 ## 文档
 
-- [Domain glossary](./CONTEXT.md)
-- [PRD](./docs/prd/0001-skillyard.md)
-- [Architecture decisions](./docs/adr/)
+- [文档索引](./docs/README.md)
+- [SkillYard 1.0 产品契约](./docs/1.0-product-contract.md)
+- [SkillYard 1.0 PRD](./docs/prd/0001-skillyard-1.0.md)
+- [SkillYard 1.0 实施计划](./docs/plans/0001-skillyard-1.0-implementation.md)
+- [SkillYard 1.0 接管与管理权设计](./docs/1.0-management-authority.md)
+- [领域术语表](./CONTEXT.md)
+
+`docs/research/` 保存外部工具和技术选型的核验事实，不产生新的产品决策。历史讨论由 Git 记录，不再在当前工作区保留被取代的 ADR 文件。

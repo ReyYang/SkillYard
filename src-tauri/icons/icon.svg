@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="yard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17211d" />
+      <stop offset="1" stop-color="#0b0f0d" />
+    </linearGradient>
+    <linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d7ff70" />
+      <stop offset="1" stop-color="#76d87f" />
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#yard)" />
+  <path d="M256 270h512v116H570v368H454V386H256z" fill="url(#leaf)" />
+  <circle cx="710" cy="692" r="64" fill="#eef9e8" opacity=".9" />
+</svg>
