@@ -1460,7 +1460,7 @@ describe("本机清单", () => {
     expect(result).toHaveTextContent("Alpha");
     expect(result).toHaveTextContent("成功");
     expect(
-      screen.getByRole("button", { name: "返回清单" }),
+      screen.getByRole("button", { name: "返回上一页" }),
     ).toBeEnabled();
   });
 
@@ -1519,7 +1519,7 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    const back = await screen.findByRole("button", { name: "返回清单" });
+    const back = await screen.findByRole("button", { name: "返回上一页" });
     await user.click(back);
 
     expect(client.acknowledgeBundleUpdateBatchResult).toHaveBeenCalledWith(

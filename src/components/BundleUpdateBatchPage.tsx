@@ -296,6 +296,13 @@ function BatchResult({
   const blocked = result.status === "blocked";
   return (
     <main className="batch-update-shell">
+      {!blocked ? (
+        <PageBackButton
+          disabled={isAcknowledging}
+          label={isAcknowledging ? "正在返回清单…" : "返回"}
+          onClick={() => onAcknowledge(result.id)}
+        />
+      ) : null}
       <p className="eyebrow">SKILLYARD · ALL UPDATES RESULT</p>
       <h1>{blocked ? "全部更新正在等待人工恢复" : "全部更新已完成"}</h1>
       <p className="lead">
@@ -333,18 +340,6 @@ function BatchResult({
         <div className="inline-error" role="alert">
           <strong>无法返回清单</strong>
           <span>{error}</span>
-        </div>
-      ) : null}
-      {!blocked ? (
-        <div className="install-actions">
-          <button
-            className="primary-action"
-            type="button"
-            disabled={isAcknowledging}
-            onClick={() => onAcknowledge(result.id)}
-          >
-            {isAcknowledging ? "正在返回清单…" : "返回清单"}
-          </button>
         </div>
       ) : null}
     </main>

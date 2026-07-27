@@ -1901,9 +1901,10 @@ impl Storage {
                     )
                     .map_err(StorageError::SaveTakeoverTransaction)?;
             }
-            if let Some(source) = takeover_source.as_ref() {
-                persist_takeover_source(&transaction, &plan.bundle_id, source, now)?;
-            }
+            let persisted_source_ref = takeover_source
+                .as_ref()
+                .map(|source| persist_takeover_source(&transaction, &plan.bundle_id, source, now))
+                .transpose()?;
             ensure_takeover_domain_matches(
                 &transaction,
                 &self.data_root,
@@ -1911,6 +1912,7 @@ impl Storage {
                 &validated,
                 existing_bundle,
                 takeover_source.as_ref(),
+                persisted_source_ref.as_deref(),
             )?;
             for origin in &plan.origins {
                 let deleted = transaction
@@ -1938,6 +1940,7 @@ impl Storage {
                 &validated,
                 existing_bundle,
                 takeover_source.as_ref(),
+                None,
             )?;
         } else {
             return Err(StorageError::TakeoverStateConflict(
@@ -10607,7 +10610,7 @@ fn persist_takeover_source(
     bundle_id: &str,
     source: &ValidatedTakeoverSource,
     now: i64,
-) -> Result<(), StorageError> {
+) -> Result<String, StorageError> {
     let read_existing = |row: &rusqlite::Row<'_>| {
         Ok((
             row.get::<_, String>(0)?,
@@ -10644,7 +10647,7 @@ fn persist_takeover_source(
     }
     .map_err(StorageError::SaveTakeoverTransaction)?;
 
-    let source_id = if let Some((
+    let (source_id, tracked_ref) = if let Some((
         source_id,
         kind,
         canonical_identity,
@@ -10661,12 +10664,9 @@ fn persist_takeover_source(
             return Err(StorageError::SourceBundleStateConflict);
         }
         if source.existing_source_id.is_some() {
-            source_id
+            (source_id, current_ref)
         } else {
-            let tracked_ref = source
-                .explicit_tracked_ref
-                .as_deref()
-                .unwrap_or(&current_ref);
+            // 同一 Source 已保存的 Tracked Ref 只能由独立确认流程修改；接管只补关系和来源证据。
             let changed = transaction
                 .execute(
                     "UPDATE sources
@@ -10679,7 +10679,7 @@ fn persist_takeover_source(
                         source.repository,
                         source.display_name,
                         source.locator,
-                        tracked_ref,
+                        current_ref,
                         now,
                     ],
                 )
@@ -10687,7 +10687,7 @@ fn persist_takeover_source(
             if changed != 1 {
                 return Err(StorageError::SourceBundleStateConflict);
             }
-            source_id
+            (source_id, current_ref)
         }
     } else {
         if source.existing_source_id.is_some() {
@@ -10701,6 +10701,11 @@ fn persist_takeover_source(
                 |row| row.get::<_, i64>(0),
             )
             .map_err(StorageError::SaveTakeoverTransaction)?;
+        let tracked_ref = source
+            .explicit_tracked_ref
+            .as_deref()
+            .unwrap_or("HEAD")
+            .to_owned();
         transaction
             .execute(
                 "INSERT INTO sources (
@@ -10715,13 +10720,13 @@ fn persist_takeover_source(
                     source.repository,
                     source.display_name,
                     source.locator,
-                    source.explicit_tracked_ref.as_deref().unwrap_or("HEAD"),
+                    tracked_ref,
                     sort_order,
                     now,
                 ],
             )
             .map_err(StorageError::SaveTakeoverTransaction)?;
-        source_id
+        (source_id, tracked_ref)
     };
 
     let linked_source_id = transaction
@@ -10773,7 +10778,7 @@ fn persist_takeover_source(
             }
         }
     }
-    Ok(())
+    Ok(tracked_ref)
 }
 
 fn ensure_takeover_domain_matches(
@@ -10783,6 +10788,7 @@ fn ensure_takeover_domain_matches(
     validated: &ValidatedTakeoverDomain,
     existing_bundle: Option<&StoredTakeoverBundleSnapshot>,
     takeover_source: Option<&ValidatedTakeoverSource>,
+    persisted_source_ref: Option<&str>,
 ) -> Result<(), StorageError> {
     let bundle = transaction
         .query_row(
@@ -10829,6 +10835,7 @@ fn ensure_takeover_domain_matches(
         &plan.bundle_id,
         takeover_source,
         existing_bundle.and_then(|bundle| bundle.source_id.as_deref()),
+        persisted_source_ref,
     )?;
     if let Some(existing) = existing_bundle {
         let actual = read_takeover_bundle_snapshot_from(transaction, data_root, &plan.bundle_id)?;
@@ -10950,6 +10957,7 @@ fn ensure_takeover_source_matches(
     bundle_id: &str,
     expected: Option<&ValidatedTakeoverSource>,
     existing_source_id: Option<&str>,
+    expected_tracked_ref: Option<&str>,
 ) -> Result<(), StorageError> {
     let actual = transaction
         .query_row(
@@ -10989,10 +10997,7 @@ fn ensure_takeover_source_matches(
         || actual.4 != expected.display_name
         || actual.5 != expected.locator
         || actual.6.is_empty()
-        || expected
-            .explicit_tracked_ref
-            .as_deref()
-            .is_some_and(|tracked_ref| tracked_ref != actual.6)
+        || expected_tracked_ref.is_some_and(|tracked_ref| tracked_ref != actual.6)
         || actual.7.is_some()
     {
         return Err(StorageError::InvalidTakeoverPlan);

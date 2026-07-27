@@ -327,6 +327,92 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
 }
 
 #[test]
+fn takeover_reuses_an_unlinked_source_without_silently_changing_its_tracked_ref() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let skill_root = home.join(".codex/skills/alpha");
+    write_skill(&skill_root, "alpha", "复用 Source 时保留已确认的 ref");
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home.clone()),
+        PlatformInfo::supported_for_test(),
+    );
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应建立真实 SQLite");
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开真实 SQLite");
+    connection
+        .execute(
+            "INSERT INTO sources (
+                id, kind, canonical_identity, owner, repository,
+                display_name, locator, tracked_ref, member_path_hint,
+                sort_order, created_at, updated_at
+             ) VALUES (
+                'existing-source', 'github', 'github:owner/repository',
+                'owner', 'repository', 'owner/repository',
+                'https://github.com/owner/repository', 'main', NULL, 50, 1, 1
+             )",
+            [],
+        )
+        .expect("应准备尚未关联 Bundle 的既有 Source");
+    drop(connection);
+
+    write_global_lock_v3(&home, "alpha");
+    let entries = match application
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("刷新应读取 ref 不同的 lock v3")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("刷新后应返回 Inventory"),
+    };
+    let observation_id = entries
+        .iter()
+        .find(|entry| entry.skill_root == path_text(&skill_root))
+        .expect("应发现待接管 Skill")
+        .id
+        .clone();
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: takeover_plan_request! {
+                observation_ids: vec![observation_id.clone()],
+                selected_observation_id: observation_id.clone(),
+                preserved_observation_ids: vec![observation_id],
+                shared_targets: Vec::new(),
+            },
+        })
+        .expect("应生成复用 Source 的接管计划")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    application
+        .handle(UiIntent::ConfirmTakeoverPlan {
+            plan_id: plan.id.clone(),
+        })
+        .expect("接管应复用 Source 并保留其当前 ref");
+
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应重新打开真实 SQLite");
+    let saved: (String, String) = connection
+        .query_row(
+            "SELECT source.tracked_ref, link.bundle_id
+             FROM sources AS source
+             JOIN source_bundle_links AS link ON link.source_id = source.id
+             WHERE source.id = 'existing-source'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("既有 Source 应自动关联到新 Bundle");
+    assert_eq!(
+        saved,
+        ("main".to_owned(), plan.bundle_id),
+        "lock 中不同的 ref 只能保留在安装履历，不能跳过用户确认改写 Source"
+    );
+}
+
+#[test]
 fn verified_lock_v3_bundle_can_plan_all_installed_members_together() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
