@@ -1,0 +1,48 @@
+name: 功能建议 / Feature request
+description: 描述一个真实使用问题和期望结果
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        SkillYard 1.0 聚焦 macOS 14+ Apple Silicon，以及 Codex、Claude Code 和 GitHub Copilot。请先描述问题，不必预先设计实现。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的问题
+      description: 这个问题在什么场景发生，目前为什么难以完成？
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+      description: 如果问题被解决，你希望看到什么可观察结果？
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_workaround
+    attributes:
+      label: 当前替代方案
+      description: 如果已有临时做法，请简要说明。
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 补充背景
+      description: 可附匿名化截图或公开链接；不要提交 Token、密钥和个人路径。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，没有找到相同建议。
+          required: true
+        - label: 我已移除 Token、密钥、个人路径和其他敏感信息。
+          required: true

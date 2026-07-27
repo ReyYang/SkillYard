@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# 普通 CI 只读取仓库内容，不授予写入 Issue、PR、Actions 或 Release 的权限。
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.2 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test frontend
+        run: pnpm test
+
+  native:
+    name: Rust and production build
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Confirm Apple Silicon runner
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.2 --activate
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 固定到项目已经验证的 stable 工具链，避免 runner 镜像更新改变编译结果。
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
+          rustup default 1.94.1
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --workspace --locked
+
+      # 这里只验证生产构建，不上传普通 CI 产物。
+      - name: Build Tauri application
+        run: pnpm tauri build --bundles app
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Gitleaks 读取 PR commit 列表以确定增量范围；仍不具备任何写权限。
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Action 负责安装固定版本的 Gitleaks；关闭评论与 SARIF artifact，保持普通 CI 只读且无产物。
+      - name: Install and run Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_VERSION: 8.30.1
+
+      # Gitleaks action 在 push/PR 事件中默认只扫描提交范围；这里显式覆盖全部可达历史。
+      - name: Scan full Git history
+        run: gitleaks git --redact --verbose --log-opts="--all"

@@ -1,52 +1,79 @@
 # SkillYard
 
-默认语言：中文 | [English](./README.en.md)
+SkillYard 是一个本地优先的 macOS 应用，用 Bundle 统一整理、安装、接管、挂载和更新 AI Agent Skills。
 
-SkillYard 是一个面向 macOS 的本地 AI Agent Skill 管理应用。它让用户看清本机有哪些 Skill、来自哪里、被哪些项目和 Agent 应用使用，并把用户明确交付管理的内容统一安装、接管、挂载、更新和删除。
+中文 | [English](./README.en.md)
 
-## SkillYard 1.0
+## 下载与系统要求
 
-1.0 的核心形态已经确定：
+[下载 SkillYard 1.0.0](https://github.com/ReyYang/SkillYard/releases/tag/v1.0.0)
 
-- 1.0 只在产品所有者的个人 Apple Silicon Mac 上本地构建和使用，`SkillYard.app` 是唯一入口；
-- 不提供公开安装包、Apple 付费签名或应用自更新，也不提供 CLI、后台服务或 localhost API；
-- 使用 Tauri 2、TypeScript Web UI 和小而封闭的 Rust Lifecycle Core；
-- 1.0 仅支持 Apple Silicon 与 macOS 14 及以上系统；
-- Supported Apps 固定为 Codex、Claude Code 和 GitHub Copilot；
-- `Source` 表示远端来源，`Bundle` 表示本地已安装组，`Skill` 是 Bundle 成员，`Mount` 是到 Agent 应用目录的软链接；
-- 扫描只产生 Inventory，不静默接管或移动文件；
-- 直接安装后保持“已安装、未挂载”，由用户选择挂载目标；
-- Bundle 更新采用完整候选内容验证和原子切换，不提供用户可见的版本历史或回滚；
-- Central Store 与 SQLite 是持久用户内容，删除应用本体不会删除已托管 Skill；
-- 不执行 `npx skills`、`gh skill`、Lark CLI 等外部安装命令，这些工具只作为 Installation Chain 和来源证据；
-- 不收集遥测或上传崩溃报告。
+SkillYard 1.0 支持：
 
-## 当前状态
+- macOS 14 Sonoma 或更高版本；
+- Apple Silicon（`arm64`）Mac；
+- Codex、Claude Code 和 GitHub Copilot 的本地 Skill 目录。
 
-SkillYard 1.0 的十个实施阶段已经进入最终验收。当前仓库包含完整的 Tauri 2 桌面应用、Rust 生命周期核心、SQLite 持久化、Central Store 与三种 Supported App 的 Mount 管理；自动化回归和当前个人 Mac 的应用构建、真实启动、Codex 路径及应用替换契约均已验证。
-
-全部 167 条 User Story 已映射到自动化、本机契约或人工验收。代码还不能标记为最终完成：产品所有者仍需确认关键文案是否易懂，并用一份真实 Bundle 完成最终日常流程体验。执行状态见 [1.0 User Story 验收证据](./docs/acceptance/1.0-user-story-evidence.md)。
-
-旧 Python CLI、HTML View、Local Server 和对应测试已经从当前工作区删除。仍然适用于 1.0 的行为约束已经写入 PRD 和实施计划，历史实现只通过 Git 记录保留。
-
-## 本地开发
+在 Release 中下载 `SkillYard-1.0.0-macos-aarch64.zip` 和 `SHA256SUMS.txt`，然后校验安装包：
 
 ```bash
-pnpm install
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+解压 ZIP，将 `SkillYard.app` 移入 `/Applications` 后启动。当前安装包使用 ad-hoc signing，尚未经过 Apple notarization；macOS 可能在首次打开时显示安全提示。请在 Finder 中按住 Control 点击应用并选择“打开”，或前往“系统设置 → 隐私与安全性”确认打开。仅从本仓库的 [GitHub Releases](https://github.com/ReyYang/SkillYard/releases) 下载正式安装包。
+
+## 界面预览
+
+![使用匿名测试数据展示的 SkillYard Bundle 清单](./docs/assets/skillyard-overview.png)
+
+截图只包含匿名测试数据，不含真实账号、目录或 Source。
+
+## 三条主路径
+
+1. **扫描并接管**：首次使用时由你点击开始扫描。SkillYard 只读发现三个 Supported Apps 中已有的 Skill，并按 Bundle 展示；只有确认接管计划后，内容才会进入 Central Store，原使用位置会替换为软链接 Mount。
+2. **安装并挂载**：从 GitHub Source、`skills.sh` 搜索结果、ZIP / `.skill`、直接归档 URL 或本地目录安装 Bundle。安装完成后默认保持“已安装、未挂载”，由你选择挂载到 Codex、Claude Code 或 GitHub Copilot。
+3. **更新或删除 Bundle**：检查到 Source 变化后，由你确认更新整个 Bundle。你可以一次解除 Bundle 的全部 Mount，或通过二次确认删除 Bundle；删除 Source 只会移除远端更新关联，不会删除本地 Bundle。
+
+## 安全与隐私边界
+
+- **本地优先**：Central Store、SQLite 状态、Mount 和事务记录保存在本机，不依赖 SkillYard 账号、云端数据库或公共 registry。
+- **显式确认**：扫描不会静默移动文件。接管、安装、挂载、更新和删除都从可见计划开始，高风险删除需要二次确认。
+- **不执行外部安装命令**：SkillYard 不运行 `npx skills`、`gh skill`、Lark CLI 或用户提供的 shell 命令，也不执行 Skill 内的脚本、二进制文件或 lifecycle hook。
+- **无遥测**：应用不收集使用分析，不上传崩溃报告，也不上传 Skill、Source、Project、路径或 SQLite 信息。只有你主动发起 Source 加载、搜索或更新时，应用才执行该操作所需的网络请求。
+- **管理边界清晰**：Codex 官方插件、Host 内置 Skill 和明确由项目仓库维护的 Skill 只读展示，SkillYard 不修改它们。
+
+## 1.0 未支持的内容
+
+- Intel Mac、macOS 13 及更早版本、Windows、Linux 或其他平台；
+- Apple Developer ID signing、notarization、Mac App Store 或无提示的首次启动体验；
+- Homebrew Cask、DMG、应用自动更新或独立 CLI；
+- 私有 GitHub 仓库认证、后台自动检查更新或公共 Skill registry；
+- Skill 版本历史、用户可见回滚、备份恢复或跨设备同步。
+
+## 从源码构建
+
+需要 Apple Silicon Mac（macOS 14+）、Xcode Command Line Tools、Rust stable、Node.js 20.19+ 或 22.12+，以及 Corepack。仓库固定使用 `pnpm@10.33.2`。
+
+```bash
+xcode-select --install
+corepack enable
+pnpm install --frozen-lockfile
+pnpm typecheck
 pnpm test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 pnpm tauri build --bundles app
 ```
 
-生产构建生成在 `target/release/bundle/macos/SkillYard.app`。这是个人电脑上的本地构建，不包含公开分发、Developer ID 签名或 notarization。
+应用生成在 `target/release/bundle/macos/SkillYard.app`。本地构建沿用 ad-hoc signing，不会获得 Apple notarization。
 
-## 文档
+## 文档、贡献与反馈
 
-- [文档索引](./docs/README.md)
-- [SkillYard 1.0 产品契约](./docs/1.0-product-contract.md)
-- [SkillYard 1.0 PRD](./docs/prd/0001-skillyard-1.0.md)
-- [SkillYard 1.0 实施计划](./docs/plans/0001-skillyard-1.0-implementation.md)
-- [SkillYard 1.0 接管与管理权设计](./docs/1.0-management-authority.md)
-- [领域术语表](./CONTEXT.md)
-
-`docs/research/` 保存外部工具和技术选型的核验事实，不产生新的产品决策。历史讨论由 Git 记录，不再在当前工作区保留被取代的 ADR 文件。
+- [文档索引](./docs/README.md)与 [1.0 产品契约](./docs/1.0-product-contract.md)
+- [更新记录](./CHANGELOG.md)
+- [贡献指南](./CONTRIBUTING.md)与 [行为准则](./CODE_OF_CONDUCT.md)
+- [使用支持](./SUPPORT.md)
+- [安全策略与私密漏洞报告](./SECURITY.md)
+- [Bug 与功能建议](https://github.com/ReyYang/SkillYard/issues)
+- [MIT License](./LICENSE)

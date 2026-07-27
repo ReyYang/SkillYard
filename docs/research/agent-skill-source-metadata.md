@@ -57,31 +57,12 @@ GitHub CLI 官方源码明确写明其 lock version 要与 Vercel 的版本保�
 1. 只看 `.skill-lock.json` 的路径和 v3 schema，无法区分记录来自 `npx skills` 还是 `gh skill`。
 2. `gh skill` 是 GitHub CLI 的安装器，不是 GitHub Copilot Host runtime。即使目标参数选择了 Copilot、Codex 或 Claude Code，也不能把 lock 归因给该 Host。
 
-### 1.3 本机只读证据
+### 1.3 v3 记录的最小解释
 
-本机核验命令：
+对一条完整的 v3 记录，SkillYard 只使用协议中可核验的 `source`、`sourceType`、`sourceUrl`、`skillPath` 和可选 `pluginName`：
 
-```bash
-stat ~/.agents/.skill-lock.json
-jq '.version, (.skills | length), .skills["ask-matt"]' ~/.agents/.skill-lock.json
-```
-
-截至核验日，本机文件为 v3，共 25 项；`ask-matt` 记录为：
-
-```json
-{
-  "source": "mattpocock/skills",
-  "sourceType": "github",
-  "sourceUrl": "https://github.com/mattpocock/skills.git",
-  "skillPath": "skills/engineering/ask-matt/SKILL.md",
-  "pluginName": "mattpocock-skills"
-}
-```
-
-这份证据足以得出：
-
-- `ask-matt` 与其他相同 `sourceUrl` 的 Skill 属于同一个来源 Bundle；
-- Bundle 应显示为 lock 保存的来源名称 `mattpocock/skills`；
+- 相同规范化 `sourceUrl` 的 Skill 属于同一个来源 Bundle；
+- Bundle 显示名使用 lock 保存的 `source`；
 - 不能仅凭该记录断言是 Codex、Claude Code、Copilot、`npx skills` 或 `gh skill` 中的哪一个执行了安装。
 
 ## 2. Codex
@@ -100,14 +81,13 @@ Codex runtime 的 `SkillMetadata` 保存名称、说明、本地 `SKILL.md` 路�
 
 Codex 插件由 Codex 自己安装和管理。官方插件文档说明插件可以包含多个 Skill，并由插件浏览器安装、启用和卸载，见 [Plugins](https://learn.chatgpt.com/docs/plugins)。
 
-本机只读核验：
+可用的只读检查入口：
 
 ```bash
-codex --version
 codex plugin list --json
 ```
 
-本机版本为 `codex-cli 0.145.0`。`codex plugin list --json` 的真实输出包含：
+该命令返回的插件记录可包含：
 
 - `pluginId`、`name`、`marketplaceName`、`version`；
 - `source`；
@@ -141,15 +121,13 @@ Claude Code plugin manager 保存 marketplace、plugin source、版本和缓存�
 
 证据见 [Plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces#plugin-sources) 和 [Plugins reference](https://code.claude.com/docs/en/plugins-reference#plugin-list)。
 
-本机只读核验：
+可用的只读检查入口：
 
 ```bash
-claude --version
 claude plugin list --json
-jq '{version, plugin_count: (.plugins | length)}' ~/.claude/plugins/installed_plugins.json
 ```
 
-本机版本为 `2.1.207`；当前 `claude plugin list --json` 返回空数组，`installed_plugins.json` 的 `plugins` 当前也为空。这证明了本机可用的检查入口，但不能用空状态推断其他机器没有插件。
+SkillYard 应按能力检测读取该命令返回的插件记录；空列表只表示当前环境没有可见插件，不能外推其他用户环境。
 
 结论：Claude Code 的 plugin metadata 可以为 plugin Skill 提供只读归属；它不能为 `~/.claude/skills` 或项目 `.claude/skills` 中的普通 Skill 提供通用来源。
 
@@ -180,30 +158,15 @@ GitHub 官方文档列出 Copilot 支持的 Skill 位置：
 
 Copilot CLI plugin 是 Host 自己管理的 Bundle。官方 plugin reference 定义了 marketplace、GitHub repository、Git URL 和本地路径等安装来源，并把安装内容放在 `~/.copilot/installed-plugins`，见 [GitHub Copilot CLI plugin reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugin-reference)。
 
-本机只读核验：
+可用的只读检查入口：
 
 ```bash
-copilot --version
 copilot plugin list
 ```
 
-本机安装的是 Homebrew Cask `copilot-cli 1.0.31`，`copilot plugin list` 显示已安装 `figma 2.1.3`。对 `~/.copilot/config.json` 只提取非敏感的 `installedPlugins` 字段后，记录包含：
+Copilot CLI 的插件记录可以恢复 plugin source。但 `config.json` 还保存认证状态，SkillYard 不应读取或展示整个文件；如需支持，必须只解析 `installedPlugins` 的允许字段，或优先使用 Host 提供的只读清单命令。
 
-```json
-{
-  "name": "figma",
-  "source": {
-    "source": "github",
-    "repo": "figma/mcp-server-guide"
-  },
-  "version": "2.1.3",
-  "enabled": true
-}
-```
-
-这证明 Copilot CLI 的插件记录可以恢复 plugin source。但 `config.json` 还保存认证状态，SkillYard 不应读取或展示整个文件；如需支持，必须只解析 `installedPlugins` 的允许字段，或优先使用 Host 提供的只读清单命令。
-
-这仍只覆盖 plugin Skill。当前本机 `config.json` 没有独立 Skill 来源条目，官方文档也没有承诺该文件是 standalone Skill provenance registry。
+这仍只覆盖 plugin Skill。官方文档没有承诺 `config.json` 是 standalone Skill provenance registry。
 
 这份状态只代表 Copilot CLI，也不能被外推成 VS Code、JetBrains、GitHub Copilot App 或 cloud agent 的统一本地插件状态。
 
@@ -223,12 +186,12 @@ GitHub 文档会推荐使用 `gh skill` 为 Copilot 安装 Skill，但执行者�
 4. `pluginName` 只保留为可核验的安装器附加信息，不改变 Bundle 边界或名称。
 5. 用户确认接管后，能够规范化为 GitHub 仓库的 lock 来源应自动创建或复用 Source，并关联本地 Bundle；这项写入与接管领域状态使用同一次 SQLite 提交。
 
-以本机 `mattpocock/skills` 为例：
+例如一组来自同一 GitHub 仓库的 v3 fixture 可以解释为：
 
 ```text
-Bundle identity  = https://github.com/mattpocock/skills.git
-Bundle name      = mattpocock/skills
-Skill members    = ask-matt、code-review、grilling、……
+Bundle identity  = https://github.com/owner/repository.git
+Bundle name      = owner/repository
+Skill members    = demo、review、testing
 ```
 
 ### 5.2 来源恢复优先级
@@ -260,5 +223,5 @@ Skill members    = ask-matt、code-review、grilling、……
 - 固定源码快照：
   - `vercel-labs/skills`：[`e173b8c88f2581cfdaa1b6767c6519a08155790e`](https://github.com/vercel-labs/skills/tree/e173b8c88f2581cfdaa1b6767c6519a08155790e)
   - `openai/codex`：[`18f50c9e628af083a52d9240de09fc2db24d79ce`](https://github.com/openai/codex/tree/18f50c9e628af083a52d9240de09fc2db24d79ce)
-  - `cli/cli`：本机正式发布版 [`v2.92.0`](https://github.com/cli/cli/tree/v2.92.0)，并复核当前 HEAD [`592255318aa6a68944a534765bacbf4c52de5741`](https://github.com/cli/cli/tree/592255318aa6a68944a534765bacbf4c52de5741)
-- 本机输出只证明核验日这台开发机的状态，不代表所有用户环境。产品实现应依能力检测和字段验证，不依赖本机当前恰好安装的插件数量。
+  - `cli/cli`：固定发布版 [`v2.92.0`](https://github.com/cli/cli/tree/v2.92.0)，并复核固定源码快照 [`592255318aa6a68944a534765bacbf4c52de5741`](https://github.com/cli/cli/tree/592255318aa6a68944a534765bacbf4c52de5741)
+- 产品实现应依能力检测和字段验证，不能依赖某一台机器当前安装的插件数量。

@@ -6,7 +6,7 @@
 
 ## 目标
 
-在产品所有者的一台 Apple Silicon Mac 上，完成一个可以日常使用的 `SkillYard.app`。应用使用 Tauri 2、TypeScript 和 Rust，统一管理用户明确交付的 Skill，并完整支持扫描、安装、Mount、Takeover、Source、Bundle 更新、删除和中断恢复。
+为 macOS 14 及以上的 Apple Silicon Mac 完成一个可以日常使用的 `SkillYard.app`。应用使用 Tauri 2、TypeScript 和 Rust，统一管理用户明确交付的 Skill，并完整支持扫描、安装、Mount、Takeover、Source、Bundle 更新、删除和中断恢复。
 
 本计划描述实施顺序，不把中间阶段当作可以降低 1.0 要求的 MVP。每个阶段都必须产生可运行、可验证的纵向结果；不能先分别建设完整前端、数据库或文件系统层，再到最后才贯通用户流程。
 
@@ -19,15 +19,15 @@
 - 每个阶段同时完成必要的 UI、Rust Core、SQLite migration、真实文件系统测试和最薄的 Tauri 验证。
 - 每个会修改受管内容或受控路径的操作，必须在同一阶段完成 Plan、确认、Filesystem Transaction Journal、幂等恢复和失败测试，不能把正确性推迟到最终阶段。
 - 主要业务测试使用真实临时目录、真实文件型 SQLite、正式 migrations、真实文件和软链接。只有最外层网络传输可以替换。
-- 旧 Python 原型已经从当前工作区删除。1.0 只根据 PRD 和本计划重建仍然有效的测试场景与不变量，不兼容旧 API、旧数据库或旧领域模型。
-- 不为公开分发、Developer ID、notarization、应用更新、备份恢复、日志页面或 CLI 预留实现。
+- 1.0 只根据 PRD 和本计划实现有效的测试场景与不变量，不兼容未发布的旧 API、旧数据库或旧领域模型。
+- 不为 Developer ID、notarization、Homebrew、应用更新、备份恢复、日志页面或 CLI 预留实现。
 
 ## 自动化验收约定
 
 计划中的“用户点击”“用户选择”“用户确认”和“手动导入”描述产品授权边界，不代表验收必须由真人操作。除非明确标记，所有阶段验收项默认属于 `[AUTO]`，由 AI 或本地自动化命令执行。
 
 - `[AUTO]`：在隔离临时根目录中，通过 TypeScript component event 或类型化 `UiIntent` 驱动正式 `SkillYardApplication`，并断言 `UiOutcome`、真实 SQLite、文件、`current`、Mount 和网络请求结果。
-- `[MAC-CONTRACT]`：仍由 AI 自动执行，但必须在产品所有者当前 Mac 上使用真实构建、当前文件系统或已安装 Agent 应用完成；它与普通隔离测试分开运行。
+- `[MAC-CONTRACT]`：使用真实构建、目标文件系统或受支持 Agent 应用完成；发布候选还必须在干净的 Apple Silicon macOS VM 中验证，它与普通隔离测试分开运行。
 - `[HUMAN]`：只用于文案是否容易理解、关键页面是否符合真实使用习惯，以及最终日常使用体验等主观判断，不能代替业务正确性测试。
 - 普通 `[AUTO]` 测试必须使用注入的临时 Central Store、Supported App 和 Project 根目录；一旦试图访问真实 `~/Library/Application Support/SkillYard/` 或真实 Agent Skill 目录，应立即失败。
 - Source 测试只替换最外层 `SourceTransport`，使用真实协议格式 fixture；live 网络 smoke 属于单独的 `[MAC-CONTRACT]`，不能成为普通回归测试的稳定性前提。
@@ -167,7 +167,7 @@
 ### 阶段验收
 
 - 三个 Supported App 的 global 和 project 路径均有文件系统 contract test。
-- `[MAC-CONTRACT]` 当前个人电脑上的 Codex 版本必须实际验证 `.codex/skills` global 与 project 路径；验证失败时不能继续宣称支持该路径。
+- `[MAC-CONTRACT]` 受支持的当前 Codex 版本必须实际验证 `.codex/skills` global 与 project 路径；验证失败时不能继续宣称支持该路径。
 - Mount 始终是软链接，不自动改名、覆盖未知内容或回退为复制。
 - Batch Mount 在确认集合内全成或全退。
 - 移除 Mount 后 Bundle 内容和其他 Mount 保持不变。
@@ -179,11 +179,9 @@
 
 把扫描发现的待接管 Skill 或确定性安装组安全迁入 Central Store，同时保持用户已有使用关系。
 
-### 重做实施边界
+### 实施边界
 
-Stage 4 在提交 `9abc7d0` 后从 Stage 3 已验收基线重新实现。此前同一阶段内先建立单路径 Takeover、再并行增加 `v2` 多路径协议，造成两套 Plan、Transaction、Journal 和恢复入口；该实现已经完整撤销，不能作为新实现的兼容前提或代码基础。
-
-新实现必须遵守以下边界：
+实现必须遵守以下边界：
 
 - 只有一套不带版本后缀的 `TakeoverPlan`、`TakeoverTransaction`、Filesystem Transaction Journal 和生产确认入口。
 - 一个 Plan 表达一个最终 Bundle。Bundle 可以包含一个或多个 Skill Member；每个 Member 分别保存一个 Skill Identity、一个被用户选中的内容副本、多个原始位置和多个最终 Mount。单成员、多成员、重复副本、scope 冲突与共享目录都是同一模型的不同输入，不建立特殊的第二套事务。
@@ -191,7 +189,7 @@ Stage 4 在提交 `9abc7d0` 后从 Stage 3 已验收基线重新实现。此前�
 - Plan 和扫描完全只读。确认后才建立一个接管事务；SQLite 记录总体阶段，Journal 记录完整文件操作合同和逐路径进度。
 - 领域状态提交前发生正常失败或中断时，恢复原始位置并移除本次候选与新增 Mount；领域状态提交后只向前完成验证和清理。未知占用、路径身份变化或权限异常进入 blocked recovery，不能猜测。
 - 共享目录的应用专属 Mount 全部建立并验证后，才能最后移除共享入口；失败时撤销本次新增 Mount 并恢复共享入口。
-- 不保留旧 Takeover 生产入口，不迁移已撤销的开发期 Stage 4 schema，也不建立 Stage 5 Source 模型。
+- Takeover 只保留一套生产入口，不建立并行 schema，也不提前建立 Stage 5 Source 模型。
 
 公开验收 seam 固定为：
 
@@ -637,7 +635,7 @@ Bundle Cascading Delete
 
 ### 目标
 
-证明前九个阶段共同构成一个可在当前个人 Mac 上长期使用的 SkillYard 1.0，而不是一组分别通过的功能演示。
+证明前九个阶段共同构成一个可在受支持平台长期使用的 SkillYard 1.0，而不是一组分别通过的功能演示。
 
 ### 范围
 
@@ -647,10 +645,9 @@ Bundle Cascading Delete
 - 完成 Local Refresh、Mount 健康检查、冲突和 Drift 的跨流程验证。
 - 验证 `SKILLYARD-INFO.md` 随 Source 与 Mount 关系变更保持同步。
 - 验证 App Reset 只清除偏好、窗口状态和缓存，不删除生命周期数据。
-- 在当前个人电脑上验证 Codex、Claude Code 和 GitHub Copilot 的实际路径与交叉可见性。
-- 构建并启动仅面向 `arm64`、macOS 14 及以上的本地 `SkillYard.app`。
-- 验证重新本地构建并手动替换 `.app` 后，原 Central Store、SQLite、Journal、`current` 和 Mount 仍被识别。
-- 验证当前工作区没有重新引入旧 Python CLI、Local Server、HTML、旧 SQLite schema 或旧测试。
+- 验证 Codex、Claude Code 和 GitHub Copilot 的实际路径与交叉可见性。
+- 构建面向 `arm64`、macOS 14 及以上的发布候选，并在干净的 Apple Silicon macOS VM 中安装和启动。
+- 验证使用同一发布渠道的新版 `.app` 手动替换后，原 Central Store、SQLite、Journal、`current` 和 Mount 仍被识别。
 - 按 PRD 的全部 167 条 User Story 建立实现或验收映射，并完成最终回归。
 - `[HUMAN]` 审阅关键危险确认、人工恢复页面和跨应用可见性提示是否容易理解。
 - `[HUMAN]` 使用一份真实 Bundle 完成最终日常流程体验，不以这一步替代任何自动化正确性断言。
@@ -710,9 +707,8 @@ Installation Chain
 - 主要业务测试全部通过正式 `SkillYardApplication` seam，且使用真实 SQLite 与文件系统。
 - Tauri UI、typed IPC 和 Rust Core 自动化验收全部通过。
 - `[MAC-CONTRACT]` 本机 `.app` smoke、Supported App 路径、目标文件系统和应用替换 contract 全部通过。
-- `[HUMAN]` 关键文案与最终日常使用体验已经由产品所有者确认。
-- 当前工作区不再包含会让维护者误以为 Python 原型仍是产品组成的运行代码或测试。
-- 没有把公开分发、应用更新、备份恢复、日志页面、版本历史、回滚或 CLI 偷带入 1.0。
+- `[HUMAN]` 关键文案与最终日常使用体验已经由发布验收确认。
+- 没有把应用自动更新、notarization、Homebrew、备份恢复、日志页面、版本历史、回滚或 CLI 加入 1.0。
 
 ## 必须尽早验证的技术契约
 
@@ -720,22 +716,13 @@ Installation Chain
 
 | 最晚阶段 | 技术契约 |
 | --- | --- |
-| 阶段 1 | `[MAC-CONTRACT]` 最小 Tauri `.app` 在当前 Mac 以 `arm64` 启动，加载内嵌资源且无 localhost/Python sidecar |
+| 阶段 1 | `[MAC-CONTRACT]` 最小 Tauri `.app` 在受支持平台以 `arm64` 启动，加载内嵌资源且无 localhost/Python sidecar |
 | 阶段 1 | `SkillYardApplication` 与 Tauri typed command 的输入、输出和错误映射一致 |
 | 阶段 1 | `[AUTO]` 三个 Supported App 的固定路径、共享只读目录和当前安装检测证据形成封闭配置 |
 | 阶段 2 | `[AUTO]` Bundle `current` 在临时文件系统上可以原子替换，并发读取只看到完整旧树或新树；目标 APFS 另做 `[MAC-CONTRACT]` |
 | 阶段 2 | SQLite、Journal、文件系统生效点和幂等启动恢复形成可重复的 failpoint 矩阵 |
 | 阶段 2 | 应用级单写门和恢复优先启动顺序能够阻止竞争事务 |
-| 阶段 10 | `[MAC-CONTRACT]` 自动替换两个本地 `.app` 构建后，持久用户内容保持不变 |
-
-## 旧 Python 原型清理边界
-
-旧 Python 实现已经在 1.0 开始实施前从当前工作区删除：
-
-- Git 历史负责保留原型，不在工作区维持两套产品实现。
-- 可以重建的只有 PRD 已记录的真实临时 SQLite／文件系统测试方式，以及 Plan 零写入、冲突前置拒绝、软链接 Drift、多应用使用关系等仍然有效的场景。
-- AI Assist、Captured Install、外部命令执行、copy fallback、自动改名、Cursor、旧更新模型和日志行为不迁移。
-- 实施过程中不能恢复旧代码作为 runtime、测试 oracle 或临时 sidecar；新的验收直接针对 Rust `SkillYardApplication` seam 编写。
+| 阶段 10 | `[MAC-CONTRACT]` 手动替换两个 `.app` 构建后，持久用户内容保持不变 |
 
 ## Issue 拆分规则
 
@@ -745,8 +732,7 @@ Installation Chain
 - 每个 Issue 明确对应阶段、用户行为、允许范围、非目标、依赖和可执行验证命令。
 - 高保证写操作的 Plan、Journal、恢复和失败测试必须与该操作位于同一 Issue 或同一不可分割的依赖链中。
 - 一个阶段可以拆为多个连续 Issue，但阶段验收没有通过前不能宣称该阶段完成。
-- 不得为了复用旧测试而恢复 Python 运行面；所需验收证据以 PRD 和本计划记录为准。
-- 实施 Issue 只来自本计划和 PRD，不从已删除 ADR 或旧 Python 行为反推新需求。
+- 所需验收证据以 PRD 和本计划记录为准，不从未发布实现反推新需求。
 
 ## 尚未锁定的实现选择
 
@@ -756,6 +742,6 @@ Installation Chain
 - Rust SQLite library 与 migration 执行方式；
 - TypeScript／Rust 类型共享或 contract generation 方式；
 - SQLite 表、Journal 文件和内部错误类型的具体结构；
-- Tauri 2 依赖的精确版本与本机构建命令。
+- Tauri 2 依赖的精确版本与可重复构建命令。
 
 这些选择应优先采用最小、直接、可测试的方案，不为未进入 1.0 的平台、分发方式或扩展能力建立抽象。
