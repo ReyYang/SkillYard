@@ -1043,15 +1043,29 @@ code {
 
 .inventory-content {
   display: grid;
-  gap: 2rem;
+  /* Bundle 卡需要容纳一组生命周期操作；空间不足时直接改为单列。 */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
+  gap: 1rem;
   margin-top: 2.3rem;
+}
+
+.inventory-section {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+  min-width: 0;
+  padding: 1.2rem;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 18px;
+  background: rgb(255 255 251 / 82%);
+  box-shadow: 0 16px 42px rgb(34 57 41 / 7%);
 }
 
 .inventory-section > header {
   display: flex;
-  align-items: end;
+  gap: 1rem;
+  align-items: flex-start;
   justify-content: space-between;
-  padding: 0 0.15rem;
 }
 
 .inventory-section h2,
@@ -1063,20 +1077,54 @@ code {
 
 .inventory-section-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.6rem;
   align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 .inventory-section-actions > span {
   display: grid;
   min-width: 30px;
-  height: 30px;
+  min-height: 30px;
+  padding: 0 0.55rem;
   place-items: center;
-  border-radius: 50%;
+  border-radius: 999px;
   color: #536357;
   background: #dde5d8;
   font-size: 0.78rem;
   font-weight: 760;
+}
+
+.inventory-section-actions > .stale-badge {
+  color: #785229;
+  background: #f1dbc6;
+}
+
+.bundle-open-action {
+  width: 100%;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid rgb(50 70 56 / 12%);
+  border-radius: 11px;
+  color: #2e5039;
+  background: #f1f5eb;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.bundle-open-action:hover {
+  background: #e8f0df;
+}
+
+.bundle-context {
+  overflow: hidden;
+  color: #778078;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .section-eyebrow {
@@ -1086,11 +1134,6 @@ code {
   font-weight: 760;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-}
-
-.inventory-section .inventory-list {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-top: 1rem;
 }
 
 .skill-card {
@@ -1901,6 +1944,132 @@ code {
   backdrop-filter: blur(16px);
 }
 
+/* Bundle 和 Skill 采用两级浏览，维护入口只在设置页展示。 */
+.inventory-subpage {
+  max-width: 920px;
+}
+
+.detail-header {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.detail-header h1 {
+  font-size: clamp(2.7rem, 6vw, 4.5rem);
+}
+
+.settings-card,
+.skill-detail-card {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-top: 1.2rem;
+  padding: 1.25rem;
+  border: 1px solid rgb(50 70 56 / 10%);
+  border-radius: 18px;
+  background: rgb(255 255 251 / 82%);
+  box-shadow: 0 16px 42px rgb(34 57 41 / 7%);
+}
+
+.settings-card h2,
+.skill-detail-card h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.settings-card p:not(.section-eyebrow) {
+  max-width: 620px;
+  margin: 0.45rem 0 0;
+  color: #687269;
+  line-height: 1.55;
+}
+
+.skill-member-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 2rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skill-member-row {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.1rem;
+  border: 1px solid rgb(50 70 56 / 9%);
+  border-radius: 14px;
+  background: rgb(255 255 251 / 82%);
+}
+
+.skill-member-row > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+  min-width: 0;
+}
+
+.skill-member-row strong {
+  font-size: 1rem;
+}
+
+.skill-member-row small {
+  color: #778078;
+}
+
+.skill-detail-card {
+  display: block;
+}
+
+.skill-detail-card dl {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.skill-detail-card h2 + dl {
+  margin-top: 0.9rem;
+}
+
+.skill-detail-card dl > div {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 1rem;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid rgb(50 70 56 / 8%);
+}
+
+.skill-detail-card dl > div:last-child {
+  border-bottom: 0;
+}
+
+.skill-detail-card dt {
+  color: #778078;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.skill-detail-card dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.skill-detail-card code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-detail-card .mount-badges {
+  margin: 0.85rem 0;
+}
+
 .current-operation > div {
   display: grid;
   gap: 0.25rem;
@@ -1932,6 +2101,7 @@ code {
   }
 
   .inventory-header,
+  .detail-header,
   .inventory-controls,
   .source-header,
   .association-header,
@@ -1950,8 +2120,19 @@ code {
     flex-direction: column;
   }
 
-  .inventory-section .inventory-list {
+  .inventory-content {
     grid-template-columns: 1fr;
+  }
+
+  .settings-card,
+  .skill-member-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .skill-detail-card dl > div {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
   }
 
   .association-mapping-list label {

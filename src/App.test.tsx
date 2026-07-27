@@ -76,7 +76,7 @@ describe("首次使用", () => {
     });
 
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(screen.getByText("example")).toBeInTheDocument();
   });
@@ -110,7 +110,7 @@ describe("本机清单", () => {
     render(<App client={client} />);
 
     expect(
-      await screen.findByRole("heading", { name: "Skill 清单" }),
+      await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(screen.getByText("saved")).toBeInTheDocument();
     expect(client.startInitialScan).not.toHaveBeenCalled();
@@ -138,6 +138,7 @@ describe("本机清单", () => {
     );
     expect(screen.queryByText("saved-after-reset")).toBeNull();
 
+    await user.click(screen.getByRole("button", { name: "设置" }));
     await user.click(screen.getByRole("button", { name: "重置应用" }));
 
     expect(await screen.findByText("saved-after-reset")).toBeInTheDocument();
@@ -151,13 +152,14 @@ describe("本机清单", () => {
     expect(client.confirmMountPlan).not.toHaveBeenCalled();
   });
 
-  it("主清单可以通过固定后端入口打开 Central Store", async () => {
+  it("设置可以通过固定后端入口打开 Central Store", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     render(<App client={client} />);
 
+    await user.click(await screen.findByRole("button", { name: "设置" }));
     await user.click(
-      await screen.findByRole("button", { name: "打开 Central Store" }),
+      screen.getByRole("button", { name: "打开 Central Store" }),
     );
 
     expect(client.openCentralStore).toHaveBeenCalledTimes(1);
@@ -532,9 +534,12 @@ describe("本机清单", () => {
       "candidate-tdd",
     ]);
     expect(
-      await screen.findByRole("heading", { name: "Skill 清单" }),
+      await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("superpowers: tdd")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "查看 Bundle superpowers" }),
+    );
+    expect(screen.getByText("tdd")).toBeInTheDocument();
   });
 
   it("更新确认失败后可以用新 Plan 重试，不继承旧错误", async () => {
@@ -632,7 +637,7 @@ describe("本机清单", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Skill 清单" }),
+      await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("更新未完成");
     expect(screen.getByRole("alert")).toHaveTextContent(
@@ -690,7 +695,7 @@ describe("本机清单", () => {
 
     expect(client.discardInstallPlan).toHaveBeenCalledWith("update-plan-1");
     expect(
-      await screen.findByRole("heading", { name: "Skill 清单" }),
+      await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(client.confirmInstallPlan).not.toHaveBeenCalled();
   });
@@ -734,7 +739,7 @@ describe("本机清单", () => {
       "bundle-archive",
     );
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "导入新内容 archive-bundle" }),
@@ -861,7 +866,7 @@ describe("本机清单", () => {
     );
 
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("无法读取所选替换内容");
     expect(
@@ -1145,7 +1150,7 @@ describe("本机清单", () => {
     );
 
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("暂时无法保存检查结果");
     expect(
@@ -1239,7 +1244,7 @@ describe("本机清单", () => {
     );
     render(<App client={ineligibleClient} />);
 
-    await screen.findByRole("heading", { name: "Skill 清单" });
+    await screen.findByRole("heading", { name: "Bundle 清单" });
     expect(
       screen.queryByRole("button", { name: "全部更新" }),
     ).not.toBeInTheDocument();
@@ -1491,7 +1496,7 @@ describe("本机清单", () => {
       finishDiscard?.(inventoryWithTwoAvailableUpdates());
     });
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
   });
 
@@ -1527,7 +1532,7 @@ describe("本机清单", () => {
       finishAcknowledge?.(inventoryWithTwoAvailableUpdates());
     });
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
   });
 
@@ -1719,15 +1724,16 @@ describe("本机清单", () => {
     );
 
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("example-bundle: saved")).toBeInTheDocument();
+    expect(screen.getByText("example-bundle")).toBeInTheDocument();
     expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    await openManagedSkillDetails(user, "example-bundle", "saved");
     const mountDetails = screen.getByRole("button", { name: "管理挂载" });
     expect(mountDetails).toBeEnabled();
     await user.click(mountDetails);
@@ -1742,14 +1748,14 @@ describe("本机清单", () => {
     expect(screen.getByRole("button", { name: "返回清单" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "返回清单" }));
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
 
     await user.type(
       screen.getByRole("searchbox", { name: "搜索 Skill" }),
       "saved",
     );
-    expect(screen.getByText("example-bundle: saved")).toBeInTheDocument();
+    expect(screen.getByText("example-bundle")).toBeInTheDocument();
     await user.click(
       screen.getByRole("button", { name: "返回当前操作" }),
     );
@@ -1768,8 +1774,9 @@ describe("本机清单", () => {
       );
     });
     expect(screen.getByRole("region", { name: "example" })).toHaveTextContent(
-      "example: example",
+      "1 个 Skill",
     );
+    expect(screen.queryByText("example: example")).not.toBeInTheDocument();
   });
 
   it("确认失败后丢弃已消费 Plan 并重新读取最终状态", async () => {
@@ -1836,7 +1843,8 @@ describe("本机清单", () => {
     expect(client.createMountPlan).not.toHaveBeenCalled();
   });
 
-  it("受管 Skill 卡直接显示三个应用的真实 Mount", async () => {
+  it("Skill 详情显示三个应用的真实 Mount", async () => {
+    const user = userEvent.setup();
     const client = createClient(
       inventoryOutcome(
         [createManagedEntry()],
@@ -1864,11 +1872,17 @@ describe("本机清单", () => {
 
     render(<App client={client} />);
 
-    const bundle = await screen.findByRole("region", { name: "example-bundle" });
-    expect(bundle).toHaveTextContent("Codex · 全局");
-    expect(bundle).toHaveTextContent("Claude Code · SkillYard");
-    expect(bundle).toHaveTextContent("GitHub Copilot · 全局");
-    expect(within(bundle).getByRole("button", { name: "管理挂载" })).toBeEnabled();
+    await openManagedSkillDetails(user);
+    expect(screen.getByRole("region", { name: "当前挂载" })).toHaveTextContent(
+      "Codex · 全局",
+    );
+    expect(screen.getByRole("region", { name: "当前挂载" })).toHaveTextContent(
+      "Claude Code · SkillYard",
+    );
+    expect(screen.getByRole("region", { name: "当前挂载" })).toHaveTextContent(
+      "GitHub Copilot · 全局",
+    );
+    expect(screen.getByRole("button", { name: "管理挂载" })).toBeEnabled();
   });
 
   it("挂载管理按三个固定应用分区，未检测到也允许用户选择", async () => {
@@ -1898,7 +1912,8 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
 
     expect(screen.getByRole("region", { name: "Codex 挂载" })).toHaveTextContent(
       "已检测到",
@@ -1951,7 +1966,8 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     await user.click(
       screen.getByRole("button", {
         name: "挂载到 Claude Code 项目 SkillYard",
@@ -1988,7 +2004,8 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     expect(screen.getByRole("button", { name: "返回添加项目" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
 
@@ -2014,8 +2031,10 @@ describe("本机清单", () => {
       finishMount?.(mounted);
     });
 
-    const bundle = screen.getByRole("region", { name: "example-bundle" });
-    expect(bundle).toHaveTextContent("Codex · 全局");
+    await openManagedSkillDetails(user);
+    expect(screen.getByRole("region", { name: "当前挂载" })).toHaveTextContent(
+      "Codex · 全局",
+    );
   });
 
   it("project Mount Plan 只接受已登记 Project 的稳定 ID", async () => {
@@ -2045,7 +2064,8 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     await user.click(
       screen.getByRole("button", { name: "挂载到 Codex 项目 SkillYard" }),
     );
@@ -2069,7 +2089,8 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
 
     expect(screen.getByLabelText("挂载影响预览")).toHaveTextContent(
@@ -2089,7 +2110,8 @@ describe("本机清单", () => {
     });
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -2097,7 +2119,7 @@ describe("本机清单", () => {
     );
     expect(client.getStartupState).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("button", { name: "返回添加项目" }));
-    expect(screen.getByText("example-bundle: example")).toBeInTheDocument();
+    expect(screen.getByText("example-bundle")).toBeInTheDocument();
   });
 
   it("移除 Mount 前显示确认页，确认后只提交 Plan ID", async () => {
@@ -2116,7 +2138,8 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     await user.click(
       screen.getByRole("button", { name: "移除 Codex 全局挂载" }),
     );
@@ -2162,7 +2185,8 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     expect(
       screen.queryByRole("button", {
         name: "修复 Claude Code 全局挂载",
@@ -2198,7 +2222,8 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     await user.click(
       screen.getByRole("button", { name: "修复 Codex 全局挂载" }),
     );
@@ -2228,7 +2253,8 @@ describe("本机清单", () => {
       .mockResolvedValueOnce(recovered);
     render(<App client={client} />);
 
-    await user.click(await screen.findByRole("button", { name: "管理挂载" }));
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
     await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
     await user.click(screen.getByRole("button", { name: "确认创建" }));
 
@@ -2237,7 +2263,7 @@ describe("本机清单", () => {
     );
     expect(client.getStartupState).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("button", { name: "确认创建" })).not.toBeInTheDocument();
-    expect(screen.getByText("example-bundle: example")).toBeInTheDocument();
+    expect(screen.getByText("example-bundle")).toBeInTheDocument();
   });
 
   it("只给真实受管 Bundle 提供批量挂载入口", async () => {
@@ -2314,7 +2340,7 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await screen.findByRole("heading", { name: "Skill 清单" });
+    await screen.findByRole("heading", { name: "Bundle 清单" });
     await user.type(
       screen.getByRole("searchbox", { name: "搜索 Skill" }),
       "alpha",
@@ -2531,9 +2557,10 @@ describe("本机清单", () => {
     await act(async () => {
       finishBatchMount?.(mounted);
     });
-    expect(
-      screen.getByRole("region", { name: "example-bundle" }),
-    ).toHaveTextContent("Codex · 全局");
+    await openManagedSkillDetails(user);
+    expect(screen.getByRole("region", { name: "当前挂载" })).toHaveTextContent(
+      "Codex · 全局",
+    );
   });
 
   it("Batch Mount 确认失败后丢弃 Plan 并读取真实状态", async () => {
@@ -2580,7 +2607,75 @@ describe("本机清单", () => {
     expect(screen.getByText("尚未执行本机刷新")).toBeInTheDocument();
   });
 
+  it("主清单只列 Bundle，并可逐层进入 Skill 详情和设置", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          id: "managed-qa",
+          memberId: "member-qa",
+          skillName: "qa",
+          bundleId: "bundle-mattpocock",
+          bundleDisplayName: "mattpocock/skills",
+          sourceDisplayName: null,
+        }),
+        createManagedEntry({
+          id: "managed-tdd",
+          memberId: "member-tdd",
+          skillName: "tdd",
+          bundleId: "bundle-mattpocock",
+          bundleDisplayName: "mattpocock/skills",
+          sourceDisplayName: null,
+        }),
+      ]),
+    );
+
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Bundle 清单" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("mattpocock/skills")).toBeInTheDocument();
+    expect(screen.getByText("2 个 Skill")).toBeInTheDocument();
+    expect(screen.queryByText("qa")).not.toBeInTheDocument();
+    expect(screen.queryByText("tdd")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重置应用" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "打开 Central Store" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "查看 Bundle mattpocock/skills" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "mattpocock/skills" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("qa")).toBeInTheDocument();
+    expect(screen.getByText("tdd")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看 Skill qa" }));
+    expect(screen.getByRole("heading", { name: "qa" })).toBeInTheDocument();
+    expect(screen.getByText("由 SkillYard 管理")).toBeInTheDocument();
+    expect(screen.getByText("/tmp/example")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回 Bundle" }));
+    await user.click(screen.getByRole("button", { name: "返回 Bundle 清单" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    expect(
+      screen.getByRole("heading", { name: "设置" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重置应用" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "打开 Central Store" }),
+    ).toBeInTheDocument();
+  });
+
   it("准确展示四种管理状态，并只把受管 Skill 放入 Bundle 分组", async () => {
+    const user = userEvent.setup();
     const client = createClient(
       inventoryOutcome([
         createEntry({
@@ -2630,24 +2725,34 @@ describe("本机清单", () => {
       name: "mattpocock/skills",
     });
     expect(bundles).toHaveLength(2);
-    expect(bundles.some((bundle) => within(bundle).queryByText("mattpocock/skills: qa")))
-      .toBe(true);
-    expect(bundles.some((bundle) => within(bundle).queryByText("mattpocock/skills: tdd")))
-      .toBe(true);
-    expect(
-      bundles.some((bundle) =>
-        within(bundle).queryByText("mattpocock/skills: research"),
-      ),
-    ).toBe(true);
-    expect(screen.getByRole("region", { name: "待接管" })).toHaveTextContent(
-      "local-copy",
+    expect(bundles[0]).toHaveTextContent("2 个 Skill");
+    expect(bundles[1]).toHaveTextContent("1 个 Skill");
+
+    await user.click(
+      within(bundles[0]!).getByRole("button", {
+        name: "查看 Bundle mattpocock/skills",
+      }),
     );
-    expect(
-      screen.getByRole("region", { name: "Agent 应用管理" }),
-    ).toHaveTextContent("请前往 Codex 管理此 Skill");
-    expect(
-      screen.getByRole("region", { name: "项目仓库管理" }),
-    ).toHaveTextContent("请在 SkillYard 中管理此 Skill");
+    expect(screen.getByText("qa")).toBeInTheDocument();
+    expect(screen.getByText("tdd")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回 Bundle 清单" }));
+
+    const refreshedBundles = screen.getAllByRole("region", {
+      name: "mattpocock/skills",
+    });
+    await user.click(
+      within(refreshedBundles[1]!).getByRole("button", {
+        name: "查看 Bundle mattpocock/skills",
+      }),
+    );
+    expect(screen.getByText("research")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回 Bundle 清单" }));
+
+    expect(screen.getByRole("region", { name: "local-copy" })).toHaveTextContent(
+      "待接管",
+    );
+    expect(screen.getByRole("region", { name: "Codex 管理" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "SkillYard" })).toBeInTheDocument();
   });
 
   it("搜索和管理状态筛选只改变当前显示，不调用任何生命周期命令", async () => {
@@ -2664,15 +2769,15 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await screen.findByRole("heading", { name: "Skill 清单" });
+    await screen.findByRole("heading", { name: "Bundle 清单" });
     await user.type(screen.getByRole("searchbox", { name: "搜索 Skill" }), "agent");
-    expect(screen.getByText("agent-only")).toBeInTheDocument();
+    expect(screen.getByText("Codex 管理")).toBeInTheDocument();
     expect(screen.queryByText("local-copy")).not.toBeInTheDocument();
 
     await user.clear(screen.getByRole("searchbox", { name: "搜索 Skill" }));
     await user.click(screen.getByRole("button", { name: "待接管" }));
     expect(screen.getByText("local-copy")).toBeInTheDocument();
-    expect(screen.queryByText("agent-only")).not.toBeInTheDocument();
+    expect(screen.queryByText("Codex 管理")).not.toBeInTheDocument();
     expect(client.startInitialScan).not.toHaveBeenCalled();
     expect(client.refreshLocalInventory).not.toHaveBeenCalled();
   });
@@ -2700,7 +2805,7 @@ describe("本机清单", () => {
     ).toBeDisabled();
     expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "接管 old-skill" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "接管 Bundle old-skill" })).toBeDisabled();
     expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "正在刷新本机…" }));
     expect(client.refreshLocalInventory).toHaveBeenCalledTimes(1);
@@ -2877,11 +2982,19 @@ describe("接管已有 Skill", () => {
     render(<App client={client} />);
 
     const bundle = await screen.findByRole("region", { name: "工具套件" });
-    expect(within(bundle).getByText("review")).toBeInTheDocument();
-    expect(within(bundle).getByText("release")).toBeInTheDocument();
+    expect(bundle).toHaveTextContent("2 个 Skill");
     expect(
       screen.getAllByRole("button", { name: "接管 Bundle 工具套件" }),
     ).toHaveLength(1);
+
+    await user.click(
+      within(bundle).getByRole("button", {
+        name: "查看 Bundle 工具套件",
+      }),
+    );
+    expect(screen.getByText("review")).toBeInTheDocument();
+    expect(screen.getByText("release")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回 Bundle 清单" }));
 
     await user.click(
       screen.getByRole("button", { name: "接管 Bundle 工具套件" }),
@@ -3431,10 +3544,16 @@ describe("接管已有 Skill", () => {
     );
     render(<App client={client} />);
 
-    const buttons = await screen.findAllByRole("button", {
-      name: "接管 example",
-    });
-    await user.click(buttons[0]);
+    const bundles = await screen.findAllByRole("region", { name: "example" });
+    const codexBundle = bundles.find((bundle) =>
+      within(bundle).queryByText(/\/tmp\/codex\/example/),
+    );
+    expect(codexBundle).toBeDefined();
+    await user.click(
+      within(codexBundle!).getByRole("button", {
+        name: "接管 Bundle example",
+      }),
+    );
 
     expect(
       screen.getByRole("heading", { name: "选择要接管的 example" }),
@@ -3483,7 +3602,7 @@ describe("接管已有 Skill", () => {
     render(<App client={client} />);
 
     const buttons = await screen.findAllByRole("button", {
-      name: "接管 example",
+      name: "接管 Bundle example",
     });
     await user.click(buttons[0]);
     await user.click(
@@ -3551,7 +3670,7 @@ describe("接管已有 Skill", () => {
     render(<App client={client} />);
 
     const buttons = await screen.findAllByRole("button", {
-      name: "接管 example",
+      name: "接管 Bundle example",
     });
     await user.click(buttons[0]);
     await user.click(
@@ -3606,7 +3725,7 @@ describe("接管已有 Skill", () => {
     render(<App client={client} />);
 
     const buttons = await screen.findAllByRole("button", {
-      name: "接管 example",
+      name: "接管 Bundle example",
     });
     await user.click(buttons[0]);
     await user.click(
@@ -3671,7 +3790,7 @@ describe("接管已有 Skill", () => {
     render(<App client={client} />);
 
     await user.click(
-      await screen.findByRole("button", { name: "接管 example" }),
+      await screen.findByRole("button", { name: "接管 Bundle example" }),
     );
     await user.click(screen.getByRole("button", { name: "生成影响预览" }));
 
@@ -3723,7 +3842,7 @@ describe("接管已有 Skill", () => {
     render(<App client={client} />);
 
     await user.click(
-      await screen.findByRole("button", { name: "接管 example" }),
+      await screen.findByRole("button", { name: "接管 Bundle example" }),
     );
     await user.click(screen.getByRole("button", { name: "生成影响预览" }));
     await user.click(screen.getByRole("button", { name: "确认接管" }));
@@ -3736,7 +3855,7 @@ describe("接管已有 Skill", () => {
       screen.queryByRole("button", { name: "确认接管" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "接管 example" }),
+      screen.getByRole("button", { name: "接管 Bundle example" }),
     ).toBeInTheDocument();
   });
 });
@@ -3774,7 +3893,7 @@ describe("GitHub Source 安装", () => {
     });
     render(<App client={client} />);
 
-    await screen.findByRole("heading", { name: "Skill 清单" });
+    await screen.findByRole("heading", { name: "Bundle 清单" });
     await user.click(screen.getByRole("button", { name: "安装 Skill" }));
     await screen.findByRole("heading", { name: "安装 Skill" });
     await user.type(
@@ -3830,7 +3949,7 @@ describe("GitHub Source 安装", () => {
       });
     render(<App client={client} />);
 
-    await screen.findByRole("heading", { name: "Skill 清单" });
+    await screen.findByRole("heading", { name: "Bundle 清单" });
     await user.click(screen.getByRole("button", { name: "安装 Skill" }));
     await user.type(
       screen.getByRole("searchbox", { name: "搜索 skills.sh" }),
@@ -3867,7 +3986,7 @@ describe("GitHub Source 安装", () => {
     render(<App client={client} />);
 
     expect(
-      await screen.findByRole("heading", { name: "Skill 清单" }),
+      await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(client.openSourceDiscovery).not.toHaveBeenCalled();
 
@@ -3910,8 +4029,11 @@ describe("GitHub Source 安装", () => {
     expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "接管 Bundle example" }),
+    ).toBeDisabled();
+    await openManagedSkillDetails(user);
     expect(screen.getByRole("button", { name: "管理挂载" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "接管 example" })).toBeDisabled();
 
     await act(async () => {
       finishOpening?.(sourceDiscoveryOutcome());
@@ -4120,7 +4242,7 @@ describe("GitHub Source 安装", () => {
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回清单" }));
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
   });
 
@@ -4423,7 +4545,7 @@ describe("GitHub Source 安装", () => {
     );
     expect(client.getStartupState).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("button", { name: "确认安装" })).not.toBeInTheDocument();
-    expect(screen.getByText("installed-elsewhere: example")).toBeInTheDocument();
+    expect(screen.getByText("installed-elsewhere")).toBeInTheDocument();
   });
 
   it("补装只提交未安装成员，并明确不覆盖已有内容和 Mount", async () => {
@@ -4774,6 +4896,7 @@ describe("补充来源与 Bundle 归并", () => {
       [],
     );
     expect(client.getStartupState).toHaveBeenCalledTimes(2);
+    await openManagedSkillDetails(user);
     expect(await screen.findByText("anthropics/skills")).toBeInTheDocument();
   });
 
@@ -5066,7 +5189,7 @@ describe("移除与删除", () => {
       finishConfirm?.(inventoryOutcome([]));
     });
     expect(
-      screen.getByRole("heading", { name: "Skill 清单" }),
+      screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
   });
 
@@ -5292,7 +5415,7 @@ describe("移除与删除", () => {
     await user.click(screen.getByRole("button", { name: "确认移除项目" }));
     expect(client.confirmRemovalPlan).toHaveBeenCalledWith("removal-plan-1");
     expect(
-      await screen.findByRole("heading", { name: "Skill 清单" }),
+      await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
   });
 
@@ -5359,6 +5482,21 @@ async function openLocalFolderPicker(
   await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
   await user.click(
     await screen.findByRole("button", { name: "从本地文件夹安装" }),
+  );
+}
+
+async function openManagedSkillDetails(
+  user: ReturnType<typeof userEvent.setup>,
+  bundleDisplayName = "example-bundle",
+  skillName = "example",
+) {
+  await user.click(
+    await screen.findByRole("button", {
+      name: `查看 Bundle ${bundleDisplayName}`,
+    }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: `查看 Skill ${skillName}` }),
   );
 }
 

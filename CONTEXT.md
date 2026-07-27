@@ -47,7 +47,7 @@ A Host-owned UI label that displays a Skill with contextual prefixes such as a p
 _Avoid_: Skill Name, rename, managed alias
 
 **Bundle Display Name**:
-The simple short name fixed when the Bundle is created, usually derived from its Source or installation input, such as a repository slug, package name, or archive or directory basename. It remains available if the Source is later deleted. SkillYard 1.0 does not support customizing it.
+The simple short name fixed when the Bundle is created, usually derived from its Source or installation input, such as a repository slug, package name, or archive or directory basename. During Takeover backed by `.agents/.skill-lock.json`, normalized `sourceUrl` determines the Bundle identity and the lock `source` value becomes the display name; optional `pluginName` does not rename or split the Bundle. It remains available if the Source is later deleted. SkillYard 1.0 does not support customizing it.
 _Avoid_: user-defined label, AI-generated name, Host Presentation Label
 
 **SkillYard Presentation Label**:

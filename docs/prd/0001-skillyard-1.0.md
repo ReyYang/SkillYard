@@ -18,7 +18,7 @@ SkillYard 1.0 因此必须在保持产品简单的同时完成完整主流程：
 
 SkillYard 1.0 是只在产品所有者个人 Apple Silicon Mac 上使用的本地桌面应用，目标系统为 macOS 14 及以上。它使用 Tauri 2、TypeScript 界面和封闭的 Rust Lifecycle Core，在这台 Mac 上本地构建并运行 `SkillYard.app`。1.0 不承担公开分发、第三方安装体验或 Apple 开发者身份验证。
 
-首次启动时，应用先说明扫描范围、只读性质和不会自动接管，再由用户点击“开始扫描”。扫描完成后，主界面以 Skill 为中心展示本机清单；由 SkillYard 管理的 Skill 按 Bundle 分组，其他内容明确区分为“待接管”“Agent 应用管理”和“项目仓库管理”。
+首次启动时，应用先说明扫描范围、只读性质和不会自动接管，再由用户点击“开始扫描”。扫描完成后，主界面第一层以 Bundle 为列表；进入 Bundle 后查看 Skill 成员，再进入单个 Skill 查看来源、路径和 Mount。其他内容明确区分为“待接管”“Agent 应用管理”和“项目仓库管理”的只读分组。
 
 SkillYard 使用以下模型管理生命周期：
 
@@ -55,11 +55,11 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 
 ### 本机清单与主界面
 
-9. 作为用户，我希望看到本机 Skill 的名称、位置、Source、Bundle、Supported App、Project 和当前管理方，从而掌握真实使用状态。
+9. 作为用户，我希望主清单只列出 Bundle 或只读管理分组，从而不会被大量 Skill 卡片淹没。
 10. 作为用户，我希望明确区分“由 SkillYard 管理”“待接管”“Agent 应用管理”和“项目仓库管理”，从而不会误以为所有扫描结果都能被 SkillYard 修改。
-11. 作为用户，我希望受管 Skill 按 Bundle 分组，从而看出哪些 Skill 属于同一个本地安装组和删除范围。
-12. 作为用户，我希望每个 Skill 仍是搜索、查看、挂载和状态展示对象，从而 Bundle 分组不会抹去成员差异。
-13. 作为用户，我希望一个 Skill Identity 只在所属 Bundle 中出现一次，从而多个 Mount 不会制造重复 Skill 卡片。
+11. 作为用户，我希望 Bundle 卡片展示来源名称、成员数量、更新状态和批量操作，从而看清本地安装组和删除范围。
+12. 作为用户，我希望进入 Bundle 后查看成员列表，并进入单个 Skill 查看来源、路径、Metadata、安装收据和 Mount，从而保留成员差异。
+13. 作为用户，我希望一个 Skill Identity 只在所属 Bundle 详情中出现一次，从而多个 Mount 不会制造重复 Skill 条目。
 14. 作为用户，我希望主列表只展示本机已有或已安装 Skill，从而 Source 中尚未安装的远端成员不会混入清单。
 15. 作为用户，我希望按管理状态筛选和搜索，从而快速找到需要接管、更新或处理的内容。
 16. 作为用户，我希望筛选只改变界面显示，从而不会意外改变安装、管理权或挂载关系。
@@ -234,7 +234,7 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 158. 作为用户，我希望 Central Store 中持续存在 `SKILLYARD-INFO.md`，说明这里不是缓存并列出已知 Source 和 Mount，从而手工查看时不容易误删。
 159. 作为用户，我希望删除或移动 `SkillYard.app` 后 Central Store、SQLite、`current` 和 Mount 全部保留，从而 Agent 中已经挂载的 Skill 继续可用。
 160. 作为重新构建或重新放置应用的用户，我希望应用检测既有状态并恢复管理能力，从而无需重新接管全部 Skill。
-161. 作为用户，我希望“重置应用”只清除偏好、窗口状态和缓存，从而不会删除任何受管内容或使用关系。
+161. 作为用户，我希望在设置页打开 Central Store，或使用只清除偏好、窗口状态和缓存的“重置应用”，从而主界面只保留日常管理入口，并且不会删除任何受管内容或使用关系。
 
 ### 个人使用与隐私
 

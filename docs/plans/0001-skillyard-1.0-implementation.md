@@ -92,7 +92,7 @@
 - 首次启动展示扫描范围、只读性质和不会自动接管的说明。
 - 只有用户点击“开始扫描”后才读取已支持目录。
 - 扫描并持久化 Inventory、首次扫描状态和最近结果。
-- 主界面以 Skill 为中心展示结果，并按能够确定的证据区分四种管理状态。
+- 主界面第一层以 Bundle／只读管理分组展示结果；进入分组后看 Skill，进入 Skill 后看详情，并按证据区分四种管理状态。
 - 返回用户启动时读取已保存状态，不自动执行完整 Local Refresh 或访问上游。
 
 ### 不包含
@@ -698,7 +698,7 @@ Installation Chain
 - “当前操作”不保存百分比、阶段或预计时间。应用只使用已有确认调用的开始与结束状态；后端单写门和现有 Journal 仍是唯一并发与恢复依据。
 - 生命周期事务期间允许使用缓存的已提交 Inventory 进行搜索、筛选和查看 Mount／Source 详情；不能发起安装、接管、挂载、更新、删除、Local Refresh、Update Check 或 Source Reload。
 - Finder 入口只调用固定的 `open_central_store` command；Rust 使用 Tauri Opener 打开 `ApplicationPaths::data_root()`，前端不能提供路径，也不获得通用文件系统或 shell 权限。
-- “重置应用”只清除当前前端导航、搜索筛选、临时错误和窗口内选择，并重新读取 Startup State。1.0 当前没有持久化偏好或窗口状态，因此不新增设置存储；SQLite、Journal、Source Catalog、Bundle、`current` 和 Mount 均不能被清理。
+- 设置页收纳“重置应用”和“打开 Central Store”，主界面不常驻展示这两个低频入口。“重置应用”只清除当前前端导航、搜索筛选、临时错误和窗口内选择，并重新读取 Startup State。1.0 当前没有持久化偏好或窗口状态，因此不新增设置存储；SQLite、Journal、Source Catalog、Bundle、`current` 和 Mount 均不能被清理。
 - Installation Chain 只有一套当前模型：扫描观察、Takeover Plan 和受管 Skill Member 使用同一份 lock v3 事实。Source 关联仍由现有 Source 模型负责，不能把 lock 中的来源字符串直接伪装成已经登记且可更新的 Source。
 - lock v3 只是一份可核验的本地收据协议，不是执行者证明。1.0 保存记录位置、Source 类型、Source URL／路径、上游 Skill 路径、ref、内容 marker 与时间；不解析 Lark 专属状态、GitHub frontmatter 或其他 receipt 格式。
 - Stage 10 建立 167 条 User Story 到自动化、`[MAC-CONTRACT]` 或 `[HUMAN]` 证据的映射。已有公开 seam 测试继续作为证据，只为真实缺口补测试，不重复实现前九阶段。

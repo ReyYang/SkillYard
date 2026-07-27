@@ -411,6 +411,53 @@ fn verified_lock_v3_bundle_can_plan_all_installed_members_together() {
 }
 
 #[test]
+fn lock_source_name_is_used_as_the_takeover_bundle_name() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let skill_root = home.join(".agents/skills/research");
+    write_skill(&skill_root, "research", "调研一手资料");
+    write_global_lock_v3_for_source(&home, &["research"], "Matt Pocock Skills");
+
+    let application = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    let entries = match application
+        .handle(UiIntent::StartInitialScan)
+        .expect("首次扫描应成功")
+    {
+        UiOutcome::Inventory { entries, .. } => entries,
+        _ => panic!("首次扫描应返回 Inventory"),
+    };
+    let observed = entries
+        .iter()
+        .find(|entry| entry.skill_name == "research")
+        .expect("应发现 research");
+    assert_eq!(
+        observed.takeover_group_display_name.as_deref(),
+        Some("Matt Pocock Skills"),
+        "待接管 Bundle 必须展示 lock 保存的 source 名称"
+    );
+
+    let plan = match application
+        .handle(UiIntent::CreateTakeoverPlan {
+            request: takeover_plan_request! {
+                observation_ids: vec![observed.id.clone()],
+                selected_observation_id: observed.id.clone(),
+                preserved_observation_ids: Vec::new(),
+                shared_targets: Vec::new(),
+            },
+        })
+        .expect("应生成接管计划")
+    {
+        UiOutcome::TakeoverPlan { plan } => plan,
+        _ => panic!("应返回 Takeover Plan"),
+    };
+    assert_eq!(plan.bundle_display_name, "Matt Pocock Skills");
+}
+
+#[test]
 fn bundle_evidence_is_independent_from_the_selected_member_content() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
@@ -3225,6 +3272,10 @@ fn write_global_lock_v3(home: &Path, skill_name: &str) {
 }
 
 fn write_global_lock_v3_for(home: &Path, skill_names: &[&str]) {
+    write_global_lock_v3_for_source(home, skill_names, "owner/repository");
+}
+
+fn write_global_lock_v3_for_source(home: &Path, skill_names: &[&str], source: &str) {
     let lock_directory = home.join(".agents");
     fs::create_dir_all(&lock_directory).expect("应创建 lock 目录");
     let skills = skill_names
@@ -3233,7 +3284,7 @@ fn write_global_lock_v3_for(home: &Path, skill_names: &[&str]) {
             (
                 (*skill_name).to_owned(),
                 serde_json::json!({
-                    "source": "owner/repository",
+                    "source": source,
                     "sourceType": "github",
                     "sourceUrl": "https://github.com/owner/repository.git",
                     "pinnedRef": "release-2026-07",

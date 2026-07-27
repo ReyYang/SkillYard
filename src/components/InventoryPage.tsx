@@ -4,7 +4,6 @@ import type {
   BundleUpdateAction,
   BundleUpdateSummary,
   BundleUpdateStatus,
-  InstallationChain,
   InventoryObservation,
   MountSummary,
   SupportedAppId,
@@ -65,6 +64,27 @@ const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
   { id: "other", label: "其他管理方" },
 ];
 
+type InventoryGroupKind =
+  | "managedBundle"
+  | "takeoverBundle"
+  | "agentManaged"
+  | "projectManaged";
+
+interface InventoryGroupView {
+  id: string;
+  title: string;
+  kind: InventoryGroupKind;
+  entries: InventoryObservation[];
+  bundleId: string | null;
+  hasSource: boolean;
+}
+
+type InventoryScreen =
+  | { type: "list" }
+  | { type: "settings" }
+  | { type: "group"; groupId: string }
+  | { type: "skill"; groupId: string; entryId: string };
+
 export function InventoryPage({
   outcome,
   isWriteBlocked,
@@ -110,36 +130,27 @@ export function InventoryPage({
 }: InventoryPageProps) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ManagementFilter>("all");
+  const [screen, setScreen] = useState<InventoryScreen>({ type: "list" });
 
-  // 搜索与筛选只操作已经加载的 read model，不能触发 IPC 或写回 SQLite。
-  const visibleEntries = useMemo(() => {
+  const groups = useMemo(
+    () => groupInventoryEntries(outcome.entries),
+    [outcome.entries],
+  );
+  // 搜索命中成员时只显示其所属分组，主清单仍不展开 Skill。
+  const visibleGroups = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
-    return outcome.entries
-      .filter((entry) => matchesFilter(entry, filter))
-      .filter((entry) => matchesQuery(entry, normalizedQuery))
-      .sort((left, right) =>
-        presentationLabel(left).localeCompare(presentationLabel(right), "zh-CN"),
-      );
-  }, [filter, outcome.entries, query]);
-
-  const managedGroups = useMemo(
-    () => groupManagedEntries(visibleEntries),
-    [visibleEntries],
-  );
-  const takeoverEntries = visibleEntries.filter(
-    (entry) => entry.managementKind === "takeoverCandidate",
-  );
-  const takeoverGroups = useMemo(
-    () => groupTakeoverEntries(takeoverEntries),
-    [takeoverEntries],
-  );
-  const agentEntries = visibleEntries.filter(
-    (entry) => entry.managementKind === "agentManaged",
-  );
-  const projectEntries = visibleEntries.filter(
-    (entry) => entry.managementKind === "projectManaged",
-  );
-  const hasVisibleEntries = visibleEntries.length > 0;
+    return groups.filter((group) =>
+      group.entries.some(
+        (entry) =>
+          matchesFilter(entry, filter) &&
+          matchesQuery(entry, normalizedQuery),
+      ),
+    );
+  }, [filter, groups, query]);
+  const bundleCount = groups.filter(
+    (group) =>
+      group.kind === "managedBundle" || group.kind === "takeoverBundle",
+  ).length;
   const updatableBundleCount = useMemo(
     () =>
       new Set(
@@ -149,17 +160,76 @@ export function InventoryPage({
       ).size,
     [outcome.bundleUpdates],
   );
+  const selectedGroup =
+    screen.type === "group" || screen.type === "skill"
+      ? groups.find((group) => group.id === screen.groupId) ?? null
+      : null;
+  const selectedEntry =
+    screen.type === "skill"
+      ? selectedGroup?.entries.find((entry) => entry.id === screen.entryId) ??
+        null
+      : null;
+
+  if (screen.type === "settings") {
+    return (
+      <InventorySettingsPage
+        isWriteBlocked={isWriteBlocked}
+        isOpeningCentralStore={isOpeningCentralStore}
+        isResettingApplication={isResettingApplication}
+        centralStoreError={centralStoreError}
+        resetError={resetError}
+        onOpenCentralStore={onOpenCentralStore}
+        onResetApplication={onResetApplication}
+        onBack={() => setScreen({ type: "list" })}
+      />
+    );
+  }
+
+  if (screen.type === "skill" && selectedGroup && selectedEntry) {
+    return (
+      <SkillDetailsPage
+        group={selectedGroup}
+        entry={selectedEntry}
+        mounts={outcome.mounts.filter(
+          (mount) => mount.memberId === selectedEntry.memberId,
+        )}
+        actionsDisabled={isWriteBlocked}
+        allowReadOnlyDetails={allowReadOnlyDetails}
+        onManageMount={onManageMount}
+        onBack={() =>
+          setScreen({ type: "group", groupId: selectedGroup.id })
+        }
+      />
+    );
+  }
+
+  if (screen.type === "group" && selectedGroup) {
+    return (
+      <InventoryGroupDetails
+        group={selectedGroup}
+        mounts={outcome.mounts}
+        onOpenSkill={(entryId) =>
+          setScreen({
+            type: "skill",
+            groupId: selectedGroup.id,
+            entryId,
+          })
+        }
+        onBack={() => setScreen({ type: "list" })}
+      />
+    );
+  }
 
   return (
     <main className="inventory-shell">
       <header className="inventory-header">
         <div>
           <p className="eyebrow">SKILLYARD · LOCAL INVENTORY</p>
-          <h1>Skill 清单</h1>
+          <h1>Bundle 清单</h1>
           <p className="inventory-summary">
             {outcome.entries.length === 0
-              ? "本机暂未发现 Skill"
-              : `本机已有 ${outcome.entries.length} 个 Skill`}
+              ? "本机暂未发现 Bundle"
+              : `本机已有 ${bundleCount} 个 Bundle · ${outcome.entries.length} 个 Skill`}
           </p>
         </div>
         <div className="inventory-actions">
@@ -211,18 +281,9 @@ export function InventoryPage({
           <button
             className="secondary-action"
             type="button"
-            disabled={isWriteBlocked || isResettingApplication}
-            onClick={onResetApplication}
+            onClick={() => setScreen({ type: "settings" })}
           >
-            {isResettingApplication ? "正在重置…" : "重置应用"}
-          </button>
-          <button
-            className="secondary-action"
-            type="button"
-            disabled={isOpeningCentralStore}
-            onClick={onOpenCentralStore}
-          >
-            {isOpeningCentralStore ? "正在打开…" : "打开 Central Store"}
+            设置
           </button>
         </div>
       </header>
@@ -304,7 +365,7 @@ export function InventoryPage({
           <input
             type="search"
             value={query}
-            placeholder="搜索 Skill"
+            placeholder="搜索 Bundle 或 Skill"
             aria-label="搜索 Skill"
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -379,20 +440,6 @@ export function InventoryPage({
         </div>
       ) : null}
 
-      {resetError ? (
-        <div className="inline-error" role="alert">
-          <strong>重置未完成</strong>
-          <span>{resetError}</span>
-        </div>
-      ) : null}
-
-      {centralStoreError ? (
-        <div className="inline-error" role="alert">
-          <strong>无法打开 Central Store</strong>
-          <span>{centralStoreError}</span>
-        </div>
-      ) : null}
-
       {outcome.scanIssues.length > 0 ? (
         <section className="scan-warning" aria-label="刷新告警">
           <strong>部分目录暂时无法读取</strong>
@@ -419,22 +466,21 @@ export function InventoryPage({
       )}
 
       <div className="inventory-content">
-        {managedGroups.map((group) => (
+        {visibleGroups.map((group) => (
           <InventorySection
             key={group.id}
             title={group.title}
-            eyebrow="由 SkillYard 管理 · BUNDLE"
+            eyebrow={groupEyebrow(group.kind)}
             entries={group.entries}
-            mounts={outcome.mounts}
             actionsDisabled={isWriteBlocked}
-            allowReadOnlyDetails={allowReadOnlyDetails}
-            onManageMount={onManageMount}
             batchMountBundleId={group.bundleId}
             onBatchMount={onBatchMount}
-            canAssociateSource={!group.hasSource}
+            canAssociateSource={
+              group.kind === "managedBundle" && !group.hasSource
+            }
             onAssociateSource={onAssociateSource}
             bundleUpdate={
-              group.bundleId
+              group.kind === "managedBundle" && group.bundleId
                 ? outcome.bundleUpdates.find(
                     (update) => update.bundleId === group.bundleId,
                   ) ?? null
@@ -445,29 +491,23 @@ export function InventoryPage({
             onUpdateBundle={onUpdateBundle}
             onChooseBundleReplacement={onChooseBundleReplacement}
             onCheckEditableLocalBundle={onCheckEditableLocalBundle}
-            removingBundleId={removingBundleId}
+            removingBundleId={
+              group.kind === "managedBundle" ? removingBundleId : null
+            }
             onRemoveBundle={onRemoveBundle}
+            onTakeover={
+              group.kind === "takeoverBundle" ? onTakeover : undefined
+            }
+            onOpen={() => setScreen({ type: "group", groupId: group.id })}
+            openLabel={
+              group.kind === "managedBundle" ||
+              group.kind === "takeoverBundle"
+                ? `查看 Bundle ${group.title}`
+                : `查看分组 ${group.title}`
+            }
           />
         ))}
-        <TakeoverInventorySection
-          groups={takeoverGroups.groups}
-          ungrouped={takeoverGroups.ungrouped}
-          actionsDisabled={isWriteBlocked}
-          onTakeover={onTakeover}
-        />
-        <InventorySection
-          title="Agent 应用管理"
-          eyebrow="交回原管理方"
-          entries={agentEntries}
-          actionsDisabled={isWriteBlocked}
-        />
-        <InventorySection
-          title="项目仓库管理"
-          eyebrow="交回项目仓库"
-          entries={projectEntries}
-          actionsDisabled={isWriteBlocked}
-        />
-        {!hasVisibleEntries ? (
+        {visibleGroups.length === 0 ? (
           <section className="empty-inventory">
             <h2>{outcome.entries.length === 0 ? "未发现 Skill" : "没有匹配结果"}</h2>
             <p>
@@ -486,10 +526,7 @@ function InventorySection({
   title,
   eyebrow,
   entries,
-  mounts = [],
   actionsDisabled = false,
-  allowReadOnlyDetails = false,
-  onManageMount,
   batchMountBundleId,
   onBatchMount,
   canAssociateSource = false,
@@ -503,14 +540,13 @@ function InventorySection({
   removingBundleId = null,
   onRemoveBundle,
   onTakeover,
+  onOpen,
+  openLabel,
 }: {
   title: string;
   eyebrow: string;
   entries: InventoryObservation[];
-  mounts?: MountSummary[];
   actionsDisabled?: boolean;
-  allowReadOnlyDetails?: boolean;
-  onManageMount?(memberId: string): void;
   batchMountBundleId?: string | null;
   onBatchMount?(bundleId: string): void;
   canAssociateSource?: boolean;
@@ -524,6 +560,8 @@ function InventorySection({
   removingBundleId?: string | null;
   onRemoveBundle?(bundleId: string): void;
   onTakeover?(observationId: string): void;
+  onOpen(): void;
+  openLabel: string;
 }) {
   if (entries.length === 0) return null;
   return (
@@ -534,6 +572,9 @@ function InventorySection({
           <h2>{title}</h2>
         </div>
         <div className="inventory-section-actions">
+          {entries.some((entry) => entry.stale) ? (
+            <span className="stale-badge">上次结果</span>
+          ) : null}
           {bundleUpdate ? (
             <BundleUpdateStatusView
               update={bundleUpdate}
@@ -591,109 +632,304 @@ function InventorySection({
                 : "删除 Bundle"}
             </button>
           ) : null}
-          <span>{entries.length}</span>
-        </div>
-      </header>
-      <ul className="inventory-list">
-        {entries.map((entry) => (
-          <SkillCard
-            key={entry.id}
-            entry={entry}
-            mounts={mounts.filter(
-              (mount) => mount.memberId === entry.memberId,
-            )}
-            actionsDisabled={actionsDisabled}
-            allowReadOnlyDetails={allowReadOnlyDetails}
-            onManageMount={onManageMount}
-            onTakeover={onTakeover}
-          />
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function TakeoverInventorySection({
-  groups,
-  ungrouped,
-  actionsDisabled,
-  onTakeover,
-}: {
-  groups: Array<{
-    id: string;
-    title: string;
-    entries: InventoryObservation[];
-  }>;
-  ungrouped: InventoryObservation[];
-  actionsDisabled: boolean;
-  onTakeover?(observationId: string): void;
-}) {
-  const entryCount =
-    ungrouped.length +
-    groups.reduce((count, group) => count + group.entries.length, 0);
-  if (entryCount === 0) return null;
-
-  return (
-    <section className="inventory-section" aria-label="待接管">
-      <header>
-        <div>
-          <p className="section-eyebrow">本机已有 · 只读</p>
-          <h2>待接管</h2>
-        </div>
-        <div className="inventory-section-actions">
-          <span>{entryCount}</span>
-        </div>
-      </header>
-      {groups.map((group) => (
-        <section
-          className="takeover-bundle"
-          aria-label={group.title}
-          key={group.id}
-        >
-          <header>
-            <div>
-              <p className="section-eyebrow">待接管 Bundle</p>
-              <h3>{group.title}</h3>
-            </div>
+          {onTakeover ? (
             <button
               className="compact-action"
               type="button"
               disabled={actionsDisabled}
-              aria-label={`接管 Bundle ${group.title}`}
-              onClick={() => onTakeover?.(group.entries[0]!.id)}
+              aria-label={`接管 Bundle ${title}`}
+              onClick={() => onTakeover(entries[0]!.id)}
             >
               接管 Bundle
             </button>
-          </header>
-          <ul className="inventory-list">
-            {group.entries.map((entry) => (
-              <SkillCard
-                key={entry.id}
-                entry={entry}
-                mounts={[]}
-                actionsDisabled={actionsDisabled}
-                allowReadOnlyDetails={false}
-                showTakeoverAction={false}
-              />
-            ))}
-          </ul>
-        </section>
-      ))}
-      {ungrouped.length > 0 ? (
-        <ul className="inventory-list">
-          {ungrouped.map((entry) => (
-            <SkillCard
-              key={entry.id}
-              entry={entry}
-              mounts={[]}
-              actionsDisabled={actionsDisabled}
-              allowReadOnlyDetails={false}
-              onTakeover={onTakeover}
-            />
-          ))}
-        </ul>
+          ) : null}
+          <span>{entries.length} 个 Skill</span>
+        </div>
+      </header>
+      <button
+        className="bundle-open-action"
+        type="button"
+        aria-label={openLabel}
+        onClick={onOpen}
+      >
+        查看成员
+      </button>
+      {entries.length === 1 && !batchMountBundleId ? (
+        <small className="bundle-context">
+          {entries[0]!.observedBy.map(supportedAppLabel).join("、") ||
+            "本地安装"}
+          {" · "}
+          {entries[0]!.skillRoot}
+        </small>
       ) : null}
     </section>
+  );
+}
+
+function InventorySettingsPage({
+  isWriteBlocked,
+  isOpeningCentralStore,
+  isResettingApplication,
+  centralStoreError,
+  resetError,
+  onOpenCentralStore,
+  onResetApplication,
+  onBack,
+}: {
+  isWriteBlocked: boolean;
+  isOpeningCentralStore: boolean;
+  isResettingApplication: boolean;
+  centralStoreError: string | null;
+  resetError: string | null;
+  onOpenCentralStore(): void;
+  onResetApplication(): void;
+  onBack(): void;
+}) {
+  return (
+    <main className="inventory-shell inventory-subpage">
+      <header className="detail-header">
+        <div>
+          <p className="eyebrow">SKILLYARD · SETTINGS</p>
+          <h1>设置</h1>
+        </div>
+        <button className="secondary-action" type="button" onClick={onBack}>
+          返回 Bundle 清单
+        </button>
+      </header>
+
+      <section className="settings-card">
+        <div>
+          <p className="section-eyebrow">CENTRAL STORE</p>
+          <h2>受管内容目录</h2>
+          <p>这里保存 SkillYard 管理的实际主副本，不是可以随意清理的缓存。</p>
+        </div>
+        <button
+          className="secondary-action"
+          type="button"
+          disabled={isOpeningCentralStore}
+          onClick={onOpenCentralStore}
+        >
+          {isOpeningCentralStore ? "正在打开…" : "打开 Central Store"}
+        </button>
+      </section>
+
+      <section className="settings-card">
+        <div>
+          <p className="section-eyebrow">APPLICATION</p>
+          <h2>重置界面状态</h2>
+          <p>只清除偏好、窗口状态和缓存，不删除 Bundle、Skill 或 Mount。</p>
+        </div>
+        <button
+          className="secondary-action"
+          type="button"
+          disabled={isWriteBlocked || isResettingApplication}
+          onClick={onResetApplication}
+        >
+          {isResettingApplication ? "正在重置…" : "重置应用"}
+        </button>
+      </section>
+
+      {resetError ? (
+        <div className="inline-error" role="alert">
+          <strong>重置未完成</strong>
+          <span>{resetError}</span>
+        </div>
+      ) : null}
+      {centralStoreError ? (
+        <div className="inline-error" role="alert">
+          <strong>无法打开 Central Store</strong>
+          <span>{centralStoreError}</span>
+        </div>
+      ) : null}
+    </main>
+  );
+}
+
+function InventoryGroupDetails({
+  group,
+  mounts,
+  onOpenSkill,
+  onBack,
+}: {
+  group: InventoryGroupView;
+  mounts: MountSummary[];
+  onOpenSkill(entryId: string): void;
+  onBack(): void;
+}) {
+  return (
+    <main className="inventory-shell inventory-subpage">
+      <header className="detail-header">
+        <div>
+          <p className="eyebrow">{groupEyebrow(group.kind)}</p>
+          <h1>{group.title}</h1>
+          <p className="inventory-summary">{group.entries.length} 个 Skill</p>
+        </div>
+        <button className="secondary-action" type="button" onClick={onBack}>
+          返回 Bundle 清单
+        </button>
+      </header>
+
+      <ul className="skill-member-list" aria-label={`${group.title} 的 Skill`}>
+        {group.entries.map((entry) => {
+          const memberMounts = mounts.filter(
+            (mount) => mount.memberId === entry.memberId,
+          );
+          return (
+            <li key={entry.id} className="skill-member-row">
+              <div>
+                <strong>{entry.skillName}</strong>
+                <span className={`management-badge ${entry.managementKind}`}>
+                  {managementLabel(entry.managementKind)}
+                </span>
+                <small>
+                  {memberMounts.length > 0
+                    ? `${memberMounts.length} 个 Mount`
+                    : "未挂载"}
+                </small>
+              </div>
+              <button
+                className="compact-action"
+                type="button"
+                aria-label={`查看 Skill ${entry.skillName}`}
+                onClick={() => onOpenSkill(entry.id)}
+              >
+                查看详情
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </main>
+  );
+}
+
+function SkillDetailsPage({
+  group,
+  entry,
+  mounts,
+  actionsDisabled,
+  allowReadOnlyDetails,
+  onManageMount,
+  onBack,
+}: {
+  group: InventoryGroupView;
+  entry: InventoryObservation;
+  mounts: MountSummary[];
+  actionsDisabled: boolean;
+  allowReadOnlyDetails: boolean;
+  onManageMount(memberId: string): void;
+  onBack(): void;
+}) {
+  const sourceName =
+    entry.sourceDisplayName ??
+    entry.installationChain?.source ??
+    "来源未知";
+  return (
+    <main className="inventory-shell inventory-subpage">
+      <header className="detail-header">
+        <div>
+          <p className="eyebrow">{group.title}</p>
+          <h1>{entry.skillName}</h1>
+          <span className={`management-badge ${entry.managementKind}`}>
+            {managementLabel(entry.managementKind)}
+          </span>
+        </div>
+        <button className="secondary-action" type="button" onClick={onBack}>
+          返回 Bundle
+        </button>
+      </header>
+
+      <section className="skill-detail-card" aria-label="Skill 详情">
+        <dl>
+          <div>
+            <dt>所属分组</dt>
+            <dd>{group.title}</dd>
+          </div>
+          <div>
+            <dt>来源</dt>
+            <dd>{sourceName}</dd>
+          </div>
+          <div>
+            <dt>本地目录</dt>
+            <dd>
+              <code>{entry.skillRoot}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>定义文件</dt>
+            <dd>
+              <code>{entry.skillFile}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>Metadata</dt>
+            <dd>
+              {entry.metadataStatus === "valid" ? "有效" : "需要检查"}
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      {entry.installationChain ? (
+        <section className="skill-detail-card" aria-label="安装来源记录">
+          <p className="section-eyebrow">INSTALLATION RECEIPT</p>
+          <h2>安装来源记录</h2>
+          <dl>
+            <div>
+              <dt>来源名称</dt>
+              <dd>{entry.installationChain.source}</dd>
+            </div>
+            <div>
+              <dt>来源地址</dt>
+              <dd>
+                <code>{entry.installationChain.sourceLocator}</code>
+              </dd>
+            </div>
+            {entry.installationChain.skillPath ? (
+              <div>
+                <dt>仓库内路径</dt>
+                <dd>
+                  <code>{entry.installationChain.skillPath}</code>
+                </dd>
+              </div>
+            ) : null}
+          </dl>
+        </section>
+      ) : null}
+
+      <section className="skill-detail-card" aria-label="当前挂载">
+        <p className="section-eyebrow">MOUNTS</p>
+        <h2>当前挂载</h2>
+        <div className="mount-badges">
+          {mounts.length > 0 ? (
+            mounts.map((mount) => (
+              <span key={mount.id} className={`mount-badge ${mount.health}`}>
+                {mountLabel(mount)}
+                {mount.health === "healthy"
+                  ? ""
+                  : ` · ${mountHealthLabel(mount.health)}`}
+              </span>
+            ))
+          ) : (
+            <span className="mount-empty">未挂载</span>
+          )}
+        </div>
+        {entry.managementKind === "skillYardManaged" && entry.memberId ? (
+          <button
+            className="compact-action"
+            type="button"
+            disabled={actionsDisabled && !allowReadOnlyDetails}
+            onClick={() => onManageMount(entry.memberId!)}
+          >
+            管理挂载
+          </button>
+        ) : null}
+      </section>
+
+      {managementDirection(entry) ? (
+        <p className="management-direction">{managementDirection(entry)}</p>
+      ) : null}
+    </main>
   );
 }
 
@@ -792,106 +1028,11 @@ function bundleUpdateBusyLabel(action: BundleUpdateAction): string {
   return "正在准备…";
 }
 
-function SkillCard({
-  entry,
-  mounts,
-  actionsDisabled,
-  allowReadOnlyDetails,
-  onManageMount,
-  onTakeover,
-  showTakeoverAction = true,
-}: {
-  entry: InventoryObservation;
-  mounts: MountSummary[];
-  actionsDisabled: boolean;
-  allowReadOnlyDetails: boolean;
-  onManageMount?(memberId: string): void;
-  onTakeover?(observationId: string): void;
-  showTakeoverAction?: boolean;
-}) {
-  return (
-    <li className="skill-card">
-      <div className="skill-card-heading">
-        <div>
-          <strong>{presentationLabel(entry)}</strong>
-          <span className={`management-badge ${entry.managementKind}`}>
-            {managementLabel(entry.managementKind)}
-          </span>
-        </div>
-        {entry.stale ? <span className="stale-badge">上次结果</span> : null}
-      </div>
-      <code title={entry.skillRoot}>{entry.skillRoot}</code>
-      <div className="skill-meta">
-        <span>{entry.sourceDisplayName ?? "来源未知"}</span>
-        {entry.installationChain ? (
-          <span title={entry.installationChain.recordPath}>
-            {`Installation Chain: ${installationChainLabel(entry.installationChain)}`}
-          </span>
-        ) : null}
-        {entry.observedBy.map((app) => (
-          <span key={app}>{supportedAppLabel(app)}</span>
-        ))}
-        {entry.projectDisplayName ? <span>{entry.projectDisplayName}</span> : null}
-        {entry.metadataStatus !== "valid" ? <span>Skill metadata 无效</span> : null}
-      </div>
-      {managementDirection(entry) ? (
-        <p className="management-direction">{managementDirection(entry)}</p>
-      ) : null}
-      {entry.managementKind === "skillYardManaged" && entry.memberId ? (
-        <div className="mount-card-controls">
-          <div className="mount-badges" aria-label="当前挂载">
-            {mounts.length > 0 ? (
-              mounts.map((mount) => (
-                <span key={mount.id} className={`mount-badge ${mount.health}`}>
-                  {mountLabel(mount)}
-                  {mount.health === "healthy"
-                    ? ""
-                    : ` · ${mountHealthLabel(mount.health)}`}
-                </span>
-              ))
-            ) : (
-              <span className="mount-empty">未挂载</span>
-            )}
-          </div>
-          <button
-            className="compact-action"
-            type="button"
-            disabled={actionsDisabled && !allowReadOnlyDetails}
-            onClick={() => onManageMount?.(entry.memberId!)}
-          >
-            管理挂载
-          </button>
-        </div>
-      ) : null}
-      {entry.managementKind === "takeoverCandidate" &&
-      showTakeoverAction ? (
-        <div className="mount-card-controls">
-          <span className="mount-empty">确认后才会移动或替换文件</span>
-          <button
-            className="compact-action"
-            type="button"
-            disabled={actionsDisabled}
-            aria-label={`接管 ${presentationLabel(entry)}`}
-            onClick={() => onTakeover?.(entry.id)}
-          >
-            接管
-          </button>
-        </div>
-      ) : null}
-    </li>
-  );
-}
-
 function mountLabel(mount: MountSummary): string {
   const appName = supportedAppLabel(mount.appId);
   return mount.scope === "global"
     ? `${appName} · 全局`
     : `${appName} · ${mount.projectDisplayName ?? "已登记项目"}`;
-}
-
-function installationChainLabel(chain: InstallationChain): string {
-  const memberPath = chain.skillPath ? ` · ${chain.skillPath}` : "";
-  return `lock v3 · ${chain.sourceLocator}${memberPath}`;
 }
 
 function mountHealthLabel(health: MountSummary["health"]): string {
@@ -984,6 +1125,101 @@ function groupTakeoverEntries(entries: InventoryObservation[]): {
   };
 }
 
+function groupInventoryEntries(
+  entries: InventoryObservation[],
+): InventoryGroupView[] {
+  const managed = groupManagedEntries(entries).map((group) => ({
+    id: `managed:${group.id}`,
+    title: group.title,
+    kind: "managedBundle" as const,
+    entries: group.entries,
+    bundleId: group.bundleId,
+    hasSource: group.hasSource,
+  }));
+  const takeover = groupTakeoverEntries(
+    entries.filter(
+      (entry) => entry.managementKind === "takeoverCandidate",
+    ),
+  );
+  const takeoverGroups: InventoryGroupView[] = [
+    ...takeover.groups.map((group) => ({
+      id: `takeover:${group.id}`,
+      title: group.title,
+      kind: "takeoverBundle" as const,
+      entries: group.entries,
+      bundleId: null,
+      hasSource: false,
+    })),
+    ...takeover.ungrouped.map((entry) => ({
+      id: `takeover-entry:${entry.id}`,
+      title: entry.skillName,
+      kind: "takeoverBundle" as const,
+      entries: [entry],
+      bundleId: null,
+      hasSource: false,
+    })),
+  ];
+
+  const external = new Map<string, InventoryGroupView>();
+  for (const entry of entries) {
+    if (
+      entry.managementKind !== "agentManaged" &&
+      entry.managementKind !== "projectManaged"
+    ) {
+      continue;
+    }
+    const isAgentManaged = entry.managementKind === "agentManaged";
+    const appKey = entry.observedBy.slice().sort().join(":");
+    const id = isAgentManaged
+      ? `agent:${appKey || entry.id}`
+      : `project:${entry.projectId ?? entry.id}`;
+    const appNames = entry.observedBy.map(supportedAppLabel).join("、");
+    const title = isAgentManaged
+      ? appNames
+        ? `${appNames} 管理`
+        : "Agent 应用管理"
+      : entry.projectDisplayName ?? "项目仓库管理";
+    const current = external.get(id);
+    external.set(id, {
+      id,
+      title: current?.title ?? title,
+      kind: isAgentManaged ? "agentManaged" : "projectManaged",
+      entries: [...(current?.entries ?? []), entry],
+      bundleId: null,
+      hasSource: false,
+    });
+  }
+
+  const order: Record<InventoryGroupKind, number> = {
+    managedBundle: 0,
+    takeoverBundle: 1,
+    agentManaged: 2,
+    projectManaged: 3,
+  };
+  return [...managed, ...takeoverGroups, ...external.values()]
+    .map((group) => ({
+      ...group,
+      entries: group.entries.slice().sort((left, right) =>
+        left.skillName.localeCompare(right.skillName, "zh-CN"),
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        order[left.kind] - order[right.kind] ||
+        left.title.localeCompare(right.title, "zh-CN") ||
+        left.id.localeCompare(right.id),
+    );
+}
+
+function groupEyebrow(kind: InventoryGroupKind): string {
+  return {
+    managedBundle: "由 SkillYard 管理 · BUNDLE",
+    takeoverBundle: "待接管 · BUNDLE",
+    agentManaged: "Agent 应用管理 · 只读",
+    projectManaged: "项目仓库管理 · 只读",
+  }[kind];
+}
+
 function matchesFilter(
   entry: InventoryObservation,
   filter: ManagementFilter,
@@ -1013,12 +1249,6 @@ function matchesQuery(entry: InventoryObservation, query: string): boolean {
   ]
     .filter((value): value is string => Boolean(value))
     .some((value) => value.toLocaleLowerCase("zh-CN").includes(query));
-}
-
-function presentationLabel(entry: InventoryObservation): string {
-  return entry.managementKind === "skillYardManaged" && entry.bundleDisplayName
-    ? `${entry.bundleDisplayName}: ${entry.skillName}`
-    : entry.skillName;
 }
 
 function managementLabel(kind: InventoryObservation["managementKind"]): string {

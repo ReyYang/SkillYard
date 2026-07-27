@@ -85,6 +85,7 @@ pub(crate) fn takeover_group_evidence(chain: &InstallationChain) -> Option<Takeo
             parsed.owner.to_ascii_lowercase(),
             parsed.repository.to_ascii_lowercase()
         ),
-        display_name: format!("{}/{}", parsed.owner, parsed.repository),
+        // lock 的 source 是安装工具保存的来源名称；URL 只负责提供稳定的分组身份。
+        display_name: chain.source.trim().to_owned(),
     })
 }

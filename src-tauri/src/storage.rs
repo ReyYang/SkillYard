@@ -79,6 +79,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         22,
         include_str!("../migrations/0022_installation_chain.sql"),
     ),
+    (
+        23,
+        include_str!("../migrations/0023_bundle_display_name_from_lock_source.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -13820,7 +13824,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=22).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=23).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -13859,6 +13863,81 @@ mod tests {
             .expect("应执行外键检查")
             .count();
         assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn bundle_display_name_migration_repairs_verified_lock_source_state() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let database = data_root.join("skillyard.sqlite3");
+        let connection = Connection::open(&database).expect("应创建 version 22 SQLite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("应建立 migration 表");
+        for (version, migration) in MIGRATIONS.iter().take(22) {
+            connection
+                .execute_batch(migration)
+                .expect("应建立 version 22 schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 1)",
+                    [version],
+                )
+                .expect("应记录旧 migration");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO bundles (
+                    id, display_name, managed_directory, current_target, created_at
+                 ) VALUES (
+                    'bundle-mattpocock', 'codebase-design',
+                    'bundles/bundle-mattpocock', 'contents/current', 1
+                 );
+                 INSERT INTO skill_members (
+                    id, bundle_id, skill_name, description, stable_relative_path,
+                    content_fingerprint, created_at
+                 ) VALUES
+                    ('member-codebase', 'bundle-mattpocock', 'codebase-design',
+                     '设计代码结构', 'members/codebase-design', 'sha256:one', 1),
+                    ('member-tdd', 'bundle-mattpocock', 'tdd',
+                     '测试驱动开发', 'members/tdd', 'sha256:two', 1);
+                 INSERT INTO member_selections (bundle_id, member_id, selected_at)
+                 VALUES
+                    ('bundle-mattpocock', 'member-codebase', 1),
+                    ('bundle-mattpocock', 'member-tdd', 1);
+                 INSERT INTO member_installation_chains (
+                    member_id, kind, record_path, source, source_type, source_locator,
+                    skill_path, tracked_ref, content_marker, installed_at, updated_at
+                 ) VALUES
+                    ('member-codebase', 'lock_v3', '/home/.agents/.skill-lock.json',
+                     'mattpocock/skills', 'github',
+                     'https://github.com/mattpocock/skills.git',
+                     'skills/codebase-design/SKILL.md', NULL, 'hash-one', '1', '1'),
+                    ('member-tdd', 'lock_v3', '/home/.agents/.skill-lock.json',
+                     'mattpocock/skills', 'github',
+                     'https://github.com/mattpocock/skills.git',
+                     'skills/tdd/SKILL.md', NULL, 'hash-two', '1', '1');",
+            )
+            .expect("应准备已核验的旧 Bundle 命名状态");
+        drop(connection);
+
+        let storage = Storage::open(&data_root, &database).expect("应完成 Bundle 名称修正");
+        let display_name = storage
+            .connection
+            .query_row(
+                "SELECT display_name FROM bundles WHERE id = 'bundle-mattpocock'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("应读取修正后的 Bundle 名称");
+        assert_eq!(display_name, "mattpocock/skills");
     }
 
     #[test]
