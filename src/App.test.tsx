@@ -2839,6 +2839,9 @@ describe("本机清单", () => {
 
     render(<App client={client} />);
 
+    expect(
+      await screen.findByText("本机已有 5 个 Bundle · 6 个 Skill"),
+    ).toBeInTheDocument();
     const bundles = await screen.findAllByRole("region", {
       name: "mattpocock/skills",
     });

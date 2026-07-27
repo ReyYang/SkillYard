@@ -157,10 +157,8 @@ export function InventoryPage({
       ),
     );
   }, [filter, groups, query]);
-  const bundleCount = groups.filter(
-    (group) =>
-      group.kind === "managedBundle" || group.kind === "takeoverBundle",
-  ).length;
+  // 主清单中的每张分组卡都是用户看到的 Bundle，包括只读的插件与项目分组。
+  const bundleCount = groups.length;
   const updatableBundleCount = useMemo(
     () =>
       new Set(
