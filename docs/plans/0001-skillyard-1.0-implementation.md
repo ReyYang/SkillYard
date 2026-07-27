@@ -222,7 +222,7 @@ TakeoverPlan（只读、已封存）
 - `TakeoverTransaction`：SQLite 中唯一的接管总体状态，负责回答操作是否已经越过领域提交点。
 - `TakeoverJournal`：文件系统事务合同，保存候选内容、原始位置、隔离位置、最终 Mount 和逐项进度；它不是第二套领域状态。
 - `takeover.rs`：编排上述单一路径。单成员、多成员、重复副本、scope 冲突和共享目录只能改变 Plan 输入，不能改变事务协议。
-- `storage.rs` 与 `0011_takeover_transactions.sql`：保存唯一接管事务，并在一个 SQLite 事务中提交完整受管领域状态；不引入 Source 或 Stage 5 schema。
+- `storage.rs` 与 `0011_takeover_transactions.sql`：保存唯一接管事务，并在一个 SQLite 事务中提交完整受管领域状态；后续已确认的 lock v3 来源保存规则复用唯一 Source 模型，不建立第二套来源状态。
 - `application.rs`、typed Tauri command/client 与 UI：只暴露创建 Plan、确认 Plan、读取持久状态三个生产动作，不暴露内部文件步骤。
 
 Stage 3 能力按以下方式直接复用：
@@ -278,12 +278,12 @@ Stage 3 能力按以下方式直接复用：
 - receipt、lock、安装 manifest 或 Adapter 结果能证明同一安装组时，多个不同 Skill 在一个 Plan 和一个事务中进入同一 Bundle。
 - 处理同一 Skill 的 global／project scope 冲突。
 - 处理 `.agents/skills` 等共享目录：用户选择目标 Supported App，新 Mount 全部验证后才移除原共享入口。
-- 没有 Source 也可以完成 Takeover，并显示“没有更新来源”。
+- 已核验的 GitHub lock v3 在接管确认时自动创建或复用 Source 并关联 Bundle；没有可确认 Source 的内容仍可完成 Takeover，并显示“没有更新来源”。
 - Agent-managed、Plugin-managed 和 Project-managed 内容继续只读展示，不生成接管写入计划。
 
 ### 不包含
 
-- GitHub 来源查找、Source 关联和上游更新。
+- 用户主动查找 GitHub 来源、人工补充 Source 关联和上游更新。
 
 ### 阶段验收
 
@@ -687,7 +687,8 @@ Installation Chain
   -> 全局 lock 只关联全局或共享目录，不能附给项目目录中的同名 Skill
   -> Inventory 与 Takeover Plan 展示 lock、Source URL／路径和上游 Skill 路径
   -> 不根据 lock 猜测具体由 `skills`、`gh skill` 或 Lark CLI 执行
-  -> 接管确认时随 Skill Member 原子保存，之后不受外部 lock 删除影响
+  -> 接管确认时随 Skill Member 原子保存；可规范化的 GitHub 来源同时创建或复用 Source 并关联 Bundle
+  -> 之后删除外部 lock 不影响已保存的 Installation Chain 与 Source 关系
 ```
 
 模型和边界固定如下：
@@ -699,7 +700,7 @@ Installation Chain
 - 生命周期事务期间允许使用缓存的已提交 Inventory 进行搜索、筛选和查看 Mount／Source 详情；不能发起安装、接管、挂载、更新、删除、Local Refresh、Update Check 或 Source Reload。
 - Finder 入口只调用固定的 `open_central_store` command；Rust 使用 Tauri Opener 打开 `ApplicationPaths::data_root()`，前端不能提供路径，也不获得通用文件系统或 shell 权限。
 - 设置页收纳“重置应用”和“打开 Central Store”，主界面不常驻展示这两个低频入口。“重置应用”只清除当前前端导航、搜索筛选、临时错误和窗口内选择，并重新读取 Startup State。1.0 当前没有持久化偏好或窗口状态，因此不新增设置存储；SQLite、Journal、Source Catalog、Bundle、`current` 和 Mount 均不能被清理。
-- Installation Chain 只有一套当前模型：扫描观察、Takeover Plan 和受管 Skill Member 使用同一份 lock v3 事实。Source 关联仍由现有 Source 模型负责，不能把 lock 中的来源字符串直接伪装成已经登记且可更新的 Source。
+- Installation Chain 只有一套当前模型：扫描观察、Takeover Plan 和受管 Skill Member 使用同一份 lock v3 事实。可规范化的 GitHub 来源在接管确认时通过现有 Source 模型原子保存；不能仅凭展示名称伪造 Source，也不能建立另一套来源状态。
 - lock v3 只是一份可核验的本地收据协议，不是执行者证明。1.0 保存记录位置、Source 类型、Source URL／路径、上游 Skill 路径、ref、内容 marker 与时间；不解析 Lark 专属状态、GitHub frontmatter 或其他 receipt 格式。
 - Stage 10 建立 167 条 User Story 到自动化、`[MAC-CONTRACT]` 或 `[HUMAN]` 证据的映射。已有公开 seam 测试继续作为证据，只为真实缺口补测试，不重复实现前九阶段。
 

@@ -649,7 +649,12 @@ pub(crate) fn create_takeover_plan(
         bundle_display_name,
         source_display_name: existing_bundle
             .as_ref()
-            .and_then(|bundle| bundle.source_display_name.clone()),
+            .and_then(|bundle| bundle.source_display_name.clone())
+            .or_else(|| {
+                group_evidence
+                    .as_ref()
+                    .map(|evidence| evidence.display_name.clone())
+            }),
         managed_directory: path_text(&managed_directory)?,
         content_directory: path_text(&content_directory)?,
         retained_members,
@@ -1189,7 +1194,12 @@ fn validate_static_plan_contract(
                 || existing_member_ids.len() != existing.members.len()
                 || existing_skill_names.len() != existing.members.len()
                 || plan.retained_members != expected_retained_members
-                || plan.source_display_name != existing.source_display_name
+                || plan.source_display_name
+                    != existing.source_display_name.clone().or_else(|| {
+                        expected_group
+                            .as_ref()
+                            .map(|evidence| evidence.display_name.clone())
+                    })
                 || existing_member_ids.iter().any(|id| member_ids.contains(id))
                 || existing_skill_names
                     .iter()
@@ -1201,7 +1211,12 @@ fn validate_static_plan_contract(
             existing.display_name.clone()
         }
         None => {
-            if !plan.retained_members.is_empty() || plan.source_display_name.is_some() {
+            let expected_source_display_name = expected_group
+                .as_ref()
+                .map(|evidence| evidence.display_name.clone());
+            if !plan.retained_members.is_empty()
+                || plan.source_display_name != expected_source_display_name
+            {
                 return Err(TakeoverError::InvalidPlanContract);
             }
             expected_group

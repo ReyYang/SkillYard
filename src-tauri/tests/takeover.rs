@@ -8,10 +8,11 @@ use std::{
 
 use rusqlite::Connection;
 use skillyard_lib::{
-    ApplicationPaths, InstallationChainKind, InventoryLocationKind, LifecycleFailpoint,
-    ManagementKind, MountHealth, MountScope, PlatformInfo, SkillYardApplication, SupportedAppId,
-    TakeoverIdentityBasis, TakeoverMemberRequest, TakeoverOriginDisposition, TakeoverPlanRequest,
-    TakeoverSharedTargetRequest, UiIntent, UiOutcome,
+    ApplicationPaths, BundleUpdateStatus, InstallationChainKind, InventoryLocationKind,
+    LifecycleFailpoint, ManagementKind, MountHealth, MountScope, PlatformInfo,
+    SkillYardApplication, SupportedAppId, TakeoverIdentityBasis, TakeoverMemberRequest,
+    TakeoverOriginDisposition, TakeoverPlanRequest, TakeoverSharedTargetRequest, UiIntent,
+    UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -244,9 +245,10 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
         Some(installation_chain),
         "接管计划必须封存扫描时的安装履历"
     );
-    assert!(
-        plan.source_display_name.is_none(),
-        "lock 来源不能冒充已经登记且可更新的 Source"
+    assert_eq!(
+        plan.source_display_name.as_deref(),
+        Some("owner/repository"),
+        "接管预览应明确显示即将自动保存的 Source"
     );
     application
         .handle(UiIntent::ConfirmTakeoverPlan { plan_id: plan.id })
@@ -255,14 +257,18 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
     drop(application);
 
     let restarted = SkillYardApplication::new(
-        ApplicationPaths::for_home(data_root, home),
+        ApplicationPaths::for_home(data_root.clone(), home),
         PlatformInfo::supported_for_test(),
     );
-    let entries = match restarted
+    let (entries, bundle_updates) = match restarted
         .handle(UiIntent::GetStartupState)
         .expect("重启后应读取受管状态")
     {
-        UiOutcome::Inventory { entries, .. } => entries,
+        UiOutcome::Inventory {
+            entries,
+            bundle_updates,
+            ..
+        } => (entries, bundle_updates),
         _ => panic!("重启后应返回 Inventory"),
     };
     let managed = entries
@@ -273,6 +279,50 @@ fn verified_lock_v3_installation_chain_survives_takeover_and_restart() {
         managed.installation_chain.as_ref(),
         Some(installation_chain),
         "外部 lock 后续不再控制已保存的安装履历"
+    );
+    assert_eq!(
+        managed.source_display_name.as_deref(),
+        Some("owner/repository"),
+        "删除外部 lock 并重启后，Bundle 仍应保留已登记 Source"
+    );
+    assert_eq!(
+        bundle_updates
+            .iter()
+            .find(|update| { Some(update.bundle_id.as_str()) == managed.bundle_id.as_deref() })
+            .map(|update| update.status),
+        Some(BundleUpdateStatus::Available),
+        "没有 adopted commit 的自动 Source 应提示可执行首次完整更新"
+    );
+    let connection =
+        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开接管后的 SQLite");
+    let saved_source: (String, String, String, String, Option<String>) = connection
+        .query_row(
+            "SELECT source.canonical_identity, source.display_name, source.locator,
+                    source.tracked_ref, link.adopted_marker
+             FROM sources AS source
+             JOIN source_bundle_links AS link ON link.source_id = source.id
+             WHERE link.bundle_id = ?1",
+            [managed.bundle_id.as_deref().expect("受管成员应有 Bundle")],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("接管确认应自动保存并关联 lock Source");
+    assert_eq!(
+        saved_source,
+        (
+            "github:owner/repository".to_owned(),
+            "owner/repository".to_owned(),
+            "https://github.com/owner/repository".to_owned(),
+            "release-2026-07".to_owned(),
+            None,
+        )
     );
 }
 
@@ -348,7 +398,10 @@ fn verified_lock_v3_bundle_can_plan_all_installed_members_together() {
         BTreeSet::from(["alpha", "beta"])
     );
     assert_eq!(plan.targets.len(), 2);
-    assert!(plan.source_display_name.is_none());
+    assert_eq!(
+        plan.source_display_name.as_deref(),
+        Some("owner/repository")
+    );
 
     let entries = match application
         .handle(UiIntent::ConfirmTakeoverPlan {
@@ -618,31 +671,6 @@ fn later_valid_member_reuses_the_managed_bundle_for_the_same_installation_group(
             plan_id: first_plan.id,
         })
         .expect("应先接管 alpha");
-    // 这里只封装既有 Source 前置状态；待验证的补充 Plan 仍完全通过应用公开入口生成。
-    let source_connection =
-        Connection::open(data_root.join("skillyard.sqlite3")).expect("应打开测试 SQLite");
-    source_connection
-        .execute(
-            "INSERT INTO sources (
-                id, kind, canonical_identity, owner, repository, display_name,
-                locator, tracked_ref, sort_order, created_at, updated_at
-             ) SELECT
-                'source-owner-repository', 'github', 'github:owner/repository',
-                'owner', 'repository', 'owner/repository',
-                'https://github.com/owner/repository', 'main',
-                COALESCE(MAX(sort_order), -1) + 1, 100, 100
-             FROM sources",
-            [],
-        )
-        .expect("应准备既有 Source");
-    source_connection
-        .execute(
-            "INSERT INTO source_bundle_links (source_id, bundle_id, adopted_marker, linked_at)
-             VALUES ('source-owner-repository', ?1, NULL, 100)",
-            [bundle_id.as_str()],
-        )
-        .expect("应准备既有 Source 与 Bundle 关系");
-    drop(source_connection);
 
     write_skill(&beta_root, "beta", "修复后补充进同一 Bundle");
     let entries = match application

@@ -10,6 +10,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::domain::{
     BatchMountDisposition, BundleUpdateAction, BundleUpdateStatus, BundleUpdateSummary,
@@ -21,6 +22,7 @@ use crate::domain::{
     SourceCatalogStatus, SourceKind, SourceRefChangePlan, SourceSummary, SupportedAppId,
     SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
+use crate::github_source::parse_github_source;
 use crate::installation_chain::takeover_group_evidence;
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -82,6 +84,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         23,
         include_str!("../migrations/0023_bundle_display_name_from_lock_source.sql"),
+    ),
+    (
+        24,
+        include_str!("../migrations/0024_takeover_source_from_lock.sql"),
     ),
 ];
 
@@ -1777,6 +1783,7 @@ impl Storage {
         now: i64,
     ) -> Result<(), StorageError> {
         let validated = validate_takeover_domain_contract(&self.data_root, plan)?;
+        let takeover_source = validate_takeover_source_contract(plan, existing_bundle)?;
         let anchor_member_id = &plan
             .members
             .first()
@@ -1890,12 +1897,16 @@ impl Storage {
                     )
                     .map_err(StorageError::SaveTakeoverTransaction)?;
             }
+            if let Some(source) = takeover_source.as_ref() {
+                persist_takeover_source(&transaction, &plan.bundle_id, source, now)?;
+            }
             ensure_takeover_domain_matches(
                 &transaction,
                 &self.data_root,
                 plan,
                 &validated,
                 existing_bundle,
+                takeover_source.as_ref(),
             )?;
             for origin in &plan.origins {
                 let deleted = transaction
@@ -1922,6 +1933,7 @@ impl Storage {
                 plan,
                 &validated,
                 existing_bundle,
+                takeover_source.as_ref(),
             )?;
         } else {
             return Err(StorageError::TakeoverStateConflict(
@@ -10229,6 +10241,155 @@ struct ValidatedTakeoverDomain {
     members: BTreeMap<String, ValidatedTakeoverMember>,
 }
 
+struct ValidatedTakeoverSource {
+    canonical_identity: String,
+    owner: String,
+    repository: String,
+    display_name: String,
+    locator: String,
+    explicit_tracked_ref: Option<String>,
+    member_paths: BTreeMap<String, String>,
+    existing_source_id: Option<String>,
+}
+
+/// 已核验的 lock v3 来源直接成为接管事务的一部分，不能只停留在预览文案中。
+fn validate_takeover_source_contract(
+    plan: &TakeoverPlan,
+    existing_bundle: Option<&StoredTakeoverBundleSnapshot>,
+) -> Result<Option<ValidatedTakeoverSource>, StorageError> {
+    let members = plan
+        .retained_members
+        .iter()
+        .map(|member| {
+            (
+                member.member_id.as_str(),
+                member.installation_chain.as_deref(),
+            )
+        })
+        .chain(plan.members.iter().map(|member| {
+            (
+                member.member_id.as_str(),
+                member.installation_chain.as_deref(),
+            )
+        }))
+        .collect::<Vec<_>>();
+    let mut source: Option<ValidatedTakeoverSource> = None;
+    let mut evidenced_members = 0;
+    let mut source_paths = BTreeSet::new();
+
+    for (member_id, chain) in &members {
+        let Some(chain) = chain else {
+            continue;
+        };
+        let Some(evidence) = takeover_group_evidence(chain) else {
+            continue;
+        };
+        let parsed = parse_github_source(&chain.source_locator, chain.tracked_ref.as_deref())
+            .map_err(|_| StorageError::InvalidTakeoverPlan)?;
+        let canonical_identity = format!(
+            "github:{}/{}",
+            parsed.owner.to_ascii_lowercase(),
+            parsed.repository.to_ascii_lowercase()
+        );
+        let display_name = evidence.display_name.trim().to_owned();
+        let locator = format!("https://github.com/{}/{}", parsed.owner, parsed.repository);
+        if evidence.id != canonical_identity || display_name.is_empty() {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
+
+        match source.as_mut() {
+            Some(existing)
+                if existing.canonical_identity != canonical_identity
+                    || existing.display_name != display_name
+                    || existing.owner != parsed.owner
+                    || existing.repository != parsed.repository =>
+            {
+                return Err(StorageError::InvalidTakeoverPlan);
+            }
+            Some(existing) => {
+                if let Some(tracked_ref) = parsed.tracked_ref.as_ref() {
+                    if existing
+                        .explicit_tracked_ref
+                        .as_ref()
+                        .is_some_and(|current| current != tracked_ref)
+                    {
+                        return Err(StorageError::InvalidTakeoverPlan);
+                    }
+                    existing.explicit_tracked_ref = Some(tracked_ref.clone());
+                }
+            }
+            None => {
+                source = Some(ValidatedTakeoverSource {
+                    canonical_identity,
+                    owner: parsed.owner,
+                    repository: parsed.repository,
+                    display_name,
+                    locator,
+                    explicit_tracked_ref: parsed.tracked_ref,
+                    member_paths: BTreeMap::new(),
+                    existing_source_id: None,
+                });
+            }
+        }
+
+        if let Some(skill_path) = chain.skill_path.as_deref() {
+            let source_relative_path = lock_skill_source_relative_path(skill_path)?;
+            if !source_paths.insert(source_relative_path.clone()) {
+                return Err(StorageError::InvalidTakeoverPlan);
+            }
+            source
+                .as_mut()
+                .ok_or(StorageError::InvalidTakeoverPlan)?
+                .member_paths
+                .insert((*member_id).to_owned(), source_relative_path);
+        }
+        evidenced_members += 1;
+    }
+
+    let Some(source) = source else {
+        if plan.source_display_name.is_some() {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
+        return Ok(None);
+    };
+    if evidenced_members != members.len() {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    let mut source = source;
+    if let Some(existing_bundle) = existing_bundle.filter(|bundle| bundle.source_id.is_some()) {
+        source.existing_source_id = existing_bundle.source_id.clone();
+        source.display_name = existing_bundle
+            .source_display_name
+            .clone()
+            .ok_or(StorageError::InvalidTakeoverPlan)?;
+    }
+    if plan.source_display_name.as_deref() != Some(source.display_name.as_str()) {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    Ok(Some(source))
+}
+
+fn lock_skill_source_relative_path(skill_path: &str) -> Result<String, StorageError> {
+    let path = Path::new(skill_path.trim());
+    if path.is_absolute()
+        || path.file_name() != Some(std::ffi::OsStr::new("SKILL.md"))
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    let parent = path
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or(StorageError::InvalidTakeoverPlan)?
+        .to_owned();
+    if !parent.is_empty() && !is_normalized_relative_path(&parent) {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    Ok(parent)
+}
+
 fn validate_takeover_domain_contract(
     data_root: &Path,
     plan: &TakeoverPlan,
@@ -10355,12 +10516,187 @@ fn validate_takeover_domain_contract(
     })
 }
 
+fn persist_takeover_source(
+    transaction: &Transaction<'_>,
+    bundle_id: &str,
+    source: &ValidatedTakeoverSource,
+    now: i64,
+) -> Result<(), StorageError> {
+    let read_existing = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    };
+    let existing = if let Some(existing_source_id) = source.existing_source_id.as_deref() {
+        transaction
+            .query_row(
+                "SELECT source.id, source.kind, source.canonical_identity,
+                        source.tracked_ref, link.bundle_id
+                 FROM sources AS source
+                 LEFT JOIN source_bundle_links AS link ON link.source_id = source.id
+                 WHERE source.id = ?1",
+                [existing_source_id],
+                read_existing,
+            )
+            .optional()
+    } else {
+        transaction
+            .query_row(
+                "SELECT source.id, source.kind, source.canonical_identity,
+                        source.tracked_ref, link.bundle_id
+                 FROM sources AS source
+                 LEFT JOIN source_bundle_links AS link ON link.source_id = source.id
+                 WHERE source.canonical_identity = ?1",
+                [source.canonical_identity.as_str()],
+                read_existing,
+            )
+            .optional()
+    }
+    .map_err(StorageError::SaveTakeoverTransaction)?;
+
+    let source_id = if let Some((
+        source_id,
+        kind,
+        canonical_identity,
+        current_ref,
+        linked_bundle_id,
+    )) = existing
+    {
+        if kind != "github"
+            || canonical_identity != source.canonical_identity
+            || linked_bundle_id
+                .as_deref()
+                .is_some_and(|linked_bundle_id| linked_bundle_id != bundle_id)
+        {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        if source.existing_source_id.is_some() {
+            source_id
+        } else {
+            let tracked_ref = source
+                .explicit_tracked_ref
+                .as_deref()
+                .unwrap_or(&current_ref);
+            let changed = transaction
+                .execute(
+                    "UPDATE sources
+                 SET owner = ?2, repository = ?3, display_name = ?4,
+                     locator = ?5, tracked_ref = ?6, updated_at = ?7
+                 WHERE id = ?1 AND kind = 'github'",
+                    params![
+                        source_id,
+                        source.owner,
+                        source.repository,
+                        source.display_name,
+                        source.locator,
+                        tracked_ref,
+                        now,
+                    ],
+                )
+                .map_err(StorageError::SaveTakeoverTransaction)?;
+            if changed != 1 {
+                return Err(StorageError::SourceBundleStateConflict);
+            }
+            source_id
+        }
+    } else {
+        if source.existing_source_id.is_some() {
+            return Err(StorageError::SourceBundleStateConflict);
+        }
+        let source_id = Uuid::new_v4().to_string();
+        let sort_order = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM sources",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(StorageError::SaveTakeoverTransaction)?;
+        transaction
+            .execute(
+                "INSERT INTO sources (
+                    id, kind, canonical_identity, owner, repository,
+                    display_name, locator, tracked_ref, member_path_hint,
+                    sort_order, created_at, updated_at
+                 ) VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9)",
+                params![
+                    source_id,
+                    source.canonical_identity,
+                    source.owner,
+                    source.repository,
+                    source.display_name,
+                    source.locator,
+                    source.explicit_tracked_ref.as_deref().unwrap_or("HEAD"),
+                    sort_order,
+                    now,
+                ],
+            )
+            .map_err(StorageError::SaveTakeoverTransaction)?;
+        source_id
+    };
+
+    let linked_source_id = transaction
+        .query_row(
+            "SELECT source_id FROM source_bundle_links WHERE bundle_id = ?1",
+            [bundle_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(StorageError::SaveTakeoverTransaction)?;
+    match linked_source_id {
+        Some(linked_source_id) if linked_source_id == source_id => {}
+        Some(_) => return Err(StorageError::SourceBundleStateConflict),
+        None => {
+            transaction
+                .execute(
+                    "INSERT INTO source_bundle_links (
+                        source_id, bundle_id, adopted_marker, linked_at
+                     ) VALUES (?1, ?2, NULL, ?3)",
+                    params![source_id, bundle_id, now],
+                )
+                .map_err(StorageError::SaveTakeoverTransaction)?;
+        }
+    }
+
+    for (member_id, source_relative_path) in &source.member_paths {
+        let existing_mapping = transaction
+            .query_row(
+                "SELECT source_id, source_relative_path
+                 FROM source_member_links WHERE member_id = ?1",
+                [member_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::SaveTakeoverTransaction)?;
+        match existing_mapping {
+            Some((existing_source_id, existing_path))
+                if existing_source_id == source_id && existing_path == *source_relative_path => {}
+            Some(_) => return Err(StorageError::SourceBundleStateConflict),
+            None => {
+                transaction
+                    .execute(
+                        "INSERT INTO source_member_links (
+                            source_id, source_relative_path, member_id, linked_at
+                         ) VALUES (?1, ?2, ?3, ?4)",
+                        params![source_id, source_relative_path, member_id, now],
+                    )
+                    .map_err(StorageError::SaveTakeoverTransaction)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn ensure_takeover_domain_matches(
     transaction: &Transaction<'_>,
     data_root: &Path,
     plan: &TakeoverPlan,
     validated: &ValidatedTakeoverDomain,
     existing_bundle: Option<&StoredTakeoverBundleSnapshot>,
+    takeover_source: Option<&ValidatedTakeoverSource>,
 ) -> Result<(), StorageError> {
     let bundle = transaction
         .query_row(
@@ -10402,15 +10738,30 @@ fn ensure_takeover_domain_matches(
     {
         return Err(StorageError::InvalidTakeoverPlan);
     }
+    ensure_takeover_source_matches(
+        transaction,
+        &plan.bundle_id,
+        takeover_source,
+        existing_bundle.and_then(|bundle| bundle.source_id.as_deref()),
+    )?;
     if let Some(existing) = existing_bundle {
         let actual = read_takeover_bundle_snapshot_from(transaction, data_root, &plan.bundle_id)?;
+        let source_was_added = existing.source_id.is_none() && takeover_source.is_some();
         if actual.id != existing.id
             || actual.display_name != existing.display_name
             || actual.managed_directory != existing.managed_directory
             || actual.current_target != validated.current_target
-            || actual.source_id != existing.source_id
-            || actual.source_display_name != existing.source_display_name
-            || actual.adopted_marker != existing.adopted_marker
+            || (!source_was_added && actual.source_id != existing.source_id)
+            || (!source_was_added && actual.source_display_name != existing.source_display_name)
+            || (source_was_added
+                && actual.source_display_name.as_deref()
+                    != takeover_source.map(|source| source.display_name.as_str()))
+            || actual.adopted_marker
+                != if source_was_added {
+                    None
+                } else {
+                    existing.adopted_marker.clone()
+                }
         {
             return Err(StorageError::InvalidTakeoverPlan);
         }
@@ -10422,7 +10773,21 @@ fn ensure_takeover_domain_matches(
             else {
                 return Err(StorageError::InvalidTakeoverPlan);
             };
-            if member != expected {
+            let member_matches = if let Some(source) = takeover_source.filter(|_| source_was_added)
+            {
+                member.id == expected.id
+                    && member.skill_name == expected.skill_name
+                    && member.description == expected.description
+                    && member.stable_relative_path == expected.stable_relative_path
+                    && member.content_fingerprint == expected.content_fingerprint
+                    && member.installation_chain == expected.installation_chain
+                    && member.mounts == expected.mounts
+                    && member.source_relative_path.as_deref()
+                        == source.member_paths.get(&expected.id).map(String::as_str)
+            } else {
+                member == expected
+            };
+            if !member_matches {
                 return Err(StorageError::InvalidTakeoverPlan);
             }
         }
@@ -10436,16 +10801,27 @@ fn ensure_takeover_domain_matches(
             .ok_or(StorageError::InvalidTakeoverPlan)?;
         let installation_chain =
             read_member_installation_chain_from(transaction, &planned.member_id)?;
-        let (description, selected) = transaction
+        let (description, selected, source_relative_path) = transaction
             .query_row(
                 "SELECT description,
                         EXISTS(
                             SELECT 1 FROM member_selections
                             WHERE bundle_id = ?1 AND member_id = ?2
+                        ),
+                        (
+                            SELECT source_relative_path
+                            FROM source_member_links
+                            WHERE member_id = ?2
                         )
                  FROM skill_members WHERE id = ?2 AND bundle_id = ?1",
                 params![plan.bundle_id, planned.member_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(StorageError::SaveTakeoverTransaction)?
@@ -10455,6 +10831,10 @@ fn ensure_takeover_domain_matches(
             || member.content_fingerprint != expected.fingerprint
             || member.stable_relative_path != expected.stable_relative_path
             || member.expected_target != planned.expected_target
+            || source_relative_path.as_deref()
+                != takeover_source
+                    .and_then(|source| source.member_paths.get(&planned.member_id))
+                    .map(String::as_str)
             || installation_chain.as_ref() != planned.installation_chain.as_deref()
             || description != planned.skill_description
             || !selected
@@ -10473,6 +10853,86 @@ fn ensure_takeover_domain_matches(
             || mount.expected_target != target.expected_target
             || mount.health != MountHealth::Healthy
         {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_takeover_source_matches(
+    transaction: &Transaction<'_>,
+    bundle_id: &str,
+    expected: Option<&ValidatedTakeoverSource>,
+    existing_source_id: Option<&str>,
+) -> Result<(), StorageError> {
+    let actual = transaction
+        .query_row(
+            "SELECT source.id, source.canonical_identity, source.owner,
+                    source.repository, source.display_name, source.locator,
+                    source.tracked_ref, link.adopted_marker
+             FROM source_bundle_links AS link
+             JOIN sources AS source ON source.id = link.source_id
+             WHERE link.bundle_id = ?1",
+            [bundle_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::SaveTakeoverTransaction)?;
+
+    let Some(expected) = expected else {
+        if existing_source_id.is_none() && actual.is_some() {
+            return Err(StorageError::InvalidTakeoverPlan);
+        }
+        return Ok(());
+    };
+    let actual = actual.ok_or(StorageError::InvalidTakeoverPlan)?;
+    if actual.1 != expected.canonical_identity
+        || actual.2 != expected.owner
+        || actual.3 != expected.repository
+        || actual.4 != expected.display_name
+        || actual.5 != expected.locator
+        || actual.6.is_empty()
+        || expected
+            .explicit_tracked_ref
+            .as_deref()
+            .is_some_and(|tracked_ref| tracked_ref != actual.6)
+        || actual.7.is_some()
+    {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    let mapping_count = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM source_member_links WHERE source_id = ?1",
+            [actual.0.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(StorageError::SaveTakeoverTransaction)?;
+    if mapping_count != expected.member_paths.len() as i64 {
+        return Err(StorageError::InvalidTakeoverPlan);
+    }
+    for (member_id, source_relative_path) in &expected.member_paths {
+        let mapping_matches = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM source_member_links
+                    WHERE source_id = ?1 AND source_relative_path = ?2 AND member_id = ?3
+                 )",
+                params![actual.0, source_relative_path, member_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::SaveTakeoverTransaction)?;
+        if !mapping_matches {
             return Err(StorageError::InvalidTakeoverPlan);
         }
     }
@@ -13824,7 +14284,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=23).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=24).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -13928,16 +14388,54 @@ mod tests {
             .expect("应准备已核验的旧 Bundle 命名状态");
         drop(connection);
 
-        let storage = Storage::open(&data_root, &database).expect("应完成 Bundle 名称修正");
-        let display_name = storage
+        let storage =
+            Storage::open(&data_root, &database).expect("应完成 Bundle 名称与 Source 修正");
+        let saved_source = storage
             .connection
             .query_row(
-                "SELECT display_name FROM bundles WHERE id = 'bundle-mattpocock'",
+                "SELECT bundle.display_name, source.canonical_identity,
+                        source.display_name, source.locator, source.tracked_ref,
+                        link.adopted_marker
+                 FROM bundles AS bundle
+                 JOIN source_bundle_links AS link ON link.bundle_id = bundle.id
+                 JOIN sources AS source ON source.id = link.source_id
+                 WHERE bundle.id = 'bundle-mattpocock'",
                 [],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
             )
-            .expect("应读取修正后的 Bundle 名称");
-        assert_eq!(display_name, "mattpocock/skills");
+            .expect("应读取修正后的 Bundle Source");
+        assert_eq!(
+            saved_source,
+            (
+                "mattpocock/skills".to_owned(),
+                "github:mattpocock/skills".to_owned(),
+                "mattpocock/skills".to_owned(),
+                "https://github.com/mattpocock/skills".to_owned(),
+                "HEAD".to_owned(),
+                None,
+            )
+        );
+        let mapping_count = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM source_member_links AS mapping
+                 JOIN source_bundle_links AS link ON link.source_id = mapping.source_id
+                 WHERE link.bundle_id = 'bundle-mattpocock'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应读取自动保存的成员路径");
+        assert_eq!(mapping_count, 2);
     }
 
     #[test]

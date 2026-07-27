@@ -221,6 +221,7 @@ GitHub 文档会推荐使用 `gh skill` 为 Copilot 安装 Skill，但执行者�
 2. 同一个 source 的所有 Skill 必须归入同一个 Bundle，不能因为安装目标 Host、安装命令或 `pluginName` 不同而拆分。
 3. Bundle 显示名直接使用 lock 保存的 `source`；SkillYard 1.0 不再引入 `pluginName` 命名优先级。
 4. `pluginName` 只保留为可核验的安装器附加信息，不改变 Bundle 边界或名称。
+5. 用户确认接管后，能够规范化为 GitHub 仓库的 lock 来源应自动创建或复用 Source，并关联本地 Bundle；这项写入与接管领域状态使用同一次 SQLite 提交。
 
 以本机 `mattpocock/skills` 为例：
 
