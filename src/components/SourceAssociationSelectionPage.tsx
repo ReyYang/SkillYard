@@ -6,6 +6,7 @@ import type {
   SourceMemberMappingChoice,
   SourceSummary,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 const NO_SOURCE_MEMBER = "__skillyard_none__";
 
@@ -90,6 +91,7 @@ export function SourceAssociationSelectionPage({
 
   return (
     <main className="association-shell">
+      <PageBackButton disabled={isPlanning} onClick={onBack} />
       <header className="association-header">
         <div>
           <p className="eyebrow">SKILLYARD · SOURCE ASSOCIATION</p>
@@ -99,14 +101,6 @@ export function SourceAssociationSelectionPage({
             Source，再明确每个本地 Skill 是否对应其中的成员。
           </p>
         </div>
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isPlanning}
-          onClick={onBack}
-        >
-          返回清单
-        </button>
       </header>
 
       {freshSources.length === 0 ? (

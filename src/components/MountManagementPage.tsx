@@ -6,6 +6,7 @@ import type {
   SupportedAppId,
   SupportedAppSummary,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface MountManagementPageProps {
   entry: InventoryObservation;
@@ -49,6 +50,7 @@ export function MountManagementPage({
 }: MountManagementPageProps) {
   return (
     <main className="mount-shell">
+      <PageBackButton disabled={isPlanning} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · SUPPORTED APP MOUNT</p>
       <h1>管理挂载</h1>
       <p className="lead">
@@ -193,17 +195,6 @@ export function MountManagementPage({
           </section>
         );
       })}
-
-      <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isPlanning}
-          onClick={onBack}
-        >
-          {readOnly || projects.length > 0 ? "返回清单" : "返回添加项目"}
-        </button>
-      </div>
     </main>
   );
 }

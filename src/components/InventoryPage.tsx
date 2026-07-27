@@ -9,12 +9,15 @@ import type {
   SupportedAppId,
   UiOutcome,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 type ManagementFilter = "all" | "managed" | "takeover" | "other";
 
 interface InventoryPageProps {
   outcome: InventoryOutcome;
+  screen: InventoryScreen;
+  onScreenChange(screen: InventoryScreen): void;
   isWriteBlocked: boolean;
   allowReadOnlyDetails: boolean;
   isRefreshing: boolean;
@@ -81,7 +84,7 @@ interface InventoryGroupView {
   hasSource: boolean;
 }
 
-type InventoryScreen =
+export type InventoryScreen =
   | { type: "list" }
   | { type: "settings" }
   | { type: "group"; groupId: string }
@@ -89,6 +92,8 @@ type InventoryScreen =
 
 export function InventoryPage({
   outcome,
+  screen,
+  onScreenChange,
   isWriteBlocked,
   allowReadOnlyDetails,
   isRefreshing,
@@ -134,7 +139,6 @@ export function InventoryPage({
 }: InventoryPageProps) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ManagementFilter>("all");
-  const [screen, setScreen] = useState<InventoryScreen>({ type: "list" });
 
   const groups = useMemo(
     () => groupInventoryEntries(outcome.entries),
@@ -184,7 +188,7 @@ export function InventoryPage({
         resetError={resetError}
         onOpenCentralStore={onOpenCentralStore}
         onResetApplication={onResetApplication}
-        onBack={() => setScreen({ type: "list" })}
+        onBack={() => onScreenChange({ type: "list" })}
       />
     );
   }
@@ -199,9 +203,10 @@ export function InventoryPage({
         )}
         actionsDisabled={isWriteBlocked}
         allowReadOnlyDetails={allowReadOnlyDetails}
+        mountError={mountError}
         onManageMount={onManageMount}
         onBack={() =>
-          setScreen({ type: "group", groupId: selectedGroup.id })
+          onScreenChange({ type: "group", groupId: selectedGroup.id })
         }
       />
     );
@@ -213,13 +218,13 @@ export function InventoryPage({
         group={selectedGroup}
         mounts={outcome.mounts}
         onOpenSkill={(entryId) =>
-          setScreen({
+          onScreenChange({
             type: "skill",
             groupId: selectedGroup.id,
             entryId,
           })
         }
-        onBack={() => setScreen({ type: "list" })}
+        onBack={() => onScreenChange({ type: "list" })}
       />
     );
   }
@@ -285,7 +290,7 @@ export function InventoryPage({
           <button
             className="secondary-action"
             type="button"
-            onClick={() => setScreen({ type: "settings" })}
+            onClick={() => onScreenChange({ type: "settings" })}
           >
             设置
           </button>
@@ -515,7 +520,9 @@ export function InventoryPage({
             onTakeover={
               group.kind === "takeoverBundle" ? onTakeover : undefined
             }
-            onOpen={() => setScreen({ type: "group", groupId: group.id })}
+            onOpen={() =>
+              onScreenChange({ type: "group", groupId: group.id })
+            }
             openLabel={
               group.kind === "managedBundle" ||
               group.kind === "takeoverBundle"
@@ -723,14 +730,12 @@ function InventorySettingsPage({
 }) {
   return (
     <main className="inventory-shell inventory-subpage">
+      <PageBackButton onClick={onBack} />
       <header className="detail-header">
         <div>
           <p className="eyebrow">SKILLYARD · SETTINGS</p>
           <h1>设置</h1>
         </div>
-        <button className="secondary-action" type="button" onClick={onBack}>
-          返回 Bundle 清单
-        </button>
       </header>
 
       <section className="settings-card">
@@ -794,15 +799,13 @@ function InventoryGroupDetails({
 }) {
   return (
     <main className="inventory-shell inventory-subpage">
+      <PageBackButton onClick={onBack} />
       <header className="detail-header">
         <div>
           <p className="eyebrow">{groupEyebrow(group.kind)}</p>
           <h1>{group.title}</h1>
           <p className="inventory-summary">{group.entries.length} 个 Skill</p>
         </div>
-        <button className="secondary-action" type="button" onClick={onBack}>
-          返回 Bundle 清单
-        </button>
       </header>
 
       <ul className="skill-member-list" aria-label={`${group.title} 的 Skill`}>
@@ -845,6 +848,7 @@ function SkillDetailsPage({
   mounts,
   actionsDisabled,
   allowReadOnlyDetails,
+  mountError,
   onManageMount,
   onBack,
 }: {
@@ -853,6 +857,7 @@ function SkillDetailsPage({
   mounts: MountSummary[];
   actionsDisabled: boolean;
   allowReadOnlyDetails: boolean;
+  mountError: string | null;
   onManageMount(memberId: string): void;
   onBack(): void;
 }) {
@@ -862,6 +867,7 @@ function SkillDetailsPage({
     "来源未知";
   return (
     <main className="inventory-shell inventory-subpage">
+      <PageBackButton onClick={onBack} />
       <header className="detail-header">
         <div>
           <p className="eyebrow">{group.title}</p>
@@ -870,9 +876,6 @@ function SkillDetailsPage({
             {managementLabel(entry.managementKind)}
           </span>
         </div>
-        <button className="secondary-action" type="button" onClick={onBack}>
-          返回 Bundle
-        </button>
       </header>
 
       <section className="skill-detail-card" aria-label="Skill 详情">
@@ -961,6 +964,13 @@ function SkillDetailsPage({
           </button>
         ) : null}
       </section>
+
+      {mountError ? (
+        <div className="inline-error" role="alert">
+          <strong>挂载操作未完成</strong>
+          <span>{mountError}</span>
+        </div>
+      ) : null}
 
       {managementDirection(entry) ? (
         <p className="management-direction">{managementDirection(entry)}</p>

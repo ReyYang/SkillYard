@@ -1,4 +1,5 @@
 import type { EditableLocalRelinkPlan } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface EditableLocalRelinkPageProps {
   plan: EditableLocalRelinkPlan;
@@ -21,6 +22,11 @@ export function EditableLocalRelinkPage({
 
   return (
     <main className="source-shell source-ref-shell">
+      <PageBackButton
+        disabled={isBusy}
+        label={isDiscarding ? "正在取消…" : "返回"}
+        onClick={onDiscard}
+      />
       <p className="eyebrow">SKILLYARD · EDITABLE LOCAL</p>
       <h1>确认重新指定 Source 路径</h1>
       <p className="lead">
@@ -84,14 +90,6 @@ export function EditableLocalRelinkPage({
       ) : null}
 
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isBusy}
-          onClick={onDiscard}
-        >
-          {isDiscarding ? "正在取消…" : "取消"}
-        </button>
         <button
           className="primary-action"
           type="button"

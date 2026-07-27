@@ -6,6 +6,7 @@ import type {
   SourceKind,
   SupportedAppId,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface RemovalPlanPageProps {
   plan: RemovalPlan;
@@ -34,6 +35,11 @@ export function RemovalPlanPage({
 
   return (
     <main className="removal-shell">
+      <PageBackButton
+        disabled={isBusy}
+        label={isDiscarding ? "正在清理预览…" : "返回"}
+        onClick={() => onDiscard(plan.id)}
+      />
       <p className="eyebrow">SKILLYARD · REMOVAL PLAN</p>
       <h1>{removalHeading(plan)}</h1>
       <p className="lead">{removalLead(plan)}</p>
@@ -141,14 +147,6 @@ export function RemovalPlanPage({
       ) : null}
 
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isBusy}
-          onClick={() => onDiscard(plan.id)}
-        >
-          {isDiscarding ? "正在清理预览…" : removalBackLabel(plan)}
-        </button>
         {plan.kind === "bundle" && !isBundleDangerConfirmed ? (
           <button
             className="danger-action"
@@ -235,10 +233,6 @@ function removalLead(plan: RemovalPlan): string {
     return "从所有 Agent 应用和项目中解除这个 Bundle 的 Mount。";
   }
   return "删除整个本地受管 Bundle，而不是删除其中某一个 Skill。";
-}
-
-function removalBackLabel(plan: RemovalPlan): string {
-  return plan.kind === "source" ? "返回 Source 列表" : "返回清单";
 }
 
 function removalConfirmLabel(plan: RemovalPlan): string {

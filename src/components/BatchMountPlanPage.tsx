@@ -6,6 +6,7 @@ import type {
   BatchMountPlanItem,
   SupportedAppId,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface BatchMountPlanPageProps {
   plan: BatchMountPlan;
@@ -42,6 +43,7 @@ export function BatchMountPlanPage({
 
   return (
     <main className="mount-shell">
+      <PageBackButton disabled={isConfirming} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · CONFIRM BATCH MOUNT</p>
       <h1>{`确认 ${plan.bundleDisplayName} 批量挂载`}</h1>
       <p className="lead">
@@ -100,14 +102,6 @@ export function BatchMountPlanPage({
         确认开始后不能取消，也不能接受部分结果。
       </p>
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isConfirming}
-          onClick={onBack}
-        >
-          返回
-        </button>
         <button
           className="primary-action"
           type="button"

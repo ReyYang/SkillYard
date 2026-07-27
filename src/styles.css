@@ -887,6 +887,34 @@ code {
   opacity: 0.58;
 }
 
+/* 次级页面把返回入口固定在内容最前面，避免每个页面各自选择位置。 */
+.page-back-action {
+  display: inline-flex;
+  gap: 0.45rem;
+  align-items: center;
+  margin: 0 0 1.4rem;
+  padding: 0.45rem 0.2rem;
+  border: 0;
+  color: #35523d;
+  background: transparent;
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.page-back-action span {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.page-back-action:hover:not(:disabled) {
+  color: #142c1b;
+}
+
+.page-back-action:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
 .inventory-controls {
   display: flex;
   gap: 1rem;

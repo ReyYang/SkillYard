@@ -5,6 +5,7 @@ import type {
   SourceAssociationPlan,
   SupportedAppId,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface SourceAssociationPlanPageProps {
   plan: SourceAssociationPlan;
@@ -43,6 +44,11 @@ export function SourceAssociationPlanPage({
 
   return (
     <main className="association-shell">
+      <PageBackButton
+        disabled={isBusy}
+        label={isDiscarding ? "正在返回…" : "返回"}
+        onClick={onBack}
+      />
       <header className="association-header">
         <div>
           <p className="eyebrow">SKILLYARD · ASSOCIATION PLAN</p>
@@ -179,14 +185,6 @@ export function SourceAssociationPlanPage({
       ) : null}
 
       <footer className="plan-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isBusy}
-          onClick={onBack}
-        >
-          {isDiscarding ? "正在返回…" : "返回"}
-        </button>
         <button
           className="primary-action"
           type="button"

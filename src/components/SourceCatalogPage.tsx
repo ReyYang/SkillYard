@@ -6,6 +6,7 @@ import type {
   SourceSummary,
   UiOutcome,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
 
@@ -101,6 +102,7 @@ export function SourceCatalogPage({
 
   return (
     <main className="source-shell">
+      <PageBackButton disabled={isBusy} onClick={onBack} />
       <header className="source-header">
         <div>
           <p className="eyebrow">SKILLYARD · SOURCE CATALOG</p>
@@ -111,14 +113,6 @@ export function SourceCatalogPage({
           </p>
         </div>
         <div className="source-header-actions">
-          <button
-            className="secondary-action"
-            type="button"
-            disabled={isBusy}
-            onClick={onBack}
-          >
-            返回清单
-          </button>
           <button
             className="secondary-action"
             type="button"

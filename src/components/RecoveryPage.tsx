@@ -1,4 +1,5 @@
 import type { RecoveryIssue } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface RecoveryPageProps {
   issue: RecoveryIssue;
@@ -17,6 +18,7 @@ export function RecoveryPage({
 }: RecoveryPageProps) {
   return (
     <main className="source-shell source-ref-shell">
+      <PageBackButton disabled={isOpeningCentralStore} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · FILESYSTEM RECOVERY</p>
       <h1>需要人工检查文件</h1>
       <p className="lead">
@@ -48,14 +50,6 @@ export function RecoveryPage({
       ) : null}
 
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isOpeningCentralStore}
-          onClick={onBack}
-        >
-          返回清单
-        </button>
         <button
           className="primary-action"
           type="button"

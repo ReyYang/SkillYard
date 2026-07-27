@@ -1,4 +1,5 @@
 import type { SourceRefChangePlan } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface SourceRefChangePageProps {
   plan: SourceRefChangePlan;
@@ -17,6 +18,7 @@ export function SourceRefChangePage({
 }: SourceRefChangePageProps) {
   return (
     <main className="source-shell source-ref-shell">
+      <PageBackButton disabled={isConfirming} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · TRACKED REF</p>
       <h1>确认更改 Source 分支</h1>
       <p className="lead">
@@ -51,14 +53,6 @@ export function SourceRefChangePage({
       ) : null}
 
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isConfirming}
-          onClick={onBack}
-        >
-          返回
-        </button>
         <button
           className="primary-action"
           type="button"

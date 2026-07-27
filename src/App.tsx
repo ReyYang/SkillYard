@@ -5,7 +5,10 @@ import { BundleMountPage } from "./components/BundleMountPage";
 import { BundleUpdateBatchPage } from "./components/BundleUpdateBatchPage";
 import { CurrentOperationBanner } from "./components/CurrentOperationBanner";
 import { EditableLocalRelinkPage } from "./components/EditableLocalRelinkPage";
-import { InventoryPage } from "./components/InventoryPage";
+import {
+  InventoryPage,
+  type InventoryScreen,
+} from "./components/InventoryPage";
 import { InstallPlanPage } from "./components/InstallPlanPage";
 import { MountManagementPage } from "./components/MountManagementPage";
 import { MountPlanPage } from "./components/MountPlanPage";
@@ -54,6 +57,8 @@ type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
 type SkillsShSearchOutcome = Extract<UiOutcome, { type: "skillsShSearch" }>;
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 
+const INVENTORY_LIST_SCREEN: InventoryScreen = { type: "list" };
+
 interface CurrentOperationSummary {
   title: string;
   detail: string;
@@ -87,6 +92,12 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [readOnlyManagedMemberId, setReadOnlyManagedMemberId] = useState<
     string | null
   >(null);
+  // 页面级挂载管理会暂时卸载 Inventory，提升 screen 后才能准确回到原 Skill 详情。
+  const [inventoryScreen, setInventoryScreen] = useState<InventoryScreen>(
+    INVENTORY_LIST_SCREEN,
+  );
+  const [readOnlyInventoryScreen, setReadOnlyInventoryScreen] =
+    useState<InventoryScreen>(INVENTORY_LIST_SCREEN);
   const [isScanning, setIsScanning] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
@@ -785,6 +796,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     // 1.0 没有持久化偏好；重置只丢弃当前窗口中的临时展示状态。
     setIsBrowsingCommittedInventory(false);
     setReadOnlyManagedMemberId(null);
+    setInventoryScreen(INVENTORY_LIST_SCREEN);
+    setReadOnlyInventoryScreen(INVENTORY_LIST_SCREEN);
     setSourceDiscovery(null);
     setSkillsShSearch(null);
     setPendingSourceRefChange(null);
@@ -1336,6 +1349,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const readOnlyInventory = committedInventory ? (
     <InventoryPage
       outcome={committedInventory}
+      screen={readOnlyInventoryScreen}
+      onScreenChange={setReadOnlyInventoryScreen}
       isWriteBlocked
       allowReadOnlyDetails
       isRefreshing={false}
@@ -1420,6 +1435,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
             isBrowsing={isBrowsingCommittedInventory}
             onBrowse={() => {
               setReadOnlyManagedMemberId(null);
+              setReadOnlyInventoryScreen(INVENTORY_LIST_SCREEN);
               setIsBrowsingCommittedInventory(true);
             }}
             onReturn={() => {
@@ -1807,6 +1823,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     <InventoryPage
       key={inventoryPresentationKey}
       outcome={viewState.outcome}
+      screen={inventoryScreen}
+      onScreenChange={setInventoryScreen}
       // 任一主界面写操作进行中时统一冻结其他写入口；搜索和筛选仍可使用。
       isWriteBlocked={isInventoryWriteBlocked}
       allowReadOnlyDetails={false}

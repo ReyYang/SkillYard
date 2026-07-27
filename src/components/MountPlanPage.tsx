@@ -1,4 +1,5 @@
 import type { MountPlan, SupportedAppId } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface MountPlanPageProps {
   plan: MountPlan;
@@ -20,6 +21,7 @@ export function MountPlanPage({
 
   return (
     <main className="mount-shell">
+      <PageBackButton disabled={isConfirming} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · CONFIRM MOUNT</p>
       <h1>{`确认${action} ${appName} 挂载`}</h1>
       <section className="install-plan" aria-label="挂载影响预览">
@@ -56,14 +58,6 @@ export function MountPlanPage({
         确认开始后不能取消。SkillYard 会完成或自动恢复这次高保证操作。
       </p>
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isConfirming}
-          onClick={onBack}
-        >
-          返回
-        </button>
         <button
           className="primary-action"
           type="button"

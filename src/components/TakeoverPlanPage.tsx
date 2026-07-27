@@ -5,6 +5,7 @@ import type {
   TakeoverPlanOrigin,
   TakeoverPlanTarget,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface TakeoverPlanPageProps {
   plan: TakeoverPlan;
@@ -25,6 +26,7 @@ export function TakeoverPlanPage({
 
   return (
     <main className="mount-shell">
+      <PageBackButton disabled={isConfirming} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · CONFIRM TAKEOVER</p>
       <h1>{`确认接管 Bundle：${plan.bundleDisplayName}`}</h1>
       <p className="lead">
@@ -203,14 +205,6 @@ export function TakeoverPlanPage({
         确认开始后不能取消，也不会接受部分接管结果。
       </p>
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isConfirming}
-          onClick={onBack}
-        >
-          返回
-        </button>
         <button
           className="primary-action"
           type="button"

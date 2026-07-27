@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { InstallPlan, SupportedAppId } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface InstallPlanPageProps {
   plan: InstallPlan;
@@ -55,6 +56,11 @@ export function InstallPlanPage({
 
   return (
     <main className="install-shell">
+      <PageBackButton
+        disabled={isBusy}
+        label={isDiscarding ? "正在返回…" : "返回"}
+        onClick={onCancel}
+      />
       <p className="eyebrow">
         SKILLYARD · {isUpdate ? "UPDATE PLAN" : "INSTALL PLAN"}
       </p>
@@ -192,14 +198,6 @@ export function InstallPlanPage({
       ) : null}
 
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isBusy}
-          onClick={onCancel}
-        >
-          {isDiscarding ? "正在返回…" : "返回"}
-        </button>
         <button
           className="primary-action"
           type="button"

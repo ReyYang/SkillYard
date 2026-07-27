@@ -691,7 +691,9 @@ describe("本机清单", () => {
     await user.click(
       await screen.findByRole("button", { name: "更新 superpowers" }),
     );
-    await user.click(await screen.findByRole("button", { name: "返回" }));
+    await user.click(
+      await screen.findByRole("button", { name: "返回上一页" }),
+    );
 
     expect(client.discardInstallPlan).toHaveBeenCalledWith("update-plan-1");
     expect(
@@ -1405,7 +1407,7 @@ describe("本机清单", () => {
     await user.click(alpha);
     await user.click(beta);
 
-    const back = screen.getByRole("button", { name: "返回清单" });
+    const back = screen.getByRole("button", { name: "返回上一页" });
     const confirm = screen.getByRole("button", { name: "确认全部更新" });
     await user.click(confirm);
 
@@ -1479,7 +1481,7 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    const back = await screen.findByRole("button", { name: "返回清单" });
+    const back = await screen.findByRole("button", { name: "返回上一页" });
     const confirm = screen.getByRole("button", { name: "确认全部更新" });
     await user.click(back);
 
@@ -1712,7 +1714,9 @@ describe("本机清单", () => {
       "candidate-example",
     ]);
     expect(screen.getByRole("button", { name: "正在安全安装…" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeDisabled();
     expect(screen.getByLabelText("当前操作")).toHaveTextContent(
       "正在安装 Bundle",
     );
@@ -1745,8 +1749,15 @@ describe("本机清单", () => {
     expect(
       screen.getByRole("button", { name: "挂载到 Codex 全局" }),
     ).toBeDisabled();
-    expect(screen.getByRole("button", { name: "返回清单" })).toBeEnabled();
-    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    expect(
+      screen.getByRole("heading", { name: "saved" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
     expect(
       screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
@@ -1760,7 +1771,9 @@ describe("本机清单", () => {
       screen.getByRole("button", { name: "返回当前操作" }),
     );
     expect(screen.getByLabelText("安装影响预览")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeDisabled();
 
     await act(async () => {
       finishInstall?.(
@@ -2006,7 +2019,9 @@ describe("本机清单", () => {
 
     await openManagedSkillDetails(user);
     await user.click(screen.getByRole("button", { name: "管理挂载" }));
-    expect(screen.getByRole("button", { name: "返回添加项目" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "挂载到 Codex 全局" }));
 
     expect(client.createMountPlan).toHaveBeenCalledWith(
@@ -2025,13 +2040,17 @@ describe("本机清单", () => {
 
     expect(client.confirmMountPlan).toHaveBeenCalledWith("mount-plan-1");
     expect(screen.getByRole("button", { name: "正在安全创建…" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeDisabled();
 
     await act(async () => {
       finishMount?.(mounted);
     });
 
-    await openManagedSkillDetails(user);
+    expect(
+      screen.getByRole("heading", { name: "example" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "当前挂载" })).toHaveTextContent(
       "Codex · 全局",
     );
@@ -2118,8 +2137,10 @@ describe("本机清单", () => {
       "目标路径已被其他内容占用",
     );
     expect(client.getStartupState).toHaveBeenCalledTimes(1);
-    await user.click(screen.getByRole("button", { name: "返回添加项目" }));
-    expect(screen.getByText("example-bundle")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    expect(
+      screen.getByRole("heading", { name: "example" }),
+    ).toBeInTheDocument();
   });
 
   it("移除 Mount 前显示确认页，确认后只提交 Plan ID", async () => {
@@ -2263,7 +2284,9 @@ describe("本机清单", () => {
     );
     expect(client.getStartupState).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("button", { name: "确认创建" })).not.toBeInTheDocument();
-    expect(screen.getByText("example-bundle")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "example" }),
+    ).toBeInTheDocument();
   });
 
   it("只给真实受管 Bundle 提供批量挂载入口", async () => {
@@ -2550,7 +2573,9 @@ describe("本机清单", () => {
       "batch-item-1",
     ]);
     expect(screen.getByRole("button", { name: "正在安全挂载…" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "正在安全挂载…" }));
     expect(client.confirmBatchMountPlan).toHaveBeenCalledTimes(1);
 
@@ -2660,8 +2685,8 @@ describe("本机清单", () => {
     expect(screen.getByText("由 SkillYard 管理")).toBeInTheDocument();
     expect(screen.getByText("/tmp/example")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "返回 Bundle" }));
-    await user.click(screen.getByRole("button", { name: "返回 Bundle 清单" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
     await user.click(screen.getByRole("button", { name: "设置" }));
     expect(
       screen.getByRole("heading", { name: "设置" }),
@@ -2672,6 +2697,65 @@ describe("本机清单", () => {
     expect(
       screen.getByRole("button", { name: "打开 Central Store" }),
     ).toBeInTheDocument();
+  });
+
+  it("左上角返回按钮按清单、Bundle、Skill 和挂载管理的层级返回", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+
+    render(<App client={client} />);
+
+    await openManagedSkillDetails(user);
+    await user.click(screen.getByRole("button", { name: "管理挂载" }));
+    expect(screen.getByRole("heading", { name: "管理挂载" })).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("main")).getAllByRole("button")[0],
+    ).toHaveAccessibleName("返回上一页");
+
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    expect(screen.getByRole("heading", { name: "example" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    expect(
+      screen.getByRole("heading", { name: "example-bundle" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    expect(
+      screen.getByRole("heading", { name: "Bundle 清单" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    expect(
+      within(screen.getByRole("main")).getAllByRole("button")[0],
+    ).toHaveAccessibleName("返回上一页");
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    expect(
+      screen.getByRole("heading", { name: "Bundle 清单" }),
+    ).toBeInTheDocument();
+  });
+
+  it("安装与影响预览页面也把返回操作放在左上角", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(
+      createInstallPlan(),
+    );
+
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
+    expect(
+      within(screen.getByRole("main")).getAllByRole("button")[0],
+    ).toHaveAccessibleName("返回上一页");
+
+    await user.click(
+      screen.getByRole("button", { name: "从本地文件夹安装" }),
+    );
+    expect(await screen.findByLabelText("安装影响预览")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("main")).getAllByRole("button")[0],
+    ).toHaveAccessibleName("返回上一页");
   });
 
   it("准确展示四种管理状态，并只把受管 Skill 放入 Bundle 分组", async () => {
@@ -2735,7 +2819,7 @@ describe("本机清单", () => {
     );
     expect(screen.getByText("qa")).toBeInTheDocument();
     expect(screen.getByText("tdd")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "返回 Bundle 清单" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     const refreshedBundles = screen.getAllByRole("region", {
       name: "mattpocock/skills",
@@ -2746,7 +2830,7 @@ describe("本机清单", () => {
       }),
     );
     expect(screen.getByText("research")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "返回 Bundle 清单" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     expect(screen.getByRole("region", { name: "local-copy" })).toHaveTextContent(
       "待接管",
@@ -2951,7 +3035,7 @@ describe("本机清单", () => {
     );
     expect(client.openCentralStore).toHaveBeenCalledTimes(1);
 
-    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
     expect(screen.getByText("still-readable")).toBeInTheDocument();
   });
 });
@@ -2994,7 +3078,7 @@ describe("接管已有 Skill", () => {
     );
     expect(screen.getByText("review")).toBeInTheDocument();
     expect(screen.getByText("release")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "返回 Bundle 清单" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     await user.click(
       screen.getByRole("button", { name: "接管 Bundle 工具套件" }),
@@ -3810,7 +3894,9 @@ describe("接管已有 Skill", () => {
     await user.click(screen.getByRole("button", { name: "确认接管" }));
     expect(client.confirmTakeoverPlan).toHaveBeenCalledWith("takeover-plan-1");
     expect(screen.getByRole("button", { name: "正在安全接管…" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "正在安全接管…" }));
     expect(client.confirmTakeoverPlan).toHaveBeenCalledTimes(1);
 
@@ -4232,7 +4318,7 @@ describe("GitHub Source 安装", () => {
       }),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "取消" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     expect(client.discardEditableLocalRelinkPlan).toHaveBeenCalledWith(
       "relink-plan-1",
@@ -4240,7 +4326,7 @@ describe("GitHub Source 安装", () => {
     expect(
       await screen.findByRole("heading", { name: "安装 Skill" }),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
     expect(
       screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
@@ -4321,7 +4407,7 @@ describe("GitHub Source 安装", () => {
     expect(client.getStartupState).toHaveBeenCalledTimes(2);
     expect(screen.getByText("Tracked Ref: next")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
     expect(
       screen.getByLabelText("Bundle 更新状态：可更新"),
     ).toBeInTheDocument();
@@ -4418,10 +4504,13 @@ describe("GitHub Source 安装", () => {
     expect(screen.getByLabelText("安装影响预览")).toHaveTextContent(
       "Sourcehttps://github.com/anthropics/skills",
     );
-    await user.click(screen.getByRole("button", { name: "返回" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     expect(client.discardInstallPlan).toHaveBeenCalledWith("plan-1");
-    expect(screen.getByRole("button", { name: "正在返回…" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeDisabled();
+    expect(screen.getByText("正在返回…")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "确认安装" })).toBeDisabled();
 
     await act(async () => {
@@ -4508,13 +4597,15 @@ describe("GitHub Source 安装", () => {
 
     await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
     await user.click(screen.getByRole("button", { name: "安装 Bundle" }));
-    await user.click(screen.getByRole("button", { name: "返回" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "无法删除安装快照",
     );
     expect(screen.getByRole("button", { name: "确认安装" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "返回上一页" }),
+    ).toBeEnabled();
   });
 
   it("Plan 已在其他实例消费时退出旧确认页并重读最终状态", async () => {
@@ -4538,7 +4629,7 @@ describe("GitHub Source 安装", () => {
 
     await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
     await user.click(screen.getByRole("button", { name: "安装 Bundle" }));
-    await user.click(screen.getByRole("button", { name: "返回" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "安装 Plan 已经使用",
@@ -4862,7 +4953,7 @@ describe("补充来源与 Bundle 归并", () => {
     render(<App client={client} />);
 
     await openSourceAssociationPlan(user);
-    await user.click(screen.getByRole("button", { name: "返回" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     expect(client.discardSourceAssociationPlan).toHaveBeenCalledWith(
       "association-plan-1",
@@ -5252,7 +5343,7 @@ describe("移除与删除", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("没有回滚");
 
     const confirm = screen.getByRole("button", { name: "确认永久删除" });
-    const back = screen.getByRole("button", { name: "返回清单" });
+    const back = screen.getByRole("button", { name: "返回上一页" });
     await user.click(confirm);
 
     expect(client.confirmRemovalPlan).toHaveBeenCalledWith("removal-plan-1");
@@ -5367,7 +5458,7 @@ describe("移除与删除", () => {
       screen.queryByRole("article", { name: "editable-skills" }),
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "返回清单" }));
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
     expect(
       screen.getByLabelText("Bundle 更新状态：没有更新来源"),
     ).toBeInTheDocument();
@@ -5413,7 +5504,7 @@ describe("移除与删除", () => {
       }),
     );
     const back = await screen.findByRole("button", {
-      name: "返回 Source 列表",
+      name: "返回上一页",
     });
     const confirm = screen.getByRole("button", { name: "确认删除 Source" });
     await user.click(back);

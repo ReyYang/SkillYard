@@ -8,6 +8,7 @@ import type {
   TakeoverPlanRequest,
   TakeoverSharedTargetRequest,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface TakeoverSelectionPageProps {
   initialObservationId: string;
@@ -286,6 +287,7 @@ export function TakeoverSelectionPage({
 
   return (
     <main className="mount-shell">
+      <PageBackButton disabled={isPlanning} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · TAKEOVER</p>
       <h1>
         {isBundle
@@ -579,14 +581,6 @@ export function TakeoverSelectionPage({
         下一步由 Rust 重新检查路径并封存影响预览，此时仍不会修改文件。
       </p>
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isPlanning}
-          onClick={onBack}
-        >
-          返回清单
-        </button>
         <button
           className="primary-action"
           type="button"

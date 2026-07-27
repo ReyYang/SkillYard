@@ -11,6 +11,7 @@ import type {
   SupportedAppId,
   UiOutcome,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 type BundleUpdateBatchOutcome = Extract<
   UiOutcome,
@@ -95,6 +96,11 @@ function BatchPlan({
 
   return (
     <main className="batch-update-shell">
+      <PageBackButton
+        disabled={isBusy}
+        label={isDiscarding ? "正在清理更新预览…" : "返回"}
+        onClick={() => onDiscard(plan.id)}
+      />
       <p className="eyebrow">SKILLYARD · ALL UPDATES</p>
       <h1>确认全部更新</h1>
       <p className="lead">
@@ -159,14 +165,6 @@ function BatchPlan({
         确认开始后不能取消或修改选择；应用会顺序完成各 Bundle。
       </p>
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isBusy}
-          onClick={() => onDiscard(plan.id)}
-        >
-          {isDiscarding ? "正在清理更新预览…" : "返回清单"}
-        </button>
         <button
           className="primary-action"
           type="button"

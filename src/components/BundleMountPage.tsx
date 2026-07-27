@@ -6,6 +6,7 @@ import type {
   SupportedAppId,
   SupportedAppSummary,
 } from "../domain";
+import { PageBackButton } from "./PageBackButton";
 
 interface BundleMountPageProps {
   bundleDisplayName: string;
@@ -95,6 +96,7 @@ export function BundleMountPage({
 
   return (
     <main className="mount-shell">
+      <PageBackButton disabled={isPlanning} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · BATCH MOUNT TARGETS</p>
       <h1>{`批量挂载 ${bundleDisplayName}`}</h1>
       <p className="lead">本 Bundle 的 {uniqueMembers.length} 个 Skill 将全部参与</p>
@@ -192,14 +194,6 @@ export function BundleMountPage({
         下一步只生成影响预览；最终确认后，所选 Mount 会全部完成或全部撤销。
       </p>
       <div className="install-actions">
-        <button
-          className="secondary-action"
-          type="button"
-          disabled={isPlanning}
-          onClick={onBack}
-        >
-          返回清单
-        </button>
         <button
           className="primary-action"
           type="button"
