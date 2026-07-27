@@ -762,6 +762,17 @@ pub fn create_bundle_removal_plan(
 }
 
 #[tauri::command(async)]
+pub fn create_bundle_mount_removal_plan(
+    application: State<'_, SkillYardApplication>,
+    bundle_id: String,
+) -> Result<UiOutcome, UiError> {
+    dispatch(
+        &application,
+        UiIntent::CreateBundleMountRemovalPlan { bundle_id },
+    )
+}
+
+#[tauri::command(async)]
 pub fn confirm_removal_plan(
     application: State<'_, SkillYardApplication>,
     plan_id: String,

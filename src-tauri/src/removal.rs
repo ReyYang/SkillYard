@@ -58,6 +58,8 @@ pub enum RemovalError {
     InvalidJournalJson(#[source] serde_json::Error),
     #[error("Removal Plan 的不可变前置状态已经变化，请重新预览")]
     PlanPreconditionChanged,
+    #[error("这个 Bundle 当前没有 Mount")]
+    NoBundleMounts,
     #[error("Removal 事务需要人工恢复：{0}")]
     RecoveryBlocked(String),
     #[error("无法{action} {path}：{source}")]
@@ -365,6 +367,93 @@ pub(crate) fn create_bundle_removal_plan(
     Ok(plan)
 }
 
+pub(crate) fn create_bundle_mount_removal_plan(
+    paths: &ApplicationPaths,
+    storage: &mut Storage,
+    bundle_id: &str,
+    now: i64,
+) -> Result<RemovalPlan, RemovalError> {
+    ensure_target_available(storage, "bundle", bundle_id)?;
+    let lifecycle_lock = acquire_lifecycle_lock(paths)?;
+    lifecycle_lock.recheck(paths)?;
+    let bundle = storage.read_source_association_bundle(bundle_id)?;
+    let mounts = bundle
+        .members
+        .iter()
+        .flat_map(|member| member.mounts.iter().cloned())
+        .collect::<Vec<_>>();
+    if mounts.is_empty() {
+        return Err(RemovalError::NoBundleMounts);
+    }
+    let plan_id = Uuid::new_v4().to_string();
+    let mount_snapshots = seal_mounts(paths, storage, &plan_id, &mounts)?;
+    for member in &bundle.members {
+        storage.read_managed_member(&member.id)?;
+    }
+    let (device, inode) = read_bundle_identity(paths, lifecycle_lock.root(), bundle_id)?;
+    let source = source_for_bundle(storage, bundle.source_id.as_deref())?;
+    let created_at = now;
+    let plan = RemovalPlan {
+        id: plan_id,
+        kind: RemovalKind::BundleMounts,
+        target_id: bundle.id.clone(),
+        target_display_name: bundle.display_name.clone(),
+        members: bundle
+            .members
+            .iter()
+            .map(|member| RemovalMemberSummary {
+                id: member.id.clone(),
+                skill_name: member.skill_name.clone(),
+            })
+            .collect(),
+        mounts: mounts.iter().map(mount_summary).collect(),
+        affected_bundles: vec![RemovalBundleSummary {
+            id: bundle.id.clone(),
+            display_name: bundle.display_name.clone(),
+        }],
+        preserved_source: source.as_ref().map(|source| RemovalPreservedSource {
+            id: source.id.clone(),
+            display_name: source.display_name.clone(),
+            kind: source.kind,
+            locator: source.locator.clone(),
+        }),
+        managed_directory: None,
+        preserved_external_paths: Vec::new(),
+        warnings: vec![
+            "只解除这个 Bundle 的全部 Mount；Bundle、Skill、Source 和当前受管内容保持不变"
+                .to_owned(),
+        ],
+        created_at,
+        expires_at: now.saturating_add(REMOVAL_PLAN_TTL_MILLIS),
+    };
+    let mut member_ids = bundle
+        .members
+        .iter()
+        .map(|member| member.id.clone())
+        .collect::<Vec<_>>();
+    member_ids.sort();
+    let sealed = SealedRemovalPlan {
+        version: REMOVAL_JOURNAL_VERSION,
+        plan: plan.clone(),
+        project: None,
+        source: source.as_ref().map(source_snapshot),
+        bundle: Some(BundleSnapshot {
+            id: bundle.id,
+            display_name: bundle.display_name,
+            managed_directory: bundle.managed_directory,
+            current_target: bundle.current_target,
+            source_id: bundle.source_id,
+            device,
+            inode,
+            member_ids,
+        }),
+        mount_snapshots,
+    };
+    save_sealed_plan(storage, &sealed)?;
+    lifecycle_lock.recheck(paths)?;
+    Ok(plan)
+}
+
 pub(crate) fn read_open_removal_plan(
     storage: &Storage,
 ) -> Result<Option<RemovalPlan>, RemovalError> {
@@ -406,7 +495,7 @@ pub(crate) fn confirm_removal_plan(
         RemovalKind::Source => {
             confirm_source_removal(paths, storage, &stored, &sealed)?;
         }
-        RemovalKind::Project | RemovalKind::Bundle => {
+        RemovalKind::Project | RemovalKind::Bundle | RemovalKind::BundleMounts => {
             let lifecycle_lock = acquire_lifecycle_lock(paths)?;
             lifecycle_lock.recheck(paths)?;
             validate_live_plan(paths, lifecycle_lock.root(), storage, &sealed)?;
@@ -630,6 +719,14 @@ fn finalize_domain_state(
                 now,
             )?;
         }
+        RemovalKind::BundleMounts => {
+            storage.finalize_bundle_mount_removal(
+                &journal.transaction_id,
+                &sealed.plan.target_id,
+                &mount_ids,
+                now,
+            )?;
+        }
         RemovalKind::Source => return Err(RemovalError::PlanPreconditionChanged),
     }
     Ok(())
@@ -701,7 +798,7 @@ fn recover_transaction(
     }
 
     match sealed.plan.kind {
-        RemovalKind::Project => {
+        RemovalKind::Project | RemovalKind::BundleMounts => {
             if transaction.phase == "journal_ready" {
                 match journal.phase {
                     RemovalJournalPhase::JournalReady => {
@@ -721,13 +818,13 @@ fn recover_transaction(
                     }
                     RemovalJournalPhase::BundleIsolated | RemovalJournalPhase::StateCommitted => {
                         return Err(RemovalError::RecoveryBlocked(
-                            "Project Removal 阶段与 Journal 不一致".to_owned(),
+                            "Mount Removal 阶段与 Journal 不一致".to_owned(),
                         ));
                     }
                 }
             } else if transaction.phase != "mounts_isolated" {
                 return Err(RemovalError::RecoveryBlocked(
-                    "Project Removal 阶段与 Journal 不一致".to_owned(),
+                    "Mount Removal 阶段与 Journal 不一致".to_owned(),
                 ));
             }
             finalize_domain_state(storage, &sealed, &journal, now)?;
@@ -938,11 +1035,12 @@ fn validate_live_plan(
     if sealed.plan.kind == RemovalKind::Project {
         ensure_project_target_available(paths, storage, &sealed.plan.target_id)?;
     } else {
-        ensure_target_available(
-            storage,
-            sealed.plan.kind.storage_kind(),
-            &sealed.plan.target_id,
-        )?;
+        let target_kind = if sealed.plan.kind == RemovalKind::BundleMounts {
+            "bundle"
+        } else {
+            sealed.plan.kind.storage_kind()
+        };
+        ensure_target_available(storage, target_kind, &sealed.plan.target_id)?;
     }
     match sealed.plan.kind {
         RemovalKind::Project => {
@@ -968,7 +1066,7 @@ fn validate_live_plan(
                 return Err(RemovalError::PlanPreconditionChanged);
             }
         }
-        RemovalKind::Bundle => {
+        RemovalKind::Bundle | RemovalKind::BundleMounts => {
             let expected = sealed
                 .bundle
                 .as_ref()
@@ -1381,6 +1479,7 @@ impl RemovalKindStorage for RemovalKind {
             Self::Project => "project",
             Self::Source => "source",
             Self::Bundle => "bundle",
+            Self::BundleMounts => "bundle_mounts",
         }
     }
 }

@@ -322,7 +322,11 @@ export interface SourceSummary {
   members: SourceCatalogMemberSummary[];
 }
 
-export type RemovalKind = "project" | "source" | "bundle";
+export type RemovalKind =
+  | "project"
+  | "source"
+  | "bundle"
+  | "bundleMounts";
 
 export interface RemovalMemberSummary {
   id: string;
@@ -341,7 +345,7 @@ export interface RemovalPreservedSource {
   locator: string;
 }
 
-// 三类移除共用一份只读影响模型，前端不能按入口重新推导删除范围。
+// 四类移除共用一份只读影响模型，前端不能按入口重新推导删除范围。
 export interface RemovalPlan {
   id: string;
   kind: RemovalKind;

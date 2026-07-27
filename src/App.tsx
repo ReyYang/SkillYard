@@ -203,6 +203,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       const title =
         activeRemovalPlan?.kind === "bundle"
           ? "正在删除 Bundle"
+          : activeRemovalPlan?.kind === "bundleMounts"
+            ? "正在解除 Bundle 挂载"
           : activeRemovalPlan?.kind === "project"
             ? "正在移除项目"
             : "正在删除 Source";
@@ -553,7 +555,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           ? await client.createProjectRemovalPlan(targetId)
           : kind === "source"
             ? await client.createSourceRemovalPlan(targetId)
-            : await client.createBundleRemovalPlan(targetId);
+            : kind === "bundleMounts"
+              ? await client.createBundleMountRemovalPlan(targetId)
+              : await client.createBundleRemovalPlan(targetId);
       setPendingRemovalPlan(outcome.plan);
     } catch (error) {
       // Plan 创建仍是只读预览；失败后保留入口所在页面和已提交 read model。
@@ -1340,6 +1344,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       checkingEditableBundleId={null}
       isPreparingBundleUpdateBatch={false}
       removingBundleId={null}
+      unmountingBundleId={null}
       removingProjectId={null}
       isOpeningInstaller={false}
       isAddingProject={false}
@@ -1362,6 +1367,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onCheckEditableLocalBundle={() => undefined}
       onUpdateAll={() => undefined}
       onRemoveBundle={() => undefined}
+      onUnmountBundle={() => undefined}
       onRemoveProject={() => undefined}
       onInstall={() => undefined}
       onAddProject={() => undefined}
@@ -1831,6 +1837,12 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           ? removalOperation.targetId
           : null
       }
+      unmountingBundleId={
+        removalOperation?.type === "planning" &&
+        removalOperation.kind === "bundleMounts"
+          ? removalOperation.targetId
+          : null
+      }
       removingProjectId={
         removalOperation?.type === "planning" &&
         removalOperation.kind === "project"
@@ -1843,6 +1855,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       onUpdateAll={createBundleUpdateBatchPlan}
       onRemoveBundle={(bundleId) =>
         createRemovalPlan("bundle", bundleId)
+      }
+      onUnmountBundle={(bundleId) =>
+        createRemovalPlan("bundleMounts", bundleId)
       }
       onRemoveProject={(projectId) =>
         createRemovalPlan("project", projectId)

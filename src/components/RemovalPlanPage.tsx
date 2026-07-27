@@ -107,6 +107,11 @@ export function RemovalPlanPage({
           不会删除 Bundle 或 Skill，也不会删除项目目录中的未知内容。
         </p>
       ) : null}
+      {plan.kind === "bundleMounts" ? (
+        <p className="removal-safety-copy">
+          Bundle、全部 Skill、Source 和 current 内容都会保留，之后仍可重新挂载。
+        </p>
+      ) : null}
       {plan.kind === "source" ? (
         <div className="removal-safety-copy">
           <p>本地 Bundle、current 内容和 Mount 都会保留。</p>
@@ -213,6 +218,9 @@ function MountImpact({ mount }: { mount: MountSummary }) {
 function removalHeading(plan: RemovalPlan): string {
   if (plan.kind === "project") return `移除项目 ${plan.targetDisplayName}`;
   if (plan.kind === "source") return `删除 Source ${plan.targetDisplayName}`;
+  if (plan.kind === "bundleMounts") {
+    return `解除 ${plan.targetDisplayName} 的全部挂载`;
+  }
   return `删除 Bundle ${plan.targetDisplayName}`;
 }
 
@@ -222,6 +230,9 @@ function removalLead(plan: RemovalPlan): string {
   }
   if (plan.kind === "source") {
     return "删除 SkillYard 保存的 Source、目录状态、检查结果和更新关联。";
+  }
+  if (plan.kind === "bundleMounts") {
+    return "从所有 Agent 应用和项目中解除这个 Bundle 的 Mount。";
   }
   return "删除整个本地受管 Bundle，而不是删除其中某一个 Skill。";
 }
@@ -233,6 +244,7 @@ function removalBackLabel(plan: RemovalPlan): string {
 function removalConfirmLabel(plan: RemovalPlan): string {
   if (plan.kind === "project") return "确认移除项目";
   if (plan.kind === "source") return "确认删除 Source";
+  if (plan.kind === "bundleMounts") return "确认解除全部挂载";
   return "确认永久删除";
 }
 

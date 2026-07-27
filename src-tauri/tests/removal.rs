@@ -11,6 +11,184 @@ use skillyard_lib::{
 use tempfile::tempdir;
 
 #[test]
+fn bundle_mount_removal_unmounts_every_host_but_preserves_the_bundle_and_source() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, home) = ready_application(sandbox.path());
+    let installed = install_editable(&application, sandbox.path(), "bundle-unmount");
+    let unrelated = install_editable(&application, sandbox.path(), "unrelated-mount");
+    mount(
+        &application,
+        &installed.member_id,
+        SupportedAppId::Codex,
+        MountScope::Global,
+        None,
+    );
+    mount(
+        &application,
+        &installed.member_id,
+        SupportedAppId::ClaudeCode,
+        MountScope::Global,
+        None,
+    );
+    mount(
+        &application,
+        &unrelated.member_id,
+        SupportedAppId::GitHubCopilot,
+        MountScope::Global,
+        None,
+    );
+
+    let UiOutcome::RemovalPlan { plan } = application
+        .handle(UiIntent::CreateBundleMountRemovalPlan {
+            bundle_id: installed.bundle_id.clone(),
+        })
+        .expect("应生成 Bundle 全量解除挂载预览")
+    else {
+        panic!("应返回 RemovalPlan");
+    };
+    assert_eq!(plan.kind, RemovalKind::BundleMounts);
+    assert_eq!(plan.mounts.len(), 2);
+    assert!(plan.managed_directory.is_none());
+    assert_eq!(
+        plan.preserved_source
+            .as_ref()
+            .map(|source| source.id.as_str()),
+        Some(installed.source.id.as_str())
+    );
+
+    let UiOutcome::Inventory {
+        entries, mounts, ..
+    } = application
+        .handle(UiIntent::ConfirmRemovalPlan { plan_id: plan.id })
+        .expect("应一次解除 Bundle 的全部 Mount")
+    else {
+        panic!("解除挂载后应返回 Inventory");
+    };
+    assert!(
+        mounts
+            .iter()
+            .all(|mount| mount.member_id != installed.member_id),
+        "目标 Bundle 的全部 Mount 都应移除"
+    );
+    assert_eq!(mounts.len(), 1, "其他 Bundle 的 Mount 必须保留");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.member_id.as_deref() == Some(&installed.member_id)),
+        "解除挂载不能删除 Skill Member"
+    );
+    assert!(
+        data_root
+            .join("bundles")
+            .join(&installed.bundle_id)
+            .join("current")
+            .is_symlink(),
+        "解除挂载不能删除 Bundle current"
+    );
+    assert!(!home.join(".codex/skills/bundle-unmount").exists());
+    assert!(!home.join(".claude/skills/bundle-unmount").exists());
+    assert!(home.join(".copilot/skills/unrelated-mount").is_symlink());
+    let source = open_sources(&application)
+        .into_iter()
+        .find(|source| source.id == installed.source.id)
+        .expect("解除挂载后 Source 必须保留");
+    assert_eq!(
+        source.bundle_id.as_deref(),
+        Some(installed.bundle_id.as_str())
+    );
+    drop(application);
+
+    let restarted = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        entries, mounts, ..
+    } = restarted
+        .handle(UiIntent::GetStartupState)
+        .expect("重启后应保持已安装未挂载状态")
+    else {
+        panic!("重启后应返回 Inventory");
+    };
+    assert_eq!(mounts.len(), 1);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.member_id.as_deref() == Some(&installed.member_id))
+    );
+}
+
+#[test]
+fn bundle_mount_removal_finishes_after_all_mounts_are_isolated() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (application, data_root, home) = ready_application(sandbox.path());
+    let installed = install_editable(&application, sandbox.path(), "bundle-unmount-recovery");
+    mount(
+        &application,
+        &installed.member_id,
+        SupportedAppId::Codex,
+        MountScope::Global,
+        None,
+    );
+    mount(
+        &application,
+        &installed.member_id,
+        SupportedAppId::ClaudeCode,
+        MountScope::Global,
+        None,
+    );
+    let UiOutcome::RemovalPlan { plan } = application
+        .handle(UiIntent::CreateBundleMountRemovalPlan {
+            bundle_id: installed.bundle_id.clone(),
+        })
+        .expect("应生成 Bundle 全量解除挂载预览")
+    else {
+        panic!("应返回 RemovalPlan");
+    };
+    drop(application);
+
+    let interrupted = application_with_failpoint(
+        &data_root,
+        &home,
+        LifecycleFailpoint::AfterRemovalMountsIsolated,
+    );
+    interrupted
+        .handle(UiIntent::ConfirmRemovalPlan { plan_id: plan.id })
+        .expect_err("应在全部 Mount 隔离后模拟中断");
+    drop(interrupted);
+
+    let restarted = SkillYardApplication::new(
+        ApplicationPaths::for_home(data_root.clone(), home),
+        PlatformInfo::supported_for_test(),
+    );
+    let UiOutcome::Inventory {
+        entries,
+        mounts,
+        recovery_issues,
+        ..
+    } = restarted
+        .handle(UiIntent::GetStartupState)
+        .expect("重启后应继续完成 Bundle 全量解除挂载")
+    else {
+        panic!("应返回 Inventory");
+    };
+    assert!(mounts.is_empty());
+    assert!(recovery_issues.is_empty());
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.member_id.as_deref() == Some(&installed.member_id))
+    );
+    assert!(
+        data_root
+            .join("bundles")
+            .join(&installed.bundle_id)
+            .join("current")
+            .is_symlink()
+    );
+}
+
+#[test]
 fn project_removal_removes_all_project_mounts_but_preserves_other_mounts_and_bundles() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let (application, data_root, _home) = ready_application(sandbox.path());

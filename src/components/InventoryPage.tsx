@@ -23,6 +23,7 @@ interface InventoryPageProps {
   checkingEditableBundleId: string | null;
   isPreparingBundleUpdateBatch: boolean;
   removingBundleId: string | null;
+  unmountingBundleId: string | null;
   removingProjectId: string | null;
   isOpeningInstaller: boolean;
   isAddingProject: boolean;
@@ -45,6 +46,7 @@ interface InventoryPageProps {
   onCheckEditableLocalBundle(bundleId: string): void;
   onUpdateAll(): void;
   onRemoveBundle(bundleId: string): void;
+  onUnmountBundle(bundleId: string): void;
   onRemoveProject(projectId: string): void;
   onInstall(): void;
   onAddProject(): void;
@@ -95,6 +97,7 @@ export function InventoryPage({
   checkingEditableBundleId,
   isPreparingBundleUpdateBatch,
   removingBundleId,
+  unmountingBundleId,
   removingProjectId,
   isOpeningInstaller,
   isAddingProject,
@@ -117,6 +120,7 @@ export function InventoryPage({
   onCheckEditableLocalBundle,
   onUpdateAll,
   onRemoveBundle,
+  onUnmountBundle,
   onRemoveProject,
   onInstall,
   onAddProject,
@@ -495,6 +499,19 @@ export function InventoryPage({
               group.kind === "managedBundle" ? removingBundleId : null
             }
             onRemoveBundle={onRemoveBundle}
+            bundleMountCount={
+              group.kind === "managedBundle"
+                ? outcome.mounts.filter((mount) =>
+                    group.entries.some(
+                      (entry) => entry.memberId === mount.memberId,
+                    ),
+                  ).length
+                : 0
+            }
+            unmountingBundleId={
+              group.kind === "managedBundle" ? unmountingBundleId : null
+            }
+            onUnmountBundle={onUnmountBundle}
             onTakeover={
               group.kind === "takeoverBundle" ? onTakeover : undefined
             }
@@ -539,6 +556,9 @@ function InventorySection({
   onCheckEditableLocalBundle,
   removingBundleId = null,
   onRemoveBundle,
+  bundleMountCount = 0,
+  unmountingBundleId = null,
+  onUnmountBundle,
   onTakeover,
   onOpen,
   openLabel,
@@ -559,6 +579,9 @@ function InventorySection({
   onCheckEditableLocalBundle?(bundleId: string): void;
   removingBundleId?: string | null;
   onRemoveBundle?(bundleId: string): void;
+  bundleMountCount?: number;
+  unmountingBundleId?: string | null;
+  onUnmountBundle?(bundleId: string): void;
   onTakeover?(observationId: string): void;
   onOpen(): void;
   openLabel: string;
@@ -617,6 +640,19 @@ function InventorySection({
               onClick={() => onBatchMount?.(batchMountBundleId)}
             >
               批量挂载
+            </button>
+          ) : null}
+          {batchMountBundleId && bundleMountCount > 0 ? (
+            <button
+              className="compact-action"
+              type="button"
+              aria-label={`解除 Bundle ${title} 的全部挂载`}
+              disabled={actionsDisabled}
+              onClick={() => onUnmountBundle?.(batchMountBundleId)}
+            >
+              {unmountingBundleId === batchMountBundleId
+                ? "正在准备解除…"
+                : "解除全部挂载"}
             </button>
           ) : null}
           {batchMountBundleId ? (

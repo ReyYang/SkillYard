@@ -39,9 +39,9 @@ use crate::{
     },
     paths::ApplicationPaths,
     removal::{
-        RemovalError, confirm_removal_plan, create_bundle_removal_plan,
-        create_project_removal_plan, create_source_removal_plan, discard_removal_plan,
-        read_open_removal_plan, recover_pending_removals,
+        RemovalError, confirm_removal_plan, create_bundle_mount_removal_plan,
+        create_bundle_removal_plan, create_project_removal_plan, create_source_removal_plan,
+        discard_removal_plan, read_open_removal_plan, recover_pending_removals,
     },
     scanner::{scan, scan_projects, scan_with_projects},
     skills_sh::{SkillsShError, search_skills_sh},
@@ -313,6 +313,9 @@ impl SkillYardApplication {
             }
             UiIntent::CreateBundleRemovalPlan { bundle_id } => {
                 self.with_write_operation(|| self.create_bundle_removal_plan(bundle_id))
+            }
+            UiIntent::CreateBundleMountRemovalPlan { bundle_id } => {
+                self.with_write_operation(|| self.create_bundle_mount_removal_plan(bundle_id))
             }
             UiIntent::ConfirmRemovalPlan { plan_id } => {
                 self.with_write_operation(|| self.confirm_removal_plan(plan_id))
@@ -1356,6 +1359,21 @@ impl SkillYardApplication {
         Ok(UiOutcome::RemovalPlan { plan })
     }
 
+    fn create_bundle_mount_removal_plan(
+        &self,
+        bundle_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let plan = create_bundle_mount_removal_plan(
+            &self.paths,
+            &mut storage,
+            &bundle_id,
+            unix_timestamp_millis(),
+        )?;
+        Ok(UiOutcome::RemovalPlan { plan })
+    }
+
     fn confirm_removal_plan(&self, plan_id: String) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_recovered_storage()?;
         ensure_onboarding_completed(&storage)?;
@@ -1372,7 +1390,9 @@ impl SkillYardApplication {
                 highlighted_source_id: None,
                 highlighted_member_path: None,
             }),
-            crate::domain::RemovalKind::Project | crate::domain::RemovalKind::Bundle => storage
+            crate::domain::RemovalKind::Project
+            | crate::domain::RemovalKind::Bundle
+            | crate::domain::RemovalKind::BundleMounts => storage
                 .read_initial_scan()?
                 .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失")),
         }
@@ -1387,7 +1407,9 @@ impl SkillYardApplication {
                 highlighted_source_id: None,
                 highlighted_member_path: None,
             }),
-            crate::domain::RemovalKind::Project | crate::domain::RemovalKind::Bundle => storage
+            crate::domain::RemovalKind::Project
+            | crate::domain::RemovalKind::Bundle
+            | crate::domain::RemovalKind::BundleMounts => storage
                 .read_initial_scan()?
                 .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失")),
         }

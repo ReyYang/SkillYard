@@ -577,7 +577,7 @@ Stage 8 沿用唯一的 `InstallPlan(mode=update)` 和 `lifecycle_transactions(k
 
 ### 范围
 
-- 移除 Mount 只删除一个使用位置，保留 Bundle、Skill 和其他 Mount。
+- 移除 Mount 可以删除一个使用位置，也可以从 Bundle 入口一次解除其全部 Mount；两者都保留 Bundle、Skill、Source 和当前受管内容。
 - 移除 Project 时先事务性移除其中全部 SkillYard-managed project Mount，再删除 Project 记录。
 - 删除 Source 使用普通确认，删除 Catalog、检查结果、更新标识和 Source-to-Bundle 关联；本地 Bundle 继续显示“由 SkillYard 管理”和“没有更新来源”。
 - 删除 Source 或 Bundle 都不能删除 Editable Local Source 原目录、Agent-managed 内容或 Project-managed 内容。

@@ -82,6 +82,10 @@ pub enum UiIntent {
         #[serde(rename = "bundleId")]
         bundle_id: String,
     },
+    CreateBundleMountRemovalPlan {
+        #[serde(rename = "bundleId")]
+        bundle_id: String,
+    },
     ConfirmRemovalPlan {
         #[serde(rename = "planId")]
         plan_id: String,
@@ -917,13 +921,14 @@ pub enum BundleUpdateBatchResultItemStatus {
     NotExecuted,
 }
 
-/// 三种移除共享一份 Plan；kind 决定确认后的唯一生产路径。
+/// 四种移除共享一份 Plan；kind 决定确认后的唯一生产路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RemovalKind {
     Project,
     Source,
     Bundle,
+    BundleMounts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

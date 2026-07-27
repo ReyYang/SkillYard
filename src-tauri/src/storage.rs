@@ -89,6 +89,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         24,
         include_str!("../migrations/0024_takeover_source_from_lock.sql"),
     ),
+    (
+        25,
+        include_str!("../migrations/0025_bundle_mount_removal.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -4299,6 +4303,11 @@ impl Storage {
                         (removal_tx.kind = ?1 AND removal_tx.target_id = ?2)
                         OR (
                             ?1 = 'bundle'
+                            AND removal_tx.kind = 'bundle_mounts'
+                            AND removal_tx.target_id = ?2
+                        )
+                        OR (
+                            ?1 = 'bundle'
                             AND removal_tx.kind = 'project'
                             AND EXISTS(
                                 SELECT 1
@@ -4310,7 +4319,7 @@ impl Storage {
                         )
                         OR (
                             ?1 = 'project'
-                            AND removal_tx.kind = 'bundle'
+                            AND removal_tx.kind IN ('bundle', 'bundle_mounts')
                             AND EXISTS(
                                 SELECT 1
                                 FROM mounts AS mount
@@ -6331,7 +6340,7 @@ impl Storage {
     ) -> Result<(), StorageError> {
         if !is_single_path_component(plan.id)
             || !is_single_path_component(plan.target_id)
-            || !matches!(plan.kind, "project" | "source" | "bundle")
+            || !matches!(plan.kind, "project" | "source" | "bundle" | "bundle_mounts")
             || plan.payload_json.is_empty()
             || plan.payload_sha256.len() != 64
             || !plan
@@ -6462,7 +6471,7 @@ impl Storage {
         if plan.expires_at <= now {
             return Err(StorageError::RemovalPlanExpired);
         }
-        if !matches!(plan.kind.as_str(), "project" | "bundle")
+        if !matches!(plan.kind.as_str(), "project" | "bundle" | "bundle_mounts")
             || !is_single_path_component(transaction_id)
             || journal_path != format!("journals/{transaction_id}.json")
         {
@@ -6773,6 +6782,76 @@ impl Storage {
         transaction.commit().map_err(StorageError::SaveRemoval)
     }
 
+    pub(crate) fn finalize_bundle_mount_removal(
+        &mut self,
+        transaction_id: &str,
+        bundle_id: &str,
+        expected_mount_ids: &[String],
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::SaveRemoval)?;
+        ensure_removal_transaction_phase(
+            &transaction,
+            transaction_id,
+            "bundle_mounts",
+            bundle_id,
+            "mounts_isolated",
+        )?;
+        let current_mount_ids = read_sorted_string_column(
+            &transaction,
+            "SELECT mount.id
+             FROM mounts AS mount
+             JOIN skill_members AS member ON member.id = mount.member_id
+             WHERE member.bundle_id = ?1
+             ORDER BY mount.id",
+            bundle_id,
+        )?;
+        let mut expected_mount_ids = expected_mount_ids.to_vec();
+        expected_mount_ids.sort();
+        if current_mount_ids != expected_mount_ids || current_mount_ids.is_empty() {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        transaction
+            .execute(
+                "DELETE FROM mount_plans
+                 WHERE member_id IN (
+                    SELECT id FROM skill_members WHERE bundle_id = ?1
+                 )",
+                [bundle_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute(
+                "DELETE FROM batch_mount_plans WHERE bundle_id = ?1",
+                [bundle_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        transaction
+            .execute(
+                "DELETE FROM mounts
+                 WHERE member_id IN (
+                    SELECT id FROM skill_members WHERE bundle_id = ?1
+                 )",
+                [bundle_id],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        let updated = transaction
+            .execute(
+                "UPDATE removal_transactions
+                 SET phase = 'state_committed', status = 'completed', updated_at = ?2
+                 WHERE id = ?1 AND status = 'in_progress' AND phase = 'mounts_isolated'",
+                params![transaction_id, now],
+            )
+            .map_err(StorageError::SaveRemoval)?;
+        if updated != 1 {
+            return Err(StorageError::RemovalStateConflict);
+        }
+        transaction.commit().map_err(StorageError::SaveRemoval)
+    }
+
     // 这些参数共同构成确认页封存的 Bundle 删除合同，保持扁平可避免再造第二个领域类型。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finalize_bundle_removal(
@@ -7020,7 +7099,8 @@ impl Storage {
                            removal_tx.created_at AS created_at
                     FROM removal_transactions AS removal_tx
                     LEFT JOIN bundles AS bundle
-                      ON removal_tx.kind = 'bundle' AND bundle.id = removal_tx.target_id
+                      ON removal_tx.kind IN ('bundle', 'bundle_mounts')
+                     AND bundle.id = removal_tx.target_id
                     LEFT JOIN projects AS project
                       ON removal_tx.kind = 'project' AND project.id = removal_tx.target_id
                     LEFT JOIN sources AS source
@@ -7647,10 +7727,10 @@ fn bundle_or_source_write_is_blocked(
                     SELECT 1
                     FROM removal_transactions AS removal_tx
                     LEFT JOIN source_bundle_links AS removal_link
-                      ON removal_tx.kind = 'bundle'
+                      ON removal_tx.kind IN ('bundle', 'bundle_mounts')
                      AND removal_link.bundle_id = removal_tx.target_id
                     WHERE removal_tx.status = 'blocked'
-                      AND removal_tx.kind = 'bundle'
+                      AND removal_tx.kind IN ('bundle', 'bundle_mounts')
                       AND (
                         (?1 IS NOT NULL AND removal_tx.target_id = ?1)
                         OR (?2 IS NOT NULL AND removal_link.source_id = ?2)
@@ -7700,7 +7780,10 @@ fn mount_object_is_blocked(
                 FROM removal_transactions AS removal_tx
                 WHERE removal_tx.status = 'blocked'
                   AND (
-                    (removal_tx.kind = 'bundle' AND removal_tx.target_id = ?1)
+                    (
+                        removal_tx.kind IN ('bundle', 'bundle_mounts')
+                        AND removal_tx.target_id = ?1
+                    )
                     OR (
                         removal_tx.kind = 'project'
                         AND ?2 IS NOT NULL
@@ -8512,7 +8595,10 @@ fn read_removal_plan_from(
 fn validate_stored_removal_plan(plan: &StoredRemovalPlan) -> Result<(), StorageError> {
     if !is_single_path_component(&plan.id)
         || !is_single_path_component(&plan.target_id)
-        || !matches!(plan.kind.as_str(), "project" | "source" | "bundle")
+        || !matches!(
+            plan.kind.as_str(),
+            "project" | "source" | "bundle" | "bundle_mounts"
+        )
         || !matches!(plan.status.as_str(), "pending" | "consumed")
         || plan.payload_json.is_empty()
         || plan.payload_sha256.len() != 64
@@ -14284,7 +14370,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=24).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=25).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -14436,6 +14522,102 @@ mod tests {
             )
             .expect("应读取自动保存的成员路径");
         assert_eq!(mapping_count, 2);
+    }
+
+    #[test]
+    fn bundle_mount_removal_migration_preserves_existing_removal_state() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let database = data_root.join("skillyard.sqlite3");
+        let connection = Connection::open(&database).expect("应创建 version 24 SQLite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("应建立 migration 表");
+        for (version, migration) in MIGRATIONS.iter().take(24) {
+            connection
+                .execute_batch(migration)
+                .expect("应建立 version 24 schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 1)",
+                    [version],
+                )
+                .expect("应记录旧 migration");
+        }
+        connection
+            .execute(
+                "INSERT INTO removal_plans (
+                    id, kind, target_id, payload_json, payload_sha256,
+                    status, created_at, expires_at
+                 ) VALUES (
+                    'old-removal-plan', 'project', 'old-project', '{}', ?1,
+                    'consumed', 1, 2
+                 )",
+                ["0".repeat(64)],
+            )
+            .expect("应准备旧 Removal Plan");
+        connection
+            .execute(
+                "INSERT INTO removal_transactions (
+                    id, plan_id, kind, target_id, journal_path, phase, status,
+                    error_message, created_at, updated_at
+                 ) VALUES (
+                    'old-removal-transaction', 'old-removal-plan', 'project',
+                    'old-project', 'journals/old-removal-transaction.json',
+                    'journal_ready', 'blocked', '等待人工处理', 1, 1
+                 )",
+                [],
+            )
+            .expect("应准备旧 Removal 事务");
+        drop(connection);
+
+        let storage = Storage::open(&data_root, &database).expect("应升级 Removal schema");
+        let preserved = storage
+            .connection
+            .query_row(
+                "SELECT plan.kind, removal_tx.kind, removal_tx.phase,
+                        removal_tx.status, removal_tx.error_message
+                 FROM removal_plans AS plan
+                 JOIN removal_transactions AS removal_tx
+                   ON removal_tx.plan_id = plan.id
+                 WHERE plan.id = 'old-removal-plan'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .expect("应读取迁移后的 Removal 状态");
+        assert_eq!(
+            preserved,
+            (
+                "project".to_owned(),
+                "project".to_owned(),
+                "journal_ready".to_owned(),
+                "blocked".to_owned(),
+                Some("等待人工处理".to_owned()),
+            )
+        );
+        let foreign_key_issues = storage
+            .connection
+            .prepare("PRAGMA foreign_key_check")
+            .expect("应检查迁移后的外键")
+            .query_map([], |_| Ok(()))
+            .expect("应执行外键检查")
+            .count();
+        assert_eq!(foreign_key_issues, 0);
     }
 
     #[test]

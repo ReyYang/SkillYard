@@ -46,6 +46,7 @@ export interface SkillYardClient {
   createProjectRemovalPlan(projectId: string): Promise<RemovalPlanOutcome>;
   createSourceRemovalPlan(sourceId: string): Promise<RemovalPlanOutcome>;
   createBundleRemovalPlan(bundleId: string): Promise<RemovalPlanOutcome>;
+  createBundleMountRemovalPlan(bundleId: string): Promise<RemovalPlanOutcome>;
   confirmRemovalPlan(planId: string): Promise<UiOutcome>;
   discardRemovalPlan(planId: string): Promise<UiOutcome>;
   openSourceDiscovery(): Promise<
@@ -151,6 +152,10 @@ export const tauriSkillYardClient: SkillYardClient = {
     invoke<RemovalPlanOutcome>("create_source_removal_plan", { sourceId }),
   createBundleRemovalPlan: (bundleId) =>
     invoke<RemovalPlanOutcome>("create_bundle_removal_plan", { bundleId }),
+  createBundleMountRemovalPlan: (bundleId) =>
+    invoke<RemovalPlanOutcome>("create_bundle_mount_removal_plan", {
+      bundleId,
+    }),
   confirmRemovalPlan: (planId) =>
     invoke<UiOutcome>("confirm_removal_plan", { planId }),
   discardRemovalPlan: (planId) =>

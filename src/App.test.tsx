@@ -5107,6 +5107,82 @@ describe("补充来源与 Bundle 归并", () => {
 });
 
 describe("移除与删除", () => {
+  it("Bundle 可以一次解除全部挂载，并保留本地内容与 Source", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()], null, {
+      mounts: [
+        createMount(),
+        createMount({
+          id: "mount-claude",
+          appId: "claudeCode",
+          targetPath: "/tmp/.claude/skills/example",
+        }),
+      ],
+    });
+    const plan = createRemovalPlan({
+      kind: "bundleMounts",
+      members: [{ id: "member-1", skillName: "example" }],
+      managedDirectory: null,
+      preservedExternalPaths: [],
+      warnings: [
+        "只解除这个 Bundle 的全部 Mount；Bundle、Skill、Source 和当前受管内容保持不变",
+      ],
+    });
+    const client = createClient(initial);
+    vi.mocked(client.createBundleMountRemovalPlan).mockResolvedValue({
+      type: "removalPlan",
+      plan,
+    });
+    vi.mocked(client.confirmRemovalPlan).mockResolvedValue(
+      inventoryOutcome([createManagedEntry()]),
+    );
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", {
+      name: "example-bundle",
+    });
+    await user.click(
+      within(bundle).getByRole("button", {
+        name: "解除 Bundle example-bundle 的全部挂载",
+      }),
+    );
+
+    expect(client.createBundleMountRemovalPlan).toHaveBeenCalledWith(
+      "bundle-1",
+    );
+    expect(
+      screen.getByRole("heading", {
+        name: "解除 example-bundle 的全部挂载",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "将移除的 Mount" })).toHaveTextContent(
+      "Codex · 全局",
+    );
+    expect(
+      screen.queryByRole("region", { name: "将删除的 Skill" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "继续删除" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Bundle、全部 Skill、Source 和 current 内容都会保留/),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "确认解除全部挂载" }),
+    );
+
+    expect(client.confirmRemovalPlan).toHaveBeenCalledWith("removal-plan-1");
+    expect(
+      await screen.findByRole("heading", { name: "Bundle 清单" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "解除 Bundle example-bundle 的全部挂载",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("Bundle 删除完整展示影响，并且第二次点击前不会确认", async () => {
     const user = userEvent.setup();
     let finishConfirm: ((outcome: UiOutcome) => void) | undefined;
@@ -5826,6 +5902,7 @@ function createClient(startup: UiOutcome): SkillYardClient {
     createProjectRemovalPlan: vi.fn(),
     createSourceRemovalPlan: vi.fn(),
     createBundleRemovalPlan: vi.fn(),
+    createBundleMountRemovalPlan: vi.fn(),
     confirmRemovalPlan: vi.fn(),
     discardRemovalPlan: vi.fn(),
     openSourceDiscovery: vi.fn().mockResolvedValue(sourceDiscoveryOutcome()),

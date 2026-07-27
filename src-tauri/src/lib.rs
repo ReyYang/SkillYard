@@ -106,6 +106,7 @@ pub fn run() {
             commands::create_project_removal_plan,
             commands::create_source_removal_plan,
             commands::create_bundle_removal_plan,
+            commands::create_bundle_mount_removal_plan,
             commands::confirm_removal_plan,
             commands::discard_removal_plan
         ])
