@@ -37,6 +37,6 @@ SkillYard 1.0 仅支持 macOS 14+ Apple Silicon。其他系统或架构上的问
 
 ## 已知分发边界
 
-正式安装包使用 ad-hoc signing，未使用 Apple Developer ID，也未经过 notarization。macOS 首次打开时出现正常 Gatekeeper 提示本身不是安全漏洞；请先核对文件来自本仓库的 GitHub Releases，并验证 SHA-256。
+正式安装包使用 ad-hoc signing，未使用 Apple Developer ID，也未经过 notarization。macOS 首次打开时出现正常 Gatekeeper 提示本身不是安全漏洞；请先核对文件来自本仓库的 GitHub Releases。
 
 SkillYard 会在用户明确发起 Source 加载、搜索、检查或更新时访问对应网络来源。它不提供遥测，不上传崩溃报告，也不执行 Source 或 Skill 携带的代码。如果实际行为超出这些边界，请按安全问题私密报告。

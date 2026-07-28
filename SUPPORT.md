@@ -12,7 +12,7 @@ GitHub Releases 是 SkillYard 正式安装包的唯一官方下载渠道。请�
 ## 提交 Bug 前
 
 1. 确认设备为 Apple Silicon，系统为 macOS 14 或更高版本。
-2. 确认使用当前最新 GitHub Release，并通过 `SHA256SUMS.txt` 验证安装包。
+2. 确认使用当前最新 GitHub Release。
 3. 重启 SkillYard，确认问题仍能复现。
 4. 搜索现有 Issue，避免重复报告。
 
