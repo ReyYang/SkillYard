@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       expected_commit_sha:
-        description: 候选 workflow 与 v1.0.0 Tag 必须共同指向的完整 commit SHA
+        description: 候选 workflow 与 v1.0.1 Tag 必须共同指向的完整 commit SHA
         required: true
         type: string
       expected_zip_sha256:
@@ -18,7 +18,7 @@ on:
       tag_name:
         description: 已创建并指向 expected commit 的 Release Tag
         required: true
-        default: v1.0.0
+        default: v1.0.1
         type: string
 
 # 只有正式发布 workflow 可以写 Release；actions:read 仅用于读取指定候选 run。
@@ -27,7 +27,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-v1.0.0
+  group: publish-v1.0.1
   cancel-in-progress: false
 
 jobs:
@@ -36,13 +36,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      ARTIFACT_NAME: skillyard-1.0.0-macos-aarch64-candidate
+      ARTIFACT_NAME: skillyard-1.0.1-macos-aarch64-candidate
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
       EXPECTED_ZIP_SHA256: ${{ inputs.expected_zip_sha256 }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG_NAME: ${{ inputs.tag_name }}
-      ZIP_NAME: SkillYard-1.0.0-macos-aarch64.zip
+      ZIP_NAME: SkillYard-1.0.1-macos-aarch64.zip
     steps:
       - name: Validate immutable inputs
         run: |
@@ -50,7 +50,7 @@ jobs:
           [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$EXPECTED_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EXPECTED_ZIP_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          test "$TAG_NAME" = "v1.0.0"
+          test "$TAG_NAME" = "v1.0.1"
 
       # 同时核验 run 本身和 workflow 记录，防止误用其他 workflow 的同名 artifact。
       - name: Verify candidate workflow run
@@ -120,6 +120,7 @@ jobs:
             exit 1
           fi
 
+      # SHA 文件只用于候选验证；公开 Release 保持一个 ZIP 资产。
       # 先保持 draft，任何上传或后验失败都不会留下对外可见的不完整 Release。
       - name: Create draft GitHub Release
         env:
@@ -127,12 +128,11 @@ jobs:
         run: |
           gh release create "$TAG_NAME" \
             "verified-candidate/$ZIP_NAME" \
-            "verified-candidate/SHA256SUMS.txt" \
             --repo "$GH_REPO" \
             --draft \
             --verify-tag \
-            --title "SkillYard 1.0.0" \
-            --notes-file docs/releases/v1.0.0.md
+            --title "SkillYard 1.0.1" \
+            --notes-file docs/releases/v1.0.1.md
 
       - name: Verify draft assets by downloading them again
         env:
@@ -143,12 +143,7 @@ jobs:
           gh release download "$TAG_NAME" \
             --repo "$GH_REPO" \
             --dir verified-draft-assets \
-            --pattern "$ZIP_NAME" \
-            --pattern "SHA256SUMS.txt"
-          (
-            cd verified-draft-assets
-            sha256sum -c SHA256SUMS.txt
-          )
+            --pattern "$ZIP_NAME"
           test "$(sha256sum "verified-draft-assets/$ZIP_NAME" | awk '{print $1}')" = "$EXPECTED_ZIP_SHA256"
 
       - name: Publish verified draft
@@ -168,17 +163,11 @@ jobs:
         run: |
           set -euo pipefail
           ACTUAL_ASSETS="$(gh release view "$TAG_NAME" --repo "$GH_REPO" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
-          EXPECTED_ASSETS="$(printf '%s\n%s' 'SHA256SUMS.txt' "$ZIP_NAME")"
-          test "$ACTUAL_ASSETS" = "$EXPECTED_ASSETS"
+          test "$ACTUAL_ASSETS" = "$ZIP_NAME"
 
           mkdir published-assets
           gh release download "$TAG_NAME" \
             --repo "$GH_REPO" \
             --dir published-assets \
-            --pattern "$ZIP_NAME" \
-            --pattern "SHA256SUMS.txt"
-          (
-            cd published-assets
-            sha256sum -c SHA256SUMS.txt
-          )
+            --pattern "$ZIP_NAME"
           test "$(sha256sum "published-assets/$ZIP_NAME" | awk '{print $1}')" = "$EXPECTED_ZIP_SHA256"
