@@ -1,6 +1,7 @@
 outputs/
 work/
 .codex/
+.pi/
 build/
 dist/
 node_modules/
