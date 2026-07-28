@@ -29,7 +29,6 @@ impl From<ApplicationError> for UiError {
             ApplicationError::SourceAssociation(_) => "sourceAssociationError",
             ApplicationError::BundleUpdateBatch(_) => "bundleUpdateBatchError",
             ApplicationError::Removal(_) => "removalError",
-            ApplicationError::InitialScan(_) => "scanError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",
             ApplicationError::OperationGateUnavailable => "operationGateUnavailable",
@@ -835,22 +834,21 @@ mod tests {
     #[test]
     fn ipc_dispatch_keeps_the_typed_application_error() {
         let sandbox = tempdir().expect("应创建隔离测试目录");
-        let home = sandbox.path().join("home");
-        fs::create_dir_all(home.join(".codex")).expect("应创建测试父目录");
-        fs::write(home.join(".codex/skills"), "not a directory").expect("应创建非法扫描根");
+        let data_root = sandbox.path().join("blocked-data-root");
+        fs::write(&data_root, "not a directory").expect("应创建不可用的数据根");
         let application = SkillYardApplication::new(
-            ApplicationPaths::for_home(sandbox.path().join("data"), home),
+            ApplicationPaths::for_home(data_root, sandbox.path().join("home")),
             PlatformInfo::supported_for_test(),
         );
 
         let expected = application
             .handle(UiIntent::StartInitialScan)
-            .expect_err("application seam 应拒绝非法扫描根")
+            .expect_err("application seam 应返回存储错误")
             .to_string();
         let actual = dispatch(&application, UiIntent::StartInitialScan)
-            .expect_err("IPC dispatch 应拒绝非法扫描根");
+            .expect_err("IPC dispatch 应保留存储错误");
 
-        assert_eq!(actual.code, "scanError");
+        assert_eq!(actual.code, "storageError");
         assert_eq!(actual.message, expected);
     }
 

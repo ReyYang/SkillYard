@@ -81,22 +81,22 @@ describe("首次使用", () => {
     expect(screen.getByText("example")).toBeInTheDocument();
   });
 
-  it("扫描失败时显示 Rust 返回的结构化错误", async () => {
+  it("首次扫描无法保存时显示 Rust 返回的结构化错误", async () => {
     const user = userEvent.setup();
     const client = createClient({
       type: "onboardingRequired",
       supportedApps: [],
     });
     vi.mocked(client.startInitialScan).mockRejectedValue({
-      code: "scanError",
-      message: "无法读取扫描根目录",
+      code: "storageError",
+      message: "无法保存首次扫描结果",
     });
 
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: "开始扫描" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "无法读取扫描根目录",
+      "无法保存首次扫描结果",
     );
   });
 });
@@ -2972,6 +2972,7 @@ describe("本机清单", () => {
       ]),
       scanIssues: [
         {
+          id: "global:codex_global:root_not_directory:/tmp/.codex/skills",
           rootId: "global:codex_global",
           rootKey: "codexGlobal",
           projectId: null,
@@ -2983,13 +2984,13 @@ describe("本机清单", () => {
     });
     render(<App client={client} />);
 
-    expect(await screen.findByLabelText("刷新告警")).toHaveTextContent(
-      "没有把它们当作已删除",
+    expect(await screen.findByLabelText("扫描告警")).toHaveTextContent(
+      "不会自动修改这些路径",
     );
     expect(screen.getByText("上次结果")).toBeInTheDocument();
   });
 
-  it("同一种项目扫描根的问题按 rootId 同时显示", async () => {
+  it("同一扫描根的多个 Skill 问题按 issue id 同时显示", async () => {
     const consoleError = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
@@ -2997,20 +2998,22 @@ describe("本机清单", () => {
       ...inventoryOutcome([]),
       scanIssues: [
         {
-          rootId: "project:project-1:codex_project",
-          rootKey: "codexProject",
-          projectId: "project-1",
-          path: "/tmp/first/.codex/skills",
-          code: "readRoot",
-          message: "无法读取第一个项目扫描根",
+          id: "global:codex_global:read_skill_content:/tmp/.codex/skills/first",
+          rootId: "global:codex_global",
+          rootKey: "codexGlobal",
+          projectId: null,
+          path: "/tmp/.codex/skills/first",
+          code: "readSkillContent",
+          message: "无法读取第一个 Skill",
         },
         {
-          rootId: "project:project-2:codex_project",
-          rootKey: "codexProject",
-          projectId: "project-2",
-          path: "/tmp/second/.codex/skills",
-          code: "readRoot",
-          message: "无法读取第二个项目扫描根",
+          id: "global:codex_global:read_skill_content:/tmp/.codex/skills/second",
+          rootId: "global:codex_global",
+          rootKey: "codexGlobal",
+          projectId: null,
+          path: "/tmp/.codex/skills/second",
+          code: "readSkillContent",
+          message: "无法读取第二个 Skill",
         },
       ],
     });
@@ -3018,10 +3021,10 @@ describe("本机清单", () => {
     try {
       render(<App client={client} />);
 
-      const warning = await screen.findByLabelText("刷新告警");
-      expect(warning).toHaveTextContent("/tmp/first/.codex/skills");
-      expect(warning).toHaveTextContent("/tmp/second/.codex/skills");
-      // 两个 Project 共用 rootKey 时，也不能触发 React 重复 key 告警。
+      const warning = await screen.findByLabelText("扫描告警");
+      expect(warning).toHaveTextContent("/tmp/.codex/skills/first");
+      expect(warning).toHaveTextContent("/tmp/.codex/skills/second");
+      // 同根问题共享 rootId 时，也不能触发 React 重复 key 告警。
       expect(
         consoleError.mock.calls.some((call) =>
           call.some(

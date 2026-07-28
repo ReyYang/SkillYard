@@ -86,8 +86,6 @@ pub enum ApplicationError {
     BundleUpdateBatch(#[from] BundleUpdateBatchError),
     #[error(transparent)]
     Removal(#[from] RemovalError),
-    #[error("首次扫描未完整完成：{0}")]
-    InitialScan(String),
     #[error("当前状态不能执行这个操作：{0}")]
     InvalidState(&'static str),
     #[error("已有一项写操作正在执行，请等待完成")]
@@ -393,11 +391,13 @@ impl SkillYardApplication {
         }
 
         let result = scan(&self.paths);
-        if let Some(issue) = result.issues.first() {
-            return Err(ApplicationError::InitialScan(issue.message.clone()));
-        }
         let scan_completed_at = unix_timestamp_millis();
-        storage.save_initial_scan(scan_completed_at, &result.entries, &result.supported_apps)?;
+        storage.save_initial_scan(
+            scan_completed_at,
+            &result.entries,
+            &result.supported_apps,
+            &result.issues,
+        )?;
         lifecycle_lock.recheck(&self.paths)?;
         storage
             .read_initial_scan()?

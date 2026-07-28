@@ -93,6 +93,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         25,
         include_str!("../migrations/0025_bundle_mount_removal.sql"),
     ),
+    (26, include_str!("../migrations/0026_scan_issue_paths.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -4015,12 +4016,14 @@ impl Storage {
         scan_completed_at: i64,
         entries: &[InventoryObservation],
         supported_apps: &[SupportedAppSummary],
+        scan_issues: &[ScanIssue],
     ) -> Result<(), StorageError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StorageError::SaveInitialScan)?;
-        replace_inventory_rows(&transaction, entries, supported_apps, &[])
+        // 首次扫描与刷新采用同一部分成功语义，扫描问题和完成标记必须原子保存。
+        replace_inventory_rows(&transaction, entries, supported_apps, scan_issues)
             .map_err(StorageError::SaveInitialScan)?;
         transaction
             .execute(
@@ -11245,7 +11248,7 @@ fn read_scan_issues_from(connection: &Connection) -> Result<Vec<ScanIssue>, Stor
     let mut statement = connection
         .prepare(
             "SELECT root_id, root_key, project_id, path, code, message
-             FROM inventory_scan_issues ORDER BY root_id",
+             FROM inventory_scan_issues ORDER BY root_id, path, code",
         )
         .map_err(StorageError::ReadInventory)?;
     let rows = statement
@@ -11270,15 +11273,9 @@ fn read_scan_issues_from(connection: &Connection) -> Result<Vec<ScanIssue>, Stor
         if root_id != identity.stable_id() {
             return Err(StorageError::InvalidScanRootIdentity(root_id));
         }
-        issues.push(ScanIssue {
-            root_id,
-            root_key,
-            project_id,
-            path,
-            code: ScanIssueCode::from_str(&code)
-                .ok_or_else(|| StorageError::UnknownScanIssueCode(code.clone()))?,
-            message,
-        });
+        let code = ScanIssueCode::from_str(&code)
+            .ok_or_else(|| StorageError::UnknownScanIssueCode(code.clone()))?;
+        issues.push(ScanIssue::new(identity, path, code, message));
     }
     Ok(issues)
 }
@@ -13438,9 +13435,15 @@ fn reconcile_entries(
     scan_issues: &[ScanIssue],
 ) -> Vec<InventoryObservation> {
     let successful = successful_roots.iter().cloned().collect::<BTreeSet<_>>();
-    let failed = scan_issues
+    let root_failures = scan_issues
         .iter()
+        .filter(|issue| !issue.is_entry_scoped())
         .map(scan_issue_identity)
+        .collect::<BTreeSet<_>>();
+    let entry_failures = scan_issues
+        .iter()
+        .filter(|issue| issue.is_entry_scoped())
+        .map(|issue| (scan_issue_identity(issue), issue.path.clone()))
         .collect::<BTreeSet<_>>();
     let previous_by_id = previous
         .iter()
@@ -13448,13 +13451,16 @@ fn reconcile_entries(
         .collect::<BTreeMap<_, _>>();
     let mut combined = previous
         .iter()
-        .filter(|entry| !successful.contains(&observation_root_identity(entry)))
-        .cloned()
-        .map(|mut entry| {
-            if failed.contains(&observation_root_identity(&entry)) {
+        .filter_map(|entry| {
+            let identity = observation_root_identity(entry);
+            if root_failures.contains(&identity)
+                || entry_failures.contains(&(identity.clone(), entry.skill_root.clone()))
+            {
+                let mut entry = entry.clone();
                 entry.stale = true;
+                return Some(entry);
             }
-            entry
+            (!successful.contains(&identity)).then(|| entry.clone())
         })
         .collect::<Vec<_>>();
     combined.extend(scanned.iter().cloned().map(|mut entry| {
@@ -13484,10 +13490,10 @@ fn reconcile_scan_issues(
         .iter()
         .filter(|issue| !touched.contains(&scan_issue_identity(issue)))
         .cloned()
-        .map(|issue| (issue.root_id.clone(), issue))
+        .map(|issue| (issue.id.clone(), issue))
         .collect::<BTreeMap<_, _>>();
     for issue in current {
-        combined.insert(issue.root_id.clone(), issue.clone());
+        combined.insert(issue.id.clone(), issue.clone());
     }
     combined.into_values().collect()
 }
@@ -14374,7 +14380,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=25).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=26).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",
@@ -14413,6 +14419,66 @@ mod tests {
             .expect("应执行外键检查")
             .count();
         assert_eq!(foreign_key_issues, 0);
+    }
+
+    #[test]
+    fn scan_issue_migration_preserves_old_rows_and_allows_multiple_paths_per_root() {
+        let sandbox = tempdir().expect("应创建隔离测试目录");
+        let data_root = sandbox.path().join("data");
+        fs::create_dir(&data_root).expect("应创建数据目录");
+        let database = data_root.join("skillyard.sqlite3");
+        let connection = Connection::open(&database).expect("应创建 version 25 SQLite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("应建立 migration 表");
+        for (version, migration) in MIGRATIONS.iter().take(25) {
+            connection
+                .execute_batch(migration)
+                .expect("应建立 version 25 schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 1)",
+                    [version],
+                )
+                .expect("应记录旧 migration");
+        }
+        connection
+            .execute(
+                "INSERT INTO inventory_scan_issues (
+                    root_id, root_key, project_id, path, code, message
+                 ) VALUES (
+                    'global:shared_agents', 'shared_agents', NULL,
+                    '/tmp/.agents/skills/first', 'read_skill_content', 'first'
+                 )",
+                [],
+            )
+            .expect("应准备旧扫描问题");
+        drop(connection);
+
+        let storage = Storage::open(&data_root, &database).expect("应升级扫描问题 schema");
+        storage
+            .connection
+            .execute(
+                "INSERT INTO inventory_scan_issues (
+                    root_id, root_key, project_id, path, code, message
+                 ) VALUES (
+                    'global:shared_agents', 'shared_agents', NULL,
+                    '/tmp/.agents/skills/second', 'read_skill_content', 'second'
+                 )",
+                [],
+            )
+            .expect("同一根应保存第二个条目问题");
+
+        let issues = read_scan_issues_from(&storage.connection).expect("应读取升级后的扫描问题");
+        assert_eq!(issues.len(), 2);
+        assert_ne!(issues[0].id, issues[1].id);
+        assert!(issues.iter().all(|issue| issue.is_entry_scoped()));
     }
 
     #[test]
@@ -17934,7 +18000,7 @@ mod tests {
         assert_eq!(mount.health, MountHealth::Healthy);
 
         storage
-            .save_initial_scan(500, &[], &[])
+            .save_initial_scan(500, &[], &[], &[])
             .expect("应保存初始清单");
         let Some(UiOutcome::Inventory {
             projects, mounts, ..
@@ -18112,7 +18178,7 @@ mod tests {
         assert_eq!(recoverable[0].status, "blocked");
 
         storage
-            .save_initial_scan(500, &[], &[])
+            .save_initial_scan(500, &[], &[], &[])
             .expect("应保存初始清单");
         let Some(UiOutcome::Inventory {
             recovery_issues, ..
@@ -18490,7 +18556,7 @@ mod tests {
             .block_lifecycle_transaction("txn", "current 状态无法判断", 201)
             .expect("应保存阻塞恢复状态");
         storage
-            .save_initial_scan(202, &[], &[])
+            .save_initial_scan(202, &[], &[], &[])
             .expect("应保存初始清单");
 
         let Some(UiOutcome::Inventory {
@@ -18725,7 +18791,7 @@ mod tests {
             )
             .expect("应完成事务");
         storage
-            .save_initial_scan(204, &[], &[])
+            .save_initial_scan(204, &[], &[], &[])
             .expect("应建立可读取的清单状态");
         storage
             .connection

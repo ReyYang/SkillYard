@@ -7,8 +7,8 @@ use std::process::Command;
 
 use rusqlite::Connection;
 use skillyard_lib::{
-    ApplicationPaths, InventoryLocationKind, ManagementKind, PlatformInfo, ScanRootKey,
-    SkillMetadataStatus, SkillYardApplication, SupportedAppId, UiIntent, UiOutcome,
+    ApplicationPaths, InventoryLocationKind, ManagementKind, PlatformInfo, ScanIssueCode,
+    ScanRootKey, SkillMetadataStatus, SkillYardApplication, SupportedAppId, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -155,6 +155,116 @@ fn scan_discovers_only_fixed_global_and_shared_roots_without_modifying_content()
         fs::read(home.join(".agents/skills/shared-one/SKILL.md")).expect("应读取扫描后内容"),
         shared_before
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn initial_scan_isolates_dangling_skill_links_and_recovers_each_entry_independently() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let shared_root = home.join(".agents/skills");
+    let linked_source = sandbox.path().join("linked-source");
+    let missing_superpowers = sandbox.path().join("missing-superpowers");
+    let missing_second = sandbox.path().join("missing-second");
+    write_skill(&shared_root.join("healthy-local"), "healthy-local", "local");
+    write_skill(&linked_source, "healthy-linked", "linked");
+    symlink(&linked_source, shared_root.join("healthy-linked")).expect("应创建有效 Skill 软链接");
+    symlink(&missing_superpowers, shared_root.join("superpowers"))
+        .expect("应创建与 Issue #42 一致的断链 Skill");
+    symlink(&missing_second, shared_root.join("second-broken"))
+        .expect("应创建同一扫描根中的第二个断链 Skill");
+
+    let paths = ApplicationPaths::for_home(data_root, home);
+    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let UiOutcome::Inventory {
+        entries,
+        scan_issues,
+        ..
+    } = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("一个断链 Skill 不能阻止首次扫描")
+    else {
+        panic!("首次扫描后应进入 Inventory");
+    };
+
+    let names = entries
+        .iter()
+        .map(|entry| entry.skill_name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(names, BTreeSet::from(["healthy-linked", "healthy-local"]));
+    assert_eq!(scan_issues.len(), 2);
+    assert!(scan_issues.iter().all(|issue| {
+        issue.root_key == ScanRootKey::SharedAgents && issue.code == ScanIssueCode::ReadSkillContent
+    }));
+    assert!(
+        scan_issues
+            .iter()
+            .any(|issue| issue.path.ends_with("/superpowers"))
+    );
+    assert!(
+        scan_issues
+            .iter()
+            .any(|issue| issue.path.ends_with("/second-broken"))
+    );
+
+    // 首次扫描和局部问题必须原子保存，重启后不能重新回到介绍页。
+    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let UiOutcome::Inventory {
+        entries,
+        scan_issues,
+        ..
+    } = reopened
+        .handle(UiIntent::GetStartupState)
+        .expect("重启后应读取首次扫描的部分成功结果")
+    else {
+        panic!("重启后应继续显示 Inventory");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(scan_issues.len(), 2);
+
+    // 修复其中一个目标后，只清除对应告警，另一个断链仍保持隔离。
+    write_skill(&missing_superpowers, "superpowers", "recovered-superpowers");
+    let UiOutcome::Inventory {
+        entries,
+        scan_issues,
+        last_local_refresh: Some(summary),
+        ..
+    } = reopened
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("修复一个断链后应恢复对应 Skill")
+    else {
+        panic!("刷新后应继续显示 Inventory");
+    };
+    assert_eq!(summary.added, 1);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.skill_name == "superpowers")
+    );
+    assert_eq!(scan_issues.len(), 1);
+    assert!(scan_issues[0].path.ends_with("/second-broken"));
+
+    // 两个目标都恢复后，告警应完全消失，扫描根无需人工重置。
+    write_skill(&missing_second, "second-broken", "recovered-second");
+    let UiOutcome::Inventory {
+        entries,
+        scan_issues,
+        last_local_refresh: Some(summary),
+        ..
+    } = reopened
+        .handle(UiIntent::RefreshLocalInventory)
+        .expect("修复全部断链后应恢复完整清单")
+    else {
+        panic!("刷新后应继续显示 Inventory");
+    };
+    assert_eq!(summary.added, 1);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.skill_name == "second-broken")
+    );
+    assert!(scan_issues.is_empty());
 }
 
 #[test]
@@ -341,7 +451,7 @@ fn returning_user_reads_persisted_inventory_without_rescanning() {
 }
 
 #[test]
-fn failed_scan_does_not_mark_onboarding_complete() {
+fn root_scan_issue_is_persisted_without_blocking_onboarding() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
     let data_root = sandbox.path().join("application-support/SkillYard");
@@ -350,14 +460,28 @@ fn failed_scan_does_not_mark_onboarding_complete() {
 
     let paths = ApplicationPaths::for_home(data_root, home);
     let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
-    assert!(application.handle(UiIntent::StartInitialScan).is_err());
+    let scanned = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("一个不可读扫描根不能阻止其他根完成首次扫描");
+    let UiOutcome::Inventory {
+        entries,
+        scan_issues,
+        ..
+    } = &scanned
+    else {
+        panic!("首次扫描后应进入 Inventory");
+    };
+    assert!(entries.is_empty());
+    assert_eq!(scan_issues.len(), 1);
+    assert_eq!(scan_issues[0].root_key, ScanRootKey::ClaudeCodeGlobal);
+    assert_eq!(scan_issues[0].code, ScanIssueCode::RootNotDirectory);
 
     let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
     assert_eq!(
         reopened
             .handle(UiIntent::GetStartupState)
-            .expect("失败后仍应显示首次介绍"),
-        UiOutcome::onboarding_required()
+            .expect("重启后应读取带扫描问题的清单"),
+        scanned
     );
 }
 
@@ -753,7 +877,9 @@ fn local_refresh_preserves_a_mounted_skill_when_its_target_disappears() {
     let data_root = sandbox.path().join("application-support/SkillYard");
     let source = sandbox.path().join("source/codex-existing");
     let mounted = home.join(".codex/skills/codex-existing");
+    let healthy = home.join(".codex/skills/healthy-sibling");
     write_skill(&source, "codex-existing", "initial");
+    write_skill(&healthy, "healthy-sibling", "initial");
     fs::create_dir_all(mounted.parent().expect("Mount 应有父目录")).expect("应创建扫描根");
     symlink(&source, &mounted).expect("应创建已有 Skill Mount");
     let application = SkillYardApplication::new(
@@ -765,6 +891,7 @@ fn local_refresh_preserves_a_mounted_skill_when_its_target_disappears() {
         .expect("首次扫描应成功");
 
     fs::remove_dir_all(&source).expect("应模拟 Mount 目标暂时消失");
+    fs::write(healthy.join("script.txt"), "changed").expect("应修改同根正常 Skill");
 
     let UiOutcome::Inventory {
         entries,
@@ -783,9 +910,16 @@ fn local_refresh_preserves_a_mounted_skill_when_its_target_disappears() {
             .iter()
             .any(|entry| { entry.skill_name == "codex-existing" && entry.stale })
     );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.skill_name == "healthy-sibling" && !entry.stale })
+    );
+    assert_eq!(summary.changed, 1);
     assert_eq!(summary.removed, 0);
     assert_eq!(scan_issues.len(), 1);
     assert_eq!(scan_issues[0].root_key, ScanRootKey::CodexGlobal);
+    assert_eq!(scan_issues[0].path, mounted.to_string_lossy());
 }
 
 #[test]
@@ -1723,7 +1857,7 @@ fn version_one_database_migrates_without_losing_inventory() {
         .expect("应读取 migration 版本");
     assert_eq!(
         versions,
-        "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25"
+        "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26"
     );
 }
 
