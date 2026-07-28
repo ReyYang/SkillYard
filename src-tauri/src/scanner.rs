@@ -64,6 +64,12 @@ pub struct ScanResult {
     pub issues: Vec<ScanIssue>,
 }
 
+#[derive(Default)]
+struct RootScanResult {
+    entries: Vec<InventoryObservation>,
+    issues: Vec<ScanIssue>,
+}
+
 struct ScanContext<'a> {
     excluded_skill_roots: &'a BTreeSet<PathBuf>,
     installation_chains: &'a BTreeMap<String, InstallationChain>,
@@ -93,7 +99,7 @@ pub fn scan_excluding(
         let detected = match path_exists(&app.detection_root) {
             Ok(value) => value,
             Err(error) => {
-                issues.push(error.as_issue(app.root_key, None));
+                issues.push(error.as_root_issue(app.root_key, None));
                 continue;
             }
         };
@@ -112,11 +118,12 @@ pub fn scan_excluding(
             None,
             &context,
         ) {
-            Ok(root_entries) => {
-                entries.extend(root_entries);
+            Ok(root_result) => {
+                entries.extend(root_result.entries);
+                issues.extend(root_result.issues);
                 successful_roots.push(ScanRootIdentity::global(app.root_key));
             }
-            Err(error) => issues.push(error.as_issue(app.root_key, None)),
+            Err(error) => issues.push(error.as_root_issue(app.root_key, None)),
         }
     }
 
@@ -129,19 +136,23 @@ pub fn scan_excluding(
         None,
         &context,
     ) {
-        Ok(root_entries) => {
-            entries.extend(root_entries);
+        Ok(root_result) => {
+            entries.extend(root_result.entries);
+            issues.extend(root_result.issues);
             successful_roots.push(ScanRootIdentity::global(ScanRootKey::SharedAgents));
         }
-        Err(error) => issues.push(error.as_issue(ScanRootKey::SharedAgents, None)),
+        Err(error) => issues.push(error.as_root_issue(ScanRootKey::SharedAgents, None)),
     }
 
     match scan_codex_official_plugins(paths, &context) {
-        Ok(root_entries) => {
-            entries.extend(root_entries);
+        Ok(root_result) => {
+            entries.extend(root_result.entries);
+            issues.extend(root_result.issues);
             successful_roots.push(ScanRootIdentity::global(ScanRootKey::CodexOfficialPlugins));
         }
-        Err(error) => issues.push(error.as_issue(ScanRootKey::CodexOfficialPlugins, None)),
+        Err(error) => {
+            issues.push(error.as_root_issue(ScanRootKey::CodexOfficialPlugins, None));
+        }
     }
     entries.sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
 
@@ -157,14 +168,14 @@ pub fn scan_excluding(
 fn scan_codex_official_plugins(
     paths: &ApplicationPaths,
     context: &ScanContext<'_>,
-) -> Result<Vec<InventoryObservation>, ScanError> {
-    let mut observations = Vec::new();
+) -> Result<RootScanResult, ScanError> {
+    let mut result = RootScanResult::default();
     for marketplace_root in paths.codex_official_plugin_cache_roots() {
         for plugin_root in child_directories(&marketplace_root)? {
             let Some(version_root) = newest_child_directory(&plugin_root)? else {
                 continue;
             };
-            let mut plugin_observations = scan_optional_root(
+            let mut plugin_result = scan_optional_root(
                 &version_root.join("skills"),
                 ScanRootKey::CodexOfficialPlugins,
                 InventoryLocationKind::SharedReadOnly,
@@ -173,13 +184,14 @@ fn scan_codex_official_plugins(
                 None,
                 context,
             )?;
-            for observation in &mut plugin_observations {
+            for observation in &mut plugin_result.entries {
                 observation.management_kind = ManagementKind::AgentManaged;
             }
-            observations.extend(plugin_observations);
+            result.entries.extend(plugin_result.entries);
+            result.issues.extend(plugin_result.issues);
         }
     }
-    Ok(observations)
+    Ok(result)
 }
 
 fn child_directories(path: &Path) -> Result<Vec<PathBuf>, ScanError> {
@@ -295,13 +307,14 @@ pub fn scan_projects(
                 Some(project_path),
                 &context,
             ) {
-                Ok(entries) => {
-                    result.entries.extend(entries);
+                Ok(root_result) => {
+                    result.entries.extend(root_result.entries);
+                    result.issues.extend(root_result.issues);
                     result.successful_roots.push(identity);
                 }
                 Err(error) => result
                     .issues
-                    .push(error.as_issue(app.project_root_key, Some(&project.id))),
+                    .push(error.as_root_issue(app.project_root_key, Some(&project.id))),
             }
         }
 
@@ -317,13 +330,14 @@ pub fn scan_projects(
             Some(project_path),
             &context,
         ) {
-            Ok(entries) => {
-                result.entries.extend(entries);
+            Ok(root_result) => {
+                result.entries.extend(root_result.entries);
+                result.issues.extend(root_result.issues);
                 result.successful_roots.push(shared_identity);
             }
             Err(error) => result
                 .issues
-                .push(error.as_issue(ScanRootKey::SharedAgentsProject, Some(&project.id))),
+                .push(error.as_root_issue(ScanRootKey::SharedAgentsProject, Some(&project.id))),
         }
 
         // 扫描期间若 Project 根被替换，丢弃本轮结果，不能把替代目录归到原 Project。
@@ -342,7 +356,7 @@ pub fn scan_projects(
 
 fn push_project_identity_issues(issues: &mut Vec<ScanIssue>, error: &ScanError, project_id: &str) {
     for root_key in project_scan_root_keys() {
-        issues.push(error.as_issue(root_key, Some(project_id)));
+        issues.push(error.as_root_issue(root_key, Some(project_id)));
     }
 }
 
@@ -354,9 +368,9 @@ fn scan_optional_root(
     project_id: Option<&str>,
     project_root: Option<&Path>,
     context: &ScanContext<'_>,
-) -> Result<Vec<InventoryObservation>, ScanError> {
+) -> Result<RootScanResult, ScanError> {
     if !path_exists(path)? {
-        return Ok(Vec::new());
+        return Ok(RootScanResult::default());
     }
     let root_metadata = fs::metadata(path).map_err(|source| ScanError::ReadRoot {
         path: path.display().to_string(),
@@ -379,91 +393,148 @@ fn scan_optional_root(
             })?;
     children.sort_by_key(|entry| entry.path());
 
-    let mut observations = Vec::new();
+    let mut result = RootScanResult::default();
     for child in children {
         let skill_root = child.path();
         if context.excluded_skill_roots.contains(&skill_root) {
             continue;
         }
-        let file_type = child.file_type().map_err(|source| ScanError::ReadRoot {
-            path: path.display().to_string(),
-            source,
-        })?;
-        let is_reachable_directory = if file_type.is_symlink() {
-            fs::metadata(&skill_root)
-                .map_err(|source| read_skill_content_error(&skill_root, source))?
-                .is_dir()
-        } else {
-            file_type.is_dir()
-        };
-        if !is_reachable_directory {
-            continue;
-        }
-
-        let skill_file = skill_root.join("SKILL.md");
-        if !is_regular_skill_file(&skill_file)? {
-            continue;
-        }
-
-        let fallback_name = child.file_name().to_string_lossy().into_owned();
-        let (declared_name, metadata_status) = read_skill_metadata(&skill_file, &fallback_name);
-        // 无效声明只能作为诊断证据展示，不能冒充可信 Skill Name。
-        let skill_name = if metadata_status == SkillMetadataStatus::Valid {
-            declared_name
-                .clone()
-                .unwrap_or_else(|| fallback_name.clone())
-        } else {
-            fallback_name
-        };
-        let observed_fingerprint = fingerprint_skill_root(&skill_root)?;
-        let (management_kind, management_evidence) = match project_root {
-            Some(project_root) => match inspect_git_head_management(project_root, &skill_file) {
-                ManagementEvidenceInspection::Confirmed(evidence) => {
-                    (ManagementKind::ProjectManaged, Some(evidence))
-                }
-                ManagementEvidenceInspection::Absent => (ManagementKind::TakeoverCandidate, None),
-                ManagementEvidenceInspection::Indeterminate(source) => {
-                    return Err(ScanError::InspectManagementEvidence {
-                        path: skill_file.display().to_string(),
-                        source,
-                    });
-                }
-            },
-            None => (ManagementKind::TakeoverCandidate, None),
-        };
-        let root_string = skill_root.to_string_lossy().into_owned();
-        // 当前读取的是全局 lock；不能把同名证据附给项目仓库中的独立 Skill。
-        let installation_chain = project_id
-            .is_none()
-            .then(|| context.installation_chains.get(&skill_name))
-            .flatten()
-            .cloned();
-        observations.push(InventoryObservation {
-            id: format!("{}:{root_string}", location_kind.as_str()),
-            skill_name,
-            declared_name,
-            skill_root: root_string,
-            skill_file: skill_file.to_string_lossy().into_owned(),
-            location_kind,
-            metadata_status,
-            observed_by: observed_by.clone(),
-            observed_fingerprint,
+        match scan_skill_entry(
+            &child,
             root_key,
-            project_id: project_id.map(str::to_owned),
-            stale: false,
-            management_kind,
-            management_evidence,
-            installation_chain,
-        });
+            location_kind,
+            &observed_by,
+            project_id,
+            project_root,
+            context,
+        ) {
+            Ok(Some(observation)) => result.entries.push(observation),
+            Ok(None) => {}
+            Err(error) => {
+                // 子项损坏不能终止同根扫描；问题绑定 Skill 根供刷新精确保留旧观察。
+                result
+                    .issues
+                    .push(error.as_entry_issue(root_key, project_id, &skill_root));
+            }
+        }
     }
 
-    Ok(observations)
+    Ok(result)
+}
+
+fn scan_skill_entry(
+    child: &fs::DirEntry,
+    root_key: ScanRootKey,
+    location_kind: InventoryLocationKind,
+    observed_by: &[SupportedAppId],
+    project_id: Option<&str>,
+    project_root: Option<&Path>,
+    context: &ScanContext<'_>,
+) -> Result<Option<InventoryObservation>, ScanError> {
+    let skill_root = child.path();
+    let file_type = child
+        .file_type()
+        .map_err(|source| read_skill_content_error(&skill_root, source))?;
+    let is_reachable_directory = if file_type.is_symlink() {
+        fs::metadata(&skill_root)
+            .map_err(|source| read_skill_content_error(&skill_root, source))?
+            .is_dir()
+    } else {
+        file_type.is_dir()
+    };
+    if !is_reachable_directory {
+        return Ok(None);
+    }
+
+    let skill_file = skill_root.join("SKILL.md");
+    if !is_regular_skill_file(&skill_file)? {
+        return Ok(None);
+    }
+
+    let fallback_name = child.file_name().to_string_lossy().into_owned();
+    let (declared_name, metadata_status) = read_skill_metadata(&skill_file, &fallback_name);
+    // 无效声明只能作为诊断证据展示，不能冒充可信 Skill Name。
+    let skill_name = if metadata_status == SkillMetadataStatus::Valid {
+        declared_name
+            .clone()
+            .unwrap_or_else(|| fallback_name.clone())
+    } else {
+        fallback_name
+    };
+    let observed_fingerprint = fingerprint_skill_root(&skill_root)?;
+    let (management_kind, management_evidence) = match project_root {
+        Some(project_root) => match inspect_git_head_management(project_root, &skill_file) {
+            ManagementEvidenceInspection::Confirmed(evidence) => {
+                (ManagementKind::ProjectManaged, Some(evidence))
+            }
+            ManagementEvidenceInspection::Absent => (ManagementKind::TakeoverCandidate, None),
+            ManagementEvidenceInspection::Indeterminate(source) => {
+                return Err(ScanError::InspectManagementEvidence {
+                    path: skill_file.display().to_string(),
+                    source,
+                });
+            }
+        },
+        None => (ManagementKind::TakeoverCandidate, None),
+    };
+    let root_string = skill_root.to_string_lossy().into_owned();
+    // 当前读取的是全局 lock；不能把同名证据附给项目仓库中的独立 Skill。
+    let installation_chain = project_id
+        .is_none()
+        .then(|| context.installation_chains.get(&skill_name))
+        .flatten()
+        .cloned();
+    Ok(Some(InventoryObservation {
+        id: format!("{}:{root_string}", location_kind.as_str()),
+        skill_name,
+        declared_name,
+        skill_root: root_string,
+        skill_file: skill_file.to_string_lossy().into_owned(),
+        location_kind,
+        metadata_status,
+        observed_by: observed_by.to_vec(),
+        observed_fingerprint,
+        root_key,
+        project_id: project_id.map(str::to_owned),
+        stale: false,
+        management_kind,
+        management_evidence,
+        installation_chain,
+    }))
 }
 
 impl ScanError {
-    fn as_issue(&self, root_key: ScanRootKey, project_id: Option<&str>) -> ScanIssue {
-        let message = self.to_string();
-        let (path, code) = match self {
+    fn as_root_issue(&self, root_key: ScanRootKey, project_id: Option<&str>) -> ScanIssue {
+        let (path, code) = self.path_and_code();
+        let identity = match project_id {
+            Some(project_id) => ScanRootIdentity::project(root_key, project_id),
+            None => ScanRootIdentity::global(root_key),
+        };
+        ScanIssue::new(identity, path, code, self.to_string())
+    }
+
+    fn as_entry_issue(
+        &self,
+        root_key: ScanRootKey,
+        project_id: Option<&str>,
+        skill_root: &Path,
+    ) -> ScanIssue {
+        let (_, code) = self.path_and_code();
+        debug_assert!(code.is_entry_scoped());
+        let identity = match project_id {
+            Some(project_id) => ScanRootIdentity::project(root_key, project_id),
+            None => ScanRootIdentity::global(root_key),
+        };
+        ScanIssue::new(
+            identity,
+            skill_root.to_string_lossy().into_owned(),
+            code,
+            self.to_string(),
+        )
+    }
+
+    fn path_and_code(&self) -> (String, ScanIssueCode) {
+        match self {
             Self::InspectPath { path, .. } => (path.clone(), ScanIssueCode::InspectPath),
             Self::RootIsNotDirectory(path) => (path.clone(), ScanIssueCode::RootNotDirectory),
             Self::ReadRoot { path, .. } => (path.clone(), ScanIssueCode::ReadRoot),
@@ -472,18 +543,6 @@ impl ScanError {
                 (path.clone(), ScanIssueCode::InspectManagementEvidence)
             }
             Self::ProjectChanged(path) => (path.clone(), ScanIssueCode::InspectPath),
-        };
-        let identity = match project_id {
-            Some(project_id) => ScanRootIdentity::project(root_key, project_id),
-            None => ScanRootIdentity::global(root_key),
-        };
-        ScanIssue {
-            root_id: identity.stable_id(),
-            root_key,
-            project_id: project_id.map(str::to_owned),
-            path,
-            code,
-            message,
         }
     }
 }

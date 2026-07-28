@@ -87,7 +87,8 @@ export interface LocalRefreshSummary {
 }
 
 export interface ScanIssue {
-  // 同一种 project rootKey 可属于多个 Project，界面身份必须使用 rootId。
+  // 同一个扫描根可以包含多个问题，界面身份必须使用独立 issue id。
+  id: string;
   rootId: string;
   rootKey: ScanRootKey;
   projectId: string | null;

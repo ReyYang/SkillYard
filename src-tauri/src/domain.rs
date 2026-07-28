@@ -1261,17 +1261,52 @@ impl ScanIssueCode {
             _ => None,
         }
     }
+
+    /// 条目级问题只冻结对应 Skill；扫描根问题继续保留该根的全部旧观察。
+    pub(crate) fn is_entry_scoped(self) -> bool {
+        matches!(
+            self,
+            Self::InspectManagementEvidence | Self::ReadSkillContent
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanIssue {
+    /// 同一个扫描根可以同时包含多个损坏条目，界面与持久化必须使用独立身份。
+    pub id: String,
     pub root_id: String,
     pub root_key: ScanRootKey,
     pub project_id: Option<String>,
     pub path: String,
     pub code: ScanIssueCode,
     pub message: String,
+}
+
+impl ScanIssue {
+    pub(crate) fn new(
+        identity: ScanRootIdentity,
+        path: String,
+        code: ScanIssueCode,
+        message: String,
+    ) -> Self {
+        let root_id = identity.stable_id();
+        let id = format!("{root_id}:{}:{path}", code.as_str());
+        Self {
+            id,
+            root_id,
+            root_key: identity.root_key,
+            project_id: identity.project_id,
+            path,
+            code,
+            message,
+        }
+    }
+
+    pub(crate) fn is_entry_scoped(&self) -> bool {
+        self.code.is_entry_scoped()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

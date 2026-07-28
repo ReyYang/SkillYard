@@ -458,12 +458,14 @@ export function InventoryPage({
       ) : null}
 
       {outcome.scanIssues.length > 0 ? (
-        <section className="scan-warning" aria-label="刷新告警">
-          <strong>部分目录暂时无法读取</strong>
-          <p>这些目录继续显示上次成功结果，SkillYard 没有把它们当作已删除。</p>
+        <section className="scan-warning" aria-label="扫描告警">
+          <strong>部分 Skill 或目录暂时无法读取</strong>
+          <p>
+            SkillYard 已继续扫描其他内容，并保留已有记录；不会自动修改这些路径。
+          </p>
           <ul>
             {outcome.scanIssues.map((issue) => (
-              <li key={issue.rootId}>
+              <li key={issue.id}>
                 <code>{issue.path}</code>
                 <span>{issue.message}</span>
               </li>
