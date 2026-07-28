@@ -6,7 +6,7 @@ SkillYard 是一个本地优先的 macOS 应用，用 Bundle 统一整理、安�
 
 ## 下载与系统要求
 
-[下载 SkillYard 1.0.0](https://github.com/ReyYang/SkillYard/releases/tag/v1.0.0)
+[下载 SkillYard 1.0.1](https://github.com/ReyYang/SkillYard/releases/tag/v1.0.1)
 
 SkillYard 1.0 支持：
 
@@ -14,7 +14,7 @@ SkillYard 1.0 支持：
 - Apple Silicon（`arm64`）Mac；
 - Codex、Claude Code 和 GitHub Copilot 的本地 Skill 目录。
 
-在 Release 中下载 `SkillYard-1.0.0-macos-aarch64.zip`。解压 ZIP，将 `SkillYard.app` 移入 `/Applications` 后启动。当前安装包使用 ad-hoc signing，尚未经过 Apple notarization；macOS 可能在首次打开时显示安全提示。请在 Finder 中按住 Control 点击应用并选择“打开”，或前往“系统设置 → 隐私与安全性”确认打开。仅从本仓库的 [GitHub Releases](https://github.com/ReyYang/SkillYard/releases) 下载正式安装包。
+在 Release 中下载 `SkillYard-1.0.1-macos-aarch64.zip`。解压 ZIP，将 `SkillYard.app` 移入 `/Applications` 后启动。当前安装包使用 ad-hoc signing，尚未经过 Apple notarization；macOS 可能在首次打开时显示安全提示。请在 Finder 中按住 Control 点击应用并选择“打开”，或前往“系统设置 → 隐私与安全性”确认打开。仅从本仓库的 [GitHub Releases](https://github.com/ReyYang/SkillYard/releases) 下载正式安装包。
 
 ## 界面预览
 
