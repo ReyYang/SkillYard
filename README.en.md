@@ -8,6 +8,18 @@
 
 ---
 
+## Download and requirements
+
+[Download SkillYard 1.0.1](https://github.com/ReyYang/SkillYard/releases/tag/v1.0.1)
+
+SkillYard 1.0 supports:
+
+- macOS 14 Sonoma or later;
+- Apple Silicon (`arm64`) Macs;
+- the local Skill directories used by Codex, Claude Code, and GitHub Copilot.
+
+Download `SkillYard-1.0.1-macos-aarch64.zip` from the Release. Unzip the archive, move `SkillYard.app` to `/Applications`, and launch it. The current build uses ad-hoc signing and is not notarized by Apple, so macOS may show a security prompt the first time it opens. Control-click the app in Finder and choose **Open**, or confirm the app under **System Settings → Privacy & Security**. Download official builds only from this repository's [GitHub Releases](https://github.com/ReyYang/SkillYard/releases).
+
 ## Preview
 
 ![SkillYard Bundle inventory populated with anonymous test data](./docs/assets/skillyard-overview.png)

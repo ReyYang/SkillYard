@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，并使用 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-07-28
+
+### 修复
+
+- 单个损坏或断开的 Skill 不再阻止首次扫描或同一目录中其他 Skill 的刷新。
+- 扫描告警按具体 Skill 路径分别保存；修复某个 Skill 后，只清除对应告警。
+- 条目级扫描失败只把受影响的 Skill 标记为 stale，不再冻结整个扫描目录。
+
 ## [1.0.0] - 2026-07-27
 
 ### 新增
@@ -18,7 +26,8 @@
 
 ### 发布
 
-- 提供适用于 macOS 14+ Apple Silicon 的 ZIP 安装包和 SHA-256 校验文件。
+- 提供适用于 macOS 14+ Apple Silicon 的 ZIP 安装包。
 - 安装包使用 ad-hoc signing，尚未经过 Apple notarization。
 
+[1.0.1]: https://github.com/ReyYang/SkillYard/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/ReyYang/SkillYard/releases/tag/v1.0.0

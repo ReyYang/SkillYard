@@ -238,7 +238,7 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 
 ### 发布与隐私
 
-162. 作为用户，我希望从 GitHub Releases 下载面向 Apple Silicon 的官方 ZIP 并核对 SHA-256，从而明确安装包来源和完整性。
+162. 作为用户，我希望从 GitHub Releases 下载面向 Apple Silicon 的官方 ZIP，从而明确安装包的唯一官方来源。
 163. 作为用户，我希望需要新版本时下载新的官方 ZIP 并手动替换 `SkillYard.app`，从而 1.0 不需要应用自更新系统。
 164. 作为用户，我希望手动替换或删除应用本体不影响 Central Store、SQLite、Journal 和 Mount，从而已经挂载的 Skill 继续工作。
 165. 作为用户，我希望所有管理数据、路径、Skill 名称和崩溃信息留在本机，从而不需要遥测同意或隐私开关。
@@ -253,7 +253,7 @@ SkillYard 不执行 `npx skills`、`gh skill`、Lark CLI 或 Skill 中携带的�
 - `SkillYard.app` 是唯一用户入口；不提供 CLI、headless 模式、daemon、localhost API、公开 Rust API 或独立恢复工具。
 - 使用 Tauri 2 和 TypeScript 构建桌面界面，前端静态资源打包进应用并由 WKWebView 加载。
 - 生产应用不启动 localhost Server，不捆绑 Chromium、Python runtime 或 Python sidecar。
-- 官方发布物是 GitHub Releases 中面向 Apple Silicon 的 ZIP 和对应 `SHA256SUMS.txt`。
+- 官方公开发布物是 GitHub Releases 中面向 Apple Silicon 的 ZIP；候选包的 SHA-256 只用于内部 VM 与发布一致性校验。
 - 1.0 不加入 Apple Developer Program，不承诺 Developer ID、Hardened Runtime、notarization、stapling 或无警告的 Gatekeeper 安装体验；发布构建使用 ad-hoc signing，但它不代表 Apple 验证身份。
 - 1.0 不进入 Mac App Store，也不启用 App Sandbox。
 - 所有扫描和生命周期操作只使用当前登录用户权限；TCC、POSIX permission、ACL、System Integrity Protection 或只读文件系统拒绝访问时，必须在首次变更前失败。SkillYard 不提权，也不绕过系统保护。

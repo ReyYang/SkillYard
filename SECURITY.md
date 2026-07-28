@@ -33,7 +33,7 @@ SkillYard 1.0 仅支持 macOS 14+ Apple Silicon。其他系统或架构上的问
 - 应只读的 Codex 插件、Host 内置或项目仓库内容被修改；
 - 应用意外执行外部安装命令、Skill 脚本、二进制文件或 lifecycle hook；
 - 敏感本地信息被意外发送到网络或写入公开输出；
-- 正式 Release 的资产与 `SHA256SUMS.txt` 不一致。
+- 正式 Release 中的 ZIP 与已经完成 VM 验收的候选 ZIP 不一致。
 
 ## 已知分发边界
 
