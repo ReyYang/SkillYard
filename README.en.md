@@ -14,13 +14,7 @@ SkillYard 1.0 supports:
 - Apple Silicon (`arm64`) Macs;
 - the local Skill directories used by Codex, Claude Code, and GitHub Copilot.
 
-Download `SkillYard-1.0.0-macos-aarch64.zip` and `SHA256SUMS.txt` from the Release, then verify the archive:
-
-```bash
-shasum -a 256 -c SHA256SUMS.txt
-```
-
-Unzip the archive, move `SkillYard.app` to `/Applications`, and launch it. The current build uses ad-hoc signing and is not notarized by Apple, so macOS may show a security prompt the first time it opens. Control-click the app in Finder and choose **Open**, or confirm the app under **System Settings → Privacy & Security**. Download official builds only from this repository's [GitHub Releases](https://github.com/ReyYang/SkillYard/releases).
+Download `SkillYard-1.0.0-macos-aarch64.zip` from the Release. Unzip the archive, move `SkillYard.app` to `/Applications`, and launch it. The current build uses ad-hoc signing and is not notarized by Apple, so macOS may show a security prompt the first time it opens. Control-click the app in Finder and choose **Open**, or confirm the app under **System Settings → Privacy & Security**. Download official builds only from this repository's [GitHub Releases](https://github.com/ReyYang/SkillYard/releases).
 
 ## Preview
 

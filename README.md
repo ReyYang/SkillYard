@@ -14,13 +14,7 @@ SkillYard 1.0 支持：
 - Apple Silicon（`arm64`）Mac；
 - Codex、Claude Code 和 GitHub Copilot 的本地 Skill 目录。
 
-在 Release 中下载 `SkillYard-1.0.0-macos-aarch64.zip` 和 `SHA256SUMS.txt`，然后校验安装包：
-
-```bash
-shasum -a 256 -c SHA256SUMS.txt
-```
-
-解压 ZIP，将 `SkillYard.app` 移入 `/Applications` 后启动。当前安装包使用 ad-hoc signing，尚未经过 Apple notarization；macOS 可能在首次打开时显示安全提示。请在 Finder 中按住 Control 点击应用并选择“打开”，或前往“系统设置 → 隐私与安全性”确认打开。仅从本仓库的 [GitHub Releases](https://github.com/ReyYang/SkillYard/releases) 下载正式安装包。
+在 Release 中下载 `SkillYard-1.0.0-macos-aarch64.zip`。解压 ZIP，将 `SkillYard.app` 移入 `/Applications` 后启动。当前安装包使用 ad-hoc signing，尚未经过 Apple notarization；macOS 可能在首次打开时显示安全提示。请在 Finder 中按住 Control 点击应用并选择“打开”，或前往“系统设置 → 隐私与安全性”确认打开。仅从本仓库的 [GitHub Releases](https://github.com/ReyYang/SkillYard/releases) 下载正式安装包。
 
 ## 界面预览
 
