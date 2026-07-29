@@ -178,7 +178,15 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       setLanguage(preferences.language);
       setAiPreferences(preferences.ai);
     } catch (error) {
-      setAiError(formatErrorMessage(error, language ?? "zhCn"));
+      const message = formatErrorMessage(error, language ?? "zhCn");
+      // 连接测试必须给出就地失败结论，不能让用户把远处的通用错误误认为按钮无响应。
+      setAiError(
+        operation === "testing"
+          ? language === "en"
+            ? `Connection test failed: ${message}`
+            : `连接测试失败：${message}`
+          : message,
+      );
     } finally {
       setAiOperation(null);
     }

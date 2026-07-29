@@ -687,8 +687,14 @@ describe("本机清单", () => {
     render(<App client={client} />);
 
     await user.click(await screen.findByRole("button", { name: "设置" }));
+    const languageSelect = screen.getByRole("combobox", { name: "界面语言" });
+    expect(
+      within(languageSelect)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["English", "简体中文"]);
     await user.selectOptions(
-      screen.getByRole("combobox", { name: "界面语言" }),
+      languageSelect,
       "en",
     );
 
@@ -698,6 +704,33 @@ describe("本机清单", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
     expect(screen.queryByText("设置")).toBeNull();
+    expect(
+      within(screen.getByRole("combobox", { name: "Interface language" }))
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["English", "简体中文"]);
+    expect(screen.queryByRole("option", { name: "Simplified Chinese" })).toBeNull();
+  });
+
+  it("API Key 可以在保存前由用户主动显示或隐藏", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+
+    const apiKeyInput = screen.getByLabelText("API Key");
+    await user.type(apiKeyInput, "skillyard-fixture-visible-key");
+    expect(apiKeyInput).toHaveAttribute("type", "password");
+
+    await user.click(screen.getByRole("button", { name: "显示 API Key" }));
+    expect(apiKeyInput).toHaveAttribute("type", "text");
+    expect(apiKeyInput).toHaveValue("skillyard-fixture-visible-key");
+
+    await user.click(screen.getByRole("button", { name: "隐藏 API Key" }));
+    expect(apiKeyInput).toHaveAttribute("type", "password");
   });
 
   it("设置页保存 OpenAI Key 后只显示保存状态，并由用户主动发起连接测试", async () => {
@@ -773,7 +806,86 @@ describe("本机清单", () => {
 
     await user.click(screen.getByRole("button", { name: "测试连接" }));
     expect(client.testAiConnection).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("连接已验证")).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("连接测试成功");
+  });
+
+  it("连接测试失败时在测试按钮旁明确显示失败原因", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "deepSeek",
+        model: "deepseek-v4-flash",
+        hasApiKey: true,
+        verified: false,
+      },
+    });
+    vi.mocked(client.testAiConnection).mockRejectedValue(
+      new Error("fixture-provider-error"),
+    );
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+
+    const aiCard = screen
+      .getByRole("heading", { name: "AI 功能" })
+      .closest("section");
+    expect(aiCard).not.toBeNull();
+    const feedback = await within(aiCard!).findByRole("alert");
+    expect(feedback).toHaveTextContent("连接测试失败");
+    expect(feedback).toHaveTextContent("fixture-provider-error");
+  });
+
+  it("连接测试不可用时说明原因，启用 AI 本身不是测试前提", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: false,
+        disclosureAccepted: false,
+        provider: "deepSeek",
+        model: "deepseek-v4-flash",
+        hasApiKey: true,
+        verified: false,
+      },
+    });
+    vi.mocked(client.setAiConfiguration).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: false,
+        disclosureAccepted: true,
+        provider: "deepSeek",
+        model: "deepseek-v4-flash",
+        hasApiKey: true,
+        verified: false,
+      },
+    });
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+
+    const testButton = screen.getByRole("button", { name: "测试连接" });
+    expect(testButton).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "同意向 Provider 发送测试请求后可测试连接",
+    );
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "同意将非敏感 Skill 内容发送给所选 Provider",
+      }),
+    );
+    expect(testButton).toBeEnabled();
+    expect(screen.getByRole("status")).toHaveTextContent("连接尚未测试");
   });
 
   it("切换到 GLM 时同时采用默认模型，并只展示五个已验证候选", async () => {

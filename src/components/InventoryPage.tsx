@@ -1020,7 +1020,20 @@ function InventorySettingsPage({
 }) {
   const { t } = useI18n();
   const [apiKey, setApiKey] = useState("");
+  // 只显示用户当前输入的值；已保存的 Key 仍然不会从 Keychain 读回前端。
+  const [isApiKeyVisible, setIsApiKeyVisible] = useState(false);
   const aiBusy = aiOperation !== null;
+  const connectionTestDisabledReason = !aiPreferences.hasApiKey
+    ? t("保存 API Key 后可测试连接")
+    : !aiPreferences.disclosureAccepted
+      ? t("同意向 Provider 发送测试请求后可测试连接")
+      : null;
+  const connectionStatus =
+    aiOperation === "testing"
+      ? t("正在测试连接…")
+      : aiPreferences.verified
+        ? t("连接测试成功")
+        : (connectionTestDisabledReason ?? t("连接尚未测试"));
   const updateAi = (
     changes: Partial<Pick<AiPreferences, "enabled" | "disclosureAccepted" | "provider" | "model">>,
   ) =>
@@ -1057,8 +1070,9 @@ function InventorySettingsPage({
               onLanguageChange(event.target.value as InterfaceLanguage)
             }
           >
-            <option value="zhCn">{t("简体中文")}</option>
-            <option value="en">{t("English")}</option>
+            {/* 语言名称是自身标识，不能跟随当前界面语言翻译。 */}
+            <option value="en">English</option>
+            <option value="zhCn">简体中文</option>
           </select>
         </label>
       </section>
@@ -1137,17 +1151,28 @@ function InventorySettingsPage({
           </div>
 
           <div className="settings-key-row">
-            <label className="settings-key-field">
+            <div className="settings-key-field">
               <span>API Key</span>
-              <input
-                aria-label="API Key"
-                type="password"
-                autoComplete="off"
-                value={apiKey}
-                disabled={aiBusy}
-                onChange={(event) => setApiKey(event.target.value)}
-              />
-            </label>
+              <div className="settings-key-input">
+                <input
+                  aria-label="API Key"
+                  type={isApiKeyVisible ? "text" : "password"}
+                  autoComplete="off"
+                  value={apiKey}
+                  disabled={aiBusy}
+                  onChange={(event) => setApiKey(event.target.value)}
+                />
+                <button
+                  className="secondary-action compact-action"
+                  type="button"
+                  aria-pressed={isApiKeyVisible}
+                  disabled={aiBusy || apiKey.length === 0}
+                  onClick={() => setIsApiKeyVisible((visible) => !visible)}
+                >
+                  {isApiKeyVisible ? t("隐藏 API Key") : t("显示 API Key")}
+                </button>
+              </div>
+            </div>
             <button
               className="secondary-action"
               type="button"
@@ -1155,6 +1180,7 @@ function InventorySettingsPage({
               onClick={async () => {
                 await onSaveAiApiKey(apiKey);
                 setApiKey("");
+                setIsApiKeyVisible(false);
               }}
             >
               {aiOperation === "savingKey"
@@ -1181,23 +1207,24 @@ function InventorySettingsPage({
                 ? t("API Key 已保存在 macOS Keychain")
                 : t("尚未保存 API Key")}
             </span>
-            <span>
-              {aiPreferences.verified ? t("连接已验证") : t("连接未验证")}
+            <span role="status" aria-live="polite">
+              {connectionStatus}
             </span>
             <button
               className="primary-action compact-action"
               type="button"
-              disabled={
-                aiBusy ||
-                !aiPreferences.enabled ||
-                !aiPreferences.disclosureAccepted ||
-                !aiPreferences.hasApiKey
-              }
+              disabled={aiBusy || connectionTestDisabledReason !== null}
               onClick={onTestAiConnection}
             >
               {aiOperation === "testing" ? t("正在测试…") : t("测试连接")}
             </button>
           </div>
+          {aiError ? (
+            <p className="inline-error settings-ai-feedback" role="alert">
+              <strong>{t("AI 设置未保存")}</strong>
+              <span>{aiError}</span>
+            </p>
+          ) : null}
         </div>
       </section>
 
@@ -1258,12 +1285,6 @@ function InventorySettingsPage({
           <strong>{t("语言")}</strong>
           <span>{languageError}</span>
         </div>
-      ) : null}
-      {aiError ? (
-        <p className="inline-error" role="alert">
-          <strong>{t("AI 设置未保存")}</strong>
-          <span>{aiError}</span>
-        </p>
       ) : null}
     </main>
   );

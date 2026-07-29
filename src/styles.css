@@ -2165,6 +2165,7 @@ code {
 }
 
 .settings-key-field input {
+  flex: 1;
   min-width: 0;
   padding: 0.78rem 0.9rem;
   border: 1px solid rgb(48 75 56 / 18%);
@@ -2172,6 +2173,16 @@ code {
   color: #203326;
   background: #fffef8;
   font: inherit;
+}
+
+.settings-key-input {
+  display: flex;
+  gap: 0.55rem;
+}
+
+.settings-key-input button {
+  flex: none;
+  white-space: nowrap;
 }
 
 .settings-ai-status {
@@ -2184,6 +2195,10 @@ code {
 
 .settings-ai-status button {
   margin-left: auto;
+}
+
+.settings-ai-feedback {
+  margin: 0;
 }
 
 .skill-member-list {
@@ -2472,6 +2487,11 @@ code {
 
   .settings-ai-status button {
     margin-left: 0;
+  }
+
+  .settings-key-input {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .skill-detail-card dl > div {
