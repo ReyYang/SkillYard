@@ -4,10 +4,11 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{
-    AiProvider, BatchMountPlan, BatchMountRequest, EditableLocalRelinkPlan, InstallPlan,
-    InterfaceLanguage, MergeContentChoice, MountPlan, MountScope, ProjectSelection,
-    SkillYardApplication, SourceAssociationPlan, SourceMemberMappingChoice, SupportedAppId,
-    TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome, application::ApplicationError,
+    AgentConversationMessage, AgentPageContext, AiProvider, BatchMountPlan, BatchMountRequest,
+    EditableLocalRelinkPlan, InstallPlan, InterfaceLanguage, MergeContentChoice, MountPlan,
+    MountScope, ProjectSelection, SkillYardApplication, SourceAssociationPlan,
+    SourceMemberMappingChoice, SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent,
+    UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -75,6 +76,18 @@ pub fn test_ai_connection(
     application: State<'_, SkillYardApplication>,
 ) -> Result<UiOutcome, UiError> {
     expect_preferences(dispatch(&application, UiIntent::TestAiConnection)?)
+}
+
+#[tauri::command(async)]
+pub fn ask_agent(
+    application: State<'_, SkillYardApplication>,
+    context: AgentPageContext,
+    messages: Vec<AgentConversationMessage>,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::AskAgent { context, messages })? {
+        outcome @ UiOutcome::AgentReply { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回 Agent 回答")),
+    }
 }
 
 fn expect_preferences(outcome: UiOutcome) -> Result<UiOutcome, UiError> {

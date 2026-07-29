@@ -24,6 +24,28 @@ export interface AiConfigurationInput {
   model: string;
 }
 
+export type AgentPageContext =
+  | {
+      type: "page";
+      page:
+        | "onboarding"
+        | "inventory"
+        | "settings"
+        | "sourceDiscovery"
+        | "operation"
+        | "unsupportedPlatform";
+    }
+  | { type: "skill"; inventoryId: string };
+
+export interface AgentConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AgentReply {
+  reply: string;
+}
+
 export interface SupportedAppSummary {
   id: SupportedAppId;
   displayName: string;
@@ -580,6 +602,10 @@ export type UiOutcome =
       type: "preferences";
       language: InterfaceLanguage;
       ai: AiPreferences;
+    }
+  | {
+      type: "agentReply";
+      reply: string;
     }
   | {
       type: "unsupportedPlatform";

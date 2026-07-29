@@ -2354,6 +2354,223 @@ code {
   }
 }
 
+/* 全局助手固定在应用外壳，页面导航不会卸载或销毁当前内存 Session。 */
+.agent-overlay {
+  position: fixed;
+  z-index: 80;
+  right: 24px;
+  bottom: 24px;
+  display: grid;
+  justify-items: end;
+  gap: 14px;
+  pointer-events: none;
+}
+
+.agent-launcher,
+.agent-window {
+  pointer-events: auto;
+}
+
+.agent-launcher {
+  display: grid;
+  width: 64px;
+  height: 64px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgb(55 86 64 / 14%);
+  border-radius: 20px;
+  color: #294735;
+  background: #dcebd4;
+  box-shadow: 0 15px 36px rgb(39 69 47 / 20%);
+  cursor: pointer;
+}
+
+.agent-launcher svg {
+  width: 38px;
+  height: 38px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.agent-window {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  width: min(520px, calc(100vw - 32px));
+  height: min(620px, calc(100vh - 118px));
+  overflow: hidden;
+  border: 1px solid rgb(55 86 64 / 16%);
+  border-radius: 24px;
+  background: rgb(250 251 246 / 98%);
+  box-shadow: 0 24px 70px rgb(26 50 32 / 24%);
+}
+
+.agent-window-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid rgb(55 86 64 / 10%);
+}
+
+.agent-window-header h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.agent-window-header .section-eyebrow {
+  margin-bottom: 5px;
+}
+
+.agent-close {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 12px;
+  color: #43604b;
+  background: #edf3e8;
+  cursor: pointer;
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.agent-messages {
+  display: flex;
+  min-height: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.agent-empty {
+  margin: auto 0;
+  padding: 26px;
+  border-radius: 18px;
+  color: #526057;
+  background: #f1f5ed;
+  line-height: 1.6;
+}
+
+.agent-empty p {
+  margin: 8px 0 0;
+}
+
+.agent-message {
+  max-width: 88%;
+}
+
+.agent-message span {
+  display: block;
+  margin-bottom: 5px;
+  color: #738077;
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.agent-message p {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 15px;
+  background: #eef3e9;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.agent-message.user {
+  align-self: flex-end;
+}
+
+.agent-message.user span {
+  text-align: right;
+}
+
+.agent-message.user p {
+  color: #f7fbf5;
+  background: #355a41;
+}
+
+.agent-thinking,
+.agent-configuration-note {
+  margin: 0;
+  color: #66736a;
+  font-size: 0.88rem;
+}
+
+.agent-configuration-note {
+  margin: 0 24px 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f2eed9;
+}
+
+.agent-window > .inline-error {
+  margin: 0 24px 12px;
+}
+
+.agent-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 16px 18px 18px;
+  border-top: 1px solid rgb(55 86 64 / 10%);
+  background: #f7f8f3;
+}
+
+.agent-composer textarea {
+  width: 100%;
+  min-height: 66px;
+  padding: 11px 13px;
+  resize: none;
+  border: 1px solid rgb(55 86 64 / 18%);
+  border-radius: 14px;
+  color: inherit;
+  background: #fff;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.agent-composer button {
+  align-self: stretch;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 14px;
+  color: #f8fff3;
+  background: #355a41;
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.agent-composer button:disabled,
+.agent-composer textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .agent-overlay {
+    right: 16px;
+    bottom: 16px;
+  }
+
+  .agent-window {
+    height: calc(100vh - 104px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

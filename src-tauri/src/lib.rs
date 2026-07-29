@@ -24,8 +24,9 @@ mod takeover;
 pub use agent::{AgentProviderEndpoints, SecretStore, SecretStoreError, SharedSecretStore};
 pub use application::SkillYardApplication;
 pub use domain::{
-    AiPreferences, AiProvider, BatchMountDisposition, BatchMountPlan, BatchMountPlanItem,
-    BatchMountRequest, BundleUpdateAction, BundleUpdateBatchPlan, BundleUpdateBatchPlanItem,
+    AgentConversationMessage, AgentMessageRole, AgentPageContext, AgentPageKind, AiPreferences,
+    AiProvider, BatchMountDisposition, BatchMountPlan, BatchMountPlanItem, BatchMountRequest,
+    BundleUpdateAction, BundleUpdateBatchPlan, BundleUpdateBatchPlanItem,
     BundleUpdateBatchPlanItemDisposition, BundleUpdateBatchResult, BundleUpdateBatchResultItem,
     BundleUpdateBatchResultItemStatus, BundleUpdateBatchResultStatus, BundleUpdateImpact,
     BundleUpdateStatus, BundleUpdateSummary, EditableLocalRelinkMember, EditableLocalRelinkPlan,
@@ -73,6 +74,7 @@ pub fn run() {
             commands::save_ai_api_key,
             commands::delete_ai_api_key,
             commands::test_ai_connection,
+            commands::ask_agent,
             commands::get_startup_state,
             commands::open_central_store,
             commands::start_initial_scan,

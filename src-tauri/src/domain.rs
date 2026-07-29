@@ -21,6 +21,10 @@ pub enum UiIntent {
     },
     DeleteAiApiKey,
     TestAiConnection,
+    AskAgent {
+        context: AgentPageContext,
+        messages: Vec<AgentConversationMessage>,
+    },
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
@@ -206,6 +210,41 @@ pub enum AiProvider {
     OpenAi,
     Glm,
     DeepSeek,
+}
+
+/// 前端只能提交当前页面的稳定领域身份，不能把本机路径交给 Agent。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum AgentPageContext {
+    Page { page: AgentPageKind },
+    Skill { inventory_id: String },
+}
+
+/// 没有具体 Skill 的页面只提供页面语义，不授权读取额外本机内容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentPageKind {
+    Onboarding,
+    Inventory,
+    Settings,
+    SourceDiscovery,
+    Operation,
+    UnsupportedPlatform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentMessageRole {
+    User,
+    Assistant,
+}
+
+/// Session 只存在于应用外壳内存中；Rust 每次只处理本次提交的有限会话。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConversationMessage {
+    pub role: AgentMessageRole,
+    pub content: String,
 }
 
 impl AiProvider {
@@ -1506,6 +1545,9 @@ pub enum UiOutcome {
     Preferences {
         language: InterfaceLanguage,
         ai: AiPreferences,
+    },
+    AgentReply {
+        reply: String,
     },
     UnsupportedPlatform {
         actual_os: String,

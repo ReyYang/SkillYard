@@ -96,6 +96,27 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenNthCalledWith(4, "test_ai_connection");
   });
 
+  it("全局助手只提交稳定页面身份和内存会话，不提交本机路径", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "agentReply",
+      reply: "fixture answer",
+    });
+    const context = {
+      type: "skill" as const,
+      inventoryId: "managed:member-1",
+    };
+    const messages = [
+      { role: "user" as const, content: "解释这个 Skill" },
+    ];
+
+    await tauriSkillYardClient.askAgent(context, messages);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("ask_agent", {
+      context,
+      messages,
+    });
+  });
+
   it("打开 Central Store 时不允许前端提交路径", async () => {
     mocks.invoke.mockResolvedValue(undefined);
 

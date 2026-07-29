@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  AgentConversationMessage,
+  AgentPageContext,
+  AgentReply,
   AiConfigurationInput,
   BatchMountPlan,
   BatchMountRequest,
@@ -40,6 +43,10 @@ export interface SkillYardClient {
   saveAiApiKey(apiKey: string): Promise<UserPreferences>;
   deleteAiApiKey(): Promise<UserPreferences>;
   testAiConnection(): Promise<UserPreferences>;
+  askAgent(
+    context: AgentPageContext,
+    messages: AgentConversationMessage[],
+  ): Promise<AgentReply>;
   getStartupState(): Promise<UiOutcome>;
   openCentralStore(): Promise<void>;
   startInitialScan(): Promise<UiOutcome>;
@@ -176,6 +183,13 @@ export const tauriSkillYardClient: SkillYardClient = {
       "test_ai_connection",
     );
     return { language: outcome.language, ai: outcome.ai };
+  },
+  askAgent: async (context, messages) => {
+    const outcome = await invoke<Extract<UiOutcome, { type: "agentReply" }>>(
+      "ask_agent",
+      { context, messages },
+    );
+    return { reply: outcome.reply };
   },
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),
   openCentralStore: () => invoke<void>("open_central_store"),

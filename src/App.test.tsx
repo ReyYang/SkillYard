@@ -103,6 +103,105 @@ describe("首次使用", () => {
 });
 
 describe("本机清单", () => {
+  it("全局助手使用稳定 Skill ID，跨页面保持，并在明确关闭后销毁 Session", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+    vi.mocked(client.askAgent).mockResolvedValue({
+      reply: "这是一个示例 Skill。",
+    });
+
+    render(<App client={client} />);
+    await openManagedSkillDetails(user);
+    await user.click(
+      screen.getByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
+      "这个 Skill 做什么？",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(client.askAgent).toHaveBeenCalledWith(
+      { type: "skill", inventoryId: "managed:member-1" },
+      [{ role: "user", content: "这个 Skill 做什么？" }],
+    );
+    expect(await screen.findByText("这是一个示例 Skill。")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    expect(
+      screen.getByRole("dialog", { name: "SkillYard 助手" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("这是一个示例 Skill。")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "关闭 SkillYard 助手" }),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "SkillYard 助手" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    expect(screen.queryByText("这是一个示例 Skill。")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
+    ).toHaveValue("");
+  });
+
+  it("关闭助手后忽略仍在返回的旧 Session 回答", async () => {
+    const user = userEvent.setup();
+    let finishReply: ((value: { reply: string }) => void) | undefined;
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+    vi.mocked(client.askAgent).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishReply = resolve;
+        }),
+    );
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
+      "等待中的问题",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(
+      screen.getByRole("button", { name: "关闭 SkillYard 助手" }),
+    );
+    await act(async () => finishReply?.({ reply: "不应恢复的旧回答" }));
+
+    await user.click(
+      screen.getByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    expect(screen.queryByText("不应恢复的旧回答")).not.toBeInTheDocument();
+  });
+
   it("启动时使用后端恢复的英文偏好", async () => {
     const client = createClient(
       inventoryOutcome([createManagedEntry({ skillName: "example" })]),
@@ -6518,6 +6617,7 @@ function createClient(startup: UiOutcome): SkillYardClient {
     saveAiApiKey: vi.fn(),
     deleteAiApiKey: vi.fn(),
     testAiConnection: vi.fn(),
+    askAgent: vi.fn(),
     getStartupState: vi.fn().mockResolvedValue(startup),
     openCentralStore: vi.fn().mockResolvedValue(undefined),
     startInitialScan: vi.fn(),

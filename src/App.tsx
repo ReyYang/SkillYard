@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
+import { AgentOverlay } from "./components/AgentOverlay";
 import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
 import { BundleMountPage } from "./components/BundleMountPage";
 import { BundleUpdateBatchPage } from "./components/BundleUpdateBatchPage";
@@ -23,6 +24,7 @@ import { SourceRefChangePage } from "./components/SourceRefChangePage";
 import { TakeoverPlanPage } from "./components/TakeoverPlanPage";
 import { TakeoverSelectionPage } from "./components/TakeoverSelectionPage";
 import type {
+  AgentPageContext,
   AiConfigurationInput,
   AiPreferences,
   BatchMountPlan,
@@ -67,6 +69,7 @@ interface AppCoreProps {
   onSaveAiApiKey(apiKey: string): Promise<void>;
   onDeleteAiApiKey(): Promise<void>;
   onTestAiConnection(): Promise<void>;
+  onAgentContextChange(context: AgentPageContext): void;
 }
 
 type AiOperation =
@@ -119,6 +122,10 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [languageError, setLanguageError] = useState<string | null>(null);
   const [aiOperation, setAiOperation] = useState<AiOperation>(null);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [agentContext, setAgentContext] = useState<AgentPageContext>({
+    type: "page",
+    page: "inventory",
+  });
 
   useEffect(() => {
     let active = true;
@@ -190,30 +197,38 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
 
   return (
     <I18nProvider language={language}>
-      <AppCore
-        client={client}
-        language={language}
-        aiPreferences={aiPreferences}
-        isSavingLanguage={isSavingLanguage}
-        languageError={languageError}
-        aiOperation={aiOperation}
-        aiError={aiError}
-        onLanguageChange={changeLanguage}
-        onAiConfigurationChange={(configuration) =>
-          runAiOperation("savingConfiguration", () =>
-            client.setAiConfiguration(configuration),
-          )
-        }
-        onSaveAiApiKey={(apiKey) =>
-          runAiOperation("savingKey", () => client.saveAiApiKey(apiKey))
-        }
-        onDeleteAiApiKey={() =>
-          runAiOperation("deletingKey", () => client.deleteAiApiKey())
-        }
-        onTestAiConnection={() =>
-          runAiOperation("testing", () => client.testAiConnection())
-        }
-      />
+      <>
+        <AppCore
+          client={client}
+          language={language}
+          aiPreferences={aiPreferences}
+          isSavingLanguage={isSavingLanguage}
+          languageError={languageError}
+          aiOperation={aiOperation}
+          aiError={aiError}
+          onAgentContextChange={setAgentContext}
+          onLanguageChange={changeLanguage}
+          onAiConfigurationChange={(configuration) =>
+            runAiOperation("savingConfiguration", () =>
+              client.setAiConfiguration(configuration),
+            )
+          }
+          onSaveAiApiKey={(apiKey) =>
+            runAiOperation("savingKey", () => client.saveAiApiKey(apiKey))
+          }
+          onDeleteAiApiKey={() =>
+            runAiOperation("deletingKey", () => client.deleteAiApiKey())
+          }
+          onTestAiConnection={() =>
+            runAiOperation("testing", () => client.testAiConnection())
+          }
+        />
+        <AgentOverlay
+          context={agentContext}
+          aiPreferences={aiPreferences}
+          onAsk={(context, messages) => client.askAgent(context, messages)}
+        />
+      </>
     </I18nProvider>
   );
 }
@@ -231,6 +246,7 @@ function AppCore({
   onSaveAiApiKey,
   onDeleteAiApiKey,
   onTestAiConnection,
+  onAgentContextChange,
 }: AppCoreProps) {
   const { t } = useI18n();
   const formatError = (error: unknown) => formatErrorMessage(error, language);
@@ -435,6 +451,57 @@ function AppCore({
     pendingProjectSelection !== null ||
     removalOperation !== null ||
     sourceOperation?.type === "opening";
+
+  const currentAgentContext = useMemo<AgentPageContext>(() => {
+    if (sourceDiscovery) {
+      return { type: "page", page: "sourceDiscovery" };
+    }
+    if (viewState.status !== "ready") {
+      return { type: "page", page: "inventory" };
+    }
+    if (viewState.outcome.type === "onboardingRequired") {
+      return { type: "page", page: "onboarding" };
+    }
+    if (viewState.outcome.type === "unsupportedPlatform") {
+      return { type: "page", page: "unsupportedPlatform" };
+    }
+    const displayedInventory =
+      isBrowsingCommittedInventory && committedInventory
+        ? committedInventory
+        : viewState.outcome.type === "inventory"
+          ? viewState.outcome
+          : null;
+    const displayedScreen = isBrowsingCommittedInventory
+      ? readOnlyInventoryScreen
+      : inventoryScreen;
+    if (displayedInventory && displayedScreen.type === "skill") {
+      const entry = displayedInventory.entries.find(
+        (candidate) => candidate.id === displayedScreen.entryId,
+      );
+      if (entry) {
+        return { type: "skill", inventoryId: entry.id };
+      }
+    }
+    if (displayedInventory && displayedScreen.type === "settings") {
+      return { type: "page", page: "settings" };
+    }
+    if (displayedInventory && !hasCurrentOperation) {
+      return { type: "page", page: "inventory" };
+    }
+    return { type: "page", page: "operation" };
+  }, [
+    committedInventory,
+    hasCurrentOperation,
+    inventoryScreen,
+    isBrowsingCommittedInventory,
+    readOnlyInventoryScreen,
+    sourceDiscovery,
+    viewState,
+  ]);
+
+  useEffect(() => {
+    onAgentContextChange(currentAgentContext);
+  }, [currentAgentContext, onAgentContextChange]);
 
   const openCentralStore = async () => {
     if (isOpeningCentralStore) return;

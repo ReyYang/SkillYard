@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use crate::{
     agent::{
-        AgentError, AgentProviderEndpoints, KeychainSecretStore, SharedSecretStore, verify_provider,
+        AgentError, AgentProviderEndpoints, KeychainSecretStore, SharedSecretStore, answer_agent,
+        read_skill_material, verify_provider,
     },
     bundle_update_batch::{
         BundleUpdateBatchError, acknowledge_bundle_update_batch, confirm_bundle_update_batch_plan,
@@ -15,9 +16,10 @@ use crate::{
         read_open_bundle_update_batch_outcome, recover_running_bundle_update_batch,
     },
     domain::{
-        AiPreferences, AiProvider, BundleUpdateStatus, EditableLocalRelinkMember,
-        InterfaceLanguage, MergeContentChoice, PlatformInfo, SourceKind, SourceMemberMappingChoice,
-        TakeoverPlanRequest, UiIntent, UiOutcome,
+        AgentConversationMessage, AgentPageContext, AgentPageKind, AiPreferences, AiProvider,
+        BundleUpdateStatus, EditableLocalRelinkMember, InterfaceLanguage, MergeContentChoice,
+        PlatformInfo, SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, UiIntent,
+        UiOutcome,
     },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
@@ -253,6 +255,7 @@ impl SkillYardApplication {
             | UiIntent::TestAiConnection => {
                 unreachable!("偏好意图已在平台检查前处理")
             }
+            UiIntent::AskAgent { context, messages } => self.ask_agent(context, messages),
             // 启动读取前可能需要修复上次中断的写事务，因此也必须取得单写门。
             UiIntent::GetStartupState => self.with_write_operation(|| self.get_startup_state()),
             UiIntent::StartInitialScan => self.with_write_operation(|| self.start_initial_scan()),
@@ -491,6 +494,71 @@ impl SkillYardApplication {
         )?;
         storage.set_ai_verified(true)?;
         self.preferences_outcome(&storage)
+    }
+
+    fn ask_agent(
+        &self,
+        context: AgentPageContext,
+        messages: Vec<AgentConversationMessage>,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let storage = self.open_storage()?;
+        let ai = storage.read_ai_preferences()?;
+        if !ai.enabled {
+            return Err(AgentError::Disabled.into());
+        }
+        if !ai.disclosure_accepted {
+            return Err(AgentError::DisclosureRequired.into());
+        }
+        if !ai.verified {
+            return Err(AgentError::NotVerified.into());
+        }
+        let api_key = self
+            .secret_store
+            .read(ai.provider.api_key_account())
+            .map_err(AgentError::from)?
+            .ok_or(AgentError::MissingApiKey)?;
+        let language = storage.read_interface_language()?;
+        let material = match context {
+            AgentPageContext::Skill { inventory_id } => {
+                let outcome = storage
+                    .read_initial_scan()?
+                    .ok_or(AgentError::SkillNotFound)?;
+                let UiOutcome::Inventory { entries, .. } = outcome else {
+                    return Err(AgentError::SkillNotFound.into());
+                };
+                let entry = entries
+                    .into_iter()
+                    .find(|entry| entry.id == inventory_id)
+                    .ok_or(AgentError::SkillNotFound)?;
+                read_skill_material(
+                    &entry.skill_name,
+                    Path::new(&entry.skill_root),
+                    Path::new(&entry.skill_file),
+                    self.paths.home(),
+                )?
+            }
+            AgentPageContext::Page { page } => {
+                let page = match page {
+                    AgentPageKind::Onboarding => "Onboarding",
+                    AgentPageKind::Inventory => "Bundle inventory",
+                    AgentPageKind::Settings => "Settings",
+                    AgentPageKind::SourceDiscovery => "Source discovery",
+                    AgentPageKind::Operation => "Lifecycle preview or operation",
+                    AgentPageKind::UnsupportedPlatform => "Unsupported platform",
+                };
+                format!("Current page: {page}. No Skill file is attached.")
+            }
+        };
+        let reply = answer_agent(
+            &self.agent_endpoints,
+            ai.provider,
+            &ai.model,
+            &api_key,
+            language,
+            &messages,
+            &material,
+        )?;
+        Ok(UiOutcome::AgentReply { reply })
     }
 
     fn read_ai_preferences(&self, storage: &Storage) -> Result<AiPreferences, ApplicationError> {

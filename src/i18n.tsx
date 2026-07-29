@@ -669,6 +669,32 @@ const EN_MESSAGES = {
   "查看详情": "View details",
   "来源未知": "Unknown Source",
   "Skill 详情": "Skill details",
+  "SkillYard 助手": "SkillYard Assistant",
+  "打开 SkillYard 助手": "Open SkillYard Assistant",
+  "关闭 SkillYard 助手": "Close SkillYard Assistant",
+  "可以从当前页面开始提问": "Ask from the current page",
+  "助手只会读取 SkillYard 已知的内容并回答，不会执行安装、更新或删除。":
+    "The assistant only reads content known to SkillYard and answers. It never installs, updates, or deletes anything.",
+  "请先在设置中启用 AI、保存 API Key 并完成连接测试。":
+    "Enable AI in Settings, save an API Key, and complete the connection test first.",
+  "向 SkillYard 提问": "Ask SkillYard",
+  "问问这个 Skill 能做什么…": "Ask what this Skill can do…",
+  "发送": "Send",
+  "正在阅读并回答…": "Reading and answering…",
+  "这次回答没有完成，请稍后重试。":
+    "This answer could not be completed. Please try again.",
+  "请先在设置中启用 AI": "Enable AI in Settings first",
+  "请先在设置中完成当前模型的连接测试":
+    "Complete the connection test for the current model in Settings first",
+  "当前页面对应的 Skill 已不存在":
+    "The Skill for the current page no longer exists",
+  "无法安全读取当前 Skill": "The current Skill could not be read safely",
+  "请先输入一个问题": "Enter a question first",
+  "本次对话内容过长，请关闭窗口后重新开始":
+    "This conversation is too long. Close the window and start a new session",
+  "无法连接模型 Provider": "Unable to connect to the model Provider",
+  "你": "You",
+  "SkillYard": "SkillYard",
   "所属分组": "Group",
   "来源": "Source",
   "本地目录": "Local directory",
