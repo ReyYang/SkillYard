@@ -189,7 +189,10 @@ export const tauriSkillYardClient: SkillYardClient = {
       "ask_agent",
       { context, messages },
     );
-    return { reply: outcome.reply };
+    return {
+      reply: outcome.reply,
+      localMatchFound: outcome.localMatchFound,
+    };
   },
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),
   openCentralStore: () => invoke<void>("open_central_store"),

@@ -81,6 +81,7 @@ fn skill_detail_agent_resolves_stable_id_and_filters_local_sensitive_content() {
             .expect("Agent 应解释当前 Skill"),
         UiOutcome::AgentReply {
             reply: "这是一个用于解释代码的 Skill。".to_owned(),
+            local_match_found: true,
         }
     );
 
@@ -119,6 +120,146 @@ fn skill_detail_agent_resolves_stable_id_and_filters_local_sensitive_content() {
 }
 
 #[test]
+fn local_search_reads_every_known_skill_kind_without_enabling_web_search() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    write_skill(
+        &home.join(".codex/skills/takeover-review"),
+        "takeover-review",
+        "Review an existing local installation.",
+    );
+    write_skill(
+        &home.join(".codex/plugins/cache/openai-bundled/review-plugin/1.0.0/skills/plugin-review"),
+        "plugin-review",
+        "Review code from an official plugin.",
+    );
+    let project = sandbox.path().join("sample-project");
+    write_skill(
+        &project.join(".codex/skills/project-review"),
+        "project-review",
+        "Review code from a registered project.",
+    );
+    let install_input = sandbox.path().join("downloads/managed-review");
+    write_skill(
+        &install_input,
+        "managed-review",
+        "Review code from SkillYard managed content.",
+    );
+
+    let secrets = Arc::new(FixtureSecretStore::default());
+    let (endpoint, requests) = spawn_agent_server(
+        "/v1",
+        [
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"status\":\"ok\"}"}]}]}"#,
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"SkillYard","annotations":[{"type":"url_citation","url":"https://github.com/ReyYang/SkillYard"}]}]}]}"#,
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"reply\":\"本机已有四个可用于代码审查的 Skill。\",\"localMatchFound\":true}"}]}]}"#,
+        ],
+    );
+    let application = SkillYardApplication::new_with_agent_dependencies(
+        ApplicationPaths::for_home(
+            sandbox.path().join("application-support/SkillYard"),
+            home.clone(),
+        ),
+        PlatformInfo::supported_for_test(),
+        secrets,
+        AgentProviderEndpoints::for_test(endpoint),
+    );
+    application
+        .handle(UiIntent::SetAiConfiguration {
+            enabled: true,
+            disclosure_accepted: true,
+            provider: AiProvider::OpenAi,
+            model: "gpt-5.6-terra".to_owned(),
+        })
+        .expect("应保存 AI 配置");
+    application
+        .handle(UiIntent::SaveAiApiKey {
+            api_key: "skillyard-fixture-local-search-key".to_owned(),
+        })
+        .expect("应保存 fixture Key");
+    application
+        .handle(UiIntent::TestAiConnection)
+        .expect("应先验证当前 Provider");
+    application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应扫描全局与插件 Skill");
+    application
+        .handle(UiIntent::RegisterProject {
+            root_path: project.to_string_lossy().into_owned(),
+        })
+        .expect("应登记并扫描项目 Skill");
+    let UiOutcome::InstallPlan { plan } = application
+        .handle(UiIntent::CreateFolderInstallPlan {
+            input_path: install_input.to_string_lossy().into_owned(),
+        })
+        .expect("应生成托管 Skill 安装预览")
+    else {
+        panic!("应返回安装 Plan");
+    };
+    application
+        .handle(UiIntent::ConfirmInstallPlan {
+            plan_id: plan.id,
+            selected_candidate_ids: plan
+                .candidates
+                .into_iter()
+                .filter(|candidate| candidate.default_selected)
+                .map(|candidate| candidate.candidate_id)
+                .collect(),
+        })
+        .expect("应通过生产入口安装托管 Skill");
+    let inventory_before = application
+        .handle(UiIntent::GetStartupState)
+        .expect("应读取搜索前清单");
+
+    assert_eq!(
+        application
+            .handle(UiIntent::AskAgent {
+                context: AgentPageContext::Page {
+                    page: skillyard_lib::AgentPageKind::Inventory,
+                },
+                messages: vec![AgentConversationMessage {
+                    role: AgentMessageRole::User,
+                    content: "我需要一个能做代码审查的 Skill".to_owned(),
+                }],
+            })
+            .expect("本机 Skill 比较应返回匹配结果"),
+        UiOutcome::AgentReply {
+            reply: "本机已有四个可用于代码审查的 Skill。".to_owned(),
+            local_match_found: true,
+        }
+    );
+
+    let recorded = requests.recv().expect("Fake Server 应返回请求记录");
+    assert_eq!(recorded.len(), 3);
+    let request = &recorded[2];
+    assert!(
+        request.get("tools").is_none(),
+        "有本机结果时不能启用 Provider Web Search"
+    );
+    let serialized = request.to_string();
+    for skill_name in [
+        "takeover-review",
+        "plugin-review",
+        "project-review",
+        "managed-review",
+    ] {
+        assert!(
+            serialized.contains(skill_name),
+            "本机候选目录应包含 {skill_name}"
+        );
+    }
+    assert!(!serialized.contains(home.to_string_lossy().as_ref()));
+    assert!(!serialized.contains(project.to_string_lossy().as_ref()));
+    assert_eq!(
+        application
+            .handle(UiIntent::GetStartupState)
+            .expect("应读取搜索后清单"),
+        inventory_before,
+        "本机搜索不能修改 Inventory、Source、Bundle 或 Mount"
+    );
+}
+
+#[test]
 fn glm_and_deepseek_use_the_same_read_only_conversation_contract() {
     assert_provider_chat(
         AiProvider::Glm,
@@ -128,7 +269,7 @@ fn glm_and_deepseek_use_the_same_read_only_conversation_contract() {
         [
             r#"{"choices":[{"message":{"content":"{\"status\":\"ok\"}"}}]}"#,
             r#"{"choices":[{"message":{"content":"SkillYard"}}],"web_search":[{"title":"SkillYard","link":"https://github.com/ReyYang/SkillYard"}]}"#,
-            r#"{"choices":[{"message":{"content":"fixture answer"}}]}"#,
+            r#"{"choices":[{"message":{"content":"{\"reply\":\"fixture answer\",\"localMatchFound\":true}"}}]}"#,
         ],
     );
     assert_provider_chat(
@@ -139,7 +280,7 @@ fn glm_and_deepseek_use_the_same_read_only_conversation_contract() {
         [
             r#"{"content":[{"type":"tool_use","id":"tool_1","name":"skillyard_connection_test","input":{"status":"ok"}}]}"#,
             r#"{"content":[{"type":"web_search_tool_result","tool_use_id":"srv_1","content":[{"type":"web_search_result","url":"https://github.com/ReyYang/SkillYard","title":"SkillYard"}]}]}"#,
-            r#"{"content":[{"type":"text","text":"fixture answer"}]}"#,
+            r#"{"content":[{"type":"tool_use","id":"tool_2","name":"skillyard_agent_answer","input":{"reply":"fixture answer","localMatchFound":true}}]}"#,
         ],
     );
 }
@@ -203,13 +344,14 @@ fn assert_provider_chat(
             .expect("当前 Provider 应返回对话回答"),
         UiOutcome::AgentReply {
             reply: "fixture answer".to_owned(),
+            local_match_found: true,
         }
     );
     let recorded = requests.recv().expect("应读取 Provider 请求");
     assert_eq!(recorded.len(), 3);
     assert!(
-        recorded[2].get("tools").is_none(),
-        "普通解释路径不能启用 Provider Web Search"
+        !recorded[2].to_string().contains("web_search"),
+        "普通解释路径不能启用 Provider Web Search；DeepSeek 只允许结构化回答工具"
     );
 }
 
@@ -251,9 +393,18 @@ fn spawn_openai_agent_server() -> (String, mpsc::Receiver<Vec<Value>>) {
         [
             r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"status\":\"ok\"}"}]}]}"#,
             r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"SkillYard","annotations":[{"type":"url_citation","url":"https://github.com/ReyYang/SkillYard"}]}]}]}"#,
-            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"这是一个用于解释代码的 Skill。"}]}]}"#,
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"reply\":\"这是一个用于解释代码的 Skill。\",\"localMatchFound\":true}"}]}]}"#,
         ],
     )
+}
+
+fn write_skill(root: &std::path::Path, name: &str, description: &str) {
+    fs::create_dir_all(root).expect("应创建 Skill fixture");
+    fs::write(
+        root.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n# {name}\n{description}\n"),
+    )
+    .expect("应写入 SKILL.md");
 }
 
 fn spawn_agent_server(

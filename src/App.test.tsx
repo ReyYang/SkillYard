@@ -119,6 +119,7 @@ describe("本机清单", () => {
     });
     vi.mocked(client.askAgent).mockResolvedValue({
       reply: "这是一个示例 Skill。",
+      localMatchFound: true,
     });
 
     render(<App client={client} />);
@@ -162,7 +163,9 @@ describe("本机清单", () => {
 
   it("关闭助手后忽略仍在返回的旧 Session 回答", async () => {
     const user = userEvent.setup();
-    let finishReply: ((value: { reply: string }) => void) | undefined;
+    let finishReply:
+      | ((value: { reply: string; localMatchFound: boolean }) => void)
+      | undefined;
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
@@ -194,7 +197,9 @@ describe("本机清单", () => {
     await user.click(
       screen.getByRole("button", { name: "关闭 SkillYard 助手" }),
     );
-    await act(async () => finishReply?.({ reply: "不应恢复的旧回答" }));
+    await act(async () =>
+      finishReply?.({ reply: "不应恢复的旧回答", localMatchFound: true }),
+    );
 
     await user.click(
       screen.getByRole("button", { name: "打开 SkillYard 助手" }),

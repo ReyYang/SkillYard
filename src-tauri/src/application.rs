@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::{
     agent::{
         AgentError, AgentProviderEndpoints, KeychainSecretStore, SharedSecretStore, answer_agent,
-        read_skill_material, verify_provider,
+        build_local_skill_catalog, read_skill_material, verify_provider,
     },
     bundle_update_batch::{
         BundleUpdateBatchError, acknowledge_bundle_update_batch, confirm_bundle_update_batch_plan,
@@ -518,16 +518,14 @@ impl SkillYardApplication {
             .map_err(AgentError::from)?
             .ok_or(AgentError::MissingApiKey)?;
         let language = storage.read_interface_language()?;
+        let inventory_entries = match storage.read_initial_scan()? {
+            Some(UiOutcome::Inventory { entries, .. }) => entries,
+            _ => Vec::new(),
+        };
         let material = match context {
             AgentPageContext::Skill { inventory_id } => {
-                let outcome = storage
-                    .read_initial_scan()?
-                    .ok_or(AgentError::SkillNotFound)?;
-                let UiOutcome::Inventory { entries, .. } = outcome else {
-                    return Err(AgentError::SkillNotFound.into());
-                };
-                let entry = entries
-                    .into_iter()
+                let entry = inventory_entries
+                    .iter()
                     .find(|entry| entry.id == inventory_id)
                     .ok_or(AgentError::SkillNotFound)?;
                 read_skill_material(
@@ -549,16 +547,33 @@ impl SkillYardApplication {
                 format!("Current page: {page}. No Skill file is attached.")
             }
         };
-        let reply = answer_agent(
+        let catalog = build_local_skill_catalog(
+            inventory_entries
+                .iter()
+                .filter(|entry| !entry.stale)
+                .map(|entry| {
+                    (
+                        entry.skill_name.as_str(),
+                        Path::new(&entry.skill_root),
+                        Path::new(&entry.skill_file),
+                    )
+                }),
+            self.paths.home(),
+        );
+        let context = format!("{material}\n\n{catalog}");
+        let answer = answer_agent(
             &self.agent_endpoints,
             ai.provider,
             &ai.model,
             &api_key,
             language,
             &messages,
-            &material,
+            &context,
         )?;
-        Ok(UiOutcome::AgentReply { reply })
+        Ok(UiOutcome::AgentReply {
+            reply: answer.reply,
+            local_match_found: answer.local_match_found,
+        })
     }
 
     fn read_ai_preferences(&self, storage: &Storage) -> Result<AiPreferences, ApplicationError> {

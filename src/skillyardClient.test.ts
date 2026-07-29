@@ -100,6 +100,7 @@ describe("Tauri IPC contract", () => {
     mocks.invoke.mockResolvedValue({
       type: "agentReply",
       reply: "fixture answer",
+      localMatchFound: true,
     });
     const context = {
       type: "skill" as const,

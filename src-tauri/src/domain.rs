@@ -1548,6 +1548,8 @@ pub enum UiOutcome {
     },
     AgentReply {
         reply: String,
+        /// #56 只在本机没有合适结果时继续联网；前端不自行推断文本含义。
+        local_match_found: bool,
     },
     UnsupportedPlatform {
         actual_os: String,
