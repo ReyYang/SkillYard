@@ -120,6 +120,30 @@ describe("Tauri IPC contract", () => {
     });
   });
 
+  it("生成 Skill 说明时只提交稳定 Inventory ID", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+      bundleUpdates: [],
+    });
+
+    await tauriSkillYardClient.generateSkillAiExplanation("managed:member-1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "generate_skill_ai_explanation",
+      {
+        inventoryId: "managed:member-1",
+      },
+    );
+  });
+
   it("打开 Central Store 时不允许前端提交路径", async () => {
     mocks.invoke.mockResolvedValue(undefined);
 

@@ -47,6 +47,7 @@ export interface SkillYardClient {
     context: AgentPageContext,
     messages: AgentConversationMessage[],
   ): Promise<AgentReply>;
+  generateSkillAiExplanation(inventoryId: string): Promise<InventoryOutcome>;
   getStartupState(): Promise<UiOutcome>;
   openCentralStore(): Promise<void>;
   startInitialScan(): Promise<UiOutcome>;
@@ -196,6 +197,10 @@ export const tauriSkillYardClient: SkillYardClient = {
       searchResults: outcome.searchResults,
     };
   },
+  generateSkillAiExplanation: (inventoryId) =>
+    invoke<InventoryOutcome>("generate_skill_ai_explanation", {
+      inventoryId,
+    }),
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),
   openCentralStore: () => invoke<void>("open_central_store"),
   startInitialScan: () => invoke<UiOutcome>("start_initial_scan"),

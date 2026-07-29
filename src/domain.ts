@@ -58,6 +58,28 @@ export interface AgentSearchResult {
   kind: AgentSearchResultKind;
 }
 
+export type SkillCategory =
+  | "developmentEngineering"
+  | "systemOperations"
+  | "productivityAutomation"
+  | "dataAnalytics"
+  | "productBusiness"
+  | "researchLearning"
+  | "writingCommunication"
+  | "designCreative"
+  | "securityCompliance"
+  | "other";
+
+export interface SkillAiExplanation {
+  category: SkillCategory;
+  summary: string;
+  useCases: string[];
+  instructions: string;
+  language: InterfaceLanguage;
+  contentFingerprint: string;
+  stale: boolean;
+}
+
 export interface SupportedAppSummary {
   id: SupportedAppId;
   displayName: string;
@@ -135,6 +157,7 @@ export interface InventoryObservation {
   sourceDisplayName?: string | null;
   projectDisplayName?: string | null;
   memberId?: string | null;
+  aiExplanation: SkillAiExplanation | null;
 }
 
 export interface LocalRefreshSummary {

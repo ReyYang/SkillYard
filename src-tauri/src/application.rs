@@ -8,7 +8,8 @@ use thiserror::Error;
 use crate::{
     agent::{
         AgentError, AgentProviderEndpoints, KeychainSecretStore, SharedSecretStore, answer_agent,
-        build_local_skill_catalog, read_skill_material, search_public_skills, verify_provider,
+        build_local_skill_catalog, generate_skill_ai_explanation, read_skill_material,
+        search_public_skills, verify_provider,
     },
     bundle_update_batch::{
         BundleUpdateBatchError, acknowledge_bundle_update_batch, confirm_bundle_update_batch_plan,
@@ -256,6 +257,9 @@ impl SkillYardApplication {
                 unreachable!("偏好意图已在平台检查前处理")
             }
             UiIntent::AskAgent { context, messages } => self.ask_agent(context, messages),
+            UiIntent::GenerateSkillAiExplanation { inventory_id } => {
+                self.generate_skill_ai_explanation(inventory_id)
+            }
             // 启动读取前可能需要修复上次中断的写事务，因此也必须取得单写门。
             UiIntent::GetStartupState => self.with_write_operation(|| self.get_startup_state()),
             UiIntent::StartInitialScan => self.with_write_operation(|| self.start_initial_scan()),
@@ -593,6 +597,58 @@ impl SkillYardApplication {
             searched_public_web,
             search_results,
         })
+    }
+
+    fn generate_skill_ai_explanation(
+        &self,
+        inventory_id: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_storage()?;
+        let ai = storage.read_ai_preferences()?;
+        if !ai.enabled {
+            return Err(AgentError::Disabled.into());
+        }
+        if !ai.disclosure_accepted {
+            return Err(AgentError::DisclosureRequired.into());
+        }
+        if !ai.verified {
+            return Err(AgentError::NotVerified.into());
+        }
+        let api_key = self
+            .secret_store
+            .read(ai.provider.api_key_account())
+            .map_err(AgentError::from)?
+            .ok_or(AgentError::MissingApiKey)?;
+        let language = storage.read_interface_language()?;
+        let outcome = storage
+            .read_initial_scan()?
+            .ok_or(AgentError::SkillNotFound)?;
+        let UiOutcome::Inventory { entries, .. } = outcome else {
+            return Err(AgentError::SkillNotFound.into());
+        };
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.id == inventory_id)
+            .ok_or(AgentError::SkillNotFound)?;
+        let material = read_skill_material(
+            &entry.skill_name,
+            Path::new(&entry.skill_root),
+            Path::new(&entry.skill_file),
+            self.paths.home(),
+        )?;
+        let explanation = generate_skill_ai_explanation(
+            &self.agent_endpoints,
+            ai.provider,
+            &ai.model,
+            &api_key,
+            language,
+            &entry.observed_fingerprint,
+            &material,
+        )?;
+        storage.save_skill_ai_explanation(&entry.id, &explanation)?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
     }
 
     fn read_ai_preferences(&self, storage: &Storage) -> Result<AiPreferences, ApplicationError> {

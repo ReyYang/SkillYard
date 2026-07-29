@@ -399,6 +399,11 @@ function AppCore({
   );
   const [isResettingApplication, setIsResettingApplication] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+  const [generatingSkillExplanationId, setGeneratingSkillExplanationId] =
+    useState<string | null>(null);
+  const [skillExplanationError, setSkillExplanationError] = useState<
+    string | null
+  >(null);
   const [inventoryPresentationKey, setInventoryPresentationKey] = useState(0);
 
   const activeRemovalPlan =
@@ -1420,6 +1425,21 @@ function AppCore({
     }
   };
 
+  const generateSkillExplanation = async (inventoryId: string) => {
+    if (generatingSkillExplanationId) return;
+    setGeneratingSkillExplanationId(inventoryId);
+    setSkillExplanationError(null);
+    try {
+      const outcome = await client.generateSkillAiExplanation(inventoryId);
+      setViewState({ status: "ready", outcome });
+      setCommittedInventory(outcome);
+    } catch (error) {
+      setSkillExplanationError(formatError(error));
+    } finally {
+      setGeneratingSkillExplanationId(null);
+    }
+  };
+
   const chooseProjectDirectory = async () => {
     if (isAddingProject) return;
     setIsAddingProject(true);
@@ -1705,6 +1725,8 @@ function AppCore({
       sourceAssociationError={null}
       centralStoreError={null}
       resetError={null}
+      generatingSkillExplanationId={null}
+      skillExplanationError={null}
       onRefresh={() => undefined}
       onCheckUpdates={() => undefined}
       onDismissUpdateError={() => undefined}
@@ -1724,6 +1746,7 @@ function AppCore({
       onTakeover={() => undefined}
       onManageMount={setReadOnlyManagedMemberId}
       onBatchMount={() => undefined}
+      onGenerateSkillExplanation={() => undefined}
     />
   ) : null;
 
@@ -2188,6 +2211,8 @@ function AppCore({
       sourceAssociationError={sourceAssociationError}
       centralStoreError={recoveryOpenError}
       resetError={resetError}
+      generatingSkillExplanationId={generatingSkillExplanationId}
+      skillExplanationError={skillExplanationError}
       onRefresh={refreshLocalInventory}
       onCheckUpdates={checkBundleUpdates}
       onDismissUpdateError={() => setUpdateError(null)}
@@ -2237,6 +2262,7 @@ function AppCore({
       onTakeover={openTakeover}
       onManageMount={openMountManager}
       onBatchMount={openBatchMount}
+      onGenerateSkillExplanation={generateSkillExplanation}
       />
       {pendingProjectSelection ? (
         <ProjectConfirmationDialog

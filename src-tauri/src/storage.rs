@@ -19,9 +19,9 @@ use crate::domain::{
     InventoryObservation, LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind,
     ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope, MountSummary,
     ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey,
-    SkillMetadataStatus, SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind,
-    SourceRefChangePlan, SourceSummary, SupportedAppId, SupportedAppSummary, TakeoverPlan,
-    UiOutcome,
+    SkillAiExplanation, SkillCategory, SkillMetadataStatus, SourceCatalogMemberSummary,
+    SourceCatalogStatus, SourceKind, SourceRefChangePlan, SourceSummary, SupportedAppId,
+    SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
 use crate::github_source::parse_github_source;
 use crate::installation_chain::takeover_group_evidence;
@@ -100,6 +100,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0027_interface_language.sql"),
     ),
     (28, include_str!("../migrations/0028_ai_preferences.sql")),
+    (
+        29,
+        include_str!("../migrations/0029_skill_ai_explanations.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -130,6 +134,18 @@ pub enum StorageError {
     SaveAiPreferences(#[source] rusqlite::Error),
     #[error("SQLite 中包含未知 AI Provider：{0}")]
     UnknownAiProvider(String),
+    #[error("无法读取 Skill AI 说明：{0}")]
+    ReadSkillAiExplanations(#[source] rusqlite::Error),
+    #[error("无法保存 Skill AI 说明：{0}")]
+    SaveSkillAiExplanation(#[source] rusqlite::Error),
+    #[error("无法编码 Skill AI 说明中的适用场景：{0}")]
+    SerializeSkillAiExplanation(#[source] serde_json::Error),
+    #[error("Skill AI 说明中的适用场景无法解析：{0}")]
+    InvalidSkillAiExplanationMetadata(#[source] serde_json::Error),
+    #[error("SQLite 中包含未知 Skill 分类：{0}")]
+    UnknownSkillCategory(String),
+    #[error("Skill AI 说明不符合固定结果结构")]
+    InvalidSkillAiExplanation,
     #[error("无法读取本机清单状态：{0}")]
     ReadInventory(#[source] rusqlite::Error),
     #[error("无法读取 Source 状态：{0}")]
@@ -1383,6 +1399,54 @@ impl Storage {
             has_api_key: false,
             verified,
         })
+    }
+
+    /// 只写入通过完整结构校验的最终结果；同一 Skill 的旧结果直接被替换。
+    pub(crate) fn save_skill_ai_explanation(
+        &mut self,
+        inventory_id: &str,
+        explanation: &SkillAiExplanation,
+    ) -> Result<(), StorageError> {
+        if inventory_id.is_empty()
+            || explanation.summary.trim().is_empty()
+            || explanation.instructions.trim().is_empty()
+            || !(2..=4).contains(&explanation.use_cases.len())
+            || explanation
+                .use_cases
+                .iter()
+                .any(|use_case| use_case.trim().is_empty())
+            || explanation.content_fingerprint.is_empty()
+            || explanation.stale
+        {
+            return Err(StorageError::InvalidSkillAiExplanation);
+        }
+        let use_cases = serde_json::to_string(&explanation.use_cases)
+            .map_err(StorageError::SerializeSkillAiExplanation)?;
+        self.connection
+            .execute(
+                "INSERT INTO skill_ai_explanations (
+                    inventory_id, language, content_fingerprint, category,
+                    summary, use_cases_json, instructions
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(inventory_id) DO UPDATE SET
+                    language = excluded.language,
+                    content_fingerprint = excluded.content_fingerprint,
+                    category = excluded.category,
+                    summary = excluded.summary,
+                    use_cases_json = excluded.use_cases_json,
+                    instructions = excluded.instructions",
+                params![
+                    inventory_id,
+                    explanation.language.as_str(),
+                    explanation.content_fingerprint,
+                    explanation.category.as_str(),
+                    explanation.summary,
+                    use_cases,
+                    explanation.instructions
+                ],
+            )
+            .map_err(StorageError::SaveSkillAiExplanation)?;
+        Ok(())
     }
 
     pub(crate) fn save_ai_configuration(
@@ -7116,7 +7180,81 @@ impl Storage {
             &self.data_root,
         )?);
         entries.sort_by(|left, right| left.skill_root.cmp(&right.skill_root));
+        self.attach_skill_ai_explanations(&mut entries)?;
         Ok(entries)
+    }
+
+    fn attach_skill_ai_explanations(
+        &self,
+        entries: &mut [InventoryItem],
+    ) -> Result<(), StorageError> {
+        let current_language = self.read_interface_language()?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT inventory_id, language, content_fingerprint, category,
+                        summary, use_cases_json, instructions
+                 FROM skill_ai_explanations",
+            )
+            .map_err(StorageError::ReadSkillAiExplanations)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(StorageError::ReadSkillAiExplanations)?;
+        let mut explanations = BTreeMap::new();
+        for row in rows {
+            let (
+                inventory_id,
+                language,
+                content_fingerprint,
+                category,
+                summary,
+                use_cases,
+                instructions,
+            ) = row.map_err(StorageError::ReadSkillAiExplanations)?;
+            let language = InterfaceLanguage::from_str(&language)
+                .ok_or(StorageError::UnknownInterfaceLanguage(language))?;
+            let category = SkillCategory::from_str(&category)
+                .ok_or(StorageError::UnknownSkillCategory(category))?;
+            let use_cases = serde_json::from_str::<Vec<String>>(&use_cases)
+                .map_err(StorageError::InvalidSkillAiExplanationMetadata)?;
+            if !(2..=4).contains(&use_cases.len())
+                || use_cases.iter().any(|use_case| use_case.trim().is_empty())
+                || summary.trim().is_empty()
+                || instructions.trim().is_empty()
+            {
+                return Err(StorageError::InvalidSkillAiExplanation);
+            }
+            explanations.insert(
+                inventory_id,
+                SkillAiExplanation {
+                    category,
+                    summary,
+                    use_cases,
+                    instructions,
+                    language,
+                    content_fingerprint,
+                    stale: false,
+                },
+            );
+        }
+        for entry in entries {
+            if let Some(mut explanation) = explanations.remove(&entry.id) {
+                explanation.stale = explanation.language != current_language
+                    || explanation.content_fingerprint != entry.observed_fingerprint;
+                entry.ai_explanation = Some(explanation);
+            }
+        }
+        Ok(())
     }
 
     fn read_supported_apps(&self) -> Result<Vec<SupportedAppSummary>, StorageError> {
@@ -12614,6 +12752,7 @@ fn inventory_item_from_observation(
         bundle_display_name: None,
         source_display_name: None,
         project_display_name,
+        ai_explanation: None,
     }
 }
 
@@ -12712,6 +12851,7 @@ fn read_managed_entries_from(
             bundle_display_name: Some(bundle_display_name),
             source_display_name,
             project_display_name: None,
+            ai_explanation: None,
         });
     }
     Ok(entries)
@@ -14506,7 +14646,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=28).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=29).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",

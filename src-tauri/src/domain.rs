@@ -25,6 +25,9 @@ pub enum UiIntent {
         context: AgentPageContext,
         messages: Vec<AgentConversationMessage>,
     },
+    GenerateSkillAiExplanation {
+        inventory_id: String,
+    },
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
@@ -262,6 +265,67 @@ pub struct AgentSearchResult {
     pub title: String,
     pub url: String,
     pub kind: AgentSearchResultKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillCategory {
+    DevelopmentEngineering,
+    SystemOperations,
+    ProductivityAutomation,
+    DataAnalytics,
+    ProductBusiness,
+    ResearchLearning,
+    WritingCommunication,
+    DesignCreative,
+    SecurityCompliance,
+    Other,
+}
+
+impl SkillCategory {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::DevelopmentEngineering => "development_engineering",
+            Self::SystemOperations => "system_operations",
+            Self::ProductivityAutomation => "productivity_automation",
+            Self::DataAnalytics => "data_analytics",
+            Self::ProductBusiness => "product_business",
+            Self::ResearchLearning => "research_learning",
+            Self::WritingCommunication => "writing_communication",
+            Self::DesignCreative => "design_creative",
+            Self::SecurityCompliance => "security_compliance",
+            Self::Other => "other",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "development_engineering" => Some(Self::DevelopmentEngineering),
+            "system_operations" => Some(Self::SystemOperations),
+            "productivity_automation" => Some(Self::ProductivityAutomation),
+            "data_analytics" => Some(Self::DataAnalytics),
+            "product_business" => Some(Self::ProductBusiness),
+            "research_learning" => Some(Self::ResearchLearning),
+            "writing_communication" => Some(Self::WritingCommunication),
+            "design_creative" => Some(Self::DesignCreative),
+            "security_compliance" => Some(Self::SecurityCompliance),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+/// AI 说明是可替换的本地派生数据，不参与 Skill 生命周期或来源身份。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillAiExplanation {
+    pub category: SkillCategory,
+    pub summary: String,
+    pub use_cases: Vec<String>,
+    pub instructions: String,
+    pub language: InterfaceLanguage,
+    pub content_fingerprint: String,
+    pub stale: bool,
 }
 
 impl AiProvider {
@@ -831,6 +895,7 @@ pub struct InventoryItem {
     pub bundle_display_name: Option<String>,
     pub source_display_name: Option<String>,
     pub project_display_name: Option<String>,
+    pub ai_explanation: Option<SkillAiExplanation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

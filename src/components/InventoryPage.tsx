@@ -9,6 +9,7 @@ import type {
   InventoryObservation,
   InterfaceLanguage,
   MountSummary,
+  SkillCategory,
   SupportedAppId,
   UiOutcome,
 } from "../domain";
@@ -81,6 +82,8 @@ interface InventoryPageProps {
   sourceAssociationError: string | null;
   centralStoreError: string | null;
   resetError: string | null;
+  generatingSkillExplanationId: string | null;
+  skillExplanationError: string | null;
   onRefresh(): void;
   onCheckUpdates(): void;
   onDismissUpdateError(): void;
@@ -105,6 +108,7 @@ interface InventoryPageProps {
   onTakeover(observationId: string): void;
   onManageMount(memberId: string): void;
   onBatchMount(bundleId: string): void;
+  onGenerateSkillExplanation(inventoryId: string): void;
 }
 
 const FILTERS: Array<{ id: ManagementFilter; label: TranslationKey }> = [
@@ -169,6 +173,8 @@ export function InventoryPage({
   sourceAssociationError,
   centralStoreError,
   resetError,
+  generatingSkillExplanationId,
+  skillExplanationError,
   onRefresh,
   onCheckUpdates,
   onDismissUpdateError,
@@ -193,6 +199,7 @@ export function InventoryPage({
   onTakeover,
   onManageMount,
   onBatchMount,
+  onGenerateSkillExplanation,
 }: InventoryPageProps) {
   const { localize, t } = useI18n();
   const [query, setQuery] = useState("");
@@ -273,6 +280,20 @@ export function InventoryPage({
         actionsDisabled={isWriteBlocked}
         allowReadOnlyDetails={allowReadOnlyDetails}
         mountError={mountError}
+        canGenerateExplanation={
+          !allowReadOnlyDetails &&
+          aiPreferences.enabled &&
+          aiPreferences.disclosureAccepted &&
+          aiPreferences.hasApiKey &&
+          aiPreferences.verified
+        }
+        isGeneratingExplanation={
+          generatingSkillExplanationId === selectedEntry.id
+        }
+        explanationError={skillExplanationError}
+        onGenerateExplanation={() =>
+          onGenerateSkillExplanation(selectedEntry.id)
+        }
         onManageMount={onManageMount}
         onBack={() =>
           onScreenChange({ type: "group", groupId: selectedGroup.id })
@@ -1183,6 +1204,10 @@ function SkillDetailsPage({
   actionsDisabled,
   allowReadOnlyDetails,
   mountError,
+  canGenerateExplanation,
+  isGeneratingExplanation,
+  explanationError,
+  onGenerateExplanation,
   onManageMount,
   onBack,
 }: {
@@ -1192,6 +1217,10 @@ function SkillDetailsPage({
   actionsDisabled: boolean;
   allowReadOnlyDetails: boolean;
   mountError: string | null;
+  canGenerateExplanation: boolean;
+  isGeneratingExplanation: boolean;
+  explanationError: string | null;
+  onGenerateExplanation(): void;
   onManageMount(memberId: string): void;
   onBack(): void;
 }) {
@@ -1242,6 +1271,62 @@ function SkillDetailsPage({
             </dd>
           </div>
         </dl>
+      </section>
+
+      <section className="skill-detail-card" aria-label={t("AI 说明")}>
+        <div className="skill-ai-header">
+          <div>
+            <p className="section-eyebrow">AI ORGANIZATION</p>
+            <h2>{t("AI 说明")}</h2>
+          </div>
+          <button
+            className="compact-action"
+            type="button"
+            disabled={!canGenerateExplanation || isGeneratingExplanation}
+            onClick={onGenerateExplanation}
+          >
+            {isGeneratingExplanation
+              ? t("正在整理…")
+              : entry.aiExplanation
+                ? t("重新整理")
+                : t("AI 整理")}
+          </button>
+        </div>
+        {entry.aiExplanation ? (
+          <div className="skill-ai-content">
+            <span className="skill-category">
+              {t(skillCategoryLabel(entry.aiExplanation.category))}
+            </span>
+            {entry.aiExplanation.stale ? (
+              <p className="skill-ai-stale">{t("待重新整理")}</p>
+            ) : null}
+            <p className="skill-ai-summary">{entry.aiExplanation.summary}</p>
+            <div>
+              <h3>{t("适用场景")}</h3>
+              <ul>
+                {entry.aiExplanation.useCases.map((useCase) => (
+                  <li key={useCase}>{useCase}</li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <h3>{t("使用说明")}</h3>
+              <p>{entry.aiExplanation.instructions}</p>
+            </div>
+          </div>
+        ) : (
+          <p className="skill-ai-empty">{t("尚未生成 AI 说明")}</p>
+        )}
+        {!canGenerateExplanation && !allowReadOnlyDetails ? (
+          <p className="skill-ai-empty">
+            {t("请先在设置中启用 AI 并完成连接测试。")}
+          </p>
+        ) : null}
+        {explanationError ? (
+          <div className="inline-error" role="alert">
+            {explanationError}
+          </div>
+        ) : null}
       </section>
 
       {entry.installationChain ? (
@@ -1314,6 +1399,21 @@ function SkillDetailsPage({
       ) : null}
     </main>
   );
+}
+
+function skillCategoryLabel(category: SkillCategory): TranslationKey {
+  return {
+    developmentEngineering: "开发与工程",
+    systemOperations: "系统与运维",
+    productivityAutomation: "效率与自动化",
+    dataAnalytics: "数据与分析",
+    productBusiness: "产品与业务",
+    researchLearning: "研究与学习",
+    writingCommunication: "写作与沟通",
+    designCreative: "设计与创意",
+    securityCompliance: "安全与合规",
+    other: "其他",
+  }[category] as TranslationKey;
 }
 
 function BundleUpdateStatusView({

@@ -2247,6 +2247,62 @@ code {
   margin: 0.85rem 0;
 }
 
+.skill-ai-header {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.skill-ai-content {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.skill-ai-content h3 {
+  margin: 0 0 0.45rem;
+  font-size: 0.9rem;
+}
+
+.skill-ai-content p,
+.skill-ai-content ul {
+  margin: 0;
+  color: #526057;
+  line-height: 1.55;
+}
+
+.skill-ai-content ul {
+  padding-left: 1.2rem;
+}
+
+.skill-category {
+  width: fit-content;
+  padding: 0.34rem 0.66rem;
+  border-radius: 999px;
+  color: #1c5737;
+  background: #e5f2e7;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.skill-ai-stale,
+.skill-ai-empty {
+  margin: 0.85rem 0 0;
+  color: #778078;
+  font-size: 0.88rem;
+}
+
+.skill-ai-stale {
+  color: #936321;
+}
+
+.skill-ai-summary {
+  color: #203326 !important;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
 .current-operation > div {
   display: grid;
   gap: 0.25rem;
@@ -2324,6 +2380,11 @@ code {
   .skill-detail-card dl > div {
     grid-template-columns: 1fr;
     gap: 0.35rem;
+  }
+
+  .skill-ai-header {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .association-mapping-list label {

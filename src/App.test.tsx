@@ -318,6 +318,60 @@ describe("本机清单", () => {
     expect(screen.getByText("vercel-labs/skills")).toBeInTheDocument();
   });
 
+  it("Skill 详情由用户主动生成固定结构说明，并只提交稳定 Inventory ID", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const client = createClient(initial);
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+    vi.mocked(client.generateSkillAiExplanation).mockResolvedValue(
+      inventoryOutcome([
+        createManagedEntry({
+          aiExplanation: {
+            category: "developmentEngineering",
+            summary: "用于审查代码并指出实现风险。",
+            useCases: ["提交前审查", "定位潜在缺陷"],
+            instructions: "在当前 Skill 中提供待审查代码上下文。",
+            language: "zhCn",
+            contentFingerprint: "fingerprint",
+            stale: false,
+          },
+        }),
+      ]),
+    );
+
+    render(<App client={client} />);
+    await openManagedSkillDetails(user);
+    expect(screen.getByText("尚未生成 AI 说明")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "AI 整理" }));
+
+    expect(client.generateSkillAiExplanation).toHaveBeenCalledWith(
+      "managed:member-1",
+    );
+    expect(
+      await screen.findByText("用于审查代码并指出实现风险。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("开发与工程")).toBeInTheDocument();
+    expect(screen.getByText("提交前审查")).toBeInTheDocument();
+    expect(screen.getByText("定位潜在缺陷")).toBeInTheDocument();
+    expect(
+      screen.getByText("在当前 Skill 中提供待审查代码上下文。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重新整理" }),
+    ).toBeInTheDocument();
+  });
+
   it("启动时使用后端恢复的英文偏好", async () => {
     const client = createClient(
       inventoryOutcome([createManagedEntry({ skillName: "example" })]),
@@ -6734,6 +6788,7 @@ function createClient(startup: UiOutcome): SkillYardClient {
     deleteAiApiKey: vi.fn(),
     testAiConnection: vi.fn(),
     askAgent: vi.fn(),
+    generateSkillAiExplanation: vi.fn(),
     getStartupState: vi.fn().mockResolvedValue(startup),
     openCentralStore: vi.fn().mockResolvedValue(undefined),
     startInitialScan: vi.fn(),
@@ -7030,6 +7085,7 @@ function createEntry(
     installationChain: null,
     takeoverGroupId: null,
     takeoverGroupDisplayName: null,
+    aiExplanation: null,
     ...overrides,
   };
 }

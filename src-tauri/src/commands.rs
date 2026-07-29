@@ -90,6 +90,22 @@ pub fn ask_agent(
     }
 }
 
+#[tauri::command(async)]
+pub fn generate_skill_ai_explanation(
+    application: State<'_, SkillYardApplication>,
+    inventory_id: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(
+        &application,
+        UiIntent::GenerateSkillAiExplanation { inventory_id },
+    )? {
+        outcome @ UiOutcome::Inventory { .. } => Ok(outcome),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有返回包含 AI 说明的 Inventory",
+        )),
+    }
+}
+
 fn expect_preferences(outcome: UiOutcome) -> Result<UiOutcome, UiError> {
     match outcome {
         outcome @ UiOutcome::Preferences { .. } => Ok(outcome),
