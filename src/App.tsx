@@ -108,7 +108,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         if (active) setLanguage(preferences.language);
       },
       (error: unknown) => {
-        if (active) setPreferenceError(formatError(error, "zhCn"));
+        if (active) setPreferenceError(formatErrorMessage(error, "zhCn"));
       },
     );
     return () => {
@@ -124,7 +124,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       const preferences = await client.setInterfaceLanguage(nextLanguage);
       setLanguage(preferences.language);
     } catch (error) {
-      setLanguageError(formatError(error, language ?? "zhCn"));
+      setLanguageError(formatErrorMessage(error, language ?? "zhCn"));
     } finally {
       setIsSavingLanguage(false);
     }
@@ -168,6 +168,7 @@ function AppCore({
   onLanguageChange,
 }: AppCoreProps) {
   const { t } = useI18n();
+  const formatError = (error: unknown) => formatErrorMessage(error, language);
   const [viewState, setViewState] = useState<ViewState>({ status: "loading" });
   const [committedInventory, setCommittedInventory] =
     useState<InventoryOutcome | null>(null);
@@ -608,7 +609,10 @@ function AppCore({
       } catch (recoveryError) {
         setViewState({
           status: "error",
-          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+          message: t("{message}；重新读取状态失败：{recoveryError}", {
+            message,
+            recoveryError: formatError(recoveryError),
+          }),
         });
       }
     } finally {
@@ -678,7 +682,9 @@ function AppCore({
       } catch (error) {
         setViewState({
           status: "error",
-          message: `Source 已处理，但重新读取本机清单失败：${formatError(error)}`,
+          message: t("Source 已处理，但重新读取本机清单失败：{error}", {
+            error: formatError(error),
+          }),
         });
       }
       return;
@@ -733,7 +739,10 @@ function AppCore({
       } catch (recoveryError) {
         setViewState({
           status: "error",
-          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+          message: t("{message}；重新读取状态失败：{recoveryError}", {
+            message,
+            recoveryError: formatError(recoveryError),
+          }),
         });
       }
     } finally {
@@ -841,7 +850,9 @@ function AppCore({
       } catch (error) {
         setViewState({ status: "ready", outcome: confirmedOutcome });
         setSourceAssociationError(
-          `来源关系已处理，但重新读取清单失败：${formatError(error)}`,
+          t("来源关系已处理，但重新读取清单失败：{error}", {
+            error: formatError(error),
+          }),
         );
       }
       setPendingSourceAssociationPlan(null);
@@ -860,7 +871,10 @@ function AppCore({
       } catch (recoveryError) {
         setViewState({
           status: "error",
-          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+          message: t("{message}；重新读取状态失败：{recoveryError}", {
+            message,
+            recoveryError: formatError(recoveryError),
+          }),
         });
       }
     } finally {
@@ -949,7 +963,10 @@ function AppCore({
       setSourceError(message);
     } catch (recoveryError) {
       setSourceError(
-        `${message}；重新读取 Source 状态失败：${formatError(recoveryError)}`,
+        t("{message}；重新读取 Source 状态失败：{recoveryError}", {
+          message,
+          recoveryError: formatError(recoveryError),
+        }),
       );
     }
   };
@@ -1003,7 +1020,9 @@ function AppCore({
         setViewState({ status: "ready", outcome: inventory });
       } catch (error) {
         setSourceError(
-          `Tracked Ref 已更改，但重新读取清单失败：${formatError(error)}`,
+          t("Tracked Ref 已更改，但重新读取清单失败：{error}", {
+            error: formatError(error),
+          }),
         );
       }
     } catch (error) {
@@ -1016,7 +1035,10 @@ function AppCore({
         setViewState({ status: "ready", outcome: inventory });
       } catch (recoveryError) {
         setSourceError(
-          `${formatError(error)}；重新读取清单失败：${formatError(recoveryError)}`,
+          t("{message}；重新读取清单失败：{recoveryError}", {
+            message: formatError(error),
+            recoveryError: formatError(recoveryError),
+          }),
         );
       }
     } finally {
@@ -1172,7 +1194,10 @@ function AppCore({
           setSourceDiscovery(null);
           setViewState({
             status: "error",
-            message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+            message: t("{message}；重新读取状态失败：{recoveryError}", {
+              message,
+              recoveryError: formatError(recoveryError),
+            }),
           });
         }
         return;
@@ -1210,7 +1235,10 @@ function AppCore({
         setSourceDiscovery(null);
         setViewState({
           status: "error",
-          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+          message: t("{message}；重新读取状态失败：{recoveryError}", {
+            message,
+            recoveryError: formatError(recoveryError),
+          }),
         });
       }
     } finally {
@@ -1292,7 +1320,10 @@ function AppCore({
       } catch (recoveryError) {
         setViewState({
           status: "error",
-          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+          message: t("{message}；重新读取状态失败：{recoveryError}", {
+            message,
+            recoveryError: formatError(recoveryError),
+          }),
         });
       }
     } finally {
@@ -1359,7 +1390,10 @@ function AppCore({
         setMountError(message);
       } catch (refreshFailure) {
         setMountError(
-          `${message}；重新检查挂载状态失败：${formatError(refreshFailure)}`,
+          t("{message}；重新检查挂载状态失败：{recoveryError}", {
+            message,
+            recoveryError: formatError(refreshFailure),
+          }),
         );
       }
     } finally {
@@ -1388,7 +1422,10 @@ function AppCore({
       } catch (recoveryError) {
         setViewState({
           status: "error",
-          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+          message: t("{message}；重新读取状态失败：{recoveryError}", {
+            message,
+            recoveryError: formatError(recoveryError),
+          }),
         });
       }
     } finally {
@@ -1443,7 +1480,10 @@ function AppCore({
       } catch (recoveryError) {
         setViewState({
           status: "error",
-          message: `${message}；重新读取状态失败：${formatError(recoveryError)}`,
+          message: t("{message}；重新读取状态失败：{recoveryError}", {
+            message,
+            recoveryError: formatError(recoveryError),
+          }),
         });
       }
     } finally {
@@ -1705,8 +1745,9 @@ function AppCore({
         <p className="eyebrow">SKILLYARD · PLATFORM CHECK</p>
         <h1>{t("当前 Mac 不受 SkillYard 1.0 支持")}</h1>
         <p>
-          需要 macOS {viewState.outcome.minimumMajorVersion} 或更高版本的 Apple
-          Silicon Mac。
+          {t("需要 macOS {version} 或更高版本的 Apple Silicon Mac。", {
+            version: viewState.outcome.minimumMajorVersion,
+          })}
         </p>
       </main>
     );
@@ -2025,23 +2066,52 @@ function AppCore({
   );
 }
 
-function formatError(
+function formatErrorMessage(
   error: unknown,
   language: InterfaceLanguage = "zhCn",
 ): string {
-  if (error instanceof Error) return error.message;
-  // Tauri command 会把 Rust 的结构化 UiError 作为普通对象传给前端。
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
-    return error.message;
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "object" &&
+          error !== null &&
+          "message" in error &&
+          typeof error.message === "string"
+        ? error.message
+        : null;
+  if (message && (language === "zhCn" || !containsCjk(message))) {
+    return message;
   }
-  return language === "zhCn"
-    ? "无法读取 SkillYard 状态"
-    : "Unable to read SkillYard state";
+  // Tauri command 会把 Rust 的结构化 UiError 作为普通对象传给前端。
+  if (language === "en") {
+    const code = errorCode(error);
+    return {
+      storageError: "SkillYard could not access its local data.",
+      lifecycleError: "SkillYard could not complete the filesystem operation.",
+      mountError: "SkillYard could not complete the Mount operation.",
+      takeoverError: "SkillYard could not complete the takeover operation.",
+      sourceError: "SkillYard could not complete the Source operation.",
+      sourceAssociationError:
+        "SkillYard could not complete the Source association.",
+      bundleUpdateBatchError:
+        "SkillYard could not complete the Bundle update operation.",
+      removalError: "SkillYard could not complete the removal operation.",
+      invalidState: "SkillYard cannot continue from the current state.",
+      operationInProgress: "Another high-assurance operation is in progress.",
+      operationGateUnavailable:
+        "SkillYard cannot access the operation coordinator.",
+      dialogError: "The selected item could not be read.",
+      invalidPath: "The selected path cannot be stored by SkillYard.",
+      openPathError: "The Central Store could not be opened in Finder.",
+      invalidOutcome: "SkillYard returned an unexpected application state.",
+      installPlanConsumed: "This installation preview is no longer available.",
+    }[code ?? ""] ?? "SkillYard could not complete the operation.";
+  }
+  return "无法读取 SkillYard 状态";
+}
+
+function containsCjk(value: string): boolean {
+  return /[\u3400-\u9fff]/u.test(value);
 }
 
 function errorCode(error: unknown): string | null {

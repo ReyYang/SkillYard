@@ -25,7 +25,7 @@ export function SourceAssociationPlanPage({
   onBack,
   onConfirm,
 }: SourceAssociationPlanPageProps) {
-  const { t } = useI18n();
+  const { localize, t } = useI18n();
   const [choiceByConflict, setChoiceByConflict] = useState<
     Record<string, string>
   >({});
@@ -153,7 +153,9 @@ export function SourceAssociationPlanPage({
           <h2>{t("选择唯一内容")}</h2>
           {plan.conflicts.map((conflict) => (
             <fieldset key={conflict.id}>
-              <legend>{conflict.label}</legend>
+              <legend>
+                {localize(conflict.label, "请选择要继续使用的内容。")}
+              </legend>
               {conflict.candidateMemberIds.map((memberId) => {
                 const member = plan.members.find(
                   (candidate) => candidate.memberId === memberId,
@@ -196,7 +198,9 @@ export function SourceAssociationPlanPage({
           <h2>{t("需要先处理冲突")}</h2>
           <ul>
             {plan.blockingIssues.map((issue) => (
-              <li key={issue}>{issue}</li>
+              <li key={issue}>
+                {localize(issue, "请先处理这个内容冲突。")}
+              </li>
             ))}
           </ul>
         </section>

@@ -6,6 +6,7 @@ import type {
   SupportedAppId,
   SupportedAppSummary,
 } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 interface BundleMountPageProps {
@@ -49,6 +50,7 @@ export function BundleMountPage({
   onBack,
   onCreatePlan,
 }: BundleMountPageProps) {
+  const { t } = useI18n();
   const [selections, setSelections] =
     useState<Record<SupportedAppId, AppSelection>>(EMPTY_SELECTIONS);
 
@@ -98,20 +100,26 @@ export function BundleMountPage({
     <main className="mount-shell">
       <PageBackButton disabled={isPlanning} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · BATCH MOUNT TARGETS</p>
-      <h1>{`批量挂载 ${bundleDisplayName}`}</h1>
-      <p className="lead">本 Bundle 的 {uniqueMembers.length} 个 Skill 将全部参与</p>
+      <h1>{t("批量挂载 {bundle}", { bundle: bundleDisplayName })}</h1>
+      <p className="lead">
+        {t("本 Bundle 的 {count} 个 Skill 将全部参与", {
+          count: uniqueMembers.length,
+        })}
+      </p>
       <p className="batch-intro">
-        先选择使用位置，再由 SkillYard 检查每个 Skill 的精确路径。此处不会立即创建挂载。
+        {t(
+          "先选择使用位置，再由 SkillYard 检查每个 Skill 的精确路径。此处不会立即创建挂载。",
+        )}
       </p>
 
       {error ? (
         <div className="inline-error" role="alert">
-          <strong>无法生成批量挂载预览</strong>
+          <strong>{t("无法生成批量挂载预览")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
 
-      <section className="batch-member-summary" aria-label="Bundle 全部成员">
+      <section className="batch-member-summary" aria-label={t("Bundle 全部成员")}>
         <p className="section-eyebrow">BUNDLE MEMBERS</p>
         <ul>
           {uniqueMembers.map((member) => (
@@ -129,20 +137,22 @@ export function BundleMountPage({
           <section
             key={app.id}
             className="mount-panel"
-            aria-label={`${app.displayName} 批量挂载目标`}
+            aria-label={t("{app} 批量挂载目标", {
+              app: app.displayName,
+            })}
           >
             <div className="mount-app-heading">
               <div>
                 <p className="section-eyebrow">SUPPORTED APP</p>
                 <h2>{app.displayName}</h2>
               </div>
-              <span>{detectionLabel(detected)}</span>
+              <span>{detectionLabel(detected, t)}</span>
             </div>
             <div className="batch-target-list">
               <label className="batch-target-option">
                 <input
                   type="checkbox"
-                  aria-label={`${app.displayName} 全局`}
+                  aria-label={t("{app} 全局", { app: app.displayName })}
                   checked={selection.global}
                   disabled={isPlanning}
                   onChange={(event) =>
@@ -150,15 +160,22 @@ export function BundleMountPage({
                   }
                 />
                 <span>
-                  <strong>{`${app.displayName} 全局`}</strong>
-                  <small>{`在这台 Mac 的所有 ${app.displayName} 项目中可用`}</small>
+                  <strong>{t("{app} 全局", { app: app.displayName })}</strong>
+                  <small>
+                    {t("在这台 Mac 的所有 {app} 项目中可用", {
+                      app: app.displayName,
+                    })}
+                  </small>
                 </span>
               </label>
               {projects.map((project) => (
                 <label key={project.id} className="batch-target-option">
                   <input
                     type="checkbox"
-                    aria-label={`${app.displayName} 项目 ${project.displayName}`}
+                    aria-label={t("{app} 项目 {project}", {
+                      app: app.displayName,
+                      project: project.displayName,
+                    })}
                     checked={selection.projectIds.includes(project.id)}
                     disabled={isPlanning}
                     onChange={(event) =>
@@ -166,7 +183,12 @@ export function BundleMountPage({
                     }
                   />
                   <span>
-                    <strong>{`${app.displayName} 项目 ${project.displayName}`}</strong>
+                    <strong>
+                      {t("{app} 项目 {project}", {
+                        app: app.displayName,
+                        project: project.displayName,
+                      })}
+                    </strong>
                     <code title={project.rootPath}>{project.rootPath}</code>
                   </span>
                 </label>
@@ -174,13 +196,16 @@ export function BundleMountPage({
             </div>
             {projects.length === 0 ? (
               <p className="mount-project-hint">
-                还没有已登记项目；可返回清单后通过“添加项目”选择本地目录。
+                {t(
+                  "还没有已登记项目；可返回清单后通过“添加项目”选择本地目录。",
+                )}
               </p>
             ) : null}
             {app.id === "claudeCode" && projects.length > 0 ? (
               <p className="mount-project-hint">
-                Claude Code 的项目挂载位于 <code>.claude/skills</code>；GitHub
-                Copilot 也可能读取这个位置。
+                {t(
+                  "Claude Code 的项目挂载位于 .claude/skills；GitHub Copilot 也可能读取这个位置。",
+                )}
               </p>
             ) : null}
           </section>
@@ -188,10 +213,12 @@ export function BundleMountPage({
       })}
 
       {requests.length === 0 ? (
-        <p className="install-selection-empty">至少选择一个应用或项目目标。</p>
+        <p className="install-selection-empty">
+          {t("至少选择一个应用或项目目标。")}
+        </p>
       ) : null}
       <p className="mount-confirm-warning">
-        下一步只生成影响预览；最终确认后，所选 Mount 会全部完成或全部撤销。
+        {t("下一步只生成影响预览；最终确认后，所选 Mount 会全部完成或全部撤销。")}
       </p>
       <div className="install-actions">
         <button
@@ -200,7 +227,7 @@ export function BundleMountPage({
           disabled={isPlanning || requests.length === 0}
           onClick={() => onCreatePlan(requests)}
         >
-          {isPlanning ? "正在检查目标…" : "生成影响预览"}
+          {isPlanning ? t("正在检查目标…") : t("生成影响预览")}
         </button>
       </div>
     </main>
@@ -247,8 +274,11 @@ function buildRequests(
   ];
 }
 
-function detectionLabel(detected: boolean | null | undefined): string {
-  if (detected === true) return "已检测到";
-  if (detected === false) return "未检测到";
-  return "尚未检测";
+function detectionLabel(
+  detected: boolean | null | undefined,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  if (detected === true) return t("已检测到");
+  if (detected === false) return t("未检测到");
+  return t("尚未检测");
 }

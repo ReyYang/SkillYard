@@ -1,4 +1,5 @@
 import type { RecoveryIssue } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 interface RecoveryPageProps {
@@ -16,35 +17,38 @@ export function RecoveryPage({
   onBack,
   onOpenCentralStore,
 }: RecoveryPageProps) {
+  const { localize, t } = useI18n();
   return (
     <main className="source-shell source-ref-shell">
       <PageBackButton disabled={isOpeningCentralStore} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · FILESYSTEM RECOVERY</p>
-      <h1>需要人工检查文件</h1>
+      <h1>{t("需要人工检查文件")}</h1>
       <p className="lead">
-        SkillYard 无法安全判断这项操作的最终状态，因此已经停止修改相关
-        Bundle。其他 Skill 和只读清单不受影响。
+        {t(
+          "SkillYard 无法安全判断这项操作的最终状态，因此已经停止修改相关 Bundle。其他 Skill 和只读清单不受影响。",
+        )}
       </p>
 
-      <section className="source-ref-plan" aria-label="需要检查的操作">
+      <section className="source-ref-plan" aria-label={t("需要检查的操作")}>
         <div>
-          <span>相关 Bundle</span>
+          <span>{t("相关 Bundle")}</span>
           <strong>{issue.bundleDisplayName}</strong>
         </div>
         <div>
-          <span>停止原因</span>
-          <strong>{issue.message}</strong>
+          <span>{t("停止原因")}</span>
+          <strong>{localize(issue.message, "这个操作需要人工恢复。")}</strong>
         </div>
       </section>
 
       <p className="source-empty">
-        你可以在 Finder 中查看 Central Store。请保留现有内容，不要手动删除相关目录；
-        SkillYard 1.0 不提供强制继续或自动清理。
+        {t(
+          "你可以在 Finder 中查看 Central Store。请保留现有内容，不要手动删除相关目录；SkillYard 1.0 不提供强制继续或自动清理。",
+        )}
       </p>
 
       {error ? (
         <div className="inline-error" role="alert">
-          <strong>无法打开 Central Store</strong>
+          <strong>{t("无法打开 Central Store")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
@@ -56,7 +60,7 @@ export function RecoveryPage({
           disabled={isOpeningCentralStore}
           onClick={onOpenCentralStore}
         >
-          {isOpeningCentralStore ? "正在打开…" : "打开 Central Store"}
+          {isOpeningCentralStore ? t("正在打开…") : t("打开 Central Store")}
         </button>
       </div>
     </main>

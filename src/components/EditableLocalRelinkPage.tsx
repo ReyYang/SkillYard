@@ -19,7 +19,7 @@ export function EditableLocalRelinkPage({
   onDiscard,
   onConfirm,
 }: EditableLocalRelinkPageProps) {
-  const { t } = useI18n();
+  const { localize, t } = useI18n();
   const isBusy = isConfirming || isDiscarding;
 
   return (
@@ -75,11 +75,13 @@ export function EditableLocalRelinkPage({
               </span>
               {member.validationErrors.map((message) => (
                 <small className="candidate-error" key={message}>
-                  {message}
+                  {localize(message, "无法确认这个 Skill 内容。")}
                 </small>
               ))}
               {member.warnings.map((message) => (
-                <small key={message}>{message}</small>
+                <small key={message}>
+                  {localize(message, "请在继续前检查此提示。")}
+                </small>
               ))}
             </li>
           ))}

@@ -132,7 +132,6 @@ const EN_MESSAGES = {
   "补装 Skill": "Install missing Skills",
   "安装 Bundle": "Install Bundle",
   "重新指定路径": "Relink path",
-  "删除 Source {source}": "Delete Source {source}",
   "正在准备删除…": "Preparing removal…",
   "删除 Source": "Delete Source",
   "最近一次加载失败：{error}": "Last load failed: {error}",
@@ -393,6 +392,323 @@ const EN_MESSAGES = {
   "正在安全接管…": "Taking over safely…",
   "确认接管": "Confirm takeover",
   "未发现可核验的安装记录": "No verifiable installation record found",
+  "确认 {bundle} 批量挂载": "Confirm batch Mount for {bundle}",
+  "每项仍是一个独立的 Skill Mount，不会创建 Bundle 级软链接。":
+    "Each item remains an independent Skill Mount; no Bundle-level symbolic link is created.",
+  "批量挂载影响预览": "Batch Mount impact preview",
+  "确认后的所选项会全部完成或全部撤销":
+    "Every selected item completes or all selected items are reverted",
+  "冲突和已经挂载的项目不会进入事务；你也可以排除其他 Ready 项。":
+    "Conflicts and already-mounted items do not enter the transaction. You can also exclude other ready items.",
+  "至少保留一个可挂载项": "Keep at least one mountable item",
+  "确认开始后不能取消，也不能接受部分结果。":
+    "The operation cannot be canceled after confirmation, and partial results are not accepted.",
+  "正在安全挂载…": "Mounting safely…",
+  "确认批量挂载": "Confirm batch Mount",
+  "项目 {project}": "Project {project}",
+  "可挂载": "Ready to Mount",
+  "路径冲突": "Path conflict",
+  "Scope 冲突": "Scope conflict",
+  "已挂载": "Already mounted",
+  "可安全创建": "Safe to create",
+  "目标路径已被其他内容占用": "The target path is occupied by other content",
+  "同一应用的 global 与 project scope 不能重叠":
+    "Global and project scopes cannot overlap for the same app",
+  "已经挂载，无需重复创建": "Already mounted; no duplicate is needed",
+  "批量挂载 {bundle}": "Batch Mount {bundle}",
+  "本 Bundle 的 {count} 个 Skill 将全部参与":
+    "All {count} Skills in this Bundle are included",
+  "先选择使用位置，再由 SkillYard 检查每个 Skill 的精确路径。此处不会立即创建挂载。":
+    "Choose usage locations first, then SkillYard checks the exact path for every Skill. No Mount is created on this page.",
+  "无法生成批量挂载预览": "Unable to create batch Mount preview",
+  "Bundle 全部成员": "All Bundle members",
+  "{app} 批量挂载目标": "{app} batch Mount targets",
+  "已检测到": "Detected",
+  "未检测到": "Not detected",
+  "尚未检测": "Not checked",
+  "{app} 全局": "{app} Global",
+  "在这台 Mac 的所有 {app} 项目中可用":
+    "Available in every {app} project on this Mac",
+  "{app} 项目 {project}": "{app} Project {project}",
+  "还没有已登记项目；可返回清单后通过“添加项目”选择本地目录。":
+    "No projects are registered yet. Return to the inventory and use “Add project” to choose a local directory.",
+  "Claude Code 的项目挂载位于 .claude/skills；GitHub Copilot 也可能读取这个位置。":
+    "Claude Code project Mounts are stored in .claude/skills; GitHub Copilot may also read this location.",
+  "至少选择一个应用或项目目标。":
+    "Choose at least one app or project target.",
+  "下一步只生成影响预览；最终确认后，所选 Mount 会全部完成或全部撤销。":
+    "The next step only creates an impact preview. After final confirmation, every selected Mount completes or all are reverted.",
+  "正在检查目标…": "Checking targets…",
+  "管理 {skill} 的挂载": "Manage Mounts for {skill}",
+  "管理挂载": "Manage Mounts",
+  "选择这个 Skill 在各 Agent 应用中的使用位置。所有写入都会先显示影响预览。":
+    "Choose where this Skill is used across Agent apps. Every write shows an impact preview first.",
+  "只读浏览期间不能修改挂载。返回当前操作后再继续。":
+    "Mounts cannot be changed while browsing read-only state. Return to the current operation to continue.",
+  "当前操作进行中，只展示已提交的挂载状态。":
+    "An operation is in progress. Only committed Mount state is shown.",
+  "无法准备挂载": "Unable to prepare Mount",
+  "{app} 挂载": "{app} Mounts",
+  "当前使用位置": "Current usage locations",
+  "这个 Skill 目前没有挂载到 {app}。":
+    "This Skill is not currently mounted to {app}.",
+  "修复 {destination}挂载": "Repair {destination} Mount",
+  "移除 {destination}挂载": "Remove {destination} Mount",
+  "新增使用位置": "Add usage location",
+  "挂载到 {app} 全局": "Mount to {app} Global",
+  "挂载到 {app} 项目 {project}": "Mount to {app} Project {project}",
+  "挂载到项目 {project}": "Mount to Project {project}",
+  "还没有已登记项目。返回清单后可通过“添加项目”选择本地目录。":
+    "No projects are registered yet. Return to the inventory and use “Add project” to choose a local directory.",
+  "同一 Skill 不能同时使用 {app} global 与 project Mount；请先移除全局挂载。":
+    "The same Skill cannot use both {app} global and project Mounts. Remove the global Mount first.",
+  "已有 project Mount 时不能再创建 global Mount，但可以继续添加其他项目。":
+    "A global Mount cannot be added while project Mounts exist, but more projects can still be added.",
+  "软链接正常": "Symbolic link is healthy",
+  "软链接已缺失；移除时只清理 SkillYard 记录":
+    "Symbolic link is missing; removal only clears the SkillYard record",
+  "目标路径无法安全确认；移除只清理 SkillYard 记录":
+    "The target path cannot be verified safely; removal only clears the SkillYard record",
+  "确认{action} {app} 挂载": "Confirm {action} {app} Mount",
+  "修复": "repair",
+  "创建": "create",
+  "移除": "remove",
+  "挂载影响预览": "Mount impact preview",
+  "应用": "App",
+  "位置": "Location",
+  "Mount 路径": "Mount path",
+  "指向": "Points to",
+  "修复只重建正确软链接，不会修改 Skill 或 Bundle。":
+    "Repair only recreates the correct symbolic link; it does not change the Skill or Bundle.",
+  "现有软链接不会被改写；SkillYard 只补充这条使用关系。":
+    "The existing symbolic link is not rewritten; SkillYard only records this usage relationship.",
+  "Skill 内容仍只有一份，Bundle 更新后这里会继续使用最新 Current Content。":
+    "Skill content still has a single master copy, and this location continues using the latest Current Content after Bundle updates.",
+  "移除挂载不会删除 Skill 或 Bundle，也不会影响其他使用位置。":
+    "Removing a Mount does not delete the Skill or Bundle and does not affect other usage locations.",
+  "这个位置位于 .claude/skills，GitHub Copilot 也可能读取这里的 Skill。":
+    "This location is under .claude/skills, and GitHub Copilot may also read the Skill here.",
+  "确认开始后不能取消。SkillYard 会完成或自动恢复这次高保证操作。":
+    "The operation cannot be canceled after confirmation. SkillYard completes or automatically recovers this high-assurance operation.",
+  "正在安全{action}…": "{action} safely…",
+  "确认{action}": "Confirm {action}",
+  "软链接已经恢复，将只校正 Mount 状态":
+    "The symbolic link is already restored; only the Mount state will be corrected",
+  "将重新创建指向中央主副本的软链接":
+    "Recreate the symbolic link to the central master copy",
+  "软链接已经正确存在，将只登记为 SkillYard Mount":
+    "The correct symbolic link already exists; only register it as a SkillYard Mount",
+  "将创建一个指向中央主副本的软链接":
+    "Create a symbolic link to the central master copy",
+  "Mount 已缺失，将只清理 SkillYard 记录":
+    "The Mount is missing; only clear the SkillYard record",
+  "目标已被其他内容占用，将保留该内容并只清理记录":
+    "The target is occupied by other content; preserve it and only clear the record",
+  "将移除这个由 SkillYard 管理的软链接":
+    "Remove this SkillYard-managed symbolic link",
+  "需要人工检查文件": "Manual filesystem inspection required",
+  "SkillYard 无法安全判断这项操作的最终状态，因此已经停止修改相关 Bundle。其他 Skill 和只读清单不受影响。":
+    "SkillYard cannot safely determine the final state of this operation, so changes to the related Bundle have stopped. Other Skills and the read-only inventory are unaffected.",
+  "需要检查的操作": "Operation requiring inspection",
+  "相关 Bundle": "Related Bundle",
+  "停止原因": "Reason for stopping",
+  "你可以在 Finder 中查看 Central Store。请保留现有内容，不要手动删除相关目录；SkillYard 1.0 不提供强制继续或自动清理。":
+    "You can inspect the Central Store in Finder. Keep the existing content and do not manually delete related directories; SkillYard 1.0 does not provide force-continue or automatic cleanup.",
+  "正在清理预览…": "Cleaning up preview…",
+  "将删除的 Skill": "Skills to delete",
+  "将永久删除的 Skill": "Skills that will be permanently deleted",
+  "将移除的 Mount": "Mounts to remove",
+  "失去更新来源的 Bundle": "Bundles losing their update Source",
+  "将失去更新来源的 Bundle": "Bundles that will lose their update Source",
+  "当前没有关联的本地 Bundle。": "No local Bundle is currently linked.",
+  "将永久删除的受管目录": "Managed directory to permanently delete",
+  "将保留的内容": "Content to preserve",
+  "删除警告": "Removal warnings",
+  "操作提示": "Operation notice",
+  "不会删除 Bundle 或 Skill，也不会删除项目目录中的未知内容。":
+    "No Bundle, Skill, or unknown content in the project directory will be deleted.",
+  "Bundle、全部 Skill、Source 和 current 内容都会保留，之后仍可重新挂载。":
+    "The Bundle, every Skill, the Source, and current content are preserved and can be mounted again later.",
+  "本地 Bundle、current 内容和 Mount 都会保留。":
+    "The local Bundle, current content, and Mounts are preserved.",
+  "Editable Local 原目录不会被删除。":
+    "The original Editable Local directory is not deleted.",
+  "保留的 Source 和外部路径不属于删除目标；1.0 不提供成员级删除。":
+    "Preserved Sources and external paths are not deletion targets. Version 1.0 does not provide member-level deletion.",
+  "这是永久删除": "This is permanent deletion",
+  "确认后将级联删除上面列出的受管内容和 Mount，成功后没有回滚入口。":
+    "Confirmation permanently deletes the managed content and Mounts listed above. No rollback entry remains after success.",
+  "移除操作未完成": "Removal operation not completed",
+  "继续删除": "Continue deletion",
+  "正在执行…": "Working…",
+  "删除 Source {source}": "Delete Source {source}",
+  "解除 {bundle} 的全部挂载": "Unmount all Mounts for {bundle}",
+  "删除 Bundle {bundle}": "Delete Bundle {bundle}",
+  "移除这个已登记项目及其中全部 SkillYard-managed project Mount。":
+    "Remove this registered project and all SkillYard-managed project Mounts in it.",
+  "删除 SkillYard 保存的 Source、目录状态、检查结果和更新关联。":
+    "Delete the Source, catalog state, check results, and update association stored by SkillYard.",
+  "从所有 Agent 应用和项目中解除这个 Bundle 的 Mount。":
+    "Remove this Bundle's Mounts from every Agent app and project.",
+  "删除整个本地受管 Bundle，而不是删除其中某一个 Skill。":
+    "Delete the entire local managed Bundle, not an individual Skill inside it.",
+  "确认移除项目": "Confirm project removal",
+  "确认删除 Source": "Confirm Source deletion",
+  "确认解除全部挂载": "Confirm unmount all",
+  "确认永久删除": "Confirm permanent deletion",
+  "{app} · 项目 · {project}": "{app} · Project · {project}",
+  "归档": "Archive",
+  "直接 URL": "Direct URL",
+  "正在清理更新预览…": "Cleaning up update preview…",
+  "确认全部更新": "Confirm all updates",
+  "每个 Bundle 仍使用自己的更新事务，并按下面的页面顺序逐个执行。一个普通失败不会撤销已经成功的 Bundle，也不会阻止后续 Bundle。":
+    "Each Bundle still uses its own update transaction and runs in the order shown below. An ordinary failure does not undo successful Bundles or stop later Bundles.",
+  "全部更新影响预览": "All updates impact preview",
+  "Bundle 更新预览：{bundle}": "Bundle update preview: {bundle}",
+  "更新 {bundle}": "Update {bundle}",
+  "已准备": "Ready",
+  "准备失败": "Preparation failed",
+  "无法准备这个 Bundle 的更新预览":
+    "Unable to prepare this Bundle update preview",
+  "至少选择一个已准备的 Bundle。":
+    "Choose at least one ready Bundle.",
+  "全部更新未开始": "All updates did not start",
+  "确认开始后不能取消或修改选择；应用会顺序完成各 Bundle。":
+    "After confirmation, the selection cannot be changed or canceled; the app completes each Bundle in order.",
+  "正在顺序更新…": "Updating in order…",
+  "{bundle} 全部 Skill": "All Skills in {bundle}",
+  "{bundle} 更新提示": "Update notices for {bundle}",
+  "{bundle} 现有挂载": "Existing Mounts for {bundle}",
+  "当前没有挂载": "No current Mounts",
+  "正在返回清单…": "Returning to inventory…",
+  "全部更新正在等待人工恢复":
+    "All updates are waiting for manual recovery",
+  "全部更新已完成": "All updates completed",
+  "批量协调已停止，未执行的 Bundle 保持原内容。":
+    "Batch coordination has stopped. Bundles that did not run keep their original content.",
+  "每个 Bundle 都保留自己的独立结果；失败项没有撤销其他成功更新。":
+    "Each Bundle keeps its independent result; failed items do not undo other successful updates.",
+  "请在人工恢复页面处理": "Continue on the manual recovery page",
+  "当前结果不能确认已读；请保留 Central Store 和现有 Mount，不要手动改写相关目录。":
+    "This result cannot be acknowledged. Preserve the Central Store and existing Mounts, and do not manually change related directories.",
+  "全部更新结果": "All updates results",
+  "{bundle} 更新结果": "Update result for {bundle}",
+  "成功": "Succeeded",
+  "失败": "Failed",
+  "等待人工恢复": "Waiting for manual recovery",
+  "未执行": "Not executed",
+  "无法返回清单": "Unable to return to inventory",
+  "当前操作": "Current operation",
+  "返回当前操作": "Return to current operation",
+  "浏览已提交清单": "Browse committed inventory",
+  "当前没有可浏览的已提交清单":
+    "No committed inventory is currently available to browse",
+  "移除项目 {project}": "Remove project {project}",
+  "正在准备移除…": "Preparing removal…",
+  "移除项目": "Remove project",
+  "需要人工恢复": "Manual recovery required",
+  "SkillYard 无法安全判断下面操作的最终状态，因此只停止修改相关 Bundle。其他 Skill 和只读清单仍可正常使用。":
+    "SkillYard cannot safely determine the final state of the operations below, so only changes to the related Bundles have stopped. Other Skills and the read-only inventory remain available.",
+  "查看 {bundle} 的恢复说明": "View recovery instructions for {bundle}",
+  "查看说明": "View instructions",
+  "请保留 Central Store 中的现有内容，不要手动删除相关目录。":
+    "Preserve the existing content in the Central Store and do not manually delete related directories.",
+  "清单筛选": "Inventory filters",
+  "搜索 Skill": "Search Skills",
+  "管理状态": "Management status",
+  "刷新未完成": "Refresh not completed",
+  "关闭更新提示": "Dismiss update notice",
+  "关闭": "Dismiss",
+  "无法准备安装": "Unable to prepare installation",
+  "挂载操作未完成": "Mount operation not completed",
+  "接管未完成": "Takeover not completed",
+  "扫描告警": "Scan warnings",
+  "部分 Skill 或目录暂时无法读取":
+    "Some Skills or directories are temporarily unreadable",
+  "SkillYard 已继续扫描其他内容，并保留已有记录；不会自动修改这些路径。":
+    "SkillYard continued scanning other content and preserved existing records. These paths are not changed automatically.",
+  "最近刷新结果": "Latest refresh result",
+  "最近刷新：新增 {added} · 变化 {changed} · 移除 {removed}":
+    "Latest refresh: {added} added · {changed} changed · {removed} removed",
+  "尚未执行本机刷新": "Local refresh has not run",
+  "未发现 Skill": "No Skills found",
+  "没有匹配结果": "No matching results",
+  "你可以继续使用现有安装方式，再主动刷新本机。":
+    "You can keep using existing installation methods, then refresh local state manually.",
+  "换一个关键词或管理状态看看。":
+    "Try another keyword or management status.",
+  "补充来源": "Add Source",
+  "批量挂载": "Batch Mount",
+  "解除 Bundle {bundle} 的全部挂载": "Unmount all Mounts for Bundle {bundle}",
+  "正在准备解除…": "Preparing unmount…",
+  "解除全部挂载": "Unmount all",
+  "删除 Bundle": "Delete Bundle",
+  "{group} 的 Skill": "Skills in {group}",
+  "{count} 个 Mount": "{count} Mounts",
+  "未挂载": "Not mounted",
+  "查看 Skill {skill}": "View Skill {skill}",
+  "查看详情": "View details",
+  "来源未知": "Unknown Source",
+  "Skill 详情": "Skill details",
+  "所属分组": "Group",
+  "来源": "Source",
+  "本地目录": "Local directory",
+  "定义文件": "Definition file",
+  "有效": "Valid",
+  "需要检查": "Needs review",
+  "安装来源记录": "Installation Source record",
+  "来源名称": "Source name",
+  "来源地址": "Source URL",
+  "仓库内路径": "Repository path",
+  "当前挂载": "Current Mounts",
+  "Bundle 更新状态：{status}": "Bundle update status: {status}",
+  "尚未检查": "Not checked",
+  "可更新": "Update available",
+  "已是最新": "Up to date",
+  "无法检查": "Unable to check",
+  "手动更新": "Manual update",
+  "来源不可用": "Source unavailable",
+  "更新": "Update",
+  "导入新内容": "Import new content",
+  "再次检查": "Check again",
+  "重新检查": "Check again",
+  "检查本地改动": "Check local changes",
+  "正在选择新内容…": "Choosing new content…",
+  "正在检查本地改动…": "Checking local changes…",
+  "正常": "Healthy",
+  "已缺失": "Missing",
+  "{apps} 管理": "Managed by {apps}",
+  "Agent 应用管理": "Managed by Agent app",
+  "项目仓库管理": "Managed by project repository",
+  "对应 Agent 应用": "the corresponding Agent app",
+  "请前往 {apps} 管理此 Skill。": "Manage this Skill in {apps}.",
+  "对应项目仓库": "the corresponding project repository",
+  "请在 {project} 中管理此 Skill。": "Manage this Skill in {project}.",
+  "{message}；重新读取状态失败：{recoveryError}":
+    "{message}; failed to reload state: {recoveryError}",
+  "Source 已处理，但重新读取本机清单失败：{error}":
+    "The Source operation completed, but the local inventory could not be reloaded: {error}",
+  "来源关系已处理，但重新读取清单失败：{error}":
+    "The Source association completed, but the inventory could not be reloaded: {error}",
+  "{message}；重新读取 Source 状态失败：{recoveryError}":
+    "{message}; failed to reload Source state: {recoveryError}",
+  "Tracked Ref 已更改，但重新读取清单失败：{error}":
+    "The Tracked Ref changed, but the inventory could not be reloaded: {error}",
+  "{message}；重新读取清单失败：{recoveryError}":
+    "{message}; failed to reload the inventory: {recoveryError}",
+  "{message}；重新检查挂载状态失败：{recoveryError}":
+    "{message}; failed to recheck Mount state: {recoveryError}",
+  "需要 macOS {version} 或更高版本的 Apple Silicon Mac。":
+    "Requires macOS {version} or later on an Apple Silicon Mac.",
+  "这个操作需要人工恢复。": "This operation requires manual recovery.",
+  "无法读取这个路径。": "This path could not be read.",
+  "无法确认这个 Skill 内容。": "This Skill content could not be validated.",
+  "请在继续前检查此提示。": "Review this notice before continuing.",
+  "无法重新加载这个 Source。": "This Source could not be reloaded.",
+  "请选择要继续使用的内容。": "Choose the content to keep using.",
+  "请先处理这个内容冲突。": "Resolve this content conflict first.",
+  "无法读取最新更新状态。":
+    "The latest update status could not be read.",
 } as const;
 
 export type TranslationKey = keyof typeof EN_MESSAGES;
@@ -401,11 +717,13 @@ type TranslationValues = Record<string, string | number>;
 interface I18nValue {
   language: InterfaceLanguage;
   t(key: TranslationKey, values?: TranslationValues): string;
+  localize(message: string, fallback: TranslationKey): string;
 }
 
 const I18nContext = createContext<I18nValue>({
   language: "zhCn",
   t: (key, values) => interpolate(key, values),
+  localize: (message) => message,
 });
 
 export function I18nProvider({
@@ -424,11 +742,20 @@ export function I18nProvider({
       language,
       t: (key, values) =>
         interpolate(language === "zhCn" ? key : EN_MESSAGES[key], values),
+      localize: (message, fallback) => {
+        if (language === "zhCn" || !containsCjk(message)) return message;
+        const known = EN_MESSAGES[message as TranslationKey];
+        return known ?? EN_MESSAGES[fallback];
+      },
     }),
     [language],
   );
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+function containsCjk(value: string): boolean {
+  return /[\u3400-\u9fff]/u.test(value);
 }
 
 export function useI18n(): I18nValue {

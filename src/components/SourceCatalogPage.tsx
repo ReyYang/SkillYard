@@ -386,7 +386,7 @@ function SourceCard({
   onRelink(): void;
   onRemove(): void;
 }) {
-  const { t } = useI18n();
+  const { localize, t } = useI18n();
   const [isExpanded, setIsExpanded] = useState(false);
   const available = source.members.filter(
     (member) => member.selectable && !member.installedMemberId,
@@ -474,7 +474,10 @@ function SourceCard({
       {source.lastReloadError ? (
         <p className="source-reload-error">
           {t("最近一次加载失败：{error}", {
-            error: source.lastReloadError,
+            error: localize(
+              source.lastReloadError,
+              "无法重新加载这个 Source。",
+            ),
           })}
         </p>
       ) : null}
@@ -526,7 +529,7 @@ function SourceCard({
                   </span>
                   {member.validationErrors.map((message) => (
                     <small className="candidate-error" key={message}>
-                      {message}
+                      {localize(message, "无法确认这个 Skill 内容。")}
                     </small>
                   ))}
                 </li>

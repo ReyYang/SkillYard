@@ -3266,6 +3266,85 @@ describe("English installation and takeover flows", () => {
       screen.getByRole("region", { name: "Takeover impact preview" }),
     ).toHaveTextContent("owner/repo");
   });
+
+  it("挂载和整 Bundle 解除挂载使用英文并保留真实名称与路径", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()], null, {
+      mounts: [createMount()],
+      supportedApps: [
+        { id: "codex", displayName: "Codex", detected: true },
+        { id: "claudeCode", displayName: "Claude Code", detected: false },
+        {
+          id: "gitHubCopilot",
+          displayName: "GitHub Copilot",
+          detected: false,
+        },
+      ],
+    });
+    const client = createClient(initial);
+    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.createBundleMountRemovalPlan).mockResolvedValue({
+      type: "removalPlan",
+      plan: createRemovalPlan({
+        kind: "bundleMounts",
+        warnings: ["只解除已确认的挂载"],
+      }),
+    });
+
+    render(<App client={client} />);
+
+    const bundle = await screen.findByRole("region", {
+      name: "example-bundle",
+    });
+    await user.click(
+      within(bundle).getByRole("button", {
+        name: "Unmount all Mounts for Bundle example-bundle",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Unmount all Mounts for example-bundle",
+      }),
+    ).toBeInTheDocument();
+    const impact = screen.getByRole("region", { name: "Mounts to remove" });
+    expect(impact).toHaveTextContent("example");
+    expect(impact).toHaveTextContent("/tmp/.codex/skills/example");
+    expect(screen.getByText("Review this notice before continuing."))
+      .toBeInTheDocument();
+    expect(screen.queryByText("只解除已确认的挂载")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Confirm unmount all" }),
+    ).toBeEnabled();
+  });
+
+  it("英文界面不会直接暴露 Rust 返回的中文错误", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "preserved" })]),
+    );
+    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.refreshLocalInventory).mockRejectedValue({
+      code: "storageError",
+      message: "SQLite 暂时不可写",
+    });
+
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Refresh local" }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "SkillYard could not access its local data.",
+    );
+    expect(alert).not.toHaveTextContent("SQLite 暂时不可写");
+    await user.click(
+      screen.getByRole("button", { name: "View Bundle example-bundle" }),
+    );
+    expect(screen.getByText("preserved")).toBeInTheDocument();
+  });
 });
 
 describe("接管已有 Skill", () => {

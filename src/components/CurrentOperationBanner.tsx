@@ -1,3 +1,5 @@
+import { useI18n } from "../i18n";
+
 interface CurrentOperationBannerProps {
   title: string;
   detail: string;
@@ -15,8 +17,9 @@ export function CurrentOperationBanner({
   onBrowse,
   onReturn,
 }: CurrentOperationBannerProps) {
+  const { t } = useI18n();
   return (
-    <aside className="current-operation" aria-label="当前操作">
+    <aside className="current-operation" aria-label={t("当前操作")}>
       <div>
         <p className="section-eyebrow">CURRENT OPERATION</p>
         <strong>{title}</strong>
@@ -24,14 +27,16 @@ export function CurrentOperationBanner({
       </div>
       {isBrowsing ? (
         <button className="primary-action" type="button" onClick={onReturn}>
-          返回当前操作
+          {t("返回当前操作")}
         </button>
       ) : canBrowse ? (
         <button className="secondary-action" type="button" onClick={onBrowse}>
-          浏览已提交清单
+          {t("浏览已提交清单")}
         </button>
       ) : (
-        <span className="current-operation-note">当前没有可浏览的已提交清单</span>
+        <span className="current-operation-note">
+          {t("当前没有可浏览的已提交清单")}
+        </span>
       )}
     </aside>
   );

@@ -14424,7 +14424,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=26).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=27).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",

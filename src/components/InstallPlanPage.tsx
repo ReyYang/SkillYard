@@ -21,7 +21,7 @@ export function InstallPlanPage({
   onCancel,
   onConfirm,
 }: InstallPlanPageProps) {
-  const { t } = useI18n();
+  const { localize, t } = useI18n();
   const isUpdate = plan.mode === "update";
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>(
     plan.candidates
@@ -136,12 +136,12 @@ export function InstallPlanPage({
                 ) : null}
                 {candidate.validationErrors.map((message) => (
                   <span className="candidate-error" key={message}>
-                    {message}
+                    {localize(message, "无法确认这个 Skill 内容。")}
                   </span>
                 ))}
                 {candidate.warnings.map((warning) => (
                   <span className="candidate-warning" key={warning}>
-                    {warning}
+                    {localize(warning, "请在继续前检查此提示。")}
                   </span>
                 ))}
               </span>
@@ -207,7 +207,9 @@ export function InstallPlanPage({
         {plan.warnings.length > 0 ? (
           <ul className="install-warnings" aria-label={t("安装提示")}>
             {plan.warnings.map((warning) => (
-              <li key={warning}>{warning}</li>
+              <li key={warning}>
+                {localize(warning, "请在继续前检查此提示。")}
+              </li>
             ))}
           </ul>
         ) : null}

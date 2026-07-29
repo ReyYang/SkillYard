@@ -6,6 +6,7 @@ import type {
   SupportedAppId,
   SupportedAppSummary,
 } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 interface MountManagementPageProps {
@@ -48,11 +49,12 @@ export function MountManagementPage({
   onRemove,
   onRepair,
 }: MountManagementPageProps) {
+  const { t } = useI18n();
   return (
     <main className="mount-shell">
       <PageBackButton disabled={isPlanning} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · SUPPORTED APP MOUNT</p>
-      <h1>管理挂载</h1>
+      <h1>{t("管理挂载")}</h1>
       <p className="lead">
         {entry.bundleDisplayName
           ? `${entry.bundleDisplayName}: ${entry.skillName}`
@@ -60,13 +62,13 @@ export function MountManagementPage({
       </p>
       {readOnly ? (
         <p className="recovery-notice" role="status">
-          当前操作进行中，只展示已提交的挂载状态。
+          {t("当前操作进行中，只展示已提交的挂载状态。")}
         </p>
       ) : null}
 
       {error ? (
         <div className="inline-error" role="alert">
-          <strong>无法准备挂载</strong>
+          <strong>{t("无法准备挂载")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
@@ -89,28 +91,30 @@ export function MountManagementPage({
           <section
             key={app.id}
             className="mount-panel"
-            aria-label={`${app.displayName} 挂载`}
+            aria-label={t("{app} 挂载", { app: app.displayName })}
           >
             <div className="mount-app-heading">
               <div>
                 <p className="section-eyebrow">SUPPORTED APP</p>
                 <h2>{app.displayName}</h2>
               </div>
-              <span>{detectionLabel(detected)}</span>
+              <span>{detectionLabel(detected, t)}</span>
             </div>
 
-            <h3>当前使用位置</h3>
+            <h3>{t("当前使用位置")}</h3>
             {appMounts.length === 0 ? (
               <p className="mount-empty-copy">
-                {`这个 Skill 目前没有挂载到 ${app.displayName}。`}
+                {t("这个 Skill 目前没有挂载到 {app}。", {
+                  app: app.displayName,
+                })}
               </p>
             ) : (
               <ul className="mount-list">
                 {appMounts.map((mount) => (
                   <li key={mount.id}>
                     <div>
-                      <strong>{mountDestinationLabel(mount)}</strong>
-                      <span>{mountHealthCopy(mount)}</span>
+                      <strong>{mountDestinationLabel(mount, t)}</strong>
+                      <span>{mountHealthCopy(mount, t)}</span>
                       <code title={mount.targetPath}>{mount.targetPath}</code>
                     </div>
                     <button
@@ -120,7 +124,9 @@ export function MountManagementPage({
                       disabled={readOnly || isPlanning}
                       onClick={() => onRepair(mount.id)}
                     >
-                      {`修复 ${mountDestinationLabel(mount)}挂载`}
+                      {t("修复 {destination}挂载", {
+                        destination: mountDestinationLabel(mount, t),
+                      })}
                     </button>
                     <button
                       className="danger-outline-action"
@@ -128,26 +134,36 @@ export function MountManagementPage({
                       disabled={readOnly || isPlanning}
                       onClick={() => onRemove(mount.id)}
                     >
-                      {`移除 ${mountDestinationLabel(mount)}挂载`}
+                      {t("移除 {destination}挂载", {
+                        destination: mountDestinationLabel(mount, t),
+                      })}
                     </button>
                   </li>
                 ))}
               </ul>
             )}
 
-            <h3>新增使用位置</h3>
+            <h3>{t("新增使用位置")}</h3>
             <div className="mount-target-list">
               <button
                 className="mount-target"
                 type="button"
-                aria-label={`挂载到 ${app.displayName} 全局`}
+                aria-label={t("挂载到 {app} 全局", {
+                  app: app.displayName,
+                })}
                 disabled={
                   readOnly || isPlanning || hasGlobalMount || hasProjectMount
                 }
                 onClick={() => onCreate(app.id, "global", null)}
               >
-                <strong>{`挂载到 ${app.displayName} 全局`}</strong>
-                <span>{`在这台 Mac 的所有 ${app.displayName} 项目中可用`}</span>
+                <strong>
+                  {t("挂载到 {app} 全局", { app: app.displayName })}
+                </strong>
+                <span>
+                  {t("在这台 Mac 的所有 {app} 项目中可用", {
+                    app: app.displayName,
+                  })}
+                </span>
               </button>
               {projects.map((project) => {
                 const alreadyMounted = appMounts.some(
@@ -159,13 +175,20 @@ export function MountManagementPage({
                     key={project.id}
                     className="mount-target"
                     type="button"
-                    aria-label={`挂载到 ${app.displayName} 项目 ${project.displayName}`}
+                    aria-label={t("挂载到 {app} 项目 {project}", {
+                      app: app.displayName,
+                      project: project.displayName,
+                    })}
                     disabled={
                       readOnly || isPlanning || hasGlobalMount || alreadyMounted
                     }
                     onClick={() => onCreate(app.id, "project", project.id)}
                   >
-                    <strong>{`挂载到项目 ${project.displayName}`}</strong>
+                    <strong>
+                      {t("挂载到项目 {project}", {
+                        project: project.displayName,
+                      })}
+                    </strong>
                     <code title={project.rootPath}>{project.rootPath}</code>
                   </button>
                 );
@@ -173,23 +196,31 @@ export function MountManagementPage({
             </div>
             {projects.length === 0 ? (
               <p className="mount-project-hint">
-                还没有已登记项目。返回清单后可通过“添加项目”选择本地目录。
+                {t(
+                  "还没有已登记项目。返回清单后可通过“添加项目”选择本地目录。",
+                )}
               </p>
             ) : null}
             {app.id === "claudeCode" && projects.length > 0 ? (
               <p className="mount-project-hint">
-                Claude Code 的项目挂载位于 <code>.claude/skills</code>；GitHub
-                Copilot 也可能读取这个位置。
+                {t(
+                  "Claude Code 的项目挂载位于 .claude/skills；GitHub Copilot 也可能读取这个位置。",
+                )}
               </p>
             ) : null}
             {hasGlobalMount ? (
               <p className="mount-project-hint">
-                {`同一 Skill 不能同时使用 ${app.displayName} global 与 project Mount；请先移除全局挂载。`}
+                {t(
+                  "同一 Skill 不能同时使用 {app} global 与 project Mount；请先移除全局挂载。",
+                  { app: app.displayName },
+                )}
               </p>
             ) : null}
             {hasProjectMount && !hasGlobalMount ? (
               <p className="mount-project-hint">
-                已有 project Mount 时不能再创建 global Mount，但可以继续添加其他项目。
+                {t(
+                  "已有 project Mount 时不能再创建 global Mount，但可以继续添加其他项目。",
+                )}
               </p>
             ) : null}
           </section>
@@ -199,17 +230,26 @@ export function MountManagementPage({
   );
 }
 
-function detectionLabel(detected: boolean | null | undefined): string {
-  if (detected === true) return "已检测到";
-  if (detected === false) return "未检测到";
-  return "尚未检测";
+function detectionLabel(
+  detected: boolean | null | undefined,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  if (detected === true) return t("已检测到");
+  if (detected === false) return t("未检测到");
+  return t("尚未检测");
 }
 
-function mountDestinationLabel(mount: MountSummary): string {
+function mountDestinationLabel(
+  mount: MountSummary,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
   const appName = supportedAppLabel(mount.appId);
   return mount.scope === "global"
-    ? `${appName} 全局`
-    : `${appName} 项目 ${mount.projectDisplayName ?? "已登记项目"}`;
+    ? t("{app} 全局", { app: appName })
+    : t("{app} 项目 {project}", {
+        app: appName,
+        project: mount.projectDisplayName ?? t("已登记项目"),
+      });
 }
 
 function supportedAppLabel(appId: SupportedAppId): string {
@@ -220,10 +260,13 @@ function supportedAppLabel(appId: SupportedAppId): string {
   }[appId];
 }
 
-function mountHealthCopy(mount: MountSummary): string {
+function mountHealthCopy(
+  mount: MountSummary,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
   return {
-    healthy: "软链接正常",
-    missing: "软链接已缺失；移除时只清理 SkillYard 记录",
-    conflict: "目标路径无法安全确认；移除只清理 SkillYard 记录",
+    healthy: t("软链接正常"),
+    missing: t("软链接已缺失；移除时只清理 SkillYard 记录"),
+    conflict: t("目标路径无法安全确认；移除只清理 SkillYard 记录"),
   }[mount.health];
 }

@@ -6,6 +6,7 @@ import type {
   BatchMountPlanItem,
   SupportedAppId,
 } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 interface BatchMountPlanPageProps {
@@ -21,6 +22,7 @@ export function BatchMountPlanPage({
   onBack,
   onConfirm,
 }: BatchMountPlanPageProps) {
+  const { localize, t } = useI18n();
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>(() =>
     // 默认集合由后端 Plan 决定；前端只能继续排除，不能扩大默认影响范围。
     plan.items
@@ -45,16 +47,20 @@ export function BatchMountPlanPage({
     <main className="mount-shell">
       <PageBackButton disabled={isConfirming} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · CONFIRM BATCH MOUNT</p>
-      <h1>{`确认 ${plan.bundleDisplayName} 批量挂载`}</h1>
+      <h1>
+        {t("确认 {bundle} 批量挂载", {
+          bundle: plan.bundleDisplayName,
+        })}
+      </h1>
       <p className="lead">
-        每项仍是一个独立的 Skill Mount，不会创建 Bundle 级软链接。
+        {t("每项仍是一个独立的 Skill Mount，不会创建 Bundle 级软链接。")}
       </p>
 
-      <section className="batch-plan" aria-label="批量挂载影响预览">
+      <section className="batch-plan" aria-label={t("批量挂载影响预览")}>
         <div className="install-mount-note">
-          <strong>确认后的所选项会全部完成或全部撤销</strong>
+          <strong>{t("确认后的所选项会全部完成或全部撤销")}</strong>
           <span>
-            冲突和已经挂载的项目不会进入事务；你也可以排除其他 Ready 项。
+            {t("冲突和已经挂载的项目不会进入事务；你也可以排除其他 Ready 项。")}
           </span>
         </div>
         <ul className="batch-plan-list">
@@ -68,7 +74,7 @@ export function BatchMountPlanPage({
                 <label>
                   <input
                     type="checkbox"
-                    aria-label={itemLabel(item)}
+                    aria-label={itemLabel(item, t)}
                     checked={ready && selectedItemIds.includes(item.id)}
                     disabled={isConfirming || !ready}
                     onChange={(event) =>
@@ -79,13 +85,23 @@ export function BatchMountPlanPage({
                     <span className="batch-plan-heading">
                       <strong>{item.skillName}</strong>
                       <small className={`batch-disposition ${item.disposition}`}>
-                        {dispositionLabel(item.disposition)}
+                        {dispositionLabel(item.disposition, t)}
                       </small>
                     </span>
-                    <span>{`${supportedAppLabel(item.appId)} · ${destinationLabel(item)}`}</span>
+                    <span>{`${supportedAppLabel(item.appId)} · ${destinationLabel(
+                      item,
+                      t,
+                    )}`}</span>
                     <code title={item.targetPath}>{item.targetPath}</code>
                     {!ready ? (
-                      <em>{item.conflictReason ?? dispositionReason(item.disposition)}</em>
+                      <em>
+                        {item.conflictReason
+                          ? localize(
+                              item.conflictReason,
+                              "请在继续前检查此提示。",
+                            )
+                          : dispositionReason(item.disposition, t)}
+                      </em>
                     ) : null}
                   </span>
                 </label>
@@ -96,10 +112,12 @@ export function BatchMountPlanPage({
       </section>
 
       {selectedItemIds.length === 0 ? (
-        <p className="install-selection-empty">至少保留一个可挂载项</p>
+        <p className="install-selection-empty">
+          {t("至少保留一个可挂载项")}
+        </p>
       ) : null}
       <p className="mount-confirm-warning">
-        确认开始后不能取消，也不能接受部分结果。
+        {t("确认开始后不能取消，也不能接受部分结果。")}
       </p>
       <div className="install-actions">
         <button
@@ -108,38 +126,55 @@ export function BatchMountPlanPage({
           disabled={isConfirming || selectedItemIds.length === 0}
           onClick={() => onConfirm(selectedItemIds)}
         >
-          {isConfirming ? "正在安全挂载…" : "确认批量挂载"}
+          {isConfirming ? t("正在安全挂载…") : t("确认批量挂载")}
         </button>
       </div>
     </main>
   );
 }
 
-function itemLabel(item: BatchMountPlanItem): string {
-  return `${item.skillName} · ${supportedAppLabel(item.appId)} · ${destinationLabel(item)}`;
+function itemLabel(
+  item: BatchMountPlanItem,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  return `${item.skillName} · ${supportedAppLabel(item.appId)} · ${destinationLabel(
+    item,
+    t,
+  )}`;
 }
 
-function destinationLabel(item: BatchMountPlanItem): string {
+function destinationLabel(
+  item: BatchMountPlanItem,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
   return item.scope === "global"
-    ? "全局"
-    : `项目 ${item.projectDisplayName ?? "已登记项目"}`;
+    ? t("全局")
+    : t("项目 {project}", {
+        project: item.projectDisplayName ?? t("已登记项目"),
+      });
 }
 
-function dispositionLabel(disposition: BatchMountDisposition): string {
+function dispositionLabel(
+  disposition: BatchMountDisposition,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
   return {
-    ready: "可挂载",
-    pathConflict: "路径冲突",
-    scopeConflict: "Scope 冲突",
-    alreadyMounted: "已挂载",
+    ready: t("可挂载"),
+    pathConflict: t("路径冲突"),
+    scopeConflict: t("Scope 冲突"),
+    alreadyMounted: t("已挂载"),
   }[disposition];
 }
 
-function dispositionReason(disposition: BatchMountDisposition): string {
+function dispositionReason(
+  disposition: BatchMountDisposition,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
   return {
-    ready: "可安全创建",
-    pathConflict: "目标路径已被其他内容占用",
-    scopeConflict: "同一应用的 global 与 project scope 不能重叠",
-    alreadyMounted: "已经挂载，无需重复创建",
+    ready: t("可安全创建"),
+    pathConflict: t("目标路径已被其他内容占用"),
+    scopeConflict: t("同一应用的 global 与 project scope 不能重叠"),
+    alreadyMounted: t("已经挂载，无需重复创建"),
   }[disposition];
 }
 

@@ -21,7 +21,7 @@ export function TakeoverPlanPage({
   onBack,
   onConfirm,
 }: TakeoverPlanPageProps) {
-  const { t } = useI18n();
+  const { localize, t } = useI18n();
   const retainedMounts = plan.retainedMembers.flatMap((member) =>
     member.mounts.map((mount) => ({ member, mount })),
   );
@@ -118,7 +118,9 @@ export function TakeoverPlanPage({
                       })}
                     </code>
                     {member.warnings.map((warning) => (
-                      <em key={warning}>{warning}</em>
+                      <em key={warning}>
+                        {localize(warning, "请在继续前检查此提示。")}
+                      </em>
                     ))}
                   </span>
                 </li>
@@ -151,7 +153,9 @@ export function TakeoverPlanPage({
                   </span>
                   <code title={origin.originalPath}>{origin.originalPath}</code>
                   {origin.warnings.map((warning) => (
-                    <em key={warning}>{warning}</em>
+                    <em key={warning}>
+                      {localize(warning, "请在继续前检查此提示。")}
+                    </em>
                   ))}
                 </span>
               </li>
@@ -232,7 +236,9 @@ export function TakeoverPlanPage({
         {plan.warnings.length > 0 ? (
           <ul className="install-warnings" aria-label={t("接管提示")}>
             {plan.warnings.map((warning) => (
-              <li key={warning}>{warning}</li>
+              <li key={warning}>
+                {localize(warning, "请在继续前检查此提示。")}
+              </li>
             ))}
           </ul>
         ) : null}
