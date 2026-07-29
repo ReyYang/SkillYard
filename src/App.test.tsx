@@ -223,6 +223,44 @@ describe("本机清单", () => {
     expect(await screen.findByText("连接已验证")).toBeInTheDocument();
   });
 
+  it("切换到 GLM 时同时采用默认模型，并只展示五个已验证候选", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.setAiConfiguration).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: false,
+        disclosureAccepted: false,
+        provider: "glm",
+        model: "glm-4.7",
+        hasApiKey: false,
+        verified: false,
+      },
+    });
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "模型供应商" }),
+      "glm",
+    );
+
+    expect(client.setAiConfiguration).toHaveBeenCalledWith({
+      enabled: false,
+      disclosureAccepted: false,
+      provider: "glm",
+      model: "glm-4.7",
+    });
+    const modelSelect = screen.getByRole("combobox", { name: "模型" });
+    expect(modelSelect).toHaveValue("glm-4.7");
+    expect(within(modelSelect).getAllByRole("option")).toHaveLength(5);
+    expect(modelSelect).toHaveTextContent("glm-5.2");
+    expect(modelSelect).toHaveTextContent("glm-4.7-flash");
+    expect(client.testAiConnection).not.toHaveBeenCalled();
+  });
+
   it("直接显示已保存清单，不自动刷新", async () => {
     const client = createClient(
       inventoryOutcome([createEntry({ skillName: "saved" })]),

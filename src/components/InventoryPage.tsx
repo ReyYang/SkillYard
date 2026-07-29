@@ -18,6 +18,30 @@ import { PageBackButton } from "./PageBackButton";
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 type ManagementFilter = "all" | "managed" | "takeover" | "other";
 
+const AI_MODELS: Record<AiPreferences["provider"], readonly string[]> = {
+  openAi: [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+  ],
+  glm: [
+    "glm-5.2",
+    "glm-5.1",
+    "glm-4.7",
+    "glm-4.7-flashx",
+    "glm-4.7-flash",
+  ],
+  deepSeek: ["deepseek-v4-flash", "deepseek-v4-pro"],
+};
+
+const DEFAULT_AI_MODELS: Record<AiPreferences["provider"], string> = {
+  openAi: "gpt-5.6-terra",
+  glm: "glm-4.7",
+  deepSeek: "deepseek-v4-flash",
+};
+
 interface InventoryPageProps {
   outcome: InventoryOutcome;
   screen: InventoryScreen;
@@ -924,13 +948,17 @@ function InventorySettingsPage({
                 aria-label={t("模型供应商")}
                 value={aiPreferences.provider}
                 disabled={aiBusy}
-                onChange={(event) =>
+                onChange={(event) => {
+                  const provider = event.target
+                    .value as AiPreferences["provider"];
                   updateAi({
-                    provider: event.target.value as AiPreferences["provider"],
-                  })
-                }
+                    provider,
+                    model: DEFAULT_AI_MODELS[provider],
+                  });
+                }}
               >
                 <option value="openAi">OpenAI</option>
+                <option value="glm">GLM</option>
               </select>
             </label>
             <label className="settings-select">
@@ -941,13 +969,7 @@ function InventorySettingsPage({
                 disabled={aiBusy}
                 onChange={(event) => updateAi({ model: event.target.value })}
               >
-                {[
-                  "gpt-5.6-sol",
-                  "gpt-5.6-terra",
-                  "gpt-5.6-luna",
-                  "gpt-5.4-mini",
-                  "gpt-5.5",
-                ].map((model) => (
+                {AI_MODELS[aiPreferences.provider].map((model) => (
                   <option key={model} value={model}>
                     {model}
                   </option>

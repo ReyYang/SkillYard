@@ -84,22 +84,39 @@ impl SecretStore for KeychainSecretStore {
 #[derive(Debug, Clone)]
 pub struct AgentProviderEndpoints {
     open_ai: String,
+    glm: String,
 }
 
 impl AgentProviderEndpoints {
     pub(crate) fn production() -> Self {
         Self {
             open_ai: "https://api.openai.com/v1".to_owned(),
+            glm: "https://open.bigmodel.cn/api/paas/v4".to_owned(),
         }
     }
 
     #[doc(hidden)]
     pub fn for_test(open_ai: String) -> Self {
-        Self { open_ai }
+        Self {
+            open_ai,
+            ..Self::production()
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn for_glm_test(glm: String) -> Self {
+        Self {
+            glm,
+            ..Self::production()
+        }
     }
 
     fn open_ai_responses(&self) -> String {
         format!("{}/responses", self.open_ai.trim_end_matches('/'))
+    }
+
+    fn glm_chat_completions(&self) -> String {
+        format!("{}/chat/completions", self.glm.trim_end_matches('/'))
     }
 }
 
@@ -134,8 +151,63 @@ pub(crate) fn verify_provider(
     }
     match provider {
         AiProvider::OpenAi => verify_openai(endpoints, model, api_key),
-        AiProvider::Glm | AiProvider::DeepSeek => Err(AgentError::UnsupportedProvider),
+        AiProvider::Glm => verify_glm(endpoints, model, api_key),
+        AiProvider::DeepSeek => Err(AgentError::UnsupportedProvider),
     }
+}
+
+fn verify_glm(
+    endpoints: &AgentProviderEndpoints,
+    model: &str,
+    api_key: &str,
+) -> Result<(), AgentError> {
+    let client = provider_client()?;
+    let endpoint = endpoints.glm_chat_completions();
+
+    let structured = send_json(
+        &client,
+        &endpoint,
+        api_key,
+        &json!({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": "Return a JSON object with exactly one field: {\"status\":\"ok\"}."
+            }],
+            "response_format": { "type": "json_object" },
+            "stream": false
+        }),
+    )?;
+    if !glm_message_contents(&structured).any(contains_json_status_ok) {
+        return Err(AgentError::InvalidCapability("JSON Output"));
+    }
+
+    let searched = send_json(
+        &client,
+        &endpoint,
+        api_key,
+        &json!({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": "Find the official SkillYard GitHub repository and cite one public URL."
+            }],
+            "tools": [{
+                "type": "web_search",
+                "web_search": {
+                    "enable": true,
+                    "search_query": "SkillYard GitHub",
+                    "search_result": true
+                }
+            }],
+            "tool_choice": "auto",
+            "stream": false
+        }),
+    )?;
+    if !contains_glm_public_url(&searched) {
+        return Err(AgentError::InvalidCapability("Web Search"));
+    }
+    Ok(())
 }
 
 fn verify_openai(
@@ -143,10 +215,7 @@ fn verify_openai(
     model: &str,
     api_key: &str,
 ) -> Result<(), AgentError> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(45))
-        .build()
-        .map_err(|_| AgentError::ProviderUnavailable)?;
+    let client = provider_client()?;
     let endpoint = endpoints.open_ai_responses();
 
     let structured = send_json(
@@ -195,6 +264,13 @@ fn verify_openai(
     Ok(())
 }
 
+fn provider_client() -> Result<Client, AgentError> {
+    Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|_| AgentError::ProviderUnavailable)
+}
+
 fn send_json(
     client: &Client,
     endpoint: &str,
@@ -221,18 +297,20 @@ fn send_json(
 }
 
 fn contains_structured_ok(response: &Value) -> bool {
-    output_texts(response).any(|text| {
-        serde_json::from_str::<Value>(text)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .as_deref()
-            == Some("ok")
-    })
+    output_texts(response).any(contains_json_status_ok)
+}
+
+fn contains_json_status_ok(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("ok")
 }
 
 fn output_texts(response: &Value) -> impl Iterator<Item = &str> {
@@ -280,4 +358,34 @@ fn contains_public_url_citation(response: &Value) -> bool {
                 .map(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
                 .unwrap_or(false)
         })
+}
+
+fn glm_message_contents(response: &Value) -> impl Iterator<Item = &str> {
+    response
+        .get("choices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|choice| {
+            choice
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str)
+        })
+}
+
+fn contains_glm_public_url(response: &Value) -> bool {
+    response
+        .get("web_search")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("link").and_then(Value::as_str))
+        .any(is_public_url)
+}
+
+fn is_public_url(candidate: &str) -> bool {
+    Url::parse(candidate)
+        .map(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+        .unwrap_or(false)
 }

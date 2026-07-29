@@ -161,6 +161,58 @@ fn openai_configuration_uses_keychain_boundary_and_only_verifies_on_request() {
     );
 }
 
+#[test]
+fn glm_configuration_uses_chat_completions_json_mode_and_native_web_search() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let secrets = Arc::new(FixtureSecretStore::default());
+    let (endpoint, requests) = spawn_glm_verification_server();
+    let application = SkillYardApplication::new_with_agent_dependencies(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+        secrets,
+        AgentProviderEndpoints::for_glm_test(endpoint),
+    );
+    application
+        .handle(UiIntent::SetAiConfiguration {
+            enabled: true,
+            disclosure_accepted: true,
+            provider: AiProvider::Glm,
+            model: "glm-4.7".to_owned(),
+        })
+        .expect("应保存 GLM 配置");
+    application
+        .handle(UiIntent::SaveAiApiKey {
+            api_key: "skillyard-fixture-glm-api-key".to_owned(),
+        })
+        .expect("应保存 GLM fixture Key");
+
+    assert_eq!(
+        application
+            .handle(UiIntent::TestAiConnection)
+            .expect("GLM 的 JSON 与联网搜索能力都成功时应完成验证"),
+        preferences(AiPreferences {
+            enabled: true,
+            disclosure_accepted: true,
+            provider: AiProvider::Glm,
+            model: "glm-4.7".to_owned(),
+            has_api_key: true,
+            verified: true,
+        })
+    );
+
+    let recorded = requests.recv().expect("Fake Server 应返回 GLM 请求记录");
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[0].path, "/api/paas/v4/chat/completions");
+    assert_eq!(recorded[0].body["response_format"]["type"], "json_object");
+    assert_eq!(recorded[1].body["tools"][0]["type"], "web_search");
+    assert_eq!(
+        recorded[1].body["tools"][0]["web_search"]["search_result"],
+        true
+    );
+}
+
 fn preferences(ai: AiPreferences) -> UiOutcome {
     UiOutcome::Preferences {
         language: InterfaceLanguage::ZhCn,
@@ -202,25 +254,49 @@ impl SecretStore for FixtureSecretStore {
 
 #[derive(Debug)]
 struct RecordedRequest {
+    path: String,
     headers: BTreeMap<String, String>,
     body: Value,
 }
 
 fn spawn_openai_verification_server() -> (String, mpsc::Receiver<Vec<RecordedRequest>>) {
+    spawn_verification_server(
+        "/v1",
+        [
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"status\":\"ok\"}"}]}]}"#,
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"SkillYard","annotations":[{"type":"url_citation","url":"https://github.com/ReyYang/SkillYard"}]}]}]}"#,
+        ],
+    )
+}
+
+fn spawn_glm_verification_server() -> (String, mpsc::Receiver<Vec<RecordedRequest>>) {
+    spawn_verification_server(
+        "/api/paas/v4",
+        [
+            r#"{"choices":[{"message":{"content":"{\"status\":\"ok\"}"}}]}"#,
+            r#"{"choices":[{"message":{"content":"SkillYard"}}],"web_search":[{"title":"SkillYard","link":"https://github.com/ReyYang/SkillYard"}]}"#,
+        ],
+    )
+}
+
+fn spawn_verification_server(
+    base_path: &str,
+    responses: [&'static str; 2],
+) -> (String, mpsc::Receiver<Vec<RecordedRequest>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("应启动 Fake Server");
     let address = listener.local_addr().expect("应读取 Fake Server 地址");
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let responses = [
-            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"status\":\"ok\"}"}]}]}"#,
-            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"SkillYard","annotations":[{"type":"url_citation","url":"https://github.com/ReyYang/SkillYard"}]}]}]}"#,
-        ];
         let mut recorded = Vec::new();
         for response in responses {
             let (mut stream, _) = listener.accept().expect("应接收 Fake Server 请求");
             let raw = read_http_request(&mut stream);
-            let (headers, body) = parse_http_request(&raw);
-            recorded.push(RecordedRequest { headers, body });
+            let (path, headers, body) = parse_http_request(&raw);
+            recorded.push(RecordedRequest {
+                path,
+                headers,
+                body,
+            });
             let reply = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response.len(),
@@ -232,7 +308,7 @@ fn spawn_openai_verification_server() -> (String, mpsc::Receiver<Vec<RecordedReq
         }
         sender.send(recorded).expect("应返回请求记录");
     });
-    (format!("http://{address}/v1"), receiver)
+    (format!("http://{address}{base_path}"), receiver)
 }
 
 fn read_http_request(stream: &mut impl Read) -> Vec<u8> {
@@ -259,16 +335,23 @@ fn read_http_request(stream: &mut impl Read) -> Vec<u8> {
     }
 }
 
-fn parse_http_request(raw: &[u8]) -> (BTreeMap<String, String>, Value) {
+fn parse_http_request(raw: &[u8]) -> (String, BTreeMap<String, String>, Value) {
     let header_end = find_bytes(raw, b"\r\n\r\n").expect("请求应包含 header");
-    let headers = String::from_utf8_lossy(&raw[..header_end])
+    let head = String::from_utf8_lossy(&raw[..header_end]);
+    let path = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .expect("请求行应包含路径")
+        .to_owned();
+    let headers = head
         .lines()
         .skip(1)
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
         .collect();
     let body = serde_json::from_slice(&raw[header_end + 4..]).expect("请求 body 应为 JSON");
-    (headers, body)
+    (path, headers, body)
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
