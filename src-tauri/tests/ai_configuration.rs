@@ -275,6 +275,10 @@ fn deepseek_configuration_uses_anthropic_schema_tool_and_web_search_result() {
         recorded[0].body["tool_choice"]["name"],
         "skillyard_connection_test"
     );
+    assert_eq!(
+        recorded[0].body["thinking"]["type"], "disabled",
+        "DeepSeek V4 默认思考模式会拒绝强制 tool_choice"
+    );
     assert_eq!(recorded[1].body["tools"][0]["type"], "web_search_20250305");
 }
 

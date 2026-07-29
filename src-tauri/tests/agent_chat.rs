@@ -472,6 +472,14 @@ fn assert_provider_web_search(
 
     let recorded = requests.recv().expect("应读取 Provider 搜索请求");
     assert_eq!(recorded.len(), 4);
+    if provider == AiProvider::DeepSeek {
+        for request in [&recorded[0], &recorded[2]] {
+            assert_eq!(
+                request["thinking"]["type"], "disabled",
+                "DeepSeek V4 的验证与本机判断请求都必须关闭思考模式"
+            );
+        }
+    }
     assert!(
         !recorded[2].to_string().contains("web_search"),
         "本机比较请求不能提前联网"
@@ -611,6 +619,14 @@ fn assert_provider_chat(
     );
     let recorded = requests.recv().expect("应读取 Provider 请求");
     assert_eq!(recorded.len(), 3);
+    if provider == AiProvider::DeepSeek {
+        for request in [&recorded[0], &recorded[2]] {
+            assert_eq!(
+                request["thinking"]["type"], "disabled",
+                "DeepSeek V4 的强制结构化 Tool 请求必须关闭思考模式"
+            );
+        }
+    }
     assert!(
         !recorded[2].to_string().contains("web_search"),
         "普通解释路径不能启用 Provider Web Search；DeepSeek 只允许结构化回答工具"

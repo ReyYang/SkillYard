@@ -265,6 +265,8 @@ pub(crate) fn answer_agent(
                 "max_tokens": 2048,
                 "system": system,
                 "messages": messages,
+                // DeepSeek V4 默认思考模式会拒绝强制 tool_choice。
+                "thinking": { "type": "disabled" },
                 "tools": [agent_answer_anthropic_tool()],
                 "tool_choice": {
                     "type": "tool",
@@ -434,6 +436,8 @@ pub(crate) fn generate_skill_ai_explanation(
                     "role": "user",
                     "content": [{ "type": "text", "text": material }]
                 }],
+                // 固定说明依赖强制 Tool，因此必须使用非思考模式。
+                "thinking": { "type": "disabled" },
                 "tools": [skill_explanation_anthropic_tool()],
                 "tool_choice": {
                     "type": "tool",
@@ -1058,6 +1062,8 @@ fn verify_deepseek(
                     "text": "Call the required connection-test tool."
                 }]
             }],
+            // 连接测试与真实 Agent 请求保持同一 DeepSeek Tool 兼容约束。
+            "thinking": { "type": "disabled" },
             "tools": [{
                 "name": "skillyard_connection_test",
                 "description": "Return the fixed SkillYard connection-test result.",

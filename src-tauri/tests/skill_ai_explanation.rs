@@ -354,6 +354,14 @@ fn assert_provider_explanation(
     assert_eq!(explanation.category, SkillCategory::ResearchLearning);
     let recorded = requests.recv().expect("应读取 Provider 请求");
     assert_eq!(recorded.len(), 3);
+    if provider == AiProvider::DeepSeek {
+        for request in [&recorded[0], &recorded[2]] {
+            assert_eq!(
+                request["thinking"]["type"], "disabled",
+                "DeepSeek V4 的验证与结构化说明请求必须关闭思考模式"
+            );
+        }
+    }
     assert!(
         !recorded[2].to_string().contains("web_search"),
         "单 Skill AI 整理不能启用 Provider Web Search"
