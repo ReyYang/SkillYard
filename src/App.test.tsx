@@ -261,6 +261,42 @@ describe("本机清单", () => {
     expect(client.testAiConnection).not.toHaveBeenCalled();
   });
 
+  it("DeepSeek 只提供两个 Anthropic-compatible 候选模型", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.setAiConfiguration).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: false,
+        disclosureAccepted: false,
+        provider: "deepSeek",
+        model: "deepseek-v4-flash",
+        hasApiKey: false,
+        verified: false,
+      },
+    });
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "模型供应商" }),
+      "deepSeek",
+    );
+
+    expect(client.setAiConfiguration).toHaveBeenCalledWith({
+      enabled: false,
+      disclosureAccepted: false,
+      provider: "deepSeek",
+      model: "deepseek-v4-flash",
+    });
+    const modelSelect = screen.getByRole("combobox", { name: "模型" });
+    expect(within(modelSelect).getAllByRole("option")).toHaveLength(2);
+    expect(modelSelect).toHaveTextContent("deepseek-v4-flash");
+    expect(modelSelect).toHaveTextContent("deepseek-v4-pro");
+  });
+
   it("直接显示已保存清单，不自动刷新", async () => {
     const client = createClient(
       inventoryOutcome([createEntry({ skillName: "saved" })]),

@@ -213,6 +213,107 @@ fn glm_configuration_uses_chat_completions_json_mode_and_native_web_search() {
     );
 }
 
+#[test]
+fn deepseek_configuration_uses_anthropic_schema_tool_and_web_search_result() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let secrets = Arc::new(FixtureSecretStore::default());
+    let (endpoint, requests) = spawn_deepseek_verification_server();
+    let application = SkillYardApplication::new_with_agent_dependencies(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+        secrets,
+        AgentProviderEndpoints::for_deepseek_test(endpoint),
+    );
+    application
+        .handle(UiIntent::SetAiConfiguration {
+            enabled: true,
+            disclosure_accepted: true,
+            provider: AiProvider::DeepSeek,
+            model: "deepseek-v4-flash".to_owned(),
+        })
+        .expect("应保存 DeepSeek 配置");
+    application
+        .handle(UiIntent::SaveAiApiKey {
+            api_key: "skillyard-fixture-deepseek-api-key".to_owned(),
+        })
+        .expect("应保存 DeepSeek fixture Key");
+
+    assert_eq!(
+        application
+            .handle(UiIntent::TestAiConnection)
+            .expect("DeepSeek 的 Schema Tool 与联网搜索都成功时应完成验证"),
+        preferences(AiPreferences {
+            enabled: true,
+            disclosure_accepted: true,
+            provider: AiProvider::DeepSeek,
+            model: "deepseek-v4-flash".to_owned(),
+            has_api_key: true,
+            verified: true,
+        })
+    );
+
+    let recorded = requests
+        .recv()
+        .expect("Fake Server 应返回 DeepSeek 请求记录");
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[0].path, "/anthropic/v1/messages");
+    assert_eq!(
+        recorded[0].headers.get("x-api-key"),
+        Some(&"skillyard-fixture-deepseek-api-key".to_owned())
+    );
+    assert_eq!(
+        recorded[0].headers.get("anthropic-version"),
+        Some(&"2023-06-01".to_owned())
+    );
+    assert_eq!(
+        recorded[0].body["tools"][0]["input_schema"]["properties"]["status"]["const"],
+        "ok"
+    );
+    assert_eq!(
+        recorded[0].body["tool_choice"]["name"],
+        "skillyard_connection_test"
+    );
+    assert_eq!(recorded[1].body["tools"][0]["type"], "web_search_20250305");
+}
+
+#[test]
+fn deepseek_provider_error_is_normalized_without_exposing_response_content() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    let application = SkillYardApplication::new_with_agent_dependencies(
+        ApplicationPaths::for_home(data_root, home),
+        PlatformInfo::supported_for_test(),
+        Arc::new(FixtureSecretStore::default()),
+        AgentProviderEndpoints::for_deepseek_test(spawn_error_server(
+            "/anthropic",
+            401,
+            r#"{"error":{"message":"fixture upstream detail must stay hidden"}}"#,
+        )),
+    );
+    application
+        .handle(UiIntent::SetAiConfiguration {
+            enabled: true,
+            disclosure_accepted: true,
+            provider: AiProvider::DeepSeek,
+            model: "deepseek-v4-pro".to_owned(),
+        })
+        .expect("应保存 DeepSeek 配置");
+    application
+        .handle(UiIntent::SaveAiApiKey {
+            api_key: "skillyard-fixture-rejected-deepseek-key".to_owned(),
+        })
+        .expect("应保存 DeepSeek fixture Key");
+
+    let error = application
+        .handle(UiIntent::TestAiConnection)
+        .expect_err("401 必须作为 Provider 错误返回");
+    assert_eq!(error.to_string(), "模型 Provider 拒绝了请求（HTTP 401）");
+    assert!(!error.to_string().contains("fixture upstream detail"));
+}
+
 fn preferences(ai: AiPreferences) -> UiOutcome {
     UiOutcome::Preferences {
         language: InterfaceLanguage::ZhCn,
@@ -279,6 +380,16 @@ fn spawn_glm_verification_server() -> (String, mpsc::Receiver<Vec<RecordedReques
     )
 }
 
+fn spawn_deepseek_verification_server() -> (String, mpsc::Receiver<Vec<RecordedRequest>>) {
+    spawn_verification_server(
+        "/anthropic",
+        [
+            r#"{"content":[{"type":"tool_use","id":"tool_1","name":"skillyard_connection_test","input":{"status":"ok"}}]}"#,
+            r#"{"content":[{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{"query":"SkillYard GitHub"}},{"type":"web_search_tool_result","tool_use_id":"srv_1","content":[{"type":"web_search_result","url":"https://github.com/ReyYang/SkillYard","title":"SkillYard"}]},{"type":"text","text":"SkillYard"}]}"#,
+        ],
+    )
+}
+
 fn spawn_verification_server(
     base_path: &str,
     responses: [&'static str; 2],
@@ -309,6 +420,24 @@ fn spawn_verification_server(
         sender.send(recorded).expect("应返回请求记录");
     });
     (format!("http://{address}{base_path}"), receiver)
+}
+
+fn spawn_error_server(base_path: &str, status: u16, body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("应启动错误 Fake Server");
+    let address = listener.local_addr().expect("应读取错误 Fake Server 地址");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("应接收错误测试请求");
+        let _ = read_http_request(&mut stream);
+        let reply = format!(
+            "HTTP/1.1 {status} Provider Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(reply.as_bytes())
+            .expect("应写入错误 Fake Server 响应");
+    });
+    format!("http://{address}{base_path}")
 }
 
 fn read_http_request(stream: &mut impl Read) -> Vec<u8> {

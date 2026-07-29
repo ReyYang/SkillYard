@@ -85,6 +85,7 @@ impl SecretStore for KeychainSecretStore {
 pub struct AgentProviderEndpoints {
     open_ai: String,
     glm: String,
+    deep_seek: String,
 }
 
 impl AgentProviderEndpoints {
@@ -92,6 +93,7 @@ impl AgentProviderEndpoints {
         Self {
             open_ai: "https://api.openai.com/v1".to_owned(),
             glm: "https://open.bigmodel.cn/api/paas/v4".to_owned(),
+            deep_seek: "https://api.deepseek.com/anthropic".to_owned(),
         }
     }
 
@@ -111,12 +113,24 @@ impl AgentProviderEndpoints {
         }
     }
 
+    #[doc(hidden)]
+    pub fn for_deepseek_test(deep_seek: String) -> Self {
+        Self {
+            deep_seek,
+            ..Self::production()
+        }
+    }
+
     fn open_ai_responses(&self) -> String {
         format!("{}/responses", self.open_ai.trim_end_matches('/'))
     }
 
     fn glm_chat_completions(&self) -> String {
         format!("{}/chat/completions", self.glm.trim_end_matches('/'))
+    }
+
+    fn deep_seek_messages(&self) -> String {
+        format!("{}/v1/messages", self.deep_seek.trim_end_matches('/'))
     }
 }
 
@@ -130,8 +144,6 @@ pub enum AgentError {
     MissingApiKey,
     #[error("当前 Provider 不支持模型 {0}")]
     UnsupportedModel(String),
-    #[error("当前 Provider 尚未由 SkillYard 支持")]
-    UnsupportedProvider,
     #[error("无法连接模型 Provider")]
     ProviderUnavailable,
     #[error("模型 Provider 拒绝了请求（HTTP {0}）")]
@@ -152,8 +164,81 @@ pub(crate) fn verify_provider(
     match provider {
         AiProvider::OpenAi => verify_openai(endpoints, model, api_key),
         AiProvider::Glm => verify_glm(endpoints, model, api_key),
-        AiProvider::DeepSeek => Err(AgentError::UnsupportedProvider),
+        AiProvider::DeepSeek => verify_deepseek(endpoints, model, api_key),
     }
+}
+
+fn verify_deepseek(
+    endpoints: &AgentProviderEndpoints,
+    model: &str,
+    api_key: &str,
+) -> Result<(), AgentError> {
+    let client = provider_client()?;
+    let endpoint = endpoints.deep_seek_messages();
+
+    let structured = send_anthropic_json(
+        &client,
+        &endpoint,
+        api_key,
+        &json!({
+            "model": model,
+            "max_tokens": 128,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "Call the required connection-test tool."
+                }]
+            }],
+            "tools": [{
+                "name": "skillyard_connection_test",
+                "description": "Return the fixed SkillYard connection-test result.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string", "const": "ok" }
+                    },
+                    "required": ["status"],
+                    "additionalProperties": false
+                }
+            }],
+            "tool_choice": {
+                "type": "tool",
+                "name": "skillyard_connection_test"
+            },
+            "stream": false
+        }),
+    )?;
+    if !contains_deepseek_structured_ok(&structured) {
+        return Err(AgentError::InvalidCapability("Structured Tool Output"));
+    }
+
+    let searched = send_anthropic_json(
+        &client,
+        &endpoint,
+        api_key,
+        &json!({
+            "model": model,
+            "max_tokens": 512,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "Find the official SkillYard GitHub repository and cite one public URL."
+                }]
+            }],
+            "tools": [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 1
+            }],
+            "stream": false
+        }),
+    )?;
+    if !contains_anthropic_public_url(&searched) {
+        return Err(AgentError::InvalidCapability("Web Search"));
+    }
+    Ok(())
 }
 
 fn verify_glm(
@@ -296,6 +381,32 @@ fn send_json(
     serde_json::from_slice(&bytes).map_err(|_| AgentError::ProviderUnavailable)
 }
 
+fn send_anthropic_json(
+    client: &Client,
+    endpoint: &str,
+    api_key: &str,
+    body: &Value,
+) -> Result<Value, AgentError> {
+    let mut response = client
+        .post(endpoint)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(body)
+        .send()
+        .map_err(|_| AgentError::ProviderUnavailable)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AgentError::ProviderRejected(status.as_u16()));
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(MAX_PROVIDER_RESPONSE_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AgentError::ProviderUnavailable)?;
+    serde_json::from_slice(&bytes).map_err(|_| AgentError::ProviderUnavailable)
+}
+
 fn contains_structured_ok(response: &Value) -> bool {
     output_texts(response).any(contains_json_status_ok)
 }
@@ -381,6 +492,43 @@ fn contains_glm_public_url(response: &Value) -> bool {
         .into_iter()
         .flatten()
         .filter_map(|item| item.get("link").and_then(Value::as_str))
+        .any(is_public_url)
+}
+
+fn contains_deepseek_structured_ok(response: &Value) -> bool {
+    response
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter(|block| {
+            block.get("name").and_then(Value::as_str) == Some("skillyard_connection_test")
+        })
+        .any(|block| {
+            block
+                .get("input")
+                .and_then(|input| input.get("status"))
+                .and_then(Value::as_str)
+                == Some("ok")
+        })
+}
+
+fn contains_anthropic_public_url(response: &Value) -> bool {
+    response
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("web_search_tool_result"))
+        .flat_map(|block| {
+            block
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|result| result.get("url").and_then(Value::as_str))
         .any(is_public_url)
 }
 

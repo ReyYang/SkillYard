@@ -959,6 +959,7 @@ function InventorySettingsPage({
               >
                 <option value="openAi">OpenAI</option>
                 <option value="glm">GLM</option>
+                <option value="deepSeek">DeepSeek</option>
               </select>
             </label>
             <label className="settings-select">
