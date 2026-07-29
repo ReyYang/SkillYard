@@ -6,15 +6,18 @@ use std::{
 use thiserror::Error;
 
 use crate::{
+    agent::{
+        AgentError, AgentProviderEndpoints, KeychainSecretStore, SharedSecretStore, verify_provider,
+    },
     bundle_update_batch::{
         BundleUpdateBatchError, acknowledge_bundle_update_batch, confirm_bundle_update_batch_plan,
         create_bundle_update_batch_plan, discard_bundle_update_batch_plan,
         read_open_bundle_update_batch_outcome, recover_running_bundle_update_batch,
     },
     domain::{
-        BundleUpdateStatus, EditableLocalRelinkMember, InterfaceLanguage, MergeContentChoice,
-        PlatformInfo, SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, UiIntent,
-        UiOutcome,
+        AiPreferences, AiProvider, BundleUpdateStatus, EditableLocalRelinkMember,
+        InterfaceLanguage, MergeContentChoice, PlatformInfo, SourceKind, SourceMemberMappingChoice,
+        TakeoverPlanRequest, UiIntent, UiOutcome,
     },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
@@ -87,6 +90,8 @@ pub enum ApplicationError {
     BundleUpdateBatch(#[from] BundleUpdateBatchError),
     #[error(transparent)]
     Removal(#[from] RemovalError),
+    #[error(transparent)]
+    Agent(#[from] AgentError),
     #[error("当前状态不能执行这个操作：{0}")]
     InvalidState(&'static str),
     #[error("已有一项写操作正在执行，请等待完成")]
@@ -102,6 +107,8 @@ pub struct SkillYardApplication {
     operation_gate: Mutex<()>,
     lifecycle_failpoint: LifecycleFailpoint,
     source_transport: Option<SharedSourceTransport>,
+    secret_store: SharedSecretStore,
+    agent_endpoints: AgentProviderEndpoints,
 }
 
 impl SkillYardApplication {
@@ -111,6 +118,8 @@ impl SkillYardApplication {
             platform,
             LifecycleFailpoint::None,
             default_source_transport(),
+            Arc::new(KeychainSecretStore),
+            AgentProviderEndpoints::production(),
         )
     }
 
@@ -131,6 +140,8 @@ impl SkillYardApplication {
             platform,
             lifecycle_failpoint,
             default_source_transport(),
+            Arc::new(KeychainSecretStore),
+            AgentProviderEndpoints::production(),
         )
     }
 
@@ -146,6 +157,26 @@ impl SkillYardApplication {
             platform,
             LifecycleFailpoint::None,
             Some(source_transport),
+            Arc::new(KeychainSecretStore),
+            AgentProviderEndpoints::production(),
+        )
+    }
+
+    /// Provider 合同测试替换 Keychain 与固定 endpoint，但所有行为仍通过唯一 Application seam。
+    #[doc(hidden)]
+    pub fn new_with_agent_dependencies(
+        paths: ApplicationPaths,
+        platform: PlatformInfo,
+        secret_store: SharedSecretStore,
+        agent_endpoints: AgentProviderEndpoints,
+    ) -> Self {
+        Self::new_with_dependencies(
+            paths,
+            platform,
+            LifecycleFailpoint::None,
+            default_source_transport(),
+            secret_store,
+            agent_endpoints,
         )
     }
 
@@ -154,6 +185,8 @@ impl SkillYardApplication {
         platform: PlatformInfo,
         lifecycle_failpoint: LifecycleFailpoint,
         source_transport: Option<SharedSourceTransport>,
+        secret_store: SharedSecretStore,
+        agent_endpoints: AgentProviderEndpoints,
     ) -> Self {
         // SQLite 延迟到 intent 中打开，确保初始化失败能通过 UiError 呈现，而不是在窗口创建前 panic。
         Self {
@@ -162,6 +195,8 @@ impl SkillYardApplication {
             operation_gate: Mutex::new(()),
             lifecycle_failpoint,
             source_transport,
+            secret_store,
+            agent_endpoints,
         }
     }
 
@@ -171,6 +206,30 @@ impl SkillYardApplication {
             UiIntent::GetPreferences => return self.get_preferences(),
             UiIntent::SetInterfaceLanguage { language } => {
                 return self.with_write_operation(|| self.set_interface_language(*language));
+            }
+            UiIntent::SetAiConfiguration {
+                enabled,
+                disclosure_accepted,
+                provider,
+                model,
+            } => {
+                return self.with_write_operation(|| {
+                    self.set_ai_configuration(
+                        *enabled,
+                        *disclosure_accepted,
+                        *provider,
+                        model.clone(),
+                    )
+                });
+            }
+            UiIntent::SaveAiApiKey { api_key } => {
+                return self.with_write_operation(|| self.save_ai_api_key(api_key.as_str()));
+            }
+            UiIntent::DeleteAiApiKey => {
+                return self.with_write_operation(|| self.delete_ai_api_key());
+            }
+            UiIntent::TestAiConnection => {
+                return self.with_write_operation(|| self.test_ai_connection());
             }
             _ => {}
         }
@@ -186,7 +245,12 @@ impl SkillYardApplication {
         }
 
         match intent {
-            UiIntent::GetPreferences | UiIntent::SetInterfaceLanguage { .. } => {
+            UiIntent::GetPreferences
+            | UiIntent::SetInterfaceLanguage { .. }
+            | UiIntent::SetAiConfiguration { .. }
+            | UiIntent::SaveAiApiKey { .. }
+            | UiIntent::DeleteAiApiKey
+            | UiIntent::TestAiConnection => {
                 unreachable!("偏好意图已在平台检查前处理")
             }
             // 启动读取前可能需要修复上次中断的写事务，因此也必须取得单写门。
@@ -352,6 +416,7 @@ impl SkillYardApplication {
         let storage = self.open_storage()?;
         Ok(UiOutcome::Preferences {
             language: storage.read_interface_language()?,
+            ai: self.read_ai_preferences(&storage)?,
         })
     }
 
@@ -361,7 +426,88 @@ impl SkillYardApplication {
     ) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_storage()?;
         storage.save_interface_language(language)?;
-        Ok(UiOutcome::Preferences { language })
+        Ok(UiOutcome::Preferences {
+            language,
+            ai: self.read_ai_preferences(&storage)?,
+        })
+    }
+
+    fn set_ai_configuration(
+        &self,
+        enabled: bool,
+        disclosure_accepted: bool,
+        provider: AiProvider,
+        model: String,
+    ) -> Result<UiOutcome, ApplicationError> {
+        if !provider.supports_model(&model) {
+            return Err(AgentError::UnsupportedModel(model).into());
+        }
+        let mut storage = self.open_storage()?;
+        storage.save_ai_configuration(enabled, disclosure_accepted, provider, &model)?;
+        self.preferences_outcome(&storage)
+    }
+
+    fn save_ai_api_key(&self, api_key: &str) -> Result<UiOutcome, ApplicationError> {
+        if api_key.trim().is_empty() {
+            return Err(AgentError::MissingApiKey.into());
+        }
+        let mut storage = self.open_storage()?;
+        let ai = storage.read_ai_preferences()?;
+        self.secret_store
+            .write(ai.provider.api_key_account(), api_key.trim())
+            .map_err(AgentError::from)?;
+        storage.set_ai_verified(false)?;
+        self.preferences_outcome(&storage)
+    }
+
+    fn delete_ai_api_key(&self) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_storage()?;
+        let ai = storage.read_ai_preferences()?;
+        self.secret_store
+            .delete(ai.provider.api_key_account())
+            .map_err(AgentError::from)?;
+        storage.set_ai_verified(false)?;
+        self.preferences_outcome(&storage)
+    }
+
+    fn test_ai_connection(&self) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_storage()?;
+        let ai = storage.read_ai_preferences()?;
+        if !ai.disclosure_accepted {
+            return Err(AgentError::DisclosureRequired.into());
+        }
+        let api_key = self
+            .secret_store
+            .read(ai.provider.api_key_account())
+            .map_err(AgentError::from)?
+            .ok_or(AgentError::MissingApiKey)?;
+        // 先撤销旧验证，确保任一能力测试失败后不会保留过期的“已验证”状态。
+        storage.set_ai_verified(false)?;
+        verify_provider(
+            &self.agent_endpoints,
+            ai.provider,
+            ai.model.as_str(),
+            api_key.as_str(),
+        )?;
+        storage.set_ai_verified(true)?;
+        self.preferences_outcome(&storage)
+    }
+
+    fn read_ai_preferences(&self, storage: &Storage) -> Result<AiPreferences, ApplicationError> {
+        let mut ai = storage.read_ai_preferences()?;
+        ai.has_api_key = self
+            .secret_store
+            .read(ai.provider.api_key_account())
+            .map_err(AgentError::from)?
+            .is_some();
+        Ok(ai)
+    }
+
+    fn preferences_outcome(&self, storage: &Storage) -> Result<UiOutcome, ApplicationError> {
+        Ok(UiOutcome::Preferences {
+            language: storage.read_interface_language()?,
+            ai: self.read_ai_preferences(storage)?,
+        })
     }
 
     /// 扫描结果会写入同一份 SQLite；拒绝并发写可避免旧快照覆盖新状态。

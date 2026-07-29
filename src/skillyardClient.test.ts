@@ -24,8 +24,30 @@ describe("Tauri IPC contract", () => {
 
   it("语言偏好只通过正式任务级命令读取和保存", async () => {
     mocks.invoke
-      .mockResolvedValueOnce({ type: "preferences", language: "zhCn" })
-      .mockResolvedValueOnce({ type: "preferences", language: "en" });
+      .mockResolvedValueOnce({
+        type: "preferences",
+        language: "zhCn",
+        ai: {
+          enabled: false,
+          disclosureAccepted: false,
+          provider: "openAi",
+          model: "gpt-5.6-terra",
+          hasApiKey: false,
+          verified: false,
+        },
+      })
+      .mockResolvedValueOnce({
+        type: "preferences",
+        language: "en",
+        ai: {
+          enabled: false,
+          disclosureAccepted: false,
+          provider: "openAi",
+          model: "gpt-5.6-terra",
+          hasApiKey: false,
+          verified: false,
+        },
+      });
 
     await tauriSkillYardClient.getPreferences();
     await tauriSkillYardClient.setInterfaceLanguage("en");
@@ -34,6 +56,44 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenNthCalledWith(2, "set_interface_language", {
       language: "en",
     });
+  });
+
+  it("AI 配置、Keychain 和连接测试只使用固定任务级命令", async () => {
+    const outcome = {
+      type: "preferences",
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: false,
+      },
+    };
+    mocks.invoke.mockResolvedValue(outcome);
+
+    await tauriSkillYardClient.setAiConfiguration({
+      enabled: true,
+      disclosureAccepted: true,
+      provider: "openAi",
+      model: "gpt-5.6-terra",
+    });
+    await tauriSkillYardClient.saveAiApiKey("skillyard-fixture-openai-api-key");
+    await tauriSkillYardClient.deleteAiApiKey();
+    await tauriSkillYardClient.testAiConnection();
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "set_ai_configuration", {
+      enabled: true,
+      disclosureAccepted: true,
+      provider: "openAi",
+      model: "gpt-5.6-terra",
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "save_ai_api_key", {
+      apiKey: "skillyard-fixture-openai-api-key",
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(3, "delete_ai_api_key");
+    expect(mocks.invoke).toHaveBeenNthCalledWith(4, "test_ai_connection");
   });
 
   it("打开 Central Store 时不允许前端提交路径", async () => {

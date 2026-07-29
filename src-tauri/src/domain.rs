@@ -10,6 +10,17 @@ pub enum UiIntent {
     SetInterfaceLanguage {
         language: InterfaceLanguage,
     },
+    SetAiConfiguration {
+        enabled: bool,
+        disclosure_accepted: bool,
+        provider: AiProvider,
+        model: String,
+    },
+    SaveAiApiKey {
+        api_key: String,
+    },
+    DeleteAiApiKey,
+    TestAiConnection,
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
@@ -186,6 +197,78 @@ impl InterfaceLanguage {
             _ => None,
         }
     }
+}
+
+/// 1.1.0 的 Provider 是经过 SkillYard 验证的固定集合，不接受任意 Base URL。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AiProvider {
+    OpenAi,
+    Glm,
+    DeepSeek,
+}
+
+impl AiProvider {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Glm => "glm",
+            Self::DeepSeek => "deepseek",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "openai" => Some(Self::OpenAi),
+            "glm" => Some(Self::Glm),
+            "deepseek" => Some(Self::DeepSeek),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn api_key_account(self) -> &'static str {
+        match self {
+            Self::OpenAi => "provider-openai",
+            Self::Glm => "provider-glm",
+            Self::DeepSeek => "provider-deepseek",
+        }
+    }
+
+    pub(crate) fn supports_model(self, model: &str) -> bool {
+        self.models().contains(&model)
+    }
+
+    pub(crate) fn models(self) -> &'static [&'static str] {
+        match self {
+            Self::OpenAi => &[
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.4-mini",
+                "gpt-5.5",
+            ],
+            Self::Glm => &[
+                "glm-5.2",
+                "glm-5.1",
+                "glm-4.7",
+                "glm-4.7-flashx",
+                "glm-4.7-flash",
+            ],
+            Self::DeepSeek => &["deepseek-v4-flash", "deepseek-v4-pro"],
+        }
+    }
+}
+
+/// API Key 不在这个 read model 中返回，界面只能知道当前 Provider 是否已经保存 Key。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPreferences {
+    pub enabled: bool,
+    pub disclosure_accepted: bool,
+    pub provider: AiProvider,
+    pub model: String,
+    pub has_api_key: bool,
+    pub verified: bool,
 }
 
 /// 固定 Supported App 的稳定标识。
@@ -1422,6 +1505,7 @@ impl SkillMetadataStatus {
 pub enum UiOutcome {
     Preferences {
         language: InterfaceLanguage,
+        ai: AiPreferences,
     },
     UnsupportedPlatform {
         actual_os: String,

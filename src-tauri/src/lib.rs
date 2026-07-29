@@ -1,5 +1,6 @@
 //! SkillYard 的内部 Rust Lifecycle Core。
 
+mod agent;
 mod application;
 mod bundle_update_batch;
 mod commands;
@@ -20,10 +21,11 @@ mod source_input;
 mod storage;
 mod takeover;
 
+pub use agent::{AgentProviderEndpoints, SecretStore, SecretStoreError, SharedSecretStore};
 pub use application::SkillYardApplication;
 pub use domain::{
-    BatchMountDisposition, BatchMountPlan, BatchMountPlanItem, BatchMountRequest,
-    BundleUpdateAction, BundleUpdateBatchPlan, BundleUpdateBatchPlanItem,
+    AiPreferences, AiProvider, BatchMountDisposition, BatchMountPlan, BatchMountPlanItem,
+    BatchMountRequest, BundleUpdateAction, BundleUpdateBatchPlan, BundleUpdateBatchPlanItem,
     BundleUpdateBatchPlanItemDisposition, BundleUpdateBatchResult, BundleUpdateBatchResultItem,
     BundleUpdateBatchResultItemStatus, BundleUpdateBatchResultStatus, BundleUpdateImpact,
     BundleUpdateStatus, BundleUpdateSummary, EditableLocalRelinkMember, EditableLocalRelinkPlan,
@@ -67,6 +69,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_preferences,
             commands::set_interface_language,
+            commands::set_ai_configuration,
+            commands::save_ai_api_key,
+            commands::delete_ai_api_key,
+            commands::test_ai_connection,
             commands::get_startup_state,
             commands::open_central_store,
             commands::start_initial_scan,

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  AiConfigurationInput,
   BatchMountPlan,
   BatchMountRequest,
   EditableLocalRelinkPlan,
@@ -33,6 +34,12 @@ type RemovalPlanOutcome = Extract<UiOutcome, { type: "removalPlan" }>;
 export interface SkillYardClient {
   getPreferences(): Promise<UserPreferences>;
   setInterfaceLanguage(language: InterfaceLanguage): Promise<UserPreferences>;
+  setAiConfiguration(
+    configuration: AiConfigurationInput,
+  ): Promise<UserPreferences>;
+  saveAiApiKey(apiKey: string): Promise<UserPreferences>;
+  deleteAiApiKey(): Promise<UserPreferences>;
+  testAiConnection(): Promise<UserPreferences>;
   getStartupState(): Promise<UiOutcome>;
   openCentralStore(): Promise<void>;
   startInitialScan(): Promise<UiOutcome>;
@@ -135,14 +142,40 @@ export const tauriSkillYardClient: SkillYardClient = {
     const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
       "get_preferences",
     );
-    return { language: outcome.language };
+    return { language: outcome.language, ai: outcome.ai };
   },
   setInterfaceLanguage: async (language) => {
     const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
       "set_interface_language",
       { language },
     );
-    return { language: outcome.language };
+    return { language: outcome.language, ai: outcome.ai };
+  },
+  setAiConfiguration: async (configuration) => {
+    const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
+      "set_ai_configuration",
+      { ...configuration },
+    );
+    return { language: outcome.language, ai: outcome.ai };
+  },
+  saveAiApiKey: async (apiKey) => {
+    const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
+      "save_ai_api_key",
+      { apiKey },
+    );
+    return { language: outcome.language, ai: outcome.ai };
+  },
+  deleteAiApiKey: async () => {
+    const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
+      "delete_ai_api_key",
+    );
+    return { language: outcome.language, ai: outcome.ai };
+  },
+  testAiConnection: async () => {
+    const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
+      "test_ai_connection",
+    );
+    return { language: outcome.language, ai: outcome.ai };
   },
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),
   openCentralStore: () => invoke<void>("open_central_store"),

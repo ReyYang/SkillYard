@@ -1,8 +1,27 @@
 export type SupportedAppId = "codex" | "claudeCode" | "gitHubCopilot";
 export type InterfaceLanguage = "zhCn" | "en";
+export type AiProvider = "openAi" | "glm" | "deepSeek";
+
+export interface AiPreferences {
+  enabled: boolean;
+  disclosureAccepted: boolean;
+  provider: AiProvider;
+  model: string;
+  // API Key 永远不返回前端，界面只得到 Keychain 是否已有值。
+  hasApiKey: boolean;
+  verified: boolean;
+}
 
 export interface UserPreferences {
   language: InterfaceLanguage;
+  ai: AiPreferences;
+}
+
+export interface AiConfigurationInput {
+  enabled: boolean;
+  disclosureAccepted: boolean;
+  provider: AiProvider;
+  model: string;
 }
 
 export interface SupportedAppSummary {
@@ -560,6 +579,7 @@ export type UiOutcome =
   | {
       type: "preferences";
       language: InterfaceLanguage;
+      ai: AiPreferences;
     }
   | {
       type: "unsupportedPlatform";

@@ -13,14 +13,15 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{
-    BatchMountDisposition, BundleUpdateAction, BundleUpdateStatus, BundleUpdateSummary,
-    EditableLocalRelinkMember, EditableLocalRelinkPlan, InstallationChain, InstallationChainKind,
-    InterfaceLanguage, InventoryItem, InventoryLocationKind, InventoryObservation,
-    LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
-    MountOperation, MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue,
-    ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus,
-    SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind, SourceRefChangePlan,
-    SourceSummary, SupportedAppId, SupportedAppSummary, TakeoverPlan, UiOutcome,
+    AiPreferences, AiProvider, BatchMountDisposition, BundleUpdateAction, BundleUpdateStatus,
+    BundleUpdateSummary, EditableLocalRelinkMember, EditableLocalRelinkPlan, InstallationChain,
+    InstallationChainKind, InterfaceLanguage, InventoryItem, InventoryLocationKind,
+    InventoryObservation, LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind,
+    ManagementKind, MountHealth, MountOperation, MountPlanPurpose, MountScope, MountSummary,
+    ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey,
+    SkillMetadataStatus, SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind,
+    SourceRefChangePlan, SourceSummary, SupportedAppId, SupportedAppSummary, TakeoverPlan,
+    UiOutcome,
 };
 use crate::github_source::parse_github_source;
 use crate::installation_chain::takeover_group_evidence;
@@ -98,6 +99,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         27,
         include_str!("../migrations/0027_interface_language.sql"),
     ),
+    (28, include_str!("../migrations/0028_ai_preferences.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -122,6 +124,12 @@ pub enum StorageError {
     SavePreferences(#[source] rusqlite::Error),
     #[error("SQLite 中包含未知界面语言：{0}")]
     UnknownInterfaceLanguage(String),
+    #[error("无法读取 AI 偏好：{0}")]
+    ReadAiPreferences(#[source] rusqlite::Error),
+    #[error("无法保存 AI 偏好：{0}")]
+    SaveAiPreferences(#[source] rusqlite::Error),
+    #[error("SQLite 中包含未知 AI Provider：{0}")]
+    UnknownAiProvider(String),
     #[error("无法读取本机清单状态：{0}")]
     ReadInventory(#[source] rusqlite::Error),
     #[error("无法读取 Source 状态：{0}")]
@@ -1343,6 +1351,80 @@ impl Storage {
                 rusqlite::Error::QueryReturnedNoRows,
             ))
         }
+    }
+
+    pub(crate) fn read_ai_preferences(&self) -> Result<AiPreferences, StorageError> {
+        let (enabled, disclosure_accepted, provider, model, verified) = self
+            .connection
+            .query_row(
+                "SELECT enabled, disclosure_accepted, provider, model, verified
+                 FROM ai_preferences
+                 WHERE singleton_id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, bool>(4)?,
+                    ))
+                },
+            )
+            .map_err(StorageError::ReadAiPreferences)?;
+        let provider = AiProvider::from_str(&provider)
+            .ok_or_else(|| StorageError::UnknownAiProvider(provider))?;
+        Ok(AiPreferences {
+            enabled,
+            disclosure_accepted,
+            provider,
+            model,
+            // Keychain 状态由 Application 在返回界面前填充。
+            has_api_key: false,
+            verified,
+        })
+    }
+
+    pub(crate) fn save_ai_configuration(
+        &mut self,
+        enabled: bool,
+        disclosure_accepted: bool,
+        provider: AiProvider,
+        model: &str,
+    ) -> Result<(), StorageError> {
+        let current = self.read_ai_preferences()?;
+        let invalidates_verification = current.provider != provider || current.model != model;
+        self.connection
+            .execute(
+                "UPDATE ai_preferences
+                 SET enabled = ?1,
+                     disclosure_accepted = ?2,
+                     provider = ?3,
+                     model = ?4,
+                     verified = CASE WHEN ?5 THEN 0 ELSE verified END
+                 WHERE singleton_id = 1",
+                params![
+                    enabled,
+                    disclosure_accepted,
+                    provider.as_str(),
+                    model,
+                    invalidates_verification
+                ],
+            )
+            .map_err(StorageError::SaveAiPreferences)?;
+        Ok(())
+    }
+
+    pub(crate) fn set_ai_verified(&mut self, verified: bool) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "UPDATE ai_preferences
+                 SET verified = ?1
+                 WHERE singleton_id = 1",
+                [verified],
+            )
+            .map_err(StorageError::SaveAiPreferences)?;
+        Ok(())
     }
 
     pub(crate) fn save_takeover_plan(
@@ -14424,7 +14506,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=27).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=28).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",

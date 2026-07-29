@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type {
+  AiPreferences,
   BatchMountPlan,
   BundleUpdateBatchPlan,
   BundleUpdateBatchResult,
@@ -106,7 +107,10 @@ describe("本机清单", () => {
     const client = createClient(
       inventoryOutcome([createManagedEntry({ skillName: "example" })]),
     );
-    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      ai: defaultAiPreferences(),
+    });
 
     render(<App client={client} />);
 
@@ -124,6 +128,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.setInterfaceLanguage).mockResolvedValue({
       language: "en",
+      ai: defaultAiPreferences(),
     });
 
     render(<App client={client} />);
@@ -140,6 +145,82 @@ describe("本机清单", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
     expect(screen.queryByText("设置")).toBeNull();
+  });
+
+  it("设置页保存 OpenAI Key 后只显示保存状态，并由用户主动发起连接测试", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.setAiConfiguration).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: false,
+        verified: false,
+      },
+    });
+    vi.mocked(client.saveAiApiKey).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: false,
+      },
+    });
+    vi.mocked(client.testAiConnection).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+
+    expect(
+      screen.getByRole("combobox", { name: "模型供应商" }),
+    ).toHaveValue("openAi");
+    expect(screen.getByRole("combobox", { name: "模型" })).toHaveTextContent(
+      "gpt-5.6-sol",
+    );
+    expect(screen.getByRole("combobox", { name: "模型" })).toHaveTextContent(
+      "gpt-5.5",
+    );
+    expect(client.testAiConnection).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("checkbox", { name: "启用 AI" }));
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "同意将非敏感 Skill 内容发送给所选 Provider",
+      }),
+    );
+    await user.type(
+      screen.getByLabelText("API Key"),
+      "skillyard-fixture-openai-api-key",
+    );
+    await user.click(screen.getByRole("button", { name: "保存 API Key" }));
+
+    expect(client.saveAiApiKey).toHaveBeenCalledWith(
+      "skillyard-fixture-openai-api-key",
+    );
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(screen.getByText("API Key 已保存在 macOS Keychain")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+    expect(client.testAiConnection).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("连接已验证")).toBeInTheDocument();
   });
 
   it("直接显示已保存清单，不自动刷新", async () => {
@@ -3134,7 +3215,10 @@ describe("English installation and takeover flows", () => {
         },
       ],
     });
-    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      ai: defaultAiPreferences(),
+    });
 
     render(<App client={client} />);
 
@@ -3150,7 +3234,10 @@ describe("English installation and takeover flows", () => {
   it("安装、Source 和项目确认使用同一英文语言状态", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([createManagedEntry()]));
-    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      ai: defaultAiPreferences(),
+    });
     vi.mocked(client.chooseProjectDirectory).mockResolvedValue({
       displayName: "Demo",
       rootPath: "/tmp/Demo",
@@ -3180,7 +3267,10 @@ describe("English installation and takeover flows", () => {
   it("安装影响预览使用英文并保留 Bundle、Skill 和路径原值", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([]));
-    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      ai: defaultAiPreferences(),
+    });
     vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(
       createInstallPlan({
         bundleDisplayName: "owner/toolkit",
@@ -3224,7 +3314,10 @@ describe("English installation and takeover flows", () => {
       takeoverGroupDisplayName: "owner/repo",
     });
     const client = createClient(inventoryOutcome([candidate]));
-    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      ai: defaultAiPreferences(),
+    });
     vi.mocked(client.createTakeoverPlan).mockResolvedValue(
       createTakeoverPlan({
         bundleDisplayName: "owner/repo",
@@ -3282,7 +3375,10 @@ describe("English installation and takeover flows", () => {
       ],
     });
     const client = createClient(initial);
-    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      ai: defaultAiPreferences(),
+    });
     vi.mocked(client.createBundleMountRemovalPlan).mockResolvedValue({
       type: "removalPlan",
       plan: createRemovalPlan({
@@ -3323,7 +3419,10 @@ describe("English installation and takeover flows", () => {
     const client = createClient(
       inventoryOutcome([createManagedEntry({ skillName: "preserved" })]),
     );
-    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      ai: defaultAiPreferences(),
+    });
     vi.mocked(client.refreshLocalInventory).mockRejectedValue({
       code: "storageError",
       message: "SQLite 暂时不可写",
@@ -6336,8 +6435,15 @@ function createEditableLocalRelinkPlan(
 
 function createClient(startup: UiOutcome): SkillYardClient {
   return {
-    getPreferences: vi.fn().mockResolvedValue({ language: "zhCn" }),
+    getPreferences: vi.fn().mockResolvedValue({
+      language: "zhCn",
+      ai: defaultAiPreferences(),
+    }),
     setInterfaceLanguage: vi.fn(),
+    setAiConfiguration: vi.fn(),
+    saveAiApiKey: vi.fn(),
+    deleteAiApiKey: vi.fn(),
+    testAiConnection: vi.fn(),
     getStartupState: vi.fn().mockResolvedValue(startup),
     openCentralStore: vi.fn().mockResolvedValue(undefined),
     startInitialScan: vi.fn(),
@@ -6384,6 +6490,17 @@ function createClient(startup: UiOutcome): SkillYardClient {
     confirmMountPlan: vi.fn(),
     createBatchMountPlan: vi.fn(),
     confirmBatchMountPlan: vi.fn(),
+  };
+}
+
+function defaultAiPreferences(): AiPreferences {
+  return {
+    enabled: false,
+    disclosureAccepted: false,
+    provider: "openAi",
+    model: "gpt-5.6-terra",
+    hasApiKey: false,
+    verified: false,
   };
 }
 

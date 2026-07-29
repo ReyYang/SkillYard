@@ -23,6 +23,8 @@ import { SourceRefChangePage } from "./components/SourceRefChangePage";
 import { TakeoverPlanPage } from "./components/TakeoverPlanPage";
 import { TakeoverSelectionPage } from "./components/TakeoverSelectionPage";
 import type {
+  AiConfigurationInput,
+  AiPreferences,
   BatchMountPlan,
   BatchMountRequest,
   EditableLocalRelinkPlan,
@@ -55,10 +57,24 @@ interface AppProps {
 interface AppCoreProps {
   client: SkillYardClient;
   language: InterfaceLanguage;
+  aiPreferences: AiPreferences;
   isSavingLanguage: boolean;
   languageError: string | null;
+  aiOperation: AiOperation;
+  aiError: string | null;
   onLanguageChange(language: InterfaceLanguage): Promise<void>;
+  onAiConfigurationChange(configuration: AiConfigurationInput): Promise<void>;
+  onSaveAiApiKey(apiKey: string): Promise<void>;
+  onDeleteAiApiKey(): Promise<void>;
+  onTestAiConnection(): Promise<void>;
 }
+
+type AiOperation =
+  | "savingConfiguration"
+  | "savingKey"
+  | "deletingKey"
+  | "testing"
+  | null;
 
 type ViewState =
   | { status: "loading" }
@@ -97,15 +113,21 @@ type RemovalOperation =
 
 export function App({ client = tauriSkillYardClient }: AppProps) {
   const [language, setLanguage] = useState<InterfaceLanguage | null>(null);
+  const [aiPreferences, setAiPreferences] = useState<AiPreferences | null>(null);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [isSavingLanguage, setIsSavingLanguage] = useState(false);
   const [languageError, setLanguageError] = useState<string | null>(null);
+  const [aiOperation, setAiOperation] = useState<AiOperation>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     client.getPreferences().then(
       (preferences) => {
-        if (active) setLanguage(preferences.language);
+        if (active) {
+          setLanguage(preferences.language);
+          setAiPreferences(preferences.ai);
+        }
       },
       (error: unknown) => {
         if (active) setPreferenceError(formatErrorMessage(error, "zhCn"));
@@ -123,10 +145,29 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     try {
       const preferences = await client.setInterfaceLanguage(nextLanguage);
       setLanguage(preferences.language);
+      setAiPreferences(preferences.ai);
     } catch (error) {
       setLanguageError(formatErrorMessage(error, language ?? "zhCn"));
     } finally {
       setIsSavingLanguage(false);
+    }
+  };
+
+  const runAiOperation = async (
+    operation: Exclude<AiOperation, null>,
+    action: () => Promise<{ language: InterfaceLanguage; ai: AiPreferences }>,
+  ) => {
+    if (aiOperation) return;
+    setAiOperation(operation);
+    setAiError(null);
+    try {
+      const preferences = await action();
+      setLanguage(preferences.language);
+      setAiPreferences(preferences.ai);
+    } catch (error) {
+      setAiError(formatErrorMessage(error, language ?? "zhCn"));
+    } finally {
+      setAiOperation(null);
     }
   };
 
@@ -138,7 +179,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       </main>
     );
   }
-  if (!language) {
+  if (!language || !aiPreferences) {
     return (
       <main className="state-page" aria-label="SkillYard 正在启动">
         <span className="loading-mark" aria-hidden="true" />
@@ -152,9 +193,26 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       <AppCore
         client={client}
         language={language}
+        aiPreferences={aiPreferences}
         isSavingLanguage={isSavingLanguage}
         languageError={languageError}
+        aiOperation={aiOperation}
+        aiError={aiError}
         onLanguageChange={changeLanguage}
+        onAiConfigurationChange={(configuration) =>
+          runAiOperation("savingConfiguration", () =>
+            client.setAiConfiguration(configuration),
+          )
+        }
+        onSaveAiApiKey={(apiKey) =>
+          runAiOperation("savingKey", () => client.saveAiApiKey(apiKey))
+        }
+        onDeleteAiApiKey={() =>
+          runAiOperation("deletingKey", () => client.deleteAiApiKey())
+        }
+        onTestAiConnection={() =>
+          runAiOperation("testing", () => client.testAiConnection())
+        }
       />
     </I18nProvider>
   );
@@ -163,9 +221,16 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
 function AppCore({
   client,
   language,
+  aiPreferences,
   isSavingLanguage,
   languageError,
+  aiOperation,
+  aiError,
   onLanguageChange,
+  onAiConfigurationChange,
+  onSaveAiApiKey,
+  onDeleteAiApiKey,
+  onTestAiConnection,
 }: AppCoreProps) {
   const { t } = useI18n();
   const formatError = (error: unknown) => formatErrorMessage(error, language);
@@ -1497,9 +1562,16 @@ function AppCore({
       screen={readOnlyInventoryScreen}
       onScreenChange={setReadOnlyInventoryScreen}
       language={language}
+      aiPreferences={aiPreferences}
       isSavingLanguage={isSavingLanguage}
       languageError={languageError}
+      aiOperation={aiOperation}
+      aiError={aiError}
       onLanguageChange={onLanguageChange}
+      onAiConfigurationChange={onAiConfigurationChange}
+      onSaveAiApiKey={onSaveAiApiKey}
+      onDeleteAiApiKey={onDeleteAiApiKey}
+      onTestAiConnection={onTestAiConnection}
       isWriteBlocked
       allowReadOnlyDetails
       isRefreshing={false}
@@ -1978,9 +2050,16 @@ function AppCore({
       screen={inventoryScreen}
       onScreenChange={setInventoryScreen}
       language={language}
+      aiPreferences={aiPreferences}
       isSavingLanguage={isSavingLanguage}
       languageError={languageError}
+      aiOperation={aiOperation}
+      aiError={aiError}
       onLanguageChange={onLanguageChange}
+      onAiConfigurationChange={onAiConfigurationChange}
+      onSaveAiApiKey={onSaveAiApiKey}
+      onDeleteAiApiKey={onDeleteAiApiKey}
+      onTestAiConnection={onTestAiConnection}
       // 任一主界面写操作进行中时统一冻结其他写入口；搜索和筛选仍可使用。
       isWriteBlocked={isInventoryWriteBlocked}
       allowReadOnlyDetails={false}

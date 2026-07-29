@@ -1,7 +1,8 @@
 use std::fs;
 
 use skillyard_lib::{
-    ApplicationPaths, InterfaceLanguage, PlatformInfo, SkillYardApplication, UiIntent, UiOutcome,
+    AiPreferences, AiProvider, ApplicationPaths, InterfaceLanguage, PlatformInfo,
+    SkillYardApplication, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -25,6 +26,7 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
             .expect("首次读取偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::ZhCn,
+            ai: default_ai_preferences(),
         }
     );
 
@@ -36,6 +38,7 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
             .expect("保存英文偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::En,
+            ai: default_ai_preferences(),
         }
     );
 
@@ -46,10 +49,22 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
             .expect("重启后读取偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::En,
+            ai: default_ai_preferences(),
         }
     );
     assert_eq!(
         fs::read(skill_file).expect("应读取未被修改的 Skill"),
         original
     );
+}
+
+fn default_ai_preferences() -> AiPreferences {
+    AiPreferences {
+        enabled: false,
+        disclosure_accepted: false,
+        provider: AiProvider::OpenAi,
+        model: "gpt-5.6-terra".to_owned(),
+        has_api_key: false,
+        verified: false,
+    }
 }

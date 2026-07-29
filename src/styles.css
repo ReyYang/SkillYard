@@ -2103,6 +2103,67 @@ code {
   font: inherit;
 }
 
+.settings-card-stack {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.settings-ai-controls {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-check {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  color: #334d3b;
+  font-weight: 700;
+}
+
+.settings-ai-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.settings-key-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.settings-key-field {
+  display: grid;
+  flex: 1;
+  gap: 0.45rem;
+  color: #526256;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.settings-key-field input {
+  min-width: 0;
+  padding: 0.78rem 0.9rem;
+  border: 1px solid rgb(48 75 56 / 18%);
+  border-radius: 10px;
+  color: #203326;
+  background: #fffef8;
+  font: inherit;
+}
+
+.settings-ai-status {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  color: #526256;
+  font-size: 0.9rem;
+}
+
+.settings-ai-status button {
+  margin-left: auto;
+}
+
 .skill-member-list {
   display: grid;
   gap: 0.75rem;
@@ -2244,6 +2305,20 @@ code {
   .skill-member-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .settings-ai-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-key-row,
+  .settings-ai-status {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-ai-status button {
+    margin-left: 0;
   }
 
   .skill-detail-card dl > div {

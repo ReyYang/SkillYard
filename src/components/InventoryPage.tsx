@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 
 import type {
+  AiConfigurationInput,
+  AiPreferences,
   BundleUpdateAction,
   BundleUpdateSummary,
   BundleUpdateStatus,
@@ -21,8 +23,16 @@ interface InventoryPageProps {
   screen: InventoryScreen;
   onScreenChange(screen: InventoryScreen): void;
   language: InterfaceLanguage;
+  aiPreferences: AiPreferences;
   isSavingLanguage: boolean;
   languageError: string | null;
+  aiOperation:
+    | "savingConfiguration"
+    | "savingKey"
+    | "deletingKey"
+    | "testing"
+    | null;
+  aiError: string | null;
   isWriteBlocked: boolean;
   allowReadOnlyDetails: boolean;
   isRefreshing: boolean;
@@ -62,6 +72,10 @@ interface InventoryPageProps {
   onOpenCentralStore(): void;
   onResetApplication(): void;
   onLanguageChange(language: InterfaceLanguage): void;
+  onAiConfigurationChange(configuration: AiConfigurationInput): Promise<void>;
+  onSaveAiApiKey(apiKey: string): Promise<void>;
+  onDeleteAiApiKey(): Promise<void>;
+  onTestAiConnection(): Promise<void>;
   onAssociateSource(bundleId: string): void;
   onOpenRecovery(issueId: string): void;
   onTakeover(observationId: string): void;
@@ -102,8 +116,11 @@ export function InventoryPage({
   screen,
   onScreenChange,
   language,
+  aiPreferences,
   isSavingLanguage,
   languageError,
+  aiOperation,
+  aiError,
   isWriteBlocked,
   allowReadOnlyDetails,
   isRefreshing,
@@ -143,6 +160,10 @@ export function InventoryPage({
   onOpenCentralStore,
   onResetApplication,
   onLanguageChange,
+  onAiConfigurationChange,
+  onSaveAiApiKey,
+  onDeleteAiApiKey,
+  onTestAiConnection,
   onAssociateSource,
   onOpenRecovery,
   onTakeover,
@@ -195,8 +216,11 @@ export function InventoryPage({
     return (
       <InventorySettingsPage
         language={language}
+        aiPreferences={aiPreferences}
         isSavingLanguage={isSavingLanguage}
         languageError={languageError}
+        aiOperation={aiOperation}
+        aiError={aiError}
         isWriteBlocked={isWriteBlocked}
         isOpeningCentralStore={isOpeningCentralStore}
         isResettingApplication={isResettingApplication}
@@ -205,6 +229,10 @@ export function InventoryPage({
         onOpenCentralStore={onOpenCentralStore}
         onResetApplication={onResetApplication}
         onLanguageChange={onLanguageChange}
+        onAiConfigurationChange={onAiConfigurationChange}
+        onSaveAiApiKey={onSaveAiApiKey}
+        onDeleteAiApiKey={onDeleteAiApiKey}
+        onTestAiConnection={onTestAiConnection}
         onBack={() => onScreenChange({ type: "list" })}
       />
     );
@@ -765,8 +793,11 @@ function InventorySection({
 
 function InventorySettingsPage({
   language,
+  aiPreferences,
   isSavingLanguage,
   languageError,
+  aiOperation,
+  aiError,
   isWriteBlocked,
   isOpeningCentralStore,
   isResettingApplication,
@@ -775,11 +806,23 @@ function InventorySettingsPage({
   onOpenCentralStore,
   onResetApplication,
   onLanguageChange,
+  onAiConfigurationChange,
+  onSaveAiApiKey,
+  onDeleteAiApiKey,
+  onTestAiConnection,
   onBack,
 }: {
   language: InterfaceLanguage;
+  aiPreferences: AiPreferences;
   isSavingLanguage: boolean;
   languageError: string | null;
+  aiOperation:
+    | "savingConfiguration"
+    | "savingKey"
+    | "deletingKey"
+    | "testing"
+    | null;
+  aiError: string | null;
   isWriteBlocked: boolean;
   isOpeningCentralStore: boolean;
   isResettingApplication: boolean;
@@ -788,9 +831,25 @@ function InventorySettingsPage({
   onOpenCentralStore(): void;
   onResetApplication(): void;
   onLanguageChange(language: InterfaceLanguage): void;
+  onAiConfigurationChange(configuration: AiConfigurationInput): Promise<void>;
+  onSaveAiApiKey(apiKey: string): Promise<void>;
+  onDeleteAiApiKey(): Promise<void>;
+  onTestAiConnection(): Promise<void>;
   onBack(): void;
 }) {
   const { t } = useI18n();
+  const [apiKey, setApiKey] = useState("");
+  const aiBusy = aiOperation !== null;
+  const updateAi = (
+    changes: Partial<Pick<AiPreferences, "enabled" | "disclosureAccepted" | "provider" | "model">>,
+  ) =>
+    onAiConfigurationChange({
+      enabled: changes.enabled ?? aiPreferences.enabled,
+      disclosureAccepted:
+        changes.disclosureAccepted ?? aiPreferences.disclosureAccepted,
+      provider: changes.provider ?? aiPreferences.provider,
+      model: changes.model ?? aiPreferences.model,
+    });
   return (
     <main className="inventory-shell inventory-subpage">
       <PageBackButton onClick={onBack} />
@@ -821,6 +880,145 @@ function InventorySettingsPage({
             <option value="en">{t("English")}</option>
           </select>
         </label>
+      </section>
+
+      <section className="settings-card settings-card-stack">
+        <div>
+          <p className="section-eyebrow">AI</p>
+          <h2>{t("AI 功能")}</h2>
+          <p>
+            {t(
+              "所有 AI 功能共用这一组 Provider 和模型。SkillYard 不会自动测试连接。",
+            )}
+          </p>
+        </div>
+
+        <div className="settings-ai-controls">
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              checked={aiPreferences.enabled}
+              disabled={aiBusy}
+              onChange={(event) => updateAi({ enabled: event.target.checked })}
+            />
+            <span>{t("启用 AI")}</span>
+          </label>
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              checked={aiPreferences.disclosureAccepted}
+              disabled={aiBusy}
+              onChange={(event) =>
+                updateAi({ disclosureAccepted: event.target.checked })
+              }
+            />
+            <span>
+              {t("同意将非敏感 Skill 内容发送给所选 Provider")}
+            </span>
+          </label>
+
+          <div className="settings-ai-grid">
+            <label className="settings-select">
+              <span>{t("模型供应商")}</span>
+              <select
+                aria-label={t("模型供应商")}
+                value={aiPreferences.provider}
+                disabled={aiBusy}
+                onChange={(event) =>
+                  updateAi({
+                    provider: event.target.value as AiPreferences["provider"],
+                  })
+                }
+              >
+                <option value="openAi">OpenAI</option>
+              </select>
+            </label>
+            <label className="settings-select">
+              <span>{t("模型")}</span>
+              <select
+                aria-label={t("模型")}
+                value={aiPreferences.model}
+                disabled={aiBusy}
+                onChange={(event) => updateAi({ model: event.target.value })}
+              >
+                {[
+                  "gpt-5.6-sol",
+                  "gpt-5.6-terra",
+                  "gpt-5.6-luna",
+                  "gpt-5.4-mini",
+                  "gpt-5.5",
+                ].map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="settings-key-row">
+            <label className="settings-key-field">
+              <span>API Key</span>
+              <input
+                aria-label="API Key"
+                type="password"
+                autoComplete="off"
+                value={apiKey}
+                disabled={aiBusy}
+                onChange={(event) => setApiKey(event.target.value)}
+              />
+            </label>
+            <button
+              className="secondary-action"
+              type="button"
+              disabled={aiBusy || apiKey.trim().length === 0}
+              onClick={async () => {
+                await onSaveAiApiKey(apiKey);
+                setApiKey("");
+              }}
+            >
+              {aiOperation === "savingKey"
+                ? t("正在保存…")
+                : t("保存 API Key")}
+            </button>
+            {aiPreferences.hasApiKey ? (
+              <button
+                className="secondary-action danger-muted"
+                type="button"
+                disabled={aiBusy}
+                onClick={onDeleteAiApiKey}
+              >
+                {aiOperation === "deletingKey"
+                  ? t("正在删除…")
+                  : t("删除 API Key")}
+              </button>
+            ) : null}
+          </div>
+
+          <div className="settings-ai-status">
+            <span>
+              {aiPreferences.hasApiKey
+                ? t("API Key 已保存在 macOS Keychain")
+                : t("尚未保存 API Key")}
+            </span>
+            <span>
+              {aiPreferences.verified ? t("连接已验证") : t("连接未验证")}
+            </span>
+            <button
+              className="primary-action compact-action"
+              type="button"
+              disabled={
+                aiBusy ||
+                !aiPreferences.enabled ||
+                !aiPreferences.disclosureAccepted ||
+                !aiPreferences.hasApiKey
+              }
+              onClick={onTestAiConnection}
+            >
+              {aiOperation === "testing" ? t("正在测试…") : t("测试连接")}
+            </button>
+          </div>
+        </div>
       </section>
 
       <section className="settings-card">
@@ -880,6 +1078,12 @@ function InventorySettingsPage({
           <strong>{t("语言")}</strong>
           <span>{languageError}</span>
         </div>
+      ) : null}
+      {aiError ? (
+        <p className="inline-error" role="alert">
+          <strong>{t("AI 设置未保存")}</strong>
+          <span>{aiError}</span>
+        </p>
       ) : null}
     </main>
   );

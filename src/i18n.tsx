@@ -58,6 +58,25 @@ const EN_MESSAGES = {
   "语言": "Language",
   "切换后立即更新，并在下次启动时保留。":
     "Changes apply immediately and remain after restart.",
+  "AI 功能": "AI features",
+  "所有 AI 功能共用这一组 Provider 和模型。SkillYard 不会自动测试连接。":
+    "All AI features use this Provider and model. SkillYard never tests the connection automatically.",
+  "启用 AI": "Enable AI",
+  "同意将非敏感 Skill 内容发送给所选 Provider":
+    "Allow non-sensitive Skill content to be sent to the selected Provider",
+  "模型供应商": "Model provider",
+  "模型": "Model",
+  "正在保存…": "Saving…",
+  "保存 API Key": "Save API Key",
+  "正在删除…": "Deleting…",
+  "删除 API Key": "Delete API Key",
+  "API Key 已保存在 macOS Keychain": "API Key is saved in macOS Keychain",
+  "尚未保存 API Key": "No API Key saved",
+  "连接已验证": "Connection verified",
+  "连接未验证": "Connection not verified",
+  "正在测试…": "Testing…",
+  "测试连接": "Test connection",
+  "AI 设置未保存": "AI settings were not saved",
   "受管内容目录": "Managed content directory",
   "这里保存 SkillYard 管理的实际主副本，不是可以随意清理的缓存。":
     "This directory contains the actual master copies managed by SkillYard, not disposable cache.",

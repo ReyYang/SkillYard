@@ -19,7 +19,7 @@ libc = "0.2"
 os_info = { version = "3.15.0", default-features = false }
 # 0.40.x 的底层构建脚本需要 Rust 1.95；固定到当前 stable 1.94 可构建的系列。
 rusqlite = { version = "=0.39.0", features = ["bundled"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10.0"
@@ -32,6 +32,10 @@ uuid = { version = "1", features = ["v4"] }
 url = "2.5"
 # GitHub 归档只需要 ZIP 内建格式与 Deflate，避免引入其他压缩算法。
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
+security-framework-sys = "2.17"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

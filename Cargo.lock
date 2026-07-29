@@ -3543,6 +3543,8 @@ dependencies = [
  "os_info",
  "reqwest",
  "rusqlite",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "serde_yaml_ng",

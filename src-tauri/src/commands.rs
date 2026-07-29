@@ -4,10 +4,10 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{
-    BatchMountPlan, BatchMountRequest, EditableLocalRelinkPlan, InstallPlan, InterfaceLanguage,
-    MergeContentChoice, MountPlan, MountScope, ProjectSelection, SkillYardApplication,
-    SourceAssociationPlan, SourceMemberMappingChoice, SupportedAppId, TakeoverPlan,
-    TakeoverPlanRequest, UiIntent, UiOutcome, application::ApplicationError,
+    AiProvider, BatchMountPlan, BatchMountRequest, EditableLocalRelinkPlan, InstallPlan,
+    InterfaceLanguage, MergeContentChoice, MountPlan, MountScope, ProjectSelection,
+    SkillYardApplication, SourceAssociationPlan, SourceMemberMappingChoice, SupportedAppId,
+    TakeoverPlan, TakeoverPlanRequest, UiIntent, UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -36,6 +36,54 @@ pub fn set_interface_language(
     }
 }
 
+#[tauri::command(async)]
+pub fn set_ai_configuration(
+    application: State<'_, SkillYardApplication>,
+    enabled: bool,
+    disclosure_accepted: bool,
+    provider: AiProvider,
+    model: String,
+) -> Result<UiOutcome, UiError> {
+    expect_preferences(dispatch(
+        &application,
+        UiIntent::SetAiConfiguration {
+            enabled,
+            disclosure_accepted,
+            provider,
+            model,
+        },
+    )?)
+}
+
+#[tauri::command(async)]
+pub fn save_ai_api_key(
+    application: State<'_, SkillYardApplication>,
+    api_key: String,
+) -> Result<UiOutcome, UiError> {
+    expect_preferences(dispatch(&application, UiIntent::SaveAiApiKey { api_key })?)
+}
+
+#[tauri::command(async)]
+pub fn delete_ai_api_key(
+    application: State<'_, SkillYardApplication>,
+) -> Result<UiOutcome, UiError> {
+    expect_preferences(dispatch(&application, UiIntent::DeleteAiApiKey)?)
+}
+
+#[tauri::command(async)]
+pub fn test_ai_connection(
+    application: State<'_, SkillYardApplication>,
+) -> Result<UiOutcome, UiError> {
+    expect_preferences(dispatch(&application, UiIntent::TestAiConnection)?)
+}
+
+fn expect_preferences(outcome: UiOutcome) -> Result<UiOutcome, UiError> {
+    match outcome {
+        outcome @ UiOutcome::Preferences { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回更新后的 AI 偏好")),
+    }
+}
+
 impl From<ApplicationError> for UiError {
     fn from(error: ApplicationError) -> Self {
         let code = match &error {
@@ -48,6 +96,7 @@ impl From<ApplicationError> for UiError {
             ApplicationError::SourceAssociation(_) => "sourceAssociationError",
             ApplicationError::BundleUpdateBatch(_) => "bundleUpdateBatchError",
             ApplicationError::Removal(_) => "removalError",
+            ApplicationError::Agent(_) => "agentError",
             ApplicationError::InvalidState(_) => "invalidState",
             ApplicationError::OperationInProgress => "operationInProgress",
             ApplicationError::OperationGateUnavailable => "operationGateUnavailable",
