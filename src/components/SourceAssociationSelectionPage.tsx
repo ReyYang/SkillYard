@@ -6,6 +6,7 @@ import type {
   SourceMemberMappingChoice,
   SourceSummary,
 } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 const NO_SOURCE_MEMBER = "__skillyard_none__";
@@ -37,14 +38,18 @@ export function SourceAssociationSelectionPage({
   onAddSource,
   onCreatePlan,
 }: SourceAssociationSelectionPageProps) {
+  const { language, t } = useI18n();
   const freshSources = useMemo(
     () =>
       sources
         .filter((source) => source.catalogStatus === "fresh")
         .sort((left, right) =>
-          left.displayName.localeCompare(right.displayName, "zh-CN"),
+          left.displayName.localeCompare(
+            right.displayName,
+            language === "zhCn" ? "zh-CN" : "en",
+          ),
         ),
-    [sources],
+    [language, sources],
   );
   const [sourceId, setSourceId] = useState("");
   const [mappingByMember, setMappingByMember] = useState<
@@ -56,7 +61,10 @@ export function SourceAssociationSelectionPage({
   );
   const localMembers = [...members].sort(
     (left, right) =>
-      left.skillName.localeCompare(right.skillName, "zh-CN") ||
+      left.skillName.localeCompare(
+        right.skillName,
+        language === "zhCn" ? "zh-CN" : "en",
+      ) ||
       (left.memberId ?? "").localeCompare(right.memberId ?? ""),
   );
 
@@ -95,37 +103,41 @@ export function SourceAssociationSelectionPage({
       <header className="association-header">
         <div>
           <p className="eyebrow">SKILLYARD · SOURCE ASSOCIATION</p>
-          <h1>为 Bundle 补充来源</h1>
+          <h1>{t("为 Bundle 补充来源")}</h1>
           <p className="lead">
-            为 <strong>{bundleDisplayName}</strong> 选择一个已经登记的
-            Source，再明确每个本地 Skill 是否对应其中的成员。
+            {t(
+              "为 {bundle} 选择一个已经登记的 Source，再明确每个本地 Skill 是否对应其中的成员。",
+              { bundle: bundleDisplayName },
+            )}
           </p>
         </div>
       </header>
 
       {freshSources.length === 0 ? (
         <section className="association-empty">
-          <h2>没有可选择的 Source</h2>
-          <p>先在现有 Source 页面添加或重新加载来源，再回来补充关系。</p>
+          <h2>{t("没有可选择的 Source")}</h2>
+          <p>
+            {t("先在现有 Source 页面添加或重新加载来源，再回来补充关系。")}
+          </p>
           <button
             className="primary-action"
             type="button"
             onClick={onAddSource}
           >
-            前往 Source 页面添加
+            {t("前往 Source 页面添加")}
           </button>
         </section>
       ) : (
         <>
           <label className="association-source-field">
-            <span>选择 Source</span>
+            <span>{t("选择 Source")}</span>
             <select
-              aria-label="选择 Source"
+              aria-label={t("选择 Source")}
               value={sourceId}
               disabled={isPlanning}
               onChange={(event) => changeSource(event.target.value)}
             >
-              <option value="">请选择</option>
+              <option value="">{t("请选择")}</option>
               {freshSources.map((candidate) => (
                 <option key={candidate.id} value={candidate.id}>
                   {candidate.displayName}
@@ -137,19 +149,23 @@ export function SourceAssociationSelectionPage({
           {source ? (
             <section
               className="association-mapping"
-              aria-label="Skill 对应关系"
+              aria-label={t("Skill 对应关系")}
             >
               <header>
                 <div>
                   <p className="section-eyebrow">MEMBER MAPPING</p>
-                  <h2>逐个确认对应关系</h2>
+                  <h2>{t("逐个确认对应关系")}</h2>
                 </div>
                 <span>
-                  {source.bundleId ? "此 Source 已有关联 Bundle" : "可直接关联"}
+                  {source.bundleId
+                    ? t("此 Source 已有关联 Bundle")
+                    : t("可直接关联")}
                 </span>
               </header>
               <p>
-                找不到对应成员时保持“不对应”。SkillYard 不会根据名称或内容自动猜测。
+                {t(
+                  "找不到对应成员时保持“不对应”。SkillYard 不会根据名称或内容自动猜测。",
+                )}
               </p>
               <div className="association-mapping-list">
                 {localMembers.map((member) => {
@@ -166,7 +182,9 @@ export function SourceAssociationSelectionPage({
                     <label key={member.memberId}>
                       <span>{member.skillName}</span>
                       <select
-                        aria-label={`${member.skillName} 的对应关系`}
+                        aria-label={t("{skill} 的对应关系", {
+                          skill: member.skillName,
+                        })}
                         value={
                           mappingByMember[member.memberId] ?? NO_SOURCE_MEMBER
                         }
@@ -175,7 +193,9 @@ export function SourceAssociationSelectionPage({
                           changeMapping(member.memberId!, event.target.value)
                         }
                       >
-                        <option value={NO_SOURCE_MEMBER}>不对应</option>
+                        <option value={NO_SOURCE_MEMBER}>
+                          {t("不对应")}
+                        </option>
                         {selectableMembers.map((candidate) => (
                           <option
                             key={candidate.relativePath}
@@ -184,7 +204,7 @@ export function SourceAssociationSelectionPage({
                               candidate.relativePath,
                             )}
                           >
-                            {sourceMemberLabel(candidate)}
+                            {sourceMemberLabel(candidate, t)}
                           </option>
                         ))}
                       </select>
@@ -198,7 +218,7 @@ export function SourceAssociationSelectionPage({
                 disabled={isPlanning}
                 onClick={createPlan}
               >
-                {isPlanning ? "正在生成计划…" : "生成关联计划"}
+                {isPlanning ? t("正在生成计划…") : t("生成关联计划")}
               </button>
             </section>
           ) : null}
@@ -207,7 +227,7 @@ export function SourceAssociationSelectionPage({
 
       {error ? (
         <div className="inline-error" role="alert">
-          <strong>无法生成关联计划</strong>
+          <strong>{t("无法生成关联计划")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
@@ -215,8 +235,11 @@ export function SourceAssociationSelectionPage({
   );
 }
 
-function sourceMemberLabel(member: SourceCatalogMemberSummary): string {
-  const pathLabel = member.relativePath || "来源根目录";
+function sourceMemberLabel(
+  member: SourceCatalogMemberSummary,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const pathLabel = member.relativePath || t("来源根目录");
   return member.skillName && member.skillName !== member.relativePath
     ? `${member.skillName} · ${pathLabel}`
     : pathLabel;

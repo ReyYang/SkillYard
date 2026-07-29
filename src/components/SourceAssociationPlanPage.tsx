@@ -5,6 +5,7 @@ import type {
   SourceAssociationPlan,
   SupportedAppId,
 } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 interface SourceAssociationPlanPageProps {
@@ -24,6 +25,7 @@ export function SourceAssociationPlanPage({
   onBack,
   onConfirm,
 }: SourceAssociationPlanPageProps) {
+  const { t } = useI18n();
   const [choiceByConflict, setChoiceByConflict] = useState<
     Record<string, string>
   >({});
@@ -46,14 +48,16 @@ export function SourceAssociationPlanPage({
     <main className="association-shell">
       <PageBackButton
         disabled={isBusy}
-        label={isDiscarding ? "正在返回…" : "返回"}
+        label={isDiscarding ? t("正在返回…") : t("返回")}
         onClick={onBack}
       />
       <header className="association-header">
         <div>
           <p className="eyebrow">SKILLYARD · ASSOCIATION PLAN</p>
           <h1>
-            {plan.mode === "link" ? "确认补充来源" : "确认归并 Bundle"}
+            {plan.mode === "link"
+              ? t("确认补充来源")
+              : t("确认归并 Bundle")}
           </h1>
           <p className="lead">
             {plan.targetBundleDisplayName} → {plan.sourceDisplayName}
@@ -62,26 +66,34 @@ export function SourceAssociationPlanPage({
       </header>
 
       {plan.mode === "link" ? (
-        <section className="association-notice" aria-label="关联影响">
-          <h2>只建立来源关系</h2>
+        <section className="association-notice" aria-label={t("关联影响")}>
+          <h2>{t("只建立来源关系")}</h2>
           <p>
-            这次操作不会修改当前内容或 Mount，也不会自动采用 Source
-            中的其他 Skill。
+            {t(
+              "这次操作不会修改当前内容或 Mount，也不会自动采用 Source 中的其他 Skill。",
+            )}
           </p>
         </section>
       ) : (
-        <section className="association-notice" aria-label="归并影响">
-          <h2>两个 Bundle 将归并为一个</h2>
+        <section className="association-notice" aria-label={t("归并影响")}>
+          <h2>{t("两个 Bundle 将归并为一个")}</h2>
           <p>
-            {plan.retiringBundleDisplayName} 将归入{" "}
-            {plan.targetBundleDisplayName}，全部 Mount
-            最终使用下面选择的唯一内容。
+            {t(
+              "{retiring} 将归入 {target}，全部 Mount 最终使用下面选择的唯一内容。",
+              {
+                retiring: plan.retiringBundleDisplayName ?? "",
+                target: plan.targetBundleDisplayName,
+              },
+            )}
           </p>
         </section>
       )}
 
-      <section className="association-plan-section" aria-label="成员关系">
-        <h2>本地 Skill</h2>
+      <section
+        className="association-plan-section"
+        aria-label={t("成员关系")}
+      >
+        <h2>{t("本地 Skill")}</h2>
         <ul>
           {plan.members.map((member) => {
             const mapping = plan.memberChoices.find(
@@ -95,8 +107,11 @@ export function SourceAssociationPlanPage({
                   </strong>
                   <span>
                     {mapping?.sourceRelativePath === null || !mapping
-                      ? "不对应"
-                      : `对应 ${mapping.sourceRelativePath || "来源根目录"}`}
+                      ? t("不对应")
+                      : t("对应 {path}", {
+                          path:
+                            mapping.sourceRelativePath || t("来源根目录"),
+                        })}
                   </span>
                 </div>
               </li>
@@ -106,7 +121,10 @@ export function SourceAssociationPlanPage({
       </section>
 
       {plan.mounts.length > 0 ? (
-        <section className="association-plan-section" aria-label="受影响 Mount">
+        <section
+          className="association-plan-section"
+          aria-label={t("受影响 Mount")}
+        >
           <h2>Mount</h2>
           <ul>
             {plan.mounts.map((mount) => (
@@ -116,8 +134,8 @@ export function SourceAssociationPlanPage({
                   <span>
                     {supportedAppLabel(mount.appId)} ·{" "}
                     {mount.scope === "global"
-                      ? "全局"
-                      : mount.projectDisplayName ?? "已登记项目"}
+                      ? t("全局")
+                      : mount.projectDisplayName ?? t("已登记项目")}
                   </span>
                 </div>
                 <code>{mount.targetPath}</code>
@@ -128,8 +146,11 @@ export function SourceAssociationPlanPage({
       ) : null}
 
       {plan.conflicts.length > 0 ? (
-        <section className="association-conflicts" aria-label="内容冲突">
-          <h2>选择唯一内容</h2>
+        <section
+          className="association-conflicts"
+          aria-label={t("内容冲突")}
+        >
+          <h2>{t("选择唯一内容")}</h2>
           {plan.conflicts.map((conflict) => (
             <fieldset key={conflict.id}>
               <legend>{conflict.label}</legend>
@@ -154,9 +175,13 @@ export function SourceAssociationPlanPage({
                       }
                     />
                     <span>
-                      {conflictMemberRole(plan, member)} ·{" "}
-                      {member.bundleDisplayName} · {member.skillName} · 内容{" "}
-                      <code>{shortFingerprint(member.contentFingerprint)}</code>
+                      {conflictMemberRole(plan, member, t)} ·{" "}
+                      {member.bundleDisplayName} · {member.skillName} ·{" "}
+                      {t("内容 {fingerprint}", {
+                        fingerprint: shortFingerprint(
+                          member.contentFingerprint,
+                        ),
+                      })}
                     </span>
                   </label>
                 );
@@ -168,7 +193,7 @@ export function SourceAssociationPlanPage({
 
       {plan.blockingIssues.length > 0 ? (
         <section className="association-blocked" role="alert">
-          <h2>需要先处理冲突</h2>
+          <h2>{t("需要先处理冲突")}</h2>
           <ul>
             {plan.blockingIssues.map((issue) => (
               <li key={issue}>{issue}</li>
@@ -179,7 +204,7 @@ export function SourceAssociationPlanPage({
 
       {error ? (
         <div className="inline-error" role="alert">
-          <strong>来源操作未完成</strong>
+          <strong>{t("来源操作未完成")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
@@ -192,10 +217,10 @@ export function SourceAssociationPlanPage({
           onClick={confirm}
         >
           {isConfirming
-            ? "正在安全处理…"
+            ? t("正在安全处理…")
             : plan.mode === "link"
-              ? "确认关联"
-              : "确认归并"}
+              ? t("确认关联")
+              : t("确认归并")}
         </button>
       </footer>
     </main>
@@ -213,11 +238,12 @@ function supportedAppLabel(app: SupportedAppId): string {
 function conflictMemberRole(
   plan: SourceAssociationPlan,
   member: SourceAssociationPlan["members"][number],
+  t: ReturnType<typeof useI18n>["t"],
 ): string {
   // 角色来自后端封存的 Bundle 身份，不能依赖可能重名的展示名称。
   return member.bundleId === plan.targetBundleId
-    ? "保留已关联 Bundle"
-    : "使用待归入 Bundle";
+    ? t("保留已关联 Bundle")
+    : t("使用待归入 Bundle");
 }
 
 function shortFingerprint(fingerprint: string): string {

@@ -3120,6 +3120,154 @@ describe("本机清单", () => {
   });
 });
 
+describe("English installation and takeover flows", () => {
+  it("首次扫描说明使用英文且 Supported App 名称保持原样", async () => {
+    const client = createClient({
+      type: "onboardingRequired",
+      supportedApps: [
+        { id: "codex", displayName: "Codex", detected: null },
+        { id: "claudeCode", displayName: "Claude Code", detected: null },
+        {
+          id: "gitHubCopilot",
+          displayName: "GitHub Copilot",
+          detected: null,
+        },
+      ],
+    });
+    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Manage local Skills, starting with a read-only scan",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start scan" })).toBeEnabled();
+    expect(screen.getByText("GitHub Copilot")).toBeInTheDocument();
+  });
+
+  it("安装、Source 和项目确认使用同一英文语言状态", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createManagedEntry()]));
+    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.chooseProjectDirectory).mockResolvedValue({
+      displayName: "Demo",
+      rootPath: "/tmp/Demo",
+    });
+
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "Install Skill" }));
+    expect(
+      await screen.findByRole("heading", { name: "Install Skill" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Install from local folder" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("form", { name: "Add GitHub Source" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.click(screen.getByRole("button", { name: "Add project" }));
+    expect(
+      await screen.findByRole("heading", { name: "Confirm adding project" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
+  });
+
+  it("安装影响预览使用英文并保留 Bundle、Skill 和路径原值", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        bundleDisplayName: "owner/toolkit",
+        inputPath: "/tmp/original-toolkit",
+        candidates: [
+          createInstallCandidate({
+            skillName: "review-api",
+            sourceRelativePath: "skills/review-api",
+          }),
+        ],
+      }),
+    );
+
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "Install Skill" }));
+    await user.click(
+      screen.getByRole("button", { name: "Install from local folder" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Confirm Bundle installation",
+      }),
+    ).toBeInTheDocument();
+    const preview = screen.getByRole("region", {
+      name: "Installation impact preview",
+    });
+    expect(preview).toHaveTextContent("owner/toolkit");
+    expect(preview).toHaveTextContent("review-api");
+    expect(preview).toHaveTextContent("/tmp/original-toolkit");
+    expect(
+      screen.getByRole("button", { name: "Confirm installation" }),
+    ).toBeEnabled();
+  });
+
+  it("待接管 Bundle 的选择和影响预览使用英文", async () => {
+    const user = userEvent.setup();
+    const candidate = createEntry({
+      takeoverGroupId: "takeover:owner/repo",
+      takeoverGroupDisplayName: "owner/repo",
+    });
+    const client = createClient(inventoryOutcome([candidate]));
+    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+    vi.mocked(client.createTakeoverPlan).mockResolvedValue(
+      createTakeoverPlan({
+        bundleDisplayName: "owner/repo",
+        members: [
+          {
+            ...createTakeoverPlan().members[0]!,
+            selectedObservationId: candidate.id,
+            skillName: candidate.skillName,
+          },
+        ],
+      }),
+    );
+
+    render(<App client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Take over Bundle owner/repo",
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "Choose Bundle to take over: owner/repo",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Create impact preview" }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Create impact preview" }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "Confirm Bundle takeover: owner/repo",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Takeover impact preview" }),
+    ).toHaveTextContent("owner/repo");
+  });
+});
+
 describe("接管已有 Skill", () => {
   it("把确定分组的不同 Skill 显示为一个待接管 Bundle，并一次生成多成员 Plan", async () => {
     const user = userEvent.setup();

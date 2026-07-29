@@ -8,6 +8,7 @@ import type {
   TakeoverPlanRequest,
   TakeoverSharedTargetRequest,
 } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 interface TakeoverSelectionPageProps {
@@ -33,11 +34,12 @@ export function TakeoverSelectionPage({
   onBack,
   onCreatePlan,
 }: TakeoverSelectionPageProps) {
+  const { t } = useI18n();
   const initial = candidates.find(
     (candidate) => candidate.id === initialObservationId,
   )!;
   const isBundle = Boolean(initial.takeoverGroupId);
-  const bundleName = initial.takeoverGroupDisplayName ?? "本地 Bundle";
+  const bundleName = initial.takeoverGroupDisplayName ?? t("本地 Bundle");
   const allMemberGroups = useMemo(() => groupMembers(candidates), [candidates]);
   const initialIncludedIds = isBundle
     ? allMemberGroups
@@ -111,6 +113,7 @@ export function TakeoverSelectionPage({
           member.observations,
           preservedObservationIds,
           sharedTargets,
+          t,
         ),
       )
       .find((issue) => issue !== null) ?? null;
@@ -291,31 +294,39 @@ export function TakeoverSelectionPage({
       <p className="eyebrow">SKILLYARD · TAKEOVER</p>
       <h1>
         {isBundle
-          ? `选择要接管的 Bundle：${bundleName}`
-          : `选择要接管的 ${initial.skillName}`}
+          ? t("选择要接管的 Bundle：{bundle}", { bundle: bundleName })
+          : t("选择要接管的 {skill}", { skill: initial.skillName })}
       </h1>
       <p className="lead">
         {isBundle
-          ? "确定性来源证据已经把这些 Skill 识别为同一个 Bundle。接管前只生成整组影响预览。"
-          : "接管前只生成影响预览。勾选其他同名位置，表示你确认它们是同一个 Skill；同名本身不会触发自动合并。"}
+          ? t(
+              "确定性来源证据已经把这些 Skill 识别为同一个 Bundle。接管前只生成整组影响预览。",
+            )
+          : t(
+              "接管前只生成影响预览。勾选其他同名位置，表示你确认它们是同一个 Skill；同名本身不会触发自动合并。",
+            )}
       </p>
 
       {error ? (
         <div className="inline-error" role="alert">
-          <strong>无法生成接管预览</strong>
+          <strong>{t("无法生成接管预览")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
 
       <section
         className="batch-member-summary"
-        aria-label={isBundle ? "Bundle 成员" : "确认同一个 Skill"}
+        aria-label={
+          isBundle ? t("Bundle 成员") : t("确认同一个 Skill")
+        }
       >
         <p className="section-eyebrow">
           {isBundle ? "BUNDLE MEMBERS" : "LOCAL IDENTITY"}
         </p>
         <h2>
-          {isBundle ? "将一起接管的 Skill" : "确认属于同一个 Skill 的位置"}
+          {isBundle
+            ? t("将一起接管的 Skill")
+            : t("确认属于同一个 Skill 的位置")}
         </h2>
         <div className="batch-target-list">
           {isBundle
@@ -323,7 +334,9 @@ export function TakeoverSelectionPage({
                 <label className="batch-target-option" key={member.skillName}>
                   <input
                     type="checkbox"
-                    aria-label={`接管 Bundle 成员：${member.skillName}`}
+                    aria-label={t("接管 Bundle 成员：{skill}", {
+                      skill: member.skillName,
+                    })}
                     checked={bundleEvidenceObservations(
                       member,
                       initial.takeoverGroupId,
@@ -348,11 +361,13 @@ export function TakeoverSelectionPage({
                         member,
                         initial.takeoverGroupId,
                       )
-                        ? `${bundleEvidenceObservations(
-                            member,
-                            initial.takeoverGroupId,
-                          ).length} 个已确认安装位置`
-                        : "Skill metadata 无效，本次不会接管"}
+                        ? t("{count} 个已确认安装位置", {
+                            count: bundleEvidenceObservations(
+                              member,
+                              initial.takeoverGroupId,
+                            ).length,
+                          })
+                        : t("Skill metadata 无效，本次不会接管")}
                     </small>
                   </span>
                 </label>
@@ -361,7 +376,9 @@ export function TakeoverSelectionPage({
                 <label className="batch-target-option" key={candidate.id}>
                   <input
                     type="checkbox"
-                    aria-label={`确认同一 Skill：${candidate.skillRoot}`}
+                    aria-label={t("确认同一 Skill：{path}", {
+                      path: candidate.skillRoot,
+                    })}
                     checked={includedIds.includes(candidate.id)}
                     disabled={
                       isPlanning || candidate.id === initialObservationId
@@ -371,7 +388,7 @@ export function TakeoverSelectionPage({
                     }
                   />
                   <span>
-                    <strong>{locationLabel(candidate)}</strong>
+                    <strong>{locationLabel(candidate, t)}</strong>
                     <code title={candidate.skillRoot}>
                       {candidate.skillRoot}
                     </code>
@@ -386,7 +403,11 @@ export function TakeoverSelectionPage({
           ),
         ) ? (
           <>
-            <p>以下同名位置没有安装组证据，只有你明确确认后才会并入对应 Member。</p>
+            <p>
+              {t(
+                "以下同名位置没有安装组证据，只有你明确确认后才会并入对应 Member。",
+              )}
+            </p>
             <div className="batch-target-list">
               {allMemberGroups.flatMap((member) =>
                 member.observations
@@ -405,7 +426,9 @@ export function TakeoverSelectionPage({
                       >
                         <input
                           type="checkbox"
-                          aria-label={`确认同一 Skill：${candidate.skillRoot}`}
+                          aria-label={t("确认同一 Skill：{path}", {
+                            path: candidate.skillRoot,
+                          })}
                           checked={includedIds.includes(candidate.id)}
                           disabled={
                             isPlanning ||
@@ -420,7 +443,10 @@ export function TakeoverSelectionPage({
                           }
                         />
                         <span>
-                          <strong>{`${candidate.skillName} · ${locationLabel(candidate)}`}</strong>
+                          <strong>{`${candidate.skillName} · ${locationLabel(
+                            candidate,
+                            t,
+                          )}`}</strong>
                           <code title={candidate.skillRoot}>
                             {candidate.skillRoot}
                           </code>
@@ -437,23 +463,33 @@ export function TakeoverSelectionPage({
       {differentContentMembers.map((member) => (
         <section
           className="batch-member-summary"
-          aria-label={`选择 ${member.skillName} 的唯一内容`}
+          aria-label={t("选择 {skill} 的唯一内容", {
+            skill: member.skillName,
+          })}
           key={member.skillName}
         >
           <p className="section-eyebrow">PRIMARY CONTENT</p>
           <h2>
             {isBundle
-              ? `请选择 ${member.skillName} 的唯一一份内容`
-              : "请选择唯一一份内容"}
+              ? t("请选择 {skill} 的唯一一份内容", {
+                  skill: member.skillName,
+                })
+              : t("请选择唯一一份内容")}
           </h2>
-          <p>该成员的其他位置会统一使用这份内容，不会保留为可选旧版本。</p>
+          <p>
+            {t(
+              "该成员的其他位置会统一使用这份内容，不会保留为可选旧版本。",
+            )}
+          </p>
           <div className="batch-target-list">
             {member.observations.map((candidate) => (
               <label className="batch-target-option" key={candidate.id}>
                 <input
                   type="radio"
                   name={`takeover-primary-content-${member.skillName}`}
-                  aria-label={`使用 ${candidate.skillRoot} 作为主副本`}
+                  aria-label={t("使用 {path} 作为主副本", {
+                    path: candidate.skillRoot,
+                  })}
                   checked={
                     selectedBySkill[member.skillName] === candidate.id
                   }
@@ -466,7 +502,7 @@ export function TakeoverSelectionPage({
                   }
                 />
                 <span>
-                  <strong>{locationLabel(candidate)}</strong>
+                  <strong>{locationLabel(candidate, t)}</strong>
                   <code title={candidate.skillRoot}>
                     {candidate.skillRoot}
                   </code>
@@ -478,10 +514,15 @@ export function TakeoverSelectionPage({
       ))}
 
       {included.some((candidate) => !isShared(candidate)) ? (
-        <section className="batch-member-summary" aria-label="保留现有使用位置">
+        <section
+          className="batch-member-summary"
+          aria-label={t("保留现有使用位置")}
+        >
           <p className="section-eyebrow">EXISTING MOUNTS</p>
-          <h2>保留哪些现有使用位置</h2>
-          <p>取消后，该原位置会在接管成功时移除，不会建立 Mount。</p>
+          <h2>{t("保留哪些现有使用位置")}</h2>
+          <p>
+            {t("取消后，该原位置会在接管成功时移除，不会建立 Mount。")}
+          </p>
           <div className="batch-target-list">
             {included
               .filter((candidate) => !isShared(candidate))
@@ -489,7 +530,9 @@ export function TakeoverSelectionPage({
                 <label className="batch-target-option" key={candidate.id}>
                   <input
                     type="checkbox"
-                    aria-label={`保留使用位置：${candidate.skillRoot}`}
+                    aria-label={t("保留使用位置：{path}", {
+                      path: candidate.skillRoot,
+                    })}
                     checked={preservedObservationIds.includes(candidate.id)}
                     disabled={isPlanning}
                     onChange={(event) =>
@@ -497,7 +540,10 @@ export function TakeoverSelectionPage({
                     }
                   />
                   <span>
-                    <strong>{`${candidate.skillName} · ${locationLabel(candidate)}`}</strong>
+                    <strong>{`${candidate.skillName} · ${locationLabel(
+                      candidate,
+                      t,
+                    )}`}</strong>
                     <code title={candidate.skillRoot}>
                       {candidate.skillRoot}
                     </code>
@@ -515,26 +561,33 @@ export function TakeoverSelectionPage({
             isPlanning,
             toggleBundleSharedTarget,
             toggleSharedTarget,
+            t,
           )
         : included.filter(isShared).map((candidate) => (
             <section
               className="batch-member-summary"
-              aria-label={`共享目录目标 ${candidate.skillRoot}`}
+              aria-label={t("共享目录目标 {path}", {
+                path: candidate.skillRoot,
+              })}
               key={candidate.id}
             >
               <p className="section-eyebrow">SHARED DIRECTORY</p>
-              <h2>选择共享目录对应的应用</h2>
+              <h2>{t("选择共享目录对应的应用")}</h2>
               <code title={candidate.skillRoot}>{candidate.skillRoot}</code>
               <p>
-                原共享入口会在全部应用专属 Mount 验证成功后移除；未选择的应用可能不再发现此
-                Skill。
+                {t(
+                  "原共享入口会在全部应用专属 Mount 验证成功后移除；未选择的应用可能不再发现此 Skill。",
+                )}
               </p>
               <div className="batch-target-list">
                 {candidate.observedBy.map((appId) => (
                   <label className="batch-target-option" key={appId}>
                     <input
                       type="checkbox"
-                      aria-label={`将 ${candidate.skillRoot} 挂载到 ${supportedAppLabel(appId)}`}
+                      aria-label={t("将 {path} 挂载到 {app}", {
+                        path: candidate.skillRoot,
+                        app: supportedAppLabel(appId),
+                      })}
                       checked={sharedTargets.some(
                         (target) =>
                           target.sharedObservationId === candidate.id &&
@@ -551,7 +604,9 @@ export function TakeoverSelectionPage({
                     />
                     <span>
                       <strong>{supportedAppLabel(appId)}</strong>
-                      <small>SkillYard 将使用该应用的固定专属 Skill 目录</small>
+                      <small>
+                        {t("SkillYard 将使用该应用的固定专属 Skill 目录")}
+                      </small>
                     </span>
                   </label>
                 ))}
@@ -561,24 +616,26 @@ export function TakeoverSelectionPage({
 
       {invalidMetadata ? (
         <p className="install-selection-empty">
-          所选位置包含无效 Skill metadata，刷新或修复后才能接管。
+          {t("所选位置包含无效 Skill metadata，刷新或修复后才能接管。")}
         </p>
       ) : null}
       {invalidBundleMembers.length > 0 ? (
         <p className="install-selection-empty">
-          {`有 ${invalidBundleMembers.length} 个无效成员未加入计划；其他有效成员仍可接管。`}
+          {t("有 {count} 个无效成员未加入计划；其他有效成员仍可接管。", {
+            count: invalidBundleMembers.length,
+          })}
         </p>
       ) : null}
       {sharedWithoutTarget ? (
         <p className="install-selection-empty">
-          共享目录必须选择至少一个应用。
+          {t("共享目录必须选择至少一个应用。")}
         </p>
       ) : null}
       {scopeIssue ? (
         <p className="install-selection-empty">{scopeIssue}</p>
       ) : null}
       <p className="mount-confirm-warning">
-        下一步由 Rust 重新检查路径并封存影响预览，此时仍不会修改文件。
+        {t("下一步由 Rust 重新检查路径并封存影响预览，此时仍不会修改文件。")}
       </p>
       <div className="install-actions">
         <button
@@ -587,7 +644,7 @@ export function TakeoverSelectionPage({
           disabled={isPlanning || !canCreatePlan}
           onClick={createPlan}
         >
-          {isPlanning ? "正在检查现有安装…" : "生成影响预览"}
+          {isPlanning ? t("正在检查现有安装…") : t("生成影响预览")}
         </button>
       </div>
     </main>
@@ -696,6 +753,7 @@ function renderBundleSharedTargets(
     appId: SupportedAppId,
     checked: boolean,
   ) => void,
+  t: ReturnType<typeof useI18n>["t"],
 ) {
   const shared = included.filter(isShared);
   if (shared.length === 0) return null;
@@ -703,10 +761,13 @@ function renderBundleSharedTargets(
     shared.some((candidate) => candidate.observedBy.includes(appId)),
   );
   return (
-    <section className="batch-member-summary" aria-label="Bundle 共享目录目标">
+    <section
+      className="batch-member-summary"
+      aria-label={t("Bundle 共享目录目标")}
+    >
       <p className="section-eyebrow">SHARED DIRECTORIES</p>
-      <h2>一次选择 Bundle 的 Supported App</h2>
-      <p>上方批量选择会应用到全部兼容成员，也可以在下方逐个调整。</p>
+      <h2>{t("一次选择 Bundle 的 Supported App")}</h2>
+      <p>{t("上方批量选择会应用到全部兼容成员，也可以在下方逐个调整。")}</p>
       <div className="batch-target-list">
         {compatibleApps.map((appId) => {
           const compatible = shared.filter((candidate) =>
@@ -716,7 +777,9 @@ function renderBundleSharedTargets(
             <label className="batch-target-option" key={appId}>
               <input
                 type="checkbox"
-                aria-label={`将 Bundle 中的共享目录挂载到 ${supportedAppLabel(appId)}`}
+                aria-label={t("将 Bundle 中的共享目录挂载到 {app}", {
+                  app: supportedAppLabel(appId),
+                })}
                 checked={compatible.every((candidate) =>
                   sharedTargets.some(
                     (target) =>
@@ -729,7 +792,11 @@ function renderBundleSharedTargets(
               />
               <span>
                 <strong>{supportedAppLabel(appId)}</strong>
-                <small>{`应用到 ${compatible.length} 个兼容成员`}</small>
+                <small>
+                  {t("应用到 {count} 个兼容成员", {
+                    count: compatible.length,
+                  })}
+                </small>
               </span>
             </label>
           );
@@ -750,7 +817,10 @@ function renderBundleSharedTargets(
                 <label key={appId}>
                   <input
                     type="checkbox"
-                    aria-label={`将 ${candidate.skillName} 挂载到 ${supportedAppLabel(appId)}`}
+                    aria-label={t("将 {skill} 挂载到 {app}", {
+                      skill: candidate.skillName,
+                      app: supportedAppLabel(appId),
+                    })}
                     checked={sharedTargets.some(
                       (target) =>
                         target.sharedObservationId === candidate.id &&
@@ -780,6 +850,7 @@ function findScopeIssue(
   included: InventoryObservation[],
   preservedObservationIds: string[],
   sharedTargets: TakeoverSharedTargetRequest[],
+  t: ReturnType<typeof useI18n>["t"],
 ): string | null {
   const originScopes = new Map<SupportedAppId, Set<MountScope>>();
   const targetScopes = new Map<SupportedAppId, Set<MountScope>>();
@@ -810,10 +881,15 @@ function findScopeIssue(
   for (const appId of SUPPORTED_APPS) {
     const finalScopes = targetScopes.get(appId)!;
     if (finalScopes.size > 1) {
-      return `${supportedAppLabel(appId)} 同时保留了 global 和 project，请只保留一种 scope。`;
+      return t("{app} 同时保留了 global 和 project，请只保留一种 scope。", {
+        app: supportedAppLabel(appId),
+      });
     }
     if (originScopes.get(appId)!.size > 1 && finalScopes.size !== 1) {
-      return `${supportedAppLabel(appId)} 原本同时存在 global 和 project，必须保留其中一种 scope。`;
+      return t(
+        "{app} 原本同时存在 global 和 project，必须保留其中一种 scope。",
+        { app: supportedAppLabel(appId) },
+      );
     }
   }
   return null;
@@ -874,18 +950,26 @@ function hasPreservedTargetForSharedSelection(
   );
 }
 
-function locationLabel(candidate: InventoryObservation): string {
+function locationLabel(
+  candidate: InventoryObservation,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
   if (isShared(candidate)) {
     return candidate.projectDisplayName
-      ? `共享目录 · ${candidate.projectDisplayName}`
-      : "共享目录";
+      ? t("共享目录 · {project}", {
+          project: candidate.projectDisplayName,
+        })
+      : t("共享目录");
   }
   const appId = observationApp(candidate);
   const scope = observationScope(candidate);
   const appName = appId ? supportedAppLabel(appId) : "Supported App";
   return scope === "project"
-    ? `${appName} · ${candidate.projectDisplayName ?? "已登记项目"}`
-    : `${appName} · 全局`;
+    ? t("{app} · {project}", {
+        app: appName,
+        project: candidate.projectDisplayName ?? t("已登记项目"),
+      })
+    : t("{app} · 全局", { app: appName });
 }
 
 function supportedAppLabel(appId: SupportedAppId): string {

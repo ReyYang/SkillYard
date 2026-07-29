@@ -6,6 +6,7 @@ import type {
   SourceSummary,
   UiOutcome,
 } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
@@ -68,6 +69,7 @@ export function SourceCatalogPage({
   onRelink,
   onRemoveSource,
 }: SourceCatalogPageProps) {
+  const { language, t } = useI18n();
   const [input, setInput] = useState("");
   const [trackedRef, setTrackedRef] = useState("");
   const [skillsShQuery, setSkillsShQuery] = useState("");
@@ -106,10 +108,11 @@ export function SourceCatalogPage({
       <header className="source-header">
         <div>
           <p className="eyebrow">SKILLYARD · SOURCE CATALOG</p>
-          <h1>安装 Skill</h1>
+          <h1>{t("安装 Skill")}</h1>
           <p className="lead">
-            从 GitHub、归档、直接 URL、个人编辑目录或本机已有安装开始。内容进入
-            SkillYard 后默认不会挂载到任何应用。
+            {t(
+              "从 GitHub、归档、直接 URL、个人编辑目录或本机已有安装开始。内容进入 SkillYard 后默认不会挂载到任何应用。",
+            )}
           </p>
         </div>
         <div className="source-header-actions">
@@ -119,7 +122,7 @@ export function SourceCatalogPage({
             disabled={isBusy}
             onClick={onBack}
           >
-            接管已有安装
+            {t("接管已有安装")}
           </button>
           <button
             className="secondary-action"
@@ -127,7 +130,7 @@ export function SourceCatalogPage({
             disabled={isBusy}
             onClick={onChooseFolder}
           >
-            {isChoosingFolder ? "正在选择…" : "从本地文件夹安装"}
+            {isChoosingFolder ? t("正在选择…") : t("从本地文件夹安装")}
           </button>
           <button
             className="secondary-action"
@@ -135,7 +138,9 @@ export function SourceCatalogPage({
             disabled={isBusy}
             onClick={onChooseArchive}
           >
-            {isChoosingArchive ? "正在选择…" : "从 ZIP / .skill 安装"}
+            {isChoosingArchive
+              ? t("正在选择…")
+              : t("从 ZIP / .skill 安装")}
           </button>
           <button
             className="secondary-action"
@@ -143,31 +148,33 @@ export function SourceCatalogPage({
             disabled={isBusy}
             onClick={onChooseEditable}
           >
-            {isChoosingEditable ? "正在选择…" : "从个人编辑目录安装"}
+            {isChoosingEditable
+              ? t("正在选择…")
+              : t("从个人编辑目录安装")}
           </button>
         </div>
       </header>
 
       <form
         className="source-add-form"
-        aria-label="添加 GitHub Source"
+        aria-label={t("添加 GitHub Source")}
         onSubmit={submitSource}
       >
         <label>
-          <span>GitHub 仓库</span>
+          <span>{t("GitHub 仓库")}</span>
           <input
             value={input}
             disabled={isBusy}
-            placeholder="owner/repository 或 GitHub URL"
+            placeholder={t("owner/repository 或 GitHub URL")}
             onChange={(event) => setInput(event.target.value)}
           />
         </label>
         <label>
-          <span>Tracked Ref（可选）</span>
+          <span>{t("Tracked Ref（可选）")}</span>
           <input
             value={trackedRef}
             disabled={isBusy}
-            placeholder="默认使用仓库默认分支"
+            placeholder={t("默认使用仓库默认分支")}
             onChange={(event) => setTrackedRef(event.target.value)}
           />
         </label>
@@ -176,17 +183,17 @@ export function SourceCatalogPage({
           type="submit"
           disabled={isBusy || !input.trim()}
         >
-          {isAddingSource ? "正在验证…" : "添加 Source"}
+          {isAddingSource ? t("正在验证…") : t("添加 Source")}
         </button>
       </form>
 
       <form
         className="source-add-form"
-        aria-label="从直接 URL 安装"
+        aria-label={t("从直接 URL 安装")}
         onSubmit={submitDirectUrl}
       >
         <label>
-          <span>ZIP / .skill 直接 URL</span>
+          <span>{t("ZIP / .skill 直接 URL")}</span>
           <input
             type="url"
             value={directUrl}
@@ -200,22 +207,22 @@ export function SourceCatalogPage({
           type="submit"
           disabled={isBusy || !directUrl.trim()}
         >
-          {isPlanningUrl ? "正在下载…" : "准备安装"}
+          {isPlanningUrl ? t("正在下载…") : t("准备安装")}
         </button>
       </form>
 
       <form
         className="source-add-form"
-        aria-label="搜索 skills.sh"
+        aria-label={t("搜索 skills.sh")}
         onSubmit={submitSkillsSh}
       >
         <label>
-          <span>搜索 skills.sh</span>
+          <span>{t("搜索 skills.sh")}</span>
           <input
             type="search"
             value={skillsShQuery}
             disabled={isBusy}
-            placeholder="例如 react、testing"
+            placeholder={t("例如 react、testing")}
             onChange={(event) => setSkillsShQuery(event.target.value)}
           />
         </label>
@@ -224,13 +231,18 @@ export function SourceCatalogPage({
           type="submit"
           disabled={isBusy || skillsShQuery.trim().length < 2}
         >
-          {isSearchingSkillsSh ? "正在搜索…" : "搜索 skills.sh"}
+          {isSearchingSkillsSh ? t("正在搜索…") : t("搜索 skills.sh")}
         </button>
       </form>
 
       {skillsShSearch ? (
-        <section className="source-list" aria-label="skills.sh 搜索结果">
-          <h2>“{skillsShSearch.query}”的搜索结果</h2>
+        <section
+          className="source-list"
+          aria-label={t("skills.sh 搜索结果")}
+        >
+          <h2>
+            {t("“{query}”的搜索结果", { query: skillsShSearch.query })}
+          </h2>
           {skillsShSearch.sources.map((source) => (
             <SkillsShResultCard
               key={source.sourceInput}
@@ -244,12 +256,12 @@ export function SourceCatalogPage({
 
       {error ? (
         <div className="inline-error" role="alert">
-          <strong>Source 操作未完成</strong>
+          <strong>{t("Source 操作未完成")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
 
-      <section className="source-list" aria-label="已登记 Source">
+      <section className="source-list" aria-label={t("已登记 Source")}>
         {outcome.sources.map((source) => (
           <SourceCard
             key={source.id}
@@ -261,6 +273,7 @@ export function SourceCatalogPage({
                 : null
             }
             isBusy={isBusy}
+            language={language}
             isReloading={
               operation?.type === "reloading" &&
               operation.sourceId === source.id
@@ -297,14 +310,15 @@ function SkillsShResultCard({
   isBusy: boolean;
   onAddSource(): void;
 }) {
+  const { language, t } = useI18n();
   return (
     <article className="source-card" aria-label={source.sourceInput}>
       <header>
         <div>
           <span className="source-status">
             {source.supported
-              ? "可添加为 GitHub Source"
-              : "当前不是受支持的 GitHub Source"}
+              ? t("可添加为 GitHub Source")
+              : t("当前不是受支持的 GitHub Source")}
           </span>
           <h2>{source.sourceInput}</h2>
         </div>
@@ -312,11 +326,13 @@ function SkillsShResultCard({
           <button
             className="primary-action"
             type="button"
-            aria-label={`添加 ${source.sourceInput} Source`}
+            aria-label={t("添加 {source} Source", {
+              source: source.sourceInput,
+            })}
             disabled={isBusy}
             onClick={onAddSource}
           >
-            添加 Source
+            {t("添加 Source")}
           </button>
         ) : null}
       </header>
@@ -327,7 +343,13 @@ function SkillsShResultCard({
               <strong>{member.name}</strong>
               <code>{member.skillId}</code>
             </div>
-            <span>{member.installs.toLocaleString("zh-CN")} 次安装</span>
+            <span>
+              {t("{count} 次安装", {
+                count: member.installs.toLocaleString(
+                  language === "zhCn" ? "zh-CN" : "en",
+                ),
+              })}
+            </span>
           </li>
         ))}
       </ul>
@@ -340,6 +362,7 @@ function SourceCard({
   mounts,
   highlightedMemberPath,
   isBusy,
+  language,
   isReloading,
   isPlanning,
   isRemoving,
@@ -353,6 +376,7 @@ function SourceCard({
   mounts: MountSummary[];
   highlightedMemberPath: string | null;
   isBusy: boolean;
+  language: "zhCn" | "en";
   isReloading: boolean;
   isPlanning: boolean;
   isRemoving: boolean;
@@ -362,6 +386,7 @@ function SourceCard({
   onRelink(): void;
   onRemove(): void;
 }) {
+  const { t } = useI18n();
   const [isExpanded, setIsExpanded] = useState(false);
   const available = source.members.filter(
     (member) => member.selectable && !member.installedMemberId,
@@ -382,7 +407,7 @@ function SourceCard({
       <header>
         <div>
           <span className={`source-status is-${source.catalogStatus}`}>
-            {statusLabel}
+            {t(statusLabel)}
           </span>
           <h2>{source.displayName}</h2>
           <code>{source.locator}</code>
@@ -391,7 +416,9 @@ function SourceCard({
           ) : null}
           {source.catalogFetchedAt !== null ? (
             <small className="source-catalog-time">
-              上次成功加载：{formatCatalogTime(source.catalogFetchedAt)}
+              {t("上次成功加载：{time}", {
+                time: formatCatalogTime(source.catalogFetchedAt, language),
+              })}
             </small>
           ) : null}
         </div>
@@ -404,7 +431,7 @@ function SourceCard({
                 disabled={isBusy}
                 onClick={onReload}
               >
-                {isReloading ? "正在重新加载…" : "重新加载来源"}
+                {isReloading ? t("正在重新加载…") : t("重新加载来源")}
               </button>
               <button
                 className="primary-action"
@@ -413,10 +440,10 @@ function SourceCard({
                 onClick={onInstall}
               >
                 {isPlanning
-                  ? "正在准备…"
+                  ? t("正在准备…")
                   : source.bundleId
-                    ? "补装 Skill"
-                    : "安装 Bundle"}
+                    ? t("补装 Skill")
+                    : t("安装 Bundle")}
               </button>
             </>
           ) : null}
@@ -427,24 +454,28 @@ function SourceCard({
               disabled={isBusy}
               onClick={onRelink}
             >
-              {isRelinking ? "正在选择…" : "重新指定路径"}
+              {isRelinking ? t("正在选择…") : t("重新指定路径")}
             </button>
           ) : null}
           <button
             className="danger-outline-action"
             type="button"
-            aria-label={`删除 Source ${source.displayName}`}
+            aria-label={t("删除 Source {source}", {
+              source: source.displayName,
+            })}
             disabled={isBusy}
             onClick={onRemove}
           >
-            {isRemoving ? "正在准备删除…" : "删除 Source"}
+            {isRemoving ? t("正在准备删除…") : t("删除 Source")}
           </button>
         </div>
       </header>
 
       {source.lastReloadError ? (
         <p className="source-reload-error">
-          最近一次加载失败：{source.lastReloadError}
+          {t("最近一次加载失败：{error}", {
+            error: source.lastReloadError,
+          })}
         </p>
       ) : null}
 
@@ -455,13 +486,15 @@ function SourceCard({
         onClick={() => setIsExpanded((expanded) => !expanded)}
       >
         {isExpanded
-          ? "收起 Skill"
-          : `查看 ${source.members.length} 个 Skill`}
+          ? t("收起 Skill")
+          : t("查看 {count} 个 Skill", { count: source.members.length })}
       </button>
 
       {isExpanded ? (
         source.members.length === 0 ? (
-          <p className="source-empty">当前没有发现可展示的 Skill。</p>
+          <p className="source-empty">
+            {t("当前没有发现可展示的 Skill。")}
+          </p>
         ) : (
           <>
             <ul className="source-members">
@@ -480,12 +513,16 @@ function SourceCard({
                   </div>
                   <span>
                     {member.installedMemberId
-                      ? installedMemberStatus(mounts, member.installedMemberId)
+                      ? installedMemberStatus(
+                          mounts,
+                          member.installedMemberId,
+                          t,
+                        )
                       : !member.selectable
-                        ? "不可安装"
+                        ? t("不可安装")
                         : source.catalogStatus === "fresh"
-                          ? "可安装"
-                          : "等待重新加载"}
+                          ? t("可安装")
+                          : t("等待重新加载")}
                   </span>
                   {member.validationErrors.map((message) => (
                     <small className="candidate-error" key={message}>
@@ -496,7 +533,9 @@ function SourceCard({
               ))}
             </ul>
             {source.catalogStatus === "fresh" && available.length === 0 ? (
-              <p className="source-empty">没有尚未安装的有效 Skill。</p>
+              <p className="source-empty">
+                {t("没有尚未安装的有效 Skill。")}
+              </p>
             ) : null}
           </>
         )
@@ -505,27 +544,36 @@ function SourceCard({
   );
 }
 
-function installedMemberStatus(mounts: MountSummary[], memberId: string) {
+function installedMemberStatus(
+  mounts: MountSummary[],
+  memberId: string,
+  t: ReturnType<typeof useI18n>["t"],
+) {
   const memberMounts = mounts.filter(
     (mount) => mount.memberId === memberId,
   );
-  if (memberMounts.length === 0) return "已安装 · 未挂载";
+  if (memberMounts.length === 0) return t("已安装 · 未挂载");
 
   // 缺失或冲突的记录仍需展示，但不能被误报为可正常使用的挂载。
   const abnormalCount = memberMounts.filter(
     (mount) => mount.health !== "healthy",
   ).length;
   if (abnormalCount === 0) {
-    return `已安装 · 已挂载 ${memberMounts.length} 处`;
+    return t("已安装 · 已挂载 {count} 处", {
+      count: memberMounts.length,
+    });
   }
   const healthyCount = memberMounts.length - abnormalCount;
   return healthyCount === 0
-    ? `已安装 · 挂载异常 ${abnormalCount} 处`
-    : `已安装 · 正常挂载 ${healthyCount} 处 · 异常 ${abnormalCount} 处`;
+    ? t("已安装 · 挂载异常 {count} 处", { count: abnormalCount })
+    : t("已安装 · 正常挂载 {healthy} 处 · 异常 {abnormal} 处", {
+        healthy: healthyCount,
+        abnormal: abnormalCount,
+      });
 }
 
-function formatCatalogTime(timestamp: number) {
-  return new Intl.DateTimeFormat("zh-CN", {
+function formatCatalogTime(timestamp: number, language: "zhCn" | "en") {
+  return new Intl.DateTimeFormat(language === "zhCn" ? "zh-CN" : "en", {
     month: "short",
     day: "numeric",
     hour: "2-digit",

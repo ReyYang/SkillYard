@@ -512,7 +512,7 @@ export function InventoryPage({
           <InventorySection
             key={group.id}
             title={group.title}
-            eyebrow={groupEyebrow(group.kind)}
+            eyebrow={t(groupEyebrow(group.kind))}
             entries={group.entries}
             actionsDisabled={isWriteBlocked}
             batchMountBundleId={group.bundleId}
@@ -559,8 +559,8 @@ export function InventoryPage({
             openLabel={
               group.kind === "managedBundle" ||
               group.kind === "takeoverBundle"
-                ? `查看 Bundle ${group.title}`
-                : `查看分组 ${group.title}`
+                ? t("查看 Bundle {bundle}", { bundle: group.title })
+                : t("查看分组 {group}", { group: group.title })
             }
           />
         ))}
@@ -626,6 +626,7 @@ function InventorySection({
   onOpen(): void;
   openLabel: string;
 }) {
+  const { t } = useI18n();
   if (entries.length === 0) return null;
   return (
     <section className="inventory-section" aria-label={title}>
@@ -636,7 +637,7 @@ function InventorySection({
         </div>
         <div className="inventory-section-actions">
           {entries.some((entry) => entry.stale) ? (
-            <span className="stale-badge">上次结果</span>
+            <span className="stale-badge">{t("上次结果")}</span>
           ) : null}
           {bundleUpdate ? (
             <BundleUpdateStatusView
@@ -713,13 +714,13 @@ function InventorySection({
               className="compact-action"
               type="button"
               disabled={actionsDisabled}
-              aria-label={`接管 Bundle ${title}`}
+              aria-label={t("接管 Bundle {bundle}", { bundle: title })}
               onClick={() => onTakeover(entries[0]!.id)}
             >
-              接管 Bundle
+              {t("接管 Bundle")}
             </button>
           ) : null}
-          <span>{entries.length} 个 Skill</span>
+          <span>{t("{count} 个 Skill", { count: entries.length })}</span>
         </div>
       </header>
       <button
@@ -728,12 +729,12 @@ function InventorySection({
         aria-label={openLabel}
         onClick={onOpen}
       >
-        查看成员
+        {t("查看成员")}
       </button>
       {entries.length === 1 && !batchMountBundleId ? (
         <small className="bundle-context">
           {entries[0]!.observedBy.map(supportedAppLabel).join("、") ||
-            "本地安装"}
+            t("本地安装")}
           {" · "}
           {entries[0]!.skillRoot}
         </small>
@@ -1334,13 +1335,14 @@ function groupInventoryEntries(
     );
 }
 
-function groupEyebrow(kind: InventoryGroupKind): string {
-  return {
+function groupEyebrow(kind: InventoryGroupKind): TranslationKey {
+  const labels: Record<InventoryGroupKind, TranslationKey> = {
     managedBundle: "由 SkillYard 管理 · BUNDLE",
     takeoverBundle: "待接管 · BUNDLE",
     agentManaged: "Agent 应用管理 · 只读",
     projectManaged: "项目仓库管理 · 只读",
-  }[kind];
+  };
+  return labels[kind];
 }
 
 function matchesFilter(

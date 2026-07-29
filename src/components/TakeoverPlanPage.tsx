@@ -5,6 +5,7 @@ import type {
   TakeoverPlanOrigin,
   TakeoverPlanTarget,
 } from "../domain";
+import { useI18n } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 interface TakeoverPlanPageProps {
@@ -20,6 +21,7 @@ export function TakeoverPlanPage({
   onBack,
   onConfirm,
 }: TakeoverPlanPageProps) {
+  const { t } = useI18n();
   const retainedMounts = plan.retainedMembers.flatMap((member) =>
     member.mounts.map((mount) => ({ member, mount })),
   );
@@ -28,21 +30,26 @@ export function TakeoverPlanPage({
     <main className="mount-shell">
       <PageBackButton disabled={isConfirming} onClick={onBack} />
       <p className="eyebrow">SKILLYARD · CONFIRM TAKEOVER</p>
-      <h1>{`确认接管 Bundle：${plan.bundleDisplayName}`}</h1>
+      <h1>
+        {t("确认接管 Bundle：{bundle}", {
+          bundle: plan.bundleDisplayName,
+        })}
+      </h1>
       <p className="lead">
-        下面是 Rust 根据当前文件状态封存的完整影响。确认开始后不能取消；如果应用意外退出，
-        下次启动会继续恢复到一致状态。
+        {t(
+          "下面是 Rust 根据当前文件状态封存的完整影响。确认开始后不能取消；如果应用意外退出，下次启动会继续恢复到一致状态。",
+        )}
       </p>
 
-      <section className="install-plan" aria-label="接管影响预览">
+      <section className="install-plan" aria-label={t("接管影响预览")}>
         <PlanRow label="Bundle" value={plan.bundleDisplayName} />
         <PlanRow
-          label="更新来源"
-          value={plan.sourceDisplayName ?? "没有更新来源"}
+          label={t("更新来源")}
+          value={plan.sourceDisplayName ?? t("没有更新来源")}
         />
         <PlanRow label="Central Store" value={plan.managedDirectory} code />
 
-        <section className="batch-plan" aria-label="Bundle 成员预览">
+        <section className="batch-plan" aria-label={t("Bundle 成员预览")}>
           <p className="section-eyebrow">BUNDLE MEMBERS</p>
           <ul className="batch-plan-list">
             {plan.retainedMembers.map((member) => (
@@ -51,14 +58,21 @@ export function TakeoverPlanPage({
                   <span className="batch-plan-heading">
                     <strong>{member.skillName}</strong>
                     <small className="batch-disposition ready">
-                      保留现有 Skill
+                      {t("保留现有 Skill")}
                     </small>
                   </span>
                   <span>
-                    {`Installation Chain: ${installationChainLabel(member.installationChain)}`}
+                    {t("Installation Chain：{chain}", {
+                      chain: installationChainLabel(
+                        member.installationChain,
+                        t,
+                      ),
+                    })}
                   </span>
                   <code title={member.expectedTarget}>
-                    {`继续使用：${member.expectedTarget}`}
+                    {t("继续使用：{path}", {
+                      path: member.expectedTarget,
+                    })}
                   </code>
                 </span>
               </li>
@@ -79,7 +93,12 @@ export function TakeoverPlanPage({
                       </small>
                     </span>
                     <span>
-                      {`Installation Chain: ${installationChainLabel(member.installationChain)}`}
+                      {t("Installation Chain：{chain}", {
+                        chain: installationChainLabel(
+                          member.installationChain,
+                          t,
+                        ),
+                      })}
                     </span>
                     <code
                       title={
@@ -87,10 +106,16 @@ export function TakeoverPlanPage({
                         member.selectedObservationId
                       }
                     >
-                      {`采用内容：${selectedOrigin?.originalPath ?? member.selectedObservationId}`}
+                      {t("采用内容：{path}", {
+                        path:
+                          selectedOrigin?.originalPath ??
+                          member.selectedObservationId,
+                      })}
                     </code>
                     <code title={member.expectedTarget}>
-                      {`受管目标：${member.expectedTarget}`}
+                      {t("受管目标：{path}", {
+                        path: member.expectedTarget,
+                      })}
                     </code>
                     {member.warnings.map((warning) => (
                       <em key={warning}>{warning}</em>
@@ -102,7 +127,7 @@ export function TakeoverPlanPage({
           </ul>
         </section>
 
-        <div className="batch-plan" aria-label="原有位置处理">
+        <div className="batch-plan" aria-label={t("原有位置处理")}>
           <p className="section-eyebrow">EXISTING LOCATIONS</p>
           <ul className="batch-plan-list">
             {plan.origins.map((origin) => (
@@ -113,12 +138,15 @@ export function TakeoverPlanPage({
                 <span className="batch-plan-copy">
                   <span className="batch-plan-heading">
                     <strong>
-                      {`${memberName(plan, origin.memberId)} · ${originLabel(origin)}`}
+                      {`${memberName(plan, origin.memberId)} · ${originLabel(
+                        origin,
+                        t,
+                      )}`}
                     </strong>
                     <small className="batch-disposition ready">
                       {origin.finalDisposition === "mount"
-                        ? "替换为 Mount"
-                        : "移除原位置"}
+                        ? t("替换为 Mount")
+                        : t("移除原位置")}
                     </small>
                   </span>
                   <code title={origin.originalPath}>{origin.originalPath}</code>
@@ -131,7 +159,7 @@ export function TakeoverPlanPage({
           </ul>
         </div>
 
-        <div className="batch-plan" aria-label="最终挂载位置">
+        <div className="batch-plan" aria-label={t("最终挂载位置")}>
           <p className="section-eyebrow">FINAL MOUNTS</p>
           {retainedMounts.length > 0 || plan.targets.length > 0 ? (
             <ul className="batch-plan-list">
@@ -140,10 +168,10 @@ export function TakeoverPlanPage({
                   <span className="batch-plan-copy">
                     <span className="batch-plan-heading">
                       <strong>
-                        {`${member.skillName} · ${targetLabel(mount)}`}
+                        {`${member.skillName} · ${targetLabel(mount, t)}`}
                       </strong>
                       <small className="batch-disposition ready">
-                        保留 Mount
+                        {t("保留 Mount")}
                       </small>
                     </span>
                     <code title={mount.targetPath}>{mount.targetPath}</code>
@@ -161,9 +189,14 @@ export function TakeoverPlanPage({
                   <span className="batch-plan-copy">
                     <span className="batch-plan-heading">
                       <strong>
-                        {`${memberName(plan, target.memberId)} · ${targetLabel(target)}`}
+                        {`${memberName(plan, target.memberId)} · ${targetLabel(
+                          target,
+                          t,
+                        )}`}
                       </strong>
-                      <small className="batch-disposition ready">创建 Mount</small>
+                      <small className="batch-disposition ready">
+                        {t("创建 Mount")}
+                      </small>
                     </span>
                     <code title={target.targetPath}>{target.targetPath}</code>
                     <code title={target.expectedTarget}>
@@ -172,7 +205,9 @@ export function TakeoverPlanPage({
                     {target.appId === "claudeCode" &&
                     target.scope === "project" ? (
                       <em>
-                        GitHub Copilot 也可能读取这个 Claude Code 项目目录。
+                        {t(
+                          "GitHub Copilot 也可能读取这个 Claude Code 项目目录。",
+                        )}
                       </em>
                     ) : null}
                   </span>
@@ -181,19 +216,21 @@ export function TakeoverPlanPage({
             </ul>
           ) : (
             <p className="mount-project-hint">
-              接管后保持已安装、未挂载；所有原使用位置都会移除。
+              {t("接管后保持已安装、未挂载；所有原使用位置都会移除。")}
             </p>
           )}
         </div>
 
         <div className="install-mount-note">
-          <strong>临时恢复内容不是版本历史</strong>
+          <strong>{t("临时恢复内容不是版本历史")}</strong>
           <span>
-            SkillYard 只在事务期间保留恢复所需内容；验证成功后会清理，未选副本不会成为回滚版本。
+            {t(
+              "SkillYard 只在事务期间保留恢复所需内容；验证成功后会清理，未选副本不会成为回滚版本。",
+            )}
           </span>
         </div>
         {plan.warnings.length > 0 ? (
-          <ul className="install-warnings" aria-label="接管提示">
+          <ul className="install-warnings" aria-label={t("接管提示")}>
             {plan.warnings.map((warning) => (
               <li key={warning}>{warning}</li>
             ))}
@@ -202,7 +239,7 @@ export function TakeoverPlanPage({
       </section>
 
       <p className="mount-confirm-warning">
-        确认开始后不能取消，也不会接受部分接管结果。
+        {t("确认开始后不能取消，也不会接受部分接管结果。")}
       </p>
       <div className="install-actions">
         <button
@@ -211,7 +248,7 @@ export function TakeoverPlanPage({
           disabled={isConfirming}
           onClick={onConfirm}
         >
-          {isConfirming ? "正在安全接管…" : "确认接管"}
+          {isConfirming ? t("正在安全接管…") : t("确认接管")}
         </button>
       </div>
     </main>
@@ -244,17 +281,26 @@ function PlanRow({
   );
 }
 
-function installationChainLabel(chain: InstallationChain | null): string {
-  if (!chain) return "未发现可核验的安装记录";
+function installationChainLabel(
+  chain: InstallationChain | null,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  if (!chain) return t("未发现可核验的安装记录");
   const memberPath = chain.skillPath ? ` · ${chain.skillPath}` : "";
   return `lock v3 · ${chain.sourceLocator}${memberPath}`;
 }
 
-function originLabel(origin: TakeoverPlanOrigin): string {
-  if (!origin.appId || !origin.scope) return "共享目录";
+function originLabel(
+  origin: TakeoverPlanOrigin,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  if (!origin.appId || !origin.scope) return t("共享目录");
   return origin.scope === "global"
-    ? `${supportedAppLabel(origin.appId)} · 全局`
-    : `${supportedAppLabel(origin.appId)} · ${origin.projectDisplayName ?? "已登记项目"}`;
+    ? t("{app} · 全局", { app: supportedAppLabel(origin.appId) })
+    : t("{app} · {project}", {
+        app: supportedAppLabel(origin.appId),
+        project: origin.projectDisplayName ?? t("已登记项目"),
+      });
 }
 
 function targetLabel(
@@ -262,10 +308,14 @@ function targetLabel(
     TakeoverPlanTarget,
     "appId" | "scope" | "projectDisplayName"
   >,
+  t: ReturnType<typeof useI18n>["t"],
 ): string {
   return target.scope === "global"
-    ? `${supportedAppLabel(target.appId)} · 全局`
-    : `${supportedAppLabel(target.appId)} · ${target.projectDisplayName ?? "已登记项目"}`;
+    ? t("{app} · 全局", { app: supportedAppLabel(target.appId) })
+    : t("{app} · {project}", {
+        app: supportedAppLabel(target.appId),
+        project: target.projectDisplayName ?? t("已登记项目"),
+      });
 }
 
 function supportedAppLabel(appId: SupportedAppId): string {
