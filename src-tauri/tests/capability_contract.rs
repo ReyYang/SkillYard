@@ -40,3 +40,21 @@ fn application_does_not_depend_on_generic_fs_sql_or_shell_plugins() {
         );
     }
 }
+
+#[test]
+fn application_manifests_publish_one_1_1_0_version() {
+    let crate_root = env!("CARGO_MANIFEST_DIR");
+    let web_manifest: Value = serde_json::from_str(
+        &fs::read_to_string(format!("{crate_root}/../package.json")).expect("应读取 Web manifest"),
+    )
+    .expect("Web manifest 应为合法 JSON");
+    let tauri_config: Value = serde_json::from_str(
+        &fs::read_to_string(format!("{crate_root}/tauri.conf.json")).expect("应读取 Tauri config"),
+    )
+    .expect("Tauri config 应为合法 JSON");
+
+    // 用户看到的应用版本必须与前后端包版本一致，避免构建出错误版本的安装包。
+    assert_eq!(env!("CARGO_PKG_VERSION"), "1.1.0");
+    assert_eq!(web_manifest["version"], "1.1.0");
+    assert_eq!(tauri_config["version"], "1.1.0");
+}
