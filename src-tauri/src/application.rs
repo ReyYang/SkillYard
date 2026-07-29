@@ -260,6 +260,7 @@ impl SkillYardApplication {
             UiIntent::GenerateSkillAiExplanation { inventory_id } => {
                 self.generate_skill_ai_explanation(inventory_id)
             }
+            UiIntent::OrganizeSkillAiExplanations => self.organize_skill_ai_explanations(),
             // 启动读取前可能需要修复上次中断的写事务，因此也必须取得单写门。
             UiIntent::GetStartupState => self.with_write_operation(|| self.get_startup_state()),
             UiIntent::StartInitialScan => self.with_write_operation(|| self.start_initial_scan()),
@@ -604,6 +605,56 @@ impl SkillYardApplication {
         inventory_id: String,
     ) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_storage()?;
+        let (ai, api_key, language) = self.ready_ai_context(&storage)?;
+        let outcome = storage
+            .read_initial_scan()?
+            .ok_or(AgentError::SkillNotFound)?;
+        let UiOutcome::Inventory { entries, .. } = outcome else {
+            return Err(AgentError::SkillNotFound.into());
+        };
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.id == inventory_id)
+            .ok_or(AgentError::SkillNotFound)?;
+        let explanation = self.generate_explanation_for_entry(&entry, &ai, &api_key, language)?;
+        storage.save_skill_ai_explanation(&entry.id, &explanation)?;
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn organize_skill_ai_explanations(&self) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_storage()?;
+        let (ai, api_key, language) = self.ready_ai_context(&storage)?;
+        let outcome = storage
+            .read_initial_scan()?
+            .ok_or(AgentError::SkillNotFound)?;
+        let UiOutcome::Inventory { entries, .. } = outcome else {
+            return Err(AgentError::SkillNotFound.into());
+        };
+        for entry in entries.into_iter().filter(|entry| {
+            entry
+                .ai_explanation
+                .as_ref()
+                .is_none_or(|explanation| explanation.stale)
+        }) {
+            // 每个 Skill 独立请求；文件或 Provider 单项失败只保留其待整理状态。
+            let Ok(explanation) =
+                self.generate_explanation_for_entry(&entry, &ai, &api_key, language)
+            else {
+                continue;
+            };
+            storage.save_skill_ai_explanation(&entry.id, &explanation)?;
+        }
+        storage
+            .read_initial_scan()?
+            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+    }
+
+    fn ready_ai_context(
+        &self,
+        storage: &Storage,
+    ) -> Result<(AiPreferences, String, InterfaceLanguage), ApplicationError> {
         let ai = storage.read_ai_preferences()?;
         if !ai.enabled {
             return Err(AgentError::Disabled.into());
@@ -620,35 +671,31 @@ impl SkillYardApplication {
             .map_err(AgentError::from)?
             .ok_or(AgentError::MissingApiKey)?;
         let language = storage.read_interface_language()?;
-        let outcome = storage
-            .read_initial_scan()?
-            .ok_or(AgentError::SkillNotFound)?;
-        let UiOutcome::Inventory { entries, .. } = outcome else {
-            return Err(AgentError::SkillNotFound.into());
-        };
-        let entry = entries
-            .into_iter()
-            .find(|entry| entry.id == inventory_id)
-            .ok_or(AgentError::SkillNotFound)?;
+        Ok((ai, api_key, language))
+    }
+
+    fn generate_explanation_for_entry(
+        &self,
+        entry: &crate::domain::InventoryItem,
+        ai: &AiPreferences,
+        api_key: &str,
+        language: InterfaceLanguage,
+    ) -> Result<crate::domain::SkillAiExplanation, AgentError> {
         let material = read_skill_material(
             &entry.skill_name,
             Path::new(&entry.skill_root),
             Path::new(&entry.skill_file),
             self.paths.home(),
         )?;
-        let explanation = generate_skill_ai_explanation(
+        generate_skill_ai_explanation(
             &self.agent_endpoints,
             ai.provider,
             &ai.model,
-            &api_key,
+            api_key,
             language,
             &entry.observed_fingerprint,
             &material,
-        )?;
-        storage.save_skill_ai_explanation(&entry.id, &explanation)?;
-        storage
-            .read_initial_scan()?
-            .ok_or(ApplicationError::InvalidState("首次扫描状态已经丢失"))
+        )
     }
 
     fn read_ai_preferences(&self, storage: &Storage) -> Result<AiPreferences, ApplicationError> {

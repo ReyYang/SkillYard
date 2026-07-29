@@ -144,6 +144,27 @@ describe("Tauri IPC contract", () => {
     );
   });
 
+  it("后台 AI 整理不接受前端提交 Skill、文件或任务状态", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "inventory",
+      scanCompletedAt: 1,
+      entries: [],
+      supportedApps: [],
+      lastLocalRefresh: null,
+      scanIssues: [],
+      recoveryIssues: [],
+      projects: [],
+      mounts: [],
+      bundleUpdates: [],
+    });
+
+    await tauriSkillYardClient.organizeSkillAiExplanations();
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "organize_skill_ai_explanations",
+    );
+  });
+
   it("打开 Central Store 时不允许前端提交路径", async () => {
     mocks.invoke.mockResolvedValue(undefined);
 

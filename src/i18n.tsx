@@ -79,6 +79,8 @@ const EN_MESSAGES = {
   "AI 设置未保存": "AI settings were not saved",
   "AI 说明": "AI explanation",
   "AI 整理": "Organize with AI",
+  "AI 整理已在后台开始": "AI organization started in the background",
+  "AI 整理未能开始": "AI organization could not start",
   "重新整理": "Regenerate",
   "正在整理…": "Organizing…",
   "尚未生成 AI 说明": "No AI explanation has been generated",

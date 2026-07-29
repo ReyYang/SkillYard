@@ -372,6 +372,110 @@ describe("本机清单", () => {
     ).toBeInTheDocument();
   });
 
+  it("清单只在用户点击后后台整理待处理 Skill，并且完成时不打断当前页面", async () => {
+    const user = userEvent.setup();
+    const initial = inventoryOutcome([createManagedEntry()]);
+    const completed = inventoryOutcome([
+      createManagedEntry({
+        aiExplanation: {
+          category: "developmentEngineering",
+          summary: "后台生成的说明。",
+          useCases: ["场景一", "场景二"],
+          instructions: "使用当前 Skill。",
+          language: "zhCn",
+          contentFingerprint: "fingerprint",
+          stale: false,
+        },
+      }),
+    ]);
+    const client = createClient(initial);
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+    let finishOrganization!: (
+      outcome: Extract<UiOutcome, { type: "inventory" }>,
+    ) => void;
+    vi.mocked(client.organizeSkillAiExplanations).mockReturnValue(
+      new Promise((resolve) => {
+        finishOrganization = resolve;
+      }),
+    );
+
+    render(<App client={client} />);
+    const organizeButton = await screen.findByRole("button", {
+      name: "AI 整理",
+    });
+    expect(client.organizeSkillAiExplanations).not.toHaveBeenCalled();
+
+    await user.click(organizeButton);
+
+    expect(client.organizeSkillAiExplanations).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("status", { name: "AI 整理已在后台开始" }),
+    ).toBeInTheDocument();
+    expect(organizeButton).toBeDisabled();
+    expect(screen.queryByText("正在整理…")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    expect(
+      screen.getByRole("heading", { name: "设置" }),
+    ).toBeInTheDocument();
+    await act(async () => {
+      finishOrganization(completed);
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByRole("heading", { name: "设置" }),
+    ).toBeInTheDocument();
+  });
+
+  it("当前界面语言与已保存说明不同时保留旧内容并标记待重新整理", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          aiExplanation: {
+            category: "writingCommunication",
+            summary: "Saved English explanation",
+            useCases: ["Write", "Review"],
+            instructions: "Use the current Skill.",
+            language: "en",
+            contentFingerprint: "fingerprint",
+            stale: false,
+          },
+        }),
+      ]),
+    );
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+
+    render(<App client={client} />);
+    expect(
+      await screen.findByRole("button", { name: "AI 整理" }),
+    ).toBeEnabled();
+    await openManagedSkillDetails(user);
+
+    expect(screen.getByText("Saved English explanation")).toBeInTheDocument();
+    expect(screen.getByText("待重新整理")).toBeInTheDocument();
+  });
+
   it("启动时使用后端恢复的英文偏好", async () => {
     const client = createClient(
       inventoryOutcome([createManagedEntry({ skillName: "example" })]),
@@ -6789,6 +6893,7 @@ function createClient(startup: UiOutcome): SkillYardClient {
     testAiConnection: vi.fn(),
     askAgent: vi.fn(),
     generateSkillAiExplanation: vi.fn(),
+    organizeSkillAiExplanations: vi.fn(),
     getStartupState: vi.fn().mockResolvedValue(startup),
     openCentralStore: vi.fn().mockResolvedValue(undefined),
     startInitialScan: vi.fn(),

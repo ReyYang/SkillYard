@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { AgentOverlay } from "./components/AgentOverlay";
 import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
@@ -404,6 +404,15 @@ function AppCore({
   const [skillExplanationError, setSkillExplanationError] = useState<
     string | null
   >(null);
+  const [isAiOrganizationRunning, setIsAiOrganizationRunning] =
+    useState(false);
+  const [aiOrganizationFeedback, setAiOrganizationFeedback] = useState<
+    string | null
+  >(null);
+  const [aiOrganizationError, setAiOrganizationError] = useState<string | null>(
+    null,
+  );
+  const aiOrganizationFeedbackTimer = useRef<number | null>(null);
   const [inventoryPresentationKey, setInventoryPresentationKey] = useState(0);
 
   const activeRemovalPlan =
@@ -1440,6 +1449,51 @@ function AppCore({
     }
   };
 
+  const organizeSkillExplanations = () => {
+    if (isAiOrganizationRunning) return;
+    setIsAiOrganizationRunning(true);
+    setAiOrganizationError(null);
+    const feedback = t("AI 整理已在后台开始");
+    setAiOrganizationFeedback(feedback);
+    if (aiOrganizationFeedbackTimer.current !== null) {
+      window.clearTimeout(aiOrganizationFeedbackTimer.current);
+    }
+    aiOrganizationFeedbackTimer.current = window.setTimeout(() => {
+      setAiOrganizationFeedback(null);
+      aiOrganizationFeedbackTimer.current = null;
+    }, 4_000);
+    void client.organizeSkillAiExplanations().then(
+      (outcome) => {
+        // 后台完成只刷新 Inventory read model，不能把用户从当前工作页面拉走。
+        setCommittedInventory(outcome);
+        setViewState((current) =>
+          current.status === "ready" && current.outcome.type === "inventory"
+            ? { status: "ready", outcome }
+            : current,
+        );
+        setIsAiOrganizationRunning(false);
+      },
+      (error: unknown) => {
+        if (aiOrganizationFeedbackTimer.current !== null) {
+          window.clearTimeout(aiOrganizationFeedbackTimer.current);
+          aiOrganizationFeedbackTimer.current = null;
+        }
+        setAiOrganizationFeedback(null);
+        setAiOrganizationError(formatError(error));
+        setIsAiOrganizationRunning(false);
+      },
+    );
+  };
+
+  useEffect(
+    () => () => {
+      if (aiOrganizationFeedbackTimer.current !== null) {
+        window.clearTimeout(aiOrganizationFeedbackTimer.current);
+      }
+    },
+    [],
+  );
+
   const chooseProjectDirectory = async () => {
     if (isAddingProject) return;
     setIsAddingProject(true);
@@ -1727,6 +1781,9 @@ function AppCore({
       resetError={null}
       generatingSkillExplanationId={null}
       skillExplanationError={null}
+      isAiOrganizationRunning={false}
+      aiOrganizationFeedback={null}
+      aiOrganizationError={null}
       onRefresh={() => undefined}
       onCheckUpdates={() => undefined}
       onDismissUpdateError={() => undefined}
@@ -1747,6 +1804,7 @@ function AppCore({
       onManageMount={setReadOnlyManagedMemberId}
       onBatchMount={() => undefined}
       onGenerateSkillExplanation={() => undefined}
+      onOrganizeSkillExplanations={() => undefined}
     />
   ) : null;
 
@@ -2213,6 +2271,9 @@ function AppCore({
       resetError={resetError}
       generatingSkillExplanationId={generatingSkillExplanationId}
       skillExplanationError={skillExplanationError}
+      isAiOrganizationRunning={isAiOrganizationRunning}
+      aiOrganizationFeedback={aiOrganizationFeedback}
+      aiOrganizationError={aiOrganizationError}
       onRefresh={refreshLocalInventory}
       onCheckUpdates={checkBundleUpdates}
       onDismissUpdateError={() => setUpdateError(null)}
@@ -2263,6 +2324,7 @@ function AppCore({
       onManageMount={openMountManager}
       onBatchMount={openBatchMount}
       onGenerateSkillExplanation={generateSkillExplanation}
+      onOrganizeSkillExplanations={organizeSkillExplanations}
       />
       {pendingProjectSelection ? (
         <ProjectConfirmationDialog

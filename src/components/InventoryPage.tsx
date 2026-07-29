@@ -84,6 +84,9 @@ interface InventoryPageProps {
   resetError: string | null;
   generatingSkillExplanationId: string | null;
   skillExplanationError: string | null;
+  isAiOrganizationRunning: boolean;
+  aiOrganizationFeedback: string | null;
+  aiOrganizationError: string | null;
   onRefresh(): void;
   onCheckUpdates(): void;
   onDismissUpdateError(): void;
@@ -109,6 +112,7 @@ interface InventoryPageProps {
   onManageMount(memberId: string): void;
   onBatchMount(bundleId: string): void;
   onGenerateSkillExplanation(inventoryId: string): void;
+  onOrganizeSkillExplanations(): void;
 }
 
 const FILTERS: Array<{ id: ManagementFilter; label: TranslationKey }> = [
@@ -175,6 +179,9 @@ export function InventoryPage({
   resetError,
   generatingSkillExplanationId,
   skillExplanationError,
+  isAiOrganizationRunning,
+  aiOrganizationFeedback,
+  aiOrganizationError,
   onRefresh,
   onCheckUpdates,
   onDismissUpdateError,
@@ -200,6 +207,7 @@ export function InventoryPage({
   onManageMount,
   onBatchMount,
   onGenerateSkillExplanation,
+  onOrganizeSkillExplanations,
 }: InventoryPageProps) {
   const { localize, t } = useI18n();
   const [query, setQuery] = useState("");
@@ -233,6 +241,14 @@ export function InventoryPage({
       ).size,
     [outcome.bundleUpdates],
   );
+  const hasPendingAiExplanation = outcome.entries.some((entry) =>
+    isSkillExplanationPending(entry, language),
+  );
+  const canOrganizeWithAi =
+    aiPreferences.enabled &&
+    aiPreferences.disclosureAccepted &&
+    aiPreferences.hasApiKey &&
+    aiPreferences.verified;
   const selectedGroup =
     screen.type === "group" || screen.type === "skill"
       ? groups.find((group) => group.id === screen.groupId) ?? null
@@ -291,6 +307,7 @@ export function InventoryPage({
           generatingSkillExplanationId === selectedEntry.id
         }
         explanationError={skillExplanationError}
+        explanationStale={isSkillExplanationPending(selectedEntry, language)}
         onGenerateExplanation={() =>
           onGenerateSkillExplanation(selectedEntry.id)
         }
@@ -338,6 +355,19 @@ export function InventoryPage({
           </p>
         </div>
         <div className="inventory-actions">
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={
+              isWriteBlocked ||
+              isAiOrganizationRunning ||
+              !canOrganizeWithAi ||
+              !hasPendingAiExplanation
+            }
+            onClick={onOrganizeSkillExplanations}
+          >
+            {t("AI 整理")}
+          </button>
           <button
             className="secondary-action"
             type="button"
@@ -392,6 +422,21 @@ export function InventoryPage({
           </button>
         </div>
       </header>
+
+      {aiOrganizationFeedback ? (
+        <p
+          className="recovery-notice"
+          role="status"
+          aria-label={aiOrganizationFeedback}
+        >
+          {aiOrganizationFeedback}
+        </p>
+      ) : null}
+      {aiOrganizationError ? (
+        <div className="inline-error" role="alert">
+          {t("AI 整理未能开始")}：{aiOrganizationError}
+        </div>
+      ) : null}
 
       {outcome.recoveredInterruptedOperation ? (
         <p className="recovery-notice" role="status">
@@ -1207,6 +1252,7 @@ function SkillDetailsPage({
   canGenerateExplanation,
   isGeneratingExplanation,
   explanationError,
+  explanationStale,
   onGenerateExplanation,
   onManageMount,
   onBack,
@@ -1220,6 +1266,7 @@ function SkillDetailsPage({
   canGenerateExplanation: boolean;
   isGeneratingExplanation: boolean;
   explanationError: string | null;
+  explanationStale: boolean;
   onGenerateExplanation(): void;
   onManageMount(memberId: string): void;
   onBack(): void;
@@ -1297,7 +1344,7 @@ function SkillDetailsPage({
             <span className="skill-category">
               {t(skillCategoryLabel(entry.aiExplanation.category))}
             </span>
-            {entry.aiExplanation.stale ? (
+            {explanationStale ? (
               <p className="skill-ai-stale">{t("待重新整理")}</p>
             ) : null}
             <p className="skill-ai-summary">{entry.aiExplanation.summary}</p>
@@ -1414,6 +1461,19 @@ function skillCategoryLabel(category: SkillCategory): TranslationKey {
     securityCompliance: "安全与合规",
     other: "其他",
   }[category] as TranslationKey;
+}
+
+function isSkillExplanationPending(
+  entry: InventoryObservation,
+  language: InterfaceLanguage,
+): boolean {
+  const explanation = entry.aiExplanation;
+  return (
+    !explanation ||
+    explanation.stale ||
+    explanation.language !== language ||
+    explanation.contentFingerprint !== entry.observedFingerprint
+  );
 }
 
 function BundleUpdateStatusView({

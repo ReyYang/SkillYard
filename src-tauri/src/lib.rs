@@ -76,6 +76,7 @@ pub fn run() {
             commands::test_ai_connection,
             commands::ask_agent,
             commands::generate_skill_ai_explanation,
+            commands::organize_skill_ai_explanations,
             commands::get_startup_state,
             commands::open_central_store,
             commands::start_initial_scan,

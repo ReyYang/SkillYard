@@ -150,6 +150,168 @@ fn glm_and_deepseek_generate_the_same_fixed_explanation_without_web_search() {
     );
 }
 
+#[test]
+fn user_started_organization_updates_only_missing_or_stale_skills_and_isolates_failures() {
+    let sandbox = tempdir().expect("应创建批量整理隔离目录");
+    let home = sandbox.path().join("home");
+    let data_root = sandbox.path().join("application-support/SkillYard");
+    for (name, description) in [
+        ("a-failed", "This explanation will fail"),
+        ("b-stale", "Organize stale research"),
+        ("c-stable", "Keep the current explanation"),
+    ] {
+        let root = home.join(".codex/skills").join(name);
+        fs::create_dir_all(&root).expect("应创建批量整理 Skill fixture");
+        fs::write(
+            root.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n# {name}\n"),
+        )
+        .expect("应写入批量整理 Skill fixture");
+    }
+    let (endpoint, requests) = spawn_openai_server([
+        r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"status\":\"ok\"}"}]}]}"#,
+        r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"SkillYard","annotations":[{"type":"url_citation","url":"https://github.com/ReyYang/SkillYard"}]}]}]}"#,
+        r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"category\":\"productivityAutomation\",\"summary\":\"保留当前说明。\",\"useCases\":[\"稳定场景一\",\"稳定场景二\"],\"instructions\":\"保持当前说明。\"}"}]}]}"#,
+        r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"category\":\"researchLearning\",\"summary\":\"旧研究说明。\",\"useCases\":[\"旧场景一\",\"旧场景二\"],\"instructions\":\"使用旧内容。\"}"}]}]}"#,
+        r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"status\":\"ok\"}"}]}]}"#,
+        r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"SkillYard","annotations":[{"type":"url_citation","url":"https://github.com/ReyYang/SkillYard"}]}]}]}"#,
+        r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"not valid structured data"}]}]}"#,
+        r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"category\":\"researchLearning\",\"summary\":\"按新内容整理研究资料。\",\"useCases\":[\"归纳新资料\",\"提炼新结论\"],\"instructions\":\"提供当前研究资料。\"}"}]}]}"#,
+    ]);
+    let application = configured_application(
+        &data_root,
+        &home,
+        Arc::new(FixtureSecretStore::default()),
+        AgentProviderEndpoints::for_test(endpoint),
+    );
+    let UiOutcome::Inventory { entries, .. } = application
+        .handle(UiIntent::StartInitialScan)
+        .expect("应扫描批量整理 fixtures")
+    else {
+        panic!("应返回 Inventory");
+    };
+    let id_for = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.skill_name == name)
+            .map(|entry| entry.id.clone())
+            .expect("应找到批量整理 Skill")
+    };
+    let stable_id = id_for("c-stable");
+    let stale_id = id_for("b-stale");
+    let failed_id = id_for("a-failed");
+    generate(&application, &stable_id);
+    generate(&application, &stale_id);
+
+    application
+        .handle(UiIntent::SetAiConfiguration {
+            enabled: true,
+            disclosure_accepted: true,
+            provider: AiProvider::OpenAi,
+            model: "gpt-5.4-mini".to_owned(),
+        })
+        .expect("应切换全局模型");
+    application
+        .handle(UiIntent::SaveAiApiKey {
+            api_key: "skillyard-fixture-replaced-key".to_owned(),
+        })
+        .expect("应替换 fixture Key");
+    let before_language_change = inventory(&application, UiIntent::GetStartupState);
+    assert!(
+        !explanation(&before_language_change, &stable_id).stale
+            && !explanation(&before_language_change, &stale_id).stale,
+        "Provider、模型和 API Key 变化不能使既有说明过时"
+    );
+
+    application
+        .handle(UiIntent::SetInterfaceLanguage {
+            language: InterfaceLanguage::En,
+        })
+        .expect("应切换英文");
+    let english = inventory(&application, UiIntent::GetStartupState);
+    assert!(
+        explanation(&english, &stable_id).stale && explanation(&english, &stale_id).stale,
+        "界面语言变化后旧结果仍可读取但必须过时"
+    );
+    application
+        .handle(UiIntent::SetInterfaceLanguage {
+            language: InterfaceLanguage::ZhCn,
+        })
+        .expect("应切回中文");
+    let stale_root = home.join(".codex/skills/b-stale");
+    fs::write(
+        stale_root.join("SKILL.md"),
+        "---\nname: b-stale\ndescription: Updated research\n---\n# Updated Research\n",
+    )
+    .expect("应修改待重新整理的 Skill");
+    let refreshed = inventory(&application, UiIntent::RefreshLocalInventory);
+    assert!(!explanation(&refreshed, &stable_id).stale);
+    assert!(
+        explanation(&refreshed, &stale_id).stale,
+        "内容 fingerprint 变化后旧结果必须过时"
+    );
+
+    application
+        .handle(UiIntent::TestAiConnection)
+        .expect("应验证切换后的模型");
+    let organized = inventory(&application, UiIntent::OrganizeSkillAiExplanations);
+    assert_eq!(
+        explanation(&organized, &stable_id).summary,
+        "保留当前说明。",
+        "未过时的说明不能重复调用或覆盖"
+    );
+    assert_eq!(
+        explanation(&organized, &stale_id).summary,
+        "按新内容整理研究资料。",
+        "过时说明应被当前结果替换"
+    );
+    assert!(
+        organized
+            .iter()
+            .find(|entry| entry.id == failed_id)
+            .and_then(|entry| entry.ai_explanation.as_ref())
+            .is_none(),
+        "单项失败应保持待整理且不能阻塞其他 Skill"
+    );
+
+    let recorded = requests.recv().expect("应读取批量整理 Provider 请求");
+    assert_eq!(
+        recorded.len(),
+        8,
+        "扫描、刷新、语言与 Provider 设置都不能静默调用模型"
+    );
+    for request in &recorded[6..] {
+        assert!(
+            !request.to_string().contains("web_search"),
+            "后台 AI 整理不能启用 Web Search"
+        );
+    }
+}
+
+fn inventory(
+    application: &SkillYardApplication,
+    intent: UiIntent,
+) -> Vec<skillyard_lib::InventoryItem> {
+    let UiOutcome::Inventory { entries, .. } = application
+        .handle(intent)
+        .expect("应返回可读取的 Inventory")
+    else {
+        panic!("应返回 Inventory");
+    };
+    entries
+}
+
+fn explanation<'a>(
+    entries: &'a [skillyard_lib::InventoryItem],
+    inventory_id: &str,
+) -> &'a skillyard_lib::SkillAiExplanation {
+    entries
+        .iter()
+        .find(|entry| entry.id == inventory_id)
+        .and_then(|entry| entry.ai_explanation.as_ref())
+        .expect("应保留目标 Skill 的 AI 说明")
+}
+
 fn assert_provider_explanation(
     provider: AiProvider,
     model: &str,

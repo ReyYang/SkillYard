@@ -28,6 +28,7 @@ pub enum UiIntent {
     GenerateSkillAiExplanation {
         inventory_id: String,
     },
+    OrganizeSkillAiExplanations,
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
