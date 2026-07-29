@@ -4,10 +4,10 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{
-    BatchMountPlan, BatchMountRequest, EditableLocalRelinkPlan, InstallPlan, MergeContentChoice,
-    MountPlan, MountScope, ProjectSelection, SkillYardApplication, SourceAssociationPlan,
-    SourceMemberMappingChoice, SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent,
-    UiOutcome, application::ApplicationError,
+    BatchMountPlan, BatchMountRequest, EditableLocalRelinkPlan, InstallPlan, InterfaceLanguage,
+    MergeContentChoice, MountPlan, MountScope, ProjectSelection, SkillYardApplication,
+    SourceAssociationPlan, SourceMemberMappingChoice, SupportedAppId, TakeoverPlan,
+    TakeoverPlanRequest, UiIntent, UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -15,6 +15,25 @@ use crate::{
 pub struct UiError {
     code: &'static str,
     message: String,
+}
+
+#[tauri::command(async)]
+pub fn get_preferences(application: State<'_, SkillYardApplication>) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::GetPreferences)? {
+        outcome @ UiOutcome::Preferences { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回界面偏好")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn set_interface_language(
+    application: State<'_, SkillYardApplication>,
+    language: InterfaceLanguage,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::SetInterfaceLanguage { language })? {
+        outcome @ UiOutcome::Preferences { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回更新后的界面偏好")),
+    }
 }
 
 impl From<ApplicationError> for UiError {

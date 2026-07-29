@@ -22,6 +22,20 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("get_startup_state");
   });
 
+  it("语言偏好只通过正式任务级命令读取和保存", async () => {
+    mocks.invoke
+      .mockResolvedValueOnce({ type: "preferences", language: "zhCn" })
+      .mockResolvedValueOnce({ type: "preferences", language: "en" });
+
+    await tauriSkillYardClient.getPreferences();
+    await tauriSkillYardClient.setInterfaceLanguage("en");
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "get_preferences");
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "set_interface_language", {
+      language: "en",
+    });
+  });
+
   it("打开 Central Store 时不允许前端提交路径", async () => {
     mocks.invoke.mockResolvedValue(undefined);
 

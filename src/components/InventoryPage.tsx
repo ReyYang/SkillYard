@@ -5,10 +5,12 @@ import type {
   BundleUpdateSummary,
   BundleUpdateStatus,
   InventoryObservation,
+  InterfaceLanguage,
   MountSummary,
   SupportedAppId,
   UiOutcome,
 } from "../domain";
+import { useI18n, type TranslationKey } from "../i18n";
 import { PageBackButton } from "./PageBackButton";
 
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
@@ -18,6 +20,9 @@ interface InventoryPageProps {
   outcome: InventoryOutcome;
   screen: InventoryScreen;
   onScreenChange(screen: InventoryScreen): void;
+  language: InterfaceLanguage;
+  isSavingLanguage: boolean;
+  languageError: string | null;
   isWriteBlocked: boolean;
   allowReadOnlyDetails: boolean;
   isRefreshing: boolean;
@@ -56,6 +61,7 @@ interface InventoryPageProps {
   onAddProject(): void;
   onOpenCentralStore(): void;
   onResetApplication(): void;
+  onLanguageChange(language: InterfaceLanguage): void;
   onAssociateSource(bundleId: string): void;
   onOpenRecovery(issueId: string): void;
   onTakeover(observationId: string): void;
@@ -63,7 +69,7 @@ interface InventoryPageProps {
   onBatchMount(bundleId: string): void;
 }
 
-const FILTERS: Array<{ id: ManagementFilter; label: string }> = [
+const FILTERS: Array<{ id: ManagementFilter; label: TranslationKey }> = [
   { id: "all", label: "全部" },
   { id: "managed", label: "由 SkillYard 管理" },
   { id: "takeover", label: "待接管" },
@@ -95,6 +101,9 @@ export function InventoryPage({
   outcome,
   screen,
   onScreenChange,
+  language,
+  isSavingLanguage,
+  languageError,
   isWriteBlocked,
   allowReadOnlyDetails,
   isRefreshing,
@@ -133,12 +142,14 @@ export function InventoryPage({
   onAddProject,
   onOpenCentralStore,
   onResetApplication,
+  onLanguageChange,
   onAssociateSource,
   onOpenRecovery,
   onTakeover,
   onManageMount,
   onBatchMount,
 }: InventoryPageProps) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ManagementFilter>("all");
 
@@ -181,6 +192,9 @@ export function InventoryPage({
   if (screen.type === "settings") {
     return (
       <InventorySettingsPage
+        language={language}
+        isSavingLanguage={isSavingLanguage}
+        languageError={languageError}
         isWriteBlocked={isWriteBlocked}
         isOpeningCentralStore={isOpeningCentralStore}
         isResettingApplication={isResettingApplication}
@@ -188,6 +202,7 @@ export function InventoryPage({
         resetError={resetError}
         onOpenCentralStore={onOpenCentralStore}
         onResetApplication={onResetApplication}
+        onLanguageChange={onLanguageChange}
         onBack={() => onScreenChange({ type: "list" })}
       />
     );
@@ -234,11 +249,17 @@ export function InventoryPage({
       <header className="inventory-header">
         <div>
           <p className="eyebrow">SKILLYARD · LOCAL INVENTORY</p>
-          <h1>Bundle 清单</h1>
+          <h1>{t("Bundle 清单")}</h1>
           <p className="inventory-summary">
             {outcome.entries.length === 0
-              ? "本机暂未发现 Bundle"
-              : `本机已有 ${bundleCount} 个 Bundle · ${outcome.entries.length} 个 Skill`}
+              ? t("本机暂未发现 Bundle")
+              : t(
+                  "本机已有 {bundleCount} 个 Bundle · {skillCount} 个 Skill",
+                  {
+                    bundleCount,
+                    skillCount: outcome.entries.length,
+                  },
+                )}
           </p>
         </div>
         <div className="inventory-actions">
@@ -248,19 +269,19 @@ export function InventoryPage({
             disabled={isWriteBlocked || isCheckingUpdates}
             onClick={onCheckUpdates}
           >
-            {isCheckingUpdates ? "正在检查更新…" : "检查更新"}
+            {isCheckingUpdates ? t("正在检查更新…") : t("检查更新")}
           </button>
           {updatableBundleCount >= 2 ? (
             <button
               className="secondary-action"
               type="button"
-              aria-label="全部更新"
+              aria-label={t("全部更新")}
               disabled={isWriteBlocked || isPreparingBundleUpdateBatch}
               onClick={onUpdateAll}
             >
               {isPreparingBundleUpdateBatch
-                ? "正在准备全部更新…"
-                : "全部更新"}
+                ? t("正在准备全部更新…")
+                : t("全部更新")}
             </button>
           ) : null}
           <button
@@ -269,7 +290,7 @@ export function InventoryPage({
             disabled={isWriteBlocked || isOpeningInstaller}
             onClick={onInstall}
           >
-            {isOpeningInstaller ? "正在打开…" : "安装 Skill"}
+            {isOpeningInstaller ? t("正在打开…") : t("安装 Skill")}
           </button>
           <button
             className="secondary-action"
@@ -277,7 +298,7 @@ export function InventoryPage({
             disabled={isWriteBlocked || isAddingProject}
             onClick={onAddProject}
           >
-            {isAddingProject ? "正在选择项目…" : "添加项目"}
+            {isAddingProject ? t("正在选择项目…") : t("添加项目")}
           </button>
           <button
             className="secondary-action"
@@ -285,35 +306,37 @@ export function InventoryPage({
             disabled={isWriteBlocked || isRefreshing}
             onClick={onRefresh}
           >
-            {isRefreshing ? "正在刷新本机…" : "刷新本机"}
+            {isRefreshing ? t("正在刷新本机…") : t("刷新本机")}
           </button>
           <button
             className="secondary-action"
             type="button"
             onClick={() => onScreenChange({ type: "settings" })}
           >
-            设置
+            {t("设置")}
           </button>
         </div>
       </header>
 
       {outcome.recoveredInterruptedOperation ? (
         <p className="recovery-notice" role="status">
-          已恢复上次中断的操作
+          {t("已恢复上次中断的操作")}
         </p>
       ) : null}
 
       {outcome.projects.length > 0 ? (
-        <section className="registered-projects" aria-label="已登记项目">
+        <section className="registered-projects" aria-label={t("已登记项目")}>
           <header>
             <div>
               <p className="section-eyebrow">REGISTERED PROJECTS</p>
-              <h2>已登记项目</h2>
+              <h2>{t("已登记项目")}</h2>
             </div>
             <span>{outcome.projects.length}</span>
           </header>
           <p>
-            移除项目会先清理其中全部 SkillYard-managed project Mount，再删除登记记录。
+            {t(
+              "移除项目会先清理其中全部 SkillYard-managed project Mount，再删除登记记录。",
+            )}
           </p>
           <ul>
             {outcome.projects.map((project) => (
@@ -374,7 +397,7 @@ export function InventoryPage({
           <input
             type="search"
             value={query}
-            placeholder="搜索 Bundle 或 Skill"
+            placeholder={t("搜索 Bundle 或 Skill")}
             aria-label="搜索 Skill"
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -387,7 +410,7 @@ export function InventoryPage({
               aria-pressed={filter === item.id}
               onClick={() => setFilter(item.id)}
             >
-              {item.label}
+              {t(item.label)}
             </button>
           ))}
         </div>
@@ -720,6 +743,9 @@ function InventorySection({
 }
 
 function InventorySettingsPage({
+  language,
+  isSavingLanguage,
+  languageError,
   isWriteBlocked,
   isOpeningCentralStore,
   isResettingApplication,
@@ -727,8 +753,12 @@ function InventorySettingsPage({
   resetError,
   onOpenCentralStore,
   onResetApplication,
+  onLanguageChange,
   onBack,
 }: {
+  language: InterfaceLanguage;
+  isSavingLanguage: boolean;
+  languageError: string | null;
   isWriteBlocked: boolean;
   isOpeningCentralStore: boolean;
   isResettingApplication: boolean;
@@ -736,23 +766,51 @@ function InventorySettingsPage({
   resetError: string | null;
   onOpenCentralStore(): void;
   onResetApplication(): void;
+  onLanguageChange(language: InterfaceLanguage): void;
   onBack(): void;
 }) {
+  const { t } = useI18n();
   return (
     <main className="inventory-shell inventory-subpage">
       <PageBackButton onClick={onBack} />
       <header className="detail-header">
         <div>
           <p className="eyebrow">SKILLYARD · SETTINGS</p>
-          <h1>设置</h1>
+          <h1>{t("设置")}</h1>
         </div>
       </header>
 
       <section className="settings-card">
         <div>
+          <p className="section-eyebrow">LANGUAGE</p>
+          <h2>{t("语言")}</h2>
+          <p>{t("切换后立即更新，并在下次启动时保留。")}</p>
+        </div>
+        <label className="settings-select">
+          <span>{t("界面语言")}</span>
+          <select
+            aria-label={t("界面语言")}
+            value={language}
+            disabled={isSavingLanguage}
+            onChange={(event) =>
+              onLanguageChange(event.target.value as InterfaceLanguage)
+            }
+          >
+            <option value="zhCn">{t("简体中文")}</option>
+            <option value="en">{t("English")}</option>
+          </select>
+        </label>
+      </section>
+
+      <section className="settings-card">
+        <div>
           <p className="section-eyebrow">CENTRAL STORE</p>
-          <h2>受管内容目录</h2>
-          <p>这里保存 SkillYard 管理的实际主副本，不是可以随意清理的缓存。</p>
+          <h2>{t("受管内容目录")}</h2>
+          <p>
+            {t(
+              "这里保存 SkillYard 管理的实际主副本，不是可以随意清理的缓存。",
+            )}
+          </p>
         </div>
         <button
           className="secondary-action"
@@ -760,15 +818,19 @@ function InventorySettingsPage({
           disabled={isOpeningCentralStore}
           onClick={onOpenCentralStore}
         >
-          {isOpeningCentralStore ? "正在打开…" : "打开 Central Store"}
+          {isOpeningCentralStore
+            ? t("正在打开…")
+            : t("打开 Central Store")}
         </button>
       </section>
 
       <section className="settings-card">
         <div>
           <p className="section-eyebrow">APPLICATION</p>
-          <h2>重置界面状态</h2>
-          <p>只清除偏好、窗口状态和缓存，不删除 Bundle、Skill 或 Mount。</p>
+          <h2>{t("重置界面状态")}</h2>
+          <p>
+            {t("只清除偏好、窗口状态和缓存，不删除 Bundle、Skill 或 Mount。")}
+          </p>
         </div>
         <button
           className="secondary-action"
@@ -776,20 +838,26 @@ function InventorySettingsPage({
           disabled={isWriteBlocked || isResettingApplication}
           onClick={onResetApplication}
         >
-          {isResettingApplication ? "正在重置…" : "重置应用"}
+          {isResettingApplication ? t("正在重置…") : t("重置应用")}
         </button>
       </section>
 
       {resetError ? (
         <div className="inline-error" role="alert">
-          <strong>重置未完成</strong>
+          <strong>{t("重置未完成")}</strong>
           <span>{resetError}</span>
         </div>
       ) : null}
       {centralStoreError ? (
         <div className="inline-error" role="alert">
-          <strong>无法打开 Central Store</strong>
+          <strong>{t("无法打开 Central Store")}</strong>
           <span>{centralStoreError}</span>
+        </div>
+      ) : null}
+      {languageError ? (
+        <div className="inline-error" role="alert">
+          <strong>{t("语言")}</strong>
+          <span>{languageError}</span>
         </div>
       ) : null}
     </main>

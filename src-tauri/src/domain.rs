@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum UiIntent {
+    GetPreferences,
+    SetInterfaceLanguage {
+        language: InterfaceLanguage,
+    },
     GetStartupState,
     StartInitialScan,
     RefreshLocalInventory,
@@ -157,6 +161,31 @@ pub enum UiIntent {
         #[serde(rename = "planId")]
         plan_id: String,
     },
+}
+
+/// 1.1.0 只提供两种界面语言，原始 Skill 与技术标识不经过这个枚举改写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InterfaceLanguage {
+    ZhCn,
+    En,
+}
+
+impl InterfaceLanguage {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ZhCn => "zh_cn",
+            Self::En => "en",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "zh_cn" => Some(Self::ZhCn),
+            "en" => Some(Self::En),
+            _ => None,
+        }
+    }
 }
 
 /// 固定 Supported App 的稳定标识。
@@ -1391,6 +1420,9 @@ impl SkillMetadataStatus {
     rename_all_fields = "camelCase"
 )]
 pub enum UiOutcome {
+    Preferences {
+        language: InterfaceLanguage,
+    },
     UnsupportedPlatform {
         actual_os: String,
         actual_architecture: String,

@@ -2085,6 +2085,24 @@ code {
   line-height: 1.55;
 }
 
+.settings-select {
+  display: grid;
+  min-width: 220px;
+  gap: 0.45rem;
+  color: #526256;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.settings-select select {
+  padding: 0.78rem 0.9rem;
+  border: 1px solid rgb(48 75 56 / 18%);
+  border-radius: 10px;
+  color: #203326;
+  background: #fffef8;
+  font: inherit;
+}
+
 .skill-member-list {
   display: grid;
   gap: 0.75rem;

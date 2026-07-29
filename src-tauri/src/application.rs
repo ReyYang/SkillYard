@@ -12,8 +12,9 @@ use crate::{
         read_open_bundle_update_batch_outcome, recover_running_bundle_update_batch,
     },
     domain::{
-        BundleUpdateStatus, EditableLocalRelinkMember, MergeContentChoice, PlatformInfo,
-        SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, UiIntent, UiOutcome,
+        BundleUpdateStatus, EditableLocalRelinkMember, InterfaceLanguage, MergeContentChoice,
+        PlatformInfo, SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, UiIntent,
+        UiOutcome,
     },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
@@ -165,6 +166,15 @@ impl SkillYardApplication {
     }
 
     pub fn handle(&self, intent: UiIntent) -> Result<UiOutcome, ApplicationError> {
+        // 偏好需要在平台阻塞页之前可读，确保该页面也能使用用户已经选择的语言。
+        match &intent {
+            UiIntent::GetPreferences => return self.get_preferences(),
+            UiIntent::SetInterfaceLanguage { language } => {
+                return self.with_write_operation(|| self.set_interface_language(*language));
+            }
+            _ => {}
+        }
+
         if !self.platform.is_supported() {
             return Ok(UiOutcome::UnsupportedPlatform {
                 actual_os: self.platform.os.clone(),
@@ -176,6 +186,9 @@ impl SkillYardApplication {
         }
 
         match intent {
+            UiIntent::GetPreferences | UiIntent::SetInterfaceLanguage { .. } => {
+                unreachable!("偏好意图已在平台检查前处理")
+            }
             // 启动读取前可能需要修复上次中断的写事务，因此也必须取得单写门。
             UiIntent::GetStartupState => self.with_write_operation(|| self.get_startup_state()),
             UiIntent::StartInitialScan => self.with_write_operation(|| self.start_initial_scan()),
@@ -333,6 +346,22 @@ impl SkillYardApplication {
                 self.with_write_operation(|| self.discard_source_association_plan(plan_id))
             }
         }
+    }
+
+    fn get_preferences(&self) -> Result<UiOutcome, ApplicationError> {
+        let storage = self.open_storage()?;
+        Ok(UiOutcome::Preferences {
+            language: storage.read_interface_language()?,
+        })
+    }
+
+    fn set_interface_language(
+        &self,
+        language: InterfaceLanguage,
+    ) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_storage()?;
+        storage.save_interface_language(language)?;
+        Ok(UiOutcome::Preferences { language })
     }
 
     /// 扫描结果会写入同一份 SQLite；拒绝并发写可避免旧快照覆盖新状态。

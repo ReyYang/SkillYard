@@ -1,4 +1,9 @@
 export type SupportedAppId = "codex" | "claudeCode" | "gitHubCopilot";
+export type InterfaceLanguage = "zhCn" | "en";
+
+export interface UserPreferences {
+  language: InterfaceLanguage;
+}
 
 export interface SupportedAppSummary {
   id: SupportedAppId;
@@ -552,6 +557,10 @@ export interface TakeoverPlanMember {
 }
 
 export type UiOutcome =
+  | {
+      type: "preferences";
+      language: InterfaceLanguage;
+    }
   | {
       type: "unsupportedPlatform";
       actualOs: string;

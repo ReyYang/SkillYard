@@ -4,6 +4,7 @@ import type {
   BatchMountPlan,
   BatchMountRequest,
   EditableLocalRelinkPlan,
+  InterfaceLanguage,
   InstallPlan,
   MountPlan,
   MountScope,
@@ -15,6 +16,7 @@ import type {
   TakeoverPlan,
   TakeoverPlanRequest,
   UiOutcome,
+  UserPreferences,
 } from "./domain";
 
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
@@ -29,6 +31,8 @@ type BundleUpdateBatchResultOutcome = Extract<
 type RemovalPlanOutcome = Extract<UiOutcome, { type: "removalPlan" }>;
 
 export interface SkillYardClient {
+  getPreferences(): Promise<UserPreferences>;
+  setInterfaceLanguage(language: InterfaceLanguage): Promise<UserPreferences>;
   getStartupState(): Promise<UiOutcome>;
   openCentralStore(): Promise<void>;
   startInitialScan(): Promise<UiOutcome>;
@@ -127,6 +131,19 @@ export interface SkillYardClient {
 
 // 前端只知道任务级命令；文件夹路径由 Rust 原生选择器产生，不开放通用文件能力。
 export const tauriSkillYardClient: SkillYardClient = {
+  getPreferences: async () => {
+    const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
+      "get_preferences",
+    );
+    return { language: outcome.language };
+  },
+  setInterfaceLanguage: async (language) => {
+    const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
+      "set_interface_language",
+      { language },
+    );
+    return { language: outcome.language };
+  },
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),
   openCentralStore: () => invoke<void>("open_central_store"),
   startInitialScan: () => invoke<UiOutcome>("start_initial_scan"),

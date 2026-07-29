@@ -28,10 +28,10 @@ pub use domain::{
     BundleUpdateBatchResultItemStatus, BundleUpdateBatchResultStatus, BundleUpdateImpact,
     BundleUpdateStatus, BundleUpdateSummary, EditableLocalRelinkMember, EditableLocalRelinkPlan,
     InstallCandidate, InstallInputKind, InstallMode, InstallPlan, InstallationChain,
-    InstallationChainKind, InventoryItem, InventoryLocationKind, InventoryObservation,
-    LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind,
-    MergeContentChoice, MountHealth, MountOperation, MountPlan, MountPlanPurpose, MountScope,
-    MountSummary, PlatformInfo, ProjectSelection, ProjectSummary, RecoveryIssue,
+    InstallationChainKind, InterfaceLanguage, InventoryItem, InventoryLocationKind,
+    InventoryObservation, LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind,
+    ManagementKind, MergeContentChoice, MountHealth, MountOperation, MountPlan, MountPlanPurpose,
+    MountScope, MountSummary, PlatformInfo, ProjectSelection, ProjectSummary, RecoveryIssue,
     RemovalBundleSummary, RemovalKind, RemovalMemberSummary, RemovalPlan, RemovalPreservedSource,
     ScanIssue, ScanIssueCode, ScanRootKey, SkillMetadataStatus, SkillsShSearchMember,
     SkillsShSearchSource, SourceAssociationConflict, SourceAssociationMember,
@@ -65,6 +65,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(application)
         .invoke_handler(tauri::generate_handler![
+            commands::get_preferences,
+            commands::set_interface_language,
             commands::get_startup_state,
             commands::open_central_store,
             commands::start_initial_scan,

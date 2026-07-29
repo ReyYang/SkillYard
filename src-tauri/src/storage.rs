@@ -15,12 +15,12 @@ use uuid::Uuid;
 use crate::domain::{
     BatchMountDisposition, BundleUpdateAction, BundleUpdateStatus, BundleUpdateSummary,
     EditableLocalRelinkMember, EditableLocalRelinkPlan, InstallationChain, InstallationChainKind,
-    InventoryItem, InventoryLocationKind, InventoryObservation, LocalRefreshSummary,
-    ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth, MountOperation,
-    MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue, ScanIssue,
-    ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus, SourceCatalogMemberSummary,
-    SourceCatalogStatus, SourceKind, SourceRefChangePlan, SourceSummary, SupportedAppId,
-    SupportedAppSummary, TakeoverPlan, UiOutcome,
+    InterfaceLanguage, InventoryItem, InventoryLocationKind, InventoryObservation,
+    LocalRefreshSummary, ManagementEvidence, ManagementEvidenceKind, ManagementKind, MountHealth,
+    MountOperation, MountPlanPurpose, MountScope, MountSummary, ProjectSummary, RecoveryIssue,
+    ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey, SkillMetadataStatus,
+    SourceCatalogMemberSummary, SourceCatalogStatus, SourceKind, SourceRefChangePlan,
+    SourceSummary, SupportedAppId, SupportedAppSummary, TakeoverPlan, UiOutcome,
 };
 use crate::github_source::parse_github_source;
 use crate::installation_chain::takeover_group_evidence;
@@ -94,6 +94,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0025_bundle_mount_removal.sql"),
     ),
     (26, include_str!("../migrations/0026_scan_issue_paths.sql")),
+    (
+        27,
+        include_str!("../migrations/0027_interface_language.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -112,6 +116,12 @@ pub enum StorageError {
     OpenDatabase(#[source] rusqlite::Error),
     #[error("无法执行 SkillYard SQLite migration：{0}")]
     Migration(#[source] rusqlite::Error),
+    #[error("无法读取界面语言偏好：{0}")]
+    ReadPreferences(#[source] rusqlite::Error),
+    #[error("无法保存界面语言偏好：{0}")]
+    SavePreferences(#[source] rusqlite::Error),
+    #[error("SQLite 中包含未知界面语言：{0}")]
+    UnknownInterfaceLanguage(String),
     #[error("无法读取本机清单状态：{0}")]
     ReadInventory(#[source] rusqlite::Error),
     #[error("无法读取 Source 状态：{0}")]
@@ -1299,6 +1309,40 @@ impl Storage {
             transaction.commit().map_err(StorageError::Migration)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn read_interface_language(&self) -> Result<InterfaceLanguage, StorageError> {
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT interface_language FROM app_preferences WHERE singleton_id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(StorageError::ReadPreferences)?;
+        InterfaceLanguage::from_str(&stored).ok_or(StorageError::UnknownInterfaceLanguage(stored))
+    }
+
+    pub(crate) fn save_interface_language(
+        &mut self,
+        language: InterfaceLanguage,
+    ) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE app_preferences
+                 SET interface_language = ?1
+                 WHERE singleton_id = 1",
+                [language.as_str()],
+            )
+            .map_err(StorageError::SavePreferences)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::SavePreferences(
+                rusqlite::Error::QueryReturnedNoRows,
+            ))
+        }
     }
 
     pub(crate) fn save_takeover_plan(

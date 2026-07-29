@@ -27,6 +27,7 @@ import type {
   BatchMountRequest,
   EditableLocalRelinkPlan,
   InstallPlan,
+  InterfaceLanguage,
   MountPlan,
   MountScope,
   ProjectSelection,
@@ -41,6 +42,7 @@ import type {
   TakeoverPlanRequest,
   UiOutcome,
 } from "./domain";
+import { I18nProvider, useI18n } from "./i18n";
 import {
   tauriSkillYardClient,
   type SkillYardClient,
@@ -48,6 +50,14 @@ import {
 
 interface AppProps {
   client?: SkillYardClient;
+}
+
+interface AppCoreProps {
+  client: SkillYardClient;
+  language: InterfaceLanguage;
+  isSavingLanguage: boolean;
+  languageError: string | null;
+  onLanguageChange(language: InterfaceLanguage): Promise<void>;
 }
 
 type ViewState =
@@ -86,6 +96,78 @@ type RemovalOperation =
   | { type: "confirming" | "discarding"; planId: string };
 
 export function App({ client = tauriSkillYardClient }: AppProps) {
+  const [language, setLanguage] = useState<InterfaceLanguage | null>(null);
+  const [preferenceError, setPreferenceError] = useState<string | null>(null);
+  const [isSavingLanguage, setIsSavingLanguage] = useState(false);
+  const [languageError, setLanguageError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    client.getPreferences().then(
+      (preferences) => {
+        if (active) setLanguage(preferences.language);
+      },
+      (error: unknown) => {
+        if (active) setPreferenceError(formatError(error, "zhCn"));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
+  const changeLanguage = async (nextLanguage: InterfaceLanguage) => {
+    if (isSavingLanguage || nextLanguage === language) return;
+    setIsSavingLanguage(true);
+    setLanguageError(null);
+    try {
+      const preferences = await client.setInterfaceLanguage(nextLanguage);
+      setLanguage(preferences.language);
+    } catch (error) {
+      setLanguageError(formatError(error, language ?? "zhCn"));
+    } finally {
+      setIsSavingLanguage(false);
+    }
+  };
+
+  if (preferenceError) {
+    return (
+      <main className="state-page" role="alert">
+        <h1>暂时无法继续</h1>
+        <p>{preferenceError}</p>
+      </main>
+    );
+  }
+  if (!language) {
+    return (
+      <main className="state-page" aria-label="SkillYard 正在启动">
+        <span className="loading-mark" aria-hidden="true" />
+        <p>正在读取本机状态…</p>
+      </main>
+    );
+  }
+
+  return (
+    <I18nProvider language={language}>
+      <AppCore
+        client={client}
+        language={language}
+        isSavingLanguage={isSavingLanguage}
+        languageError={languageError}
+        onLanguageChange={changeLanguage}
+      />
+    </I18nProvider>
+  );
+}
+
+function AppCore({
+  client,
+  language,
+  isSavingLanguage,
+  languageError,
+  onLanguageChange,
+}: AppCoreProps) {
+  const { t } = useI18n();
   const [viewState, setViewState] = useState<ViewState>({ status: "loading" });
   const [committedInventory, setCommittedInventory] =
     useState<InventoryOutcome | null>(null);
@@ -210,67 +292,67 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const currentOperation = (() => {
     if (isConfirmingBundleUpdateBatch) {
       return {
-        title: "正在更新所选 Bundle",
-        detail: "已确认的 Bundle 会依次完成，当前操作不能取消。",
+        title: t("正在更新所选 Bundle"),
+        detail: t("已确认的 Bundle 会依次完成，当前操作不能取消。"),
       };
     }
     if (removalOperation?.type === "confirming") {
       const title =
         activeRemovalPlan?.kind === "bundle"
-          ? "正在删除 Bundle"
+          ? t("正在删除 Bundle")
           : activeRemovalPlan?.kind === "bundleMounts"
-            ? "正在解除 Bundle 挂载"
+            ? t("正在解除 Bundle 挂载")
           : activeRemovalPlan?.kind === "project"
-            ? "正在移除项目"
-            : "正在删除 Source";
+            ? t("正在移除项目")
+            : t("正在删除 Source");
       return {
         title,
-        detail: "SkillYard 正在完成已确认的影响范围，当前操作不能取消。",
+        detail: t("SkillYard 正在完成已确认的影响范围，当前操作不能取消。"),
       };
     }
     if (isConfirmingSourceAssociation) {
       return {
-        title: "正在保存来源关联",
-        detail: "关联或归并会作为一个完整操作完成，当前操作不能取消。",
+        title: t("正在保存来源关联"),
+        detail: t("关联或归并会作为一个完整操作完成，当前操作不能取消。"),
       };
     }
     if (sourceOperation?.type === "confirmingRelink") {
       return {
-        title: "正在重新关联 Source 路径",
-        detail: "只更新来源位置，不会替换正在使用的 Skill 内容。",
+        title: t("正在重新关联 Source 路径"),
+        detail: t("只更新来源位置，不会替换正在使用的 Skill 内容。"),
       };
     }
     if (sourceOperation?.type === "confirmingRef") {
       return {
-        title: "正在更改 Source 分支",
-        detail: "只更新后续来源基线，不会替换正在使用的 Skill 内容。",
+        title: t("正在更改 Source 分支"),
+        detail: t("只更新后续来源基线，不会替换正在使用的 Skill 内容。"),
       };
     }
     if (isConfirmingTakeover) {
       return {
-        title: "正在接管 Skill",
-        detail: "文件迁移、受管内容和 Mount 会作为一个完整操作完成。",
+        title: t("正在接管 Skill"),
+        detail: t("文件迁移、受管内容和 Mount 会作为一个完整操作完成。"),
       };
     }
     if (isInstalling) {
       return {
         title:
           pendingInstallPlan?.mode === "update"
-            ? "正在更新 Bundle"
-            : "正在安装 Bundle",
-        detail: "确认后的文件系统操作不能取消，SkillYard 会自动完成或恢复。",
+            ? t("正在更新 Bundle")
+            : t("正在安装 Bundle"),
+        detail: t("确认后的文件系统操作不能取消，SkillYard 会自动完成或恢复。"),
       };
     }
     if (isConfirmingMount) {
       return {
-        title: "正在修改 Mount",
-        detail: "目标路径与登记状态会作为一个完整操作完成。",
+        title: t("正在修改 Mount"),
+        detail: t("目标路径与登记状态会作为一个完整操作完成。"),
       };
     }
     if (isConfirmingBatchMount) {
       return {
-        title: "正在批量挂载 Bundle",
-        detail: "所选 Mount 会作为一个完整操作完成，当前操作不能取消。",
+        title: t("正在批量挂载 Bundle"),
+        detail: t("所选 Mount 会作为一个完整操作完成，当前操作不能取消。"),
       };
     }
     return null;
@@ -1374,6 +1456,10 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       outcome={committedInventory}
       screen={readOnlyInventoryScreen}
       onScreenChange={setReadOnlyInventoryScreen}
+      language={language}
+      isSavingLanguage={isSavingLanguage}
+      languageError={languageError}
+      onLanguageChange={onLanguageChange}
       isWriteBlocked
       allowReadOnlyDetails
       isRefreshing={false}
@@ -1479,9 +1565,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
 
   if (viewState.status === "loading") {
     return (
-      <main className="state-page" aria-label="SkillYard 正在启动">
+      <main className="state-page" aria-label={t("正在读取本机状态…")}>
         <span className="spinner" aria-hidden="true" />
-        <p>正在读取本机状态…</p>
+        <p>{t("正在读取本机状态…")}</p>
       </main>
     );
   }
@@ -1489,7 +1575,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     return (
       <main className="state-page" role="alert">
         <p className="eyebrow">SKILLYARD · LOCAL ERROR</p>
-        <h1>暂时无法继续</h1>
+        <h1>{t("暂时无法继续")}</h1>
         <p>{viewState.message}</p>
       </main>
     );
@@ -1617,7 +1703,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     return (
       <main className="state-page">
         <p className="eyebrow">SKILLYARD · PLATFORM CHECK</p>
-        <h1>当前 Mac 不受 SkillYard 1.0 支持</h1>
+        <h1>{t("当前 Mac 不受 SkillYard 1.0 支持")}</h1>
         <p>
           需要 macOS {viewState.outcome.minimumMajorVersion} 或更高版本的 Apple
           Silicon Mac。
@@ -1658,7 +1744,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         entry.bundleId === sourceAssociationBundleId,
     );
     const bundleDisplayName =
-      members[0]?.bundleDisplayName ?? "本地 Bundle";
+      members[0]?.bundleDisplayName ?? t("本地 Bundle");
     if (members.length > 0) {
       return (
         <SourceAssociationSelectionPage
@@ -1722,8 +1808,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   if (viewState.outcome.type !== "inventory") {
     return (
       <main className="state-page" role="alert">
-        <h1>暂时无法继续</h1>
-        <p>SkillYard 收到了无法显示的应用状态。</p>
+        <h1>{t("暂时无法继续")}</h1>
+        <p>{t("SkillYard 收到了无法显示的应用状态。")}</p>
       </main>
     );
   }
@@ -1850,6 +1936,10 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       outcome={viewState.outcome}
       screen={inventoryScreen}
       onScreenChange={setInventoryScreen}
+      language={language}
+      isSavingLanguage={isSavingLanguage}
+      languageError={languageError}
+      onLanguageChange={onLanguageChange}
       // 任一主界面写操作进行中时统一冻结其他写入口；搜索和筛选仍可使用。
       isWriteBlocked={isInventoryWriteBlocked}
       allowReadOnlyDetails={false}
@@ -1935,7 +2025,10 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   );
 }
 
-function formatError(error: unknown): string {
+function formatError(
+  error: unknown,
+  language: InterfaceLanguage = "zhCn",
+): string {
   if (error instanceof Error) return error.message;
   // Tauri command 会把 Rust 的结构化 UiError 作为普通对象传给前端。
   if (
@@ -1946,7 +2039,9 @@ function formatError(error: unknown): string {
   ) {
     return error.message;
   }
-  return "无法读取 SkillYard 状态";
+  return language === "zhCn"
+    ? "无法读取 SkillYard 状态"
+    : "Unable to read SkillYard state";
 }
 
 function errorCode(error: unknown): string | null {

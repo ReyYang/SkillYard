@@ -102,6 +102,46 @@ describe("首次使用", () => {
 });
 
 describe("本机清单", () => {
+  it("启动时使用后端恢复的英文偏好", async () => {
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.getPreferences).mockResolvedValue({ language: "en" });
+
+    render(<App client={client} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Bundle inventory" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(client.setInterfaceLanguage).not.toHaveBeenCalled();
+  });
+
+  it("设置中的语言切换立即更新外壳并使用持久化偏好", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.setInterfaceLanguage).mockResolvedValue({
+      language: "en",
+    });
+
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "界面语言" }),
+      "en",
+    );
+
+    expect(client.setInterfaceLanguage).toHaveBeenCalledWith("en");
+    expect(
+      await screen.findByRole("heading", { name: "Settings" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
+    expect(screen.queryByText("设置")).toBeNull();
+  });
+
   it("直接显示已保存清单，不自动刷新", async () => {
     const client = createClient(
       inventoryOutcome([createEntry({ skillName: "saved" })]),
@@ -6069,6 +6109,8 @@ function createEditableLocalRelinkPlan(
 
 function createClient(startup: UiOutcome): SkillYardClient {
   return {
+    getPreferences: vi.fn().mockResolvedValue({ language: "zhCn" }),
+    setInterfaceLanguage: vi.fn(),
     getStartupState: vi.fn().mockResolvedValue(startup),
     openCentralStore: vi.fn().mockResolvedValue(undefined),
     startInitialScan: vi.fn(),
