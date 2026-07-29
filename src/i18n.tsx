@@ -87,6 +87,9 @@ const EN_MESSAGES = {
   "请先在设置中启用 AI 并完成连接测试。":
     "Enable AI and test the connection in Settings first.",
   "待重新整理": "Regeneration needed",
+  "未整理": "Not organized",
+  "分类": "Category",
+  "全部分类": "All categories",
   "适用场景": "Use cases",
   "使用说明": "Instructions",
   "开发与工程": "Development & Engineering",
@@ -328,6 +331,7 @@ const EN_MESSAGES = {
   "接管 Bundle {bundle}": "Take over Bundle {bundle}",
   "接管 Bundle": "Take over Bundle",
   "{count} 个 Skill": "{count} Skills",
+  "{visible} / {total} 个 Skill": "{visible} / {total} Skills",
   "查看 Bundle {bundle}": "View Bundle {bundle}",
   "查看成员": "View members",
   "查看分组 {group}": "View group {group}",

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type {
   AiConfigurationInput,
@@ -18,6 +18,7 @@ import { PageBackButton } from "./PageBackButton";
 
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 type ManagementFilter = "all" | "managed" | "takeover" | "other";
+type CategoryFilter = "all" | SkillCategory;
 
 const AI_MODELS: Record<AiPreferences["provider"], readonly string[]> = {
   openAi: [
@@ -122,6 +123,23 @@ const FILTERS: Array<{ id: ManagementFilter; label: TranslationKey }> = [
   { id: "other", label: "其他管理方" },
 ];
 
+// 固定顺序属于 SkillYard 自己的 Taxonomy；界面只取当前清单实际出现的项。
+const SKILL_CATEGORIES: Array<{
+  id: SkillCategory;
+  label: TranslationKey;
+}> = [
+  { id: "developmentEngineering", label: "开发与工程" },
+  { id: "systemOperations", label: "系统与运维" },
+  { id: "productivityAutomation", label: "效率与自动化" },
+  { id: "dataAnalytics", label: "数据与分析" },
+  { id: "productBusiness", label: "产品与业务" },
+  { id: "researchLearning", label: "研究与学习" },
+  { id: "writingCommunication", label: "写作与沟通" },
+  { id: "designCreative", label: "设计与创意" },
+  { id: "securityCompliance", label: "安全与合规" },
+  { id: "other", label: "其他" },
+];
+
 type InventoryGroupKind =
   | "managedBundle"
   | "takeoverBundle"
@@ -212,11 +230,29 @@ export function InventoryPage({
   const { localize, t } = useI18n();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ManagementFilter>("all");
+  const [categoryFilter, setCategoryFilter] =
+    useState<CategoryFilter>("all");
 
   const groups = useMemo(
     () => groupInventoryEntries(outcome.entries, t, language),
     [language, outcome.entries, t],
   );
+  const availableCategories = useMemo(() => {
+    const present = new Set(
+      outcome.entries.flatMap((entry) =>
+        entry.aiExplanation ? [entry.aiExplanation.category] : [],
+      ),
+    );
+    return SKILL_CATEGORIES.filter((category) => present.has(category.id));
+  }, [outcome.entries]);
+  useEffect(() => {
+    if (
+      categoryFilter !== "all" &&
+      !availableCategories.some((category) => category.id === categoryFilter)
+    ) {
+      setCategoryFilter("all");
+    }
+  }, [availableCategories, categoryFilter]);
   // 搜索命中成员时只显示其所属分组，主清单仍不展开 Skill。
   const visibleGroups = useMemo(() => {
     const normalizedQuery = query
@@ -226,10 +262,11 @@ export function InventoryPage({
       group.entries.some(
         (entry) =>
           matchesFilter(entry, filter) &&
-          matchesQuery(entry, normalizedQuery),
+          matchesQuery(entry, normalizedQuery) &&
+          matchesCategory(entry, categoryFilter),
       ),
     );
-  }, [filter, groups, language, query]);
+  }, [categoryFilter, filter, groups, language, query]);
   // 主清单中的每张分组卡都是用户看到的 Bundle，包括只读的插件与项目分组。
   const bundleCount = groups.length;
   const updatableBundleCount = useMemo(
@@ -258,6 +295,11 @@ export function InventoryPage({
       ? selectedGroup?.entries.find((entry) => entry.id === screen.entryId) ??
         null
       : null;
+  const selectedGroupEntries = selectedGroup
+    ? selectedGroup.entries.filter((entry) =>
+        matchesCategory(entry, categoryFilter),
+      )
+    : [];
 
   if (screen.type === "settings") {
     return (
@@ -313,7 +355,11 @@ export function InventoryPage({
         }
         onManageMount={onManageMount}
         onBack={() =>
-          onScreenChange({ type: "group", groupId: selectedGroup.id })
+          onScreenChange(
+            selectedGroup.entries.length === 1
+              ? { type: "list" }
+              : { type: "group", groupId: selectedGroup.id },
+          )
         }
       />
     );
@@ -323,6 +369,9 @@ export function InventoryPage({
     return (
       <InventoryGroupDetails
         group={selectedGroup}
+        entries={selectedGroupEntries}
+        categoryFilter={categoryFilter}
+        language={language}
         mounts={outcome.mounts}
         onOpenSkill={(entryId) =>
           onScreenChange({
@@ -527,6 +576,23 @@ export function InventoryPage({
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
+        <label className="category-filter">
+          <span>{t("分类")}</span>
+          <select
+            aria-label={t("分类")}
+            value={categoryFilter}
+            onChange={(event) =>
+              setCategoryFilter(event.target.value as CategoryFilter)
+            }
+          >
+            <option value="all">{t("全部分类")}</option>
+            {availableCategories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {t(category.label)}
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="filter-group" aria-label={t("管理状态")}>
           {FILTERS.map((item) => (
             <button
@@ -646,6 +712,7 @@ export function InventoryPage({
             title={group.title}
             eyebrow={t(groupEyebrow(group.kind))}
             entries={group.entries}
+            language={language}
             actionsDisabled={isWriteBlocked}
             batchMountBundleId={group.bundleId}
             onBatchMount={onBatchMount}
@@ -685,12 +752,27 @@ export function InventoryPage({
             onTakeover={
               group.kind === "takeoverBundle" ? onTakeover : undefined
             }
-            onOpen={() =>
-              onScreenChange({ type: "group", groupId: group.id })
-            }
+            onOpen={() => {
+              const singleEntry = group.entries.length === 1
+                ? group.entries[0]
+                : null;
+              onScreenChange(
+                singleEntry
+                  ? {
+                      type: "skill",
+                      groupId: group.id,
+                      entryId: singleEntry.id,
+                    }
+                  : { type: "group", groupId: group.id },
+              );
+            }}
             openLabel={
-              group.kind === "managedBundle" ||
-              group.kind === "takeoverBundle"
+              group.entries.length === 1
+                ? t("查看 Skill {skill}", {
+                    skill: group.entries[0]!.skillName,
+                  })
+                : group.kind === "managedBundle" ||
+                    group.kind === "takeoverBundle"
                 ? t("查看 Bundle {bundle}", { bundle: group.title })
                 : t("查看分组 {group}", { group: group.title })
             }
@@ -719,6 +801,7 @@ function InventorySection({
   title,
   eyebrow,
   entries,
+  language,
   actionsDisabled = false,
   batchMountBundleId,
   onBatchMount,
@@ -742,6 +825,7 @@ function InventorySection({
   title: string;
   eyebrow: string;
   entries: InventoryObservation[];
+  language: InterfaceLanguage;
   actionsDisabled?: boolean;
   batchMountBundleId?: string | null;
   onBatchMount?(bundleId: string): void;
@@ -861,13 +945,20 @@ function InventorySection({
           <span>{t("{count} 个 Skill", { count: entries.length })}</span>
         </div>
       </header>
+      {entries.length === 1 ? (
+        <SkillAiPresentation
+          entry={entries[0]!}
+          language={language}
+          detailed={false}
+        />
+      ) : null}
       <button
         className="bundle-open-action"
         type="button"
         aria-label={openLabel}
         onClick={onOpen}
       >
-        {t("查看成员")}
+        {entries.length === 1 ? t("查看详情") : t("查看成员")}
       </button>
       {entries.length === 1 && !batchMountBundleId ? (
         <small className="bundle-context">
@@ -1180,11 +1271,17 @@ function InventorySettingsPage({
 
 function InventoryGroupDetails({
   group,
+  entries,
+  categoryFilter,
+  language,
   mounts,
   onOpenSkill,
   onBack,
 }: {
   group: InventoryGroupView;
+  entries: InventoryObservation[];
+  categoryFilter: CategoryFilter;
+  language: InterfaceLanguage;
   mounts: MountSummary[];
   onOpenSkill(entryId: string): void;
   onBack(): void;
@@ -1198,7 +1295,12 @@ function InventoryGroupDetails({
           <p className="eyebrow">{t(groupEyebrow(group.kind))}</p>
           <h1>{group.title}</h1>
           <p className="inventory-summary">
-            {t("{count} 个 Skill", { count: group.entries.length })}
+            {categoryFilter === "all"
+              ? t("{count} 个 Skill", { count: entries.length })
+              : t("{visible} / {total} 个 Skill", {
+                  visible: entries.length,
+                  total: group.entries.length,
+                })}
           </p>
         </div>
       </header>
@@ -1207,22 +1309,29 @@ function InventoryGroupDetails({
         className="skill-member-list"
         aria-label={t("{group} 的 Skill", { group: group.title })}
       >
-        {group.entries.map((entry) => {
+        {entries.map((entry) => {
           const memberMounts = mounts.filter(
             (mount) => mount.memberId === entry.memberId,
           );
           return (
             <li key={entry.id} className="skill-member-row">
-              <div>
-                <strong>{entry.skillName}</strong>
-                <span className={`management-badge ${entry.managementKind}`}>
-                  {managementLabel(entry.managementKind, t)}
-                </span>
-                <small>
-                  {memberMounts.length > 0
-                    ? t("{count} 个 Mount", { count: memberMounts.length })
-                    : t("未挂载")}
-                </small>
+              <div className="skill-member-copy">
+                <div className="skill-member-heading">
+                  <strong>{entry.skillName}</strong>
+                  <span className={`management-badge ${entry.managementKind}`}>
+                    {managementLabel(entry.managementKind, t)}
+                  </span>
+                  <small>
+                    {memberMounts.length > 0
+                      ? t("{count} 个 Mount", { count: memberMounts.length })
+                      : t("未挂载")}
+                  </small>
+                </div>
+                <SkillAiPresentation
+                  entry={entry}
+                  language={language}
+                  detailed
+                />
               </div>
               <button
                 className="compact-action"
@@ -1239,6 +1348,58 @@ function InventoryGroupDetails({
         })}
       </ul>
     </main>
+  );
+}
+
+function SkillAiPresentation({
+  entry,
+  language,
+  detailed,
+}: {
+  entry: InventoryObservation;
+  language: InterfaceLanguage;
+  detailed: boolean;
+}) {
+  const { t } = useI18n();
+  const explanation = entry.aiExplanation;
+  if (!explanation) {
+    return (
+      <div className="skill-ai-presentation is-empty">
+        <span className="skill-ai-state">{t("未整理")}</span>
+      </div>
+    );
+  }
+  const stale = isSkillExplanationPending(entry, language);
+  return (
+    <div className="skill-ai-presentation">
+      <div className="skill-ai-presentation-heading">
+        <span className="skill-category">
+          {t(skillCategoryLabel(explanation.category))}
+        </span>
+        {stale ? (
+          <span className="skill-ai-state is-stale">
+            {t("待重新整理")}
+          </span>
+        ) : null}
+      </div>
+      <p className="skill-ai-presentation-summary">{explanation.summary}</p>
+      {detailed ? (
+        <div className="skill-ai-presentation-details">
+          <div>
+            <strong>{t("适用场景")}</strong>
+            <ul>
+              {explanation.useCases.map((useCase) => (
+                <li key={useCase}>{useCase}</li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <strong>{t("使用说明")}</strong>
+            <p>{explanation.instructions}</p>
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1820,6 +1981,13 @@ function matchesFilter(
     entry.managementKind === "agentManaged" ||
     entry.managementKind === "projectManaged"
   );
+}
+
+function matchesCategory(
+  entry: InventoryObservation,
+  category: CategoryFilter,
+): boolean {
+  return category === "all" || entry.aiExplanation?.category === category;
 }
 
 function matchesQuery(entry: InventoryObservation, query: string): boolean {

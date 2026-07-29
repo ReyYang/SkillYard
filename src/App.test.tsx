@@ -476,6 +476,186 @@ describe("本机清单", () => {
     expect(screen.getByText("待重新整理")).toBeInTheDocument();
   });
 
+  it("单成员 Bundle 在主清单直接显示分类概要并进入 Skill 详情", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          aiExplanation: {
+            category: "developmentEngineering",
+            summary: "用于审查代码并指出风险。",
+            useCases: ["提交前审查", "定位潜在缺陷"],
+            instructions: "提供待审查代码。",
+            language: "zhCn",
+            contentFingerprint: "fingerprint",
+            stale: false,
+          },
+        }),
+      ]),
+    );
+
+    render(<App client={client} />);
+    const bundle = await screen.findByRole("region", {
+      name: "example-bundle",
+    });
+    expect(within(bundle).getByText("开发与工程")).toBeInTheDocument();
+    expect(
+      within(bundle).getByText("用于审查代码并指出风险。"),
+    ).toBeInTheDocument();
+    expect(
+      within(bundle).getByRole("button", { name: "删除 Bundle example-bundle" }),
+    ).toBeInTheDocument();
+    expect(
+      within(bundle).queryByRole("button", {
+        name: "查看 Bundle example-bundle",
+      }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      within(bundle).getByRole("button", { name: "查看 Skill example" }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "example" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("提交前审查")).toBeInTheDocument();
+    expect(screen.getByText("提供待审查代码。")).toBeInTheDocument();
+  });
+
+  it("分类筛选仍返回 Bundle，并在多成员页只展示匹配 Skill 的完整说明", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          id: "managed:alpha",
+          memberId: "alpha",
+          skillName: "alpha",
+          aiExplanation: {
+            category: "developmentEngineering",
+            summary: "开发说明。",
+            useCases: ["开发一", "开发二"],
+            instructions: "执行开发流程。",
+            language: "zhCn",
+            contentFingerprint: "fingerprint",
+            stale: false,
+          },
+        }),
+        createManagedEntry({
+          id: "managed:beta",
+          memberId: "beta",
+          skillName: "beta",
+          aiExplanation: {
+            category: "writingCommunication",
+            summary: "写作说明。",
+            useCases: ["起草文档", "润色内容"],
+            instructions: "提供写作目标。",
+            language: "zhCn",
+            contentFingerprint: "fingerprint",
+            stale: false,
+          },
+        }),
+        createManagedEntry({
+          id: "managed:gamma",
+          memberId: "gamma",
+          skillName: "gamma",
+        }),
+        createManagedEntry({
+          id: "managed:other",
+          memberId: "other",
+          skillName: "other",
+          bundleId: "bundle-2",
+          bundleDisplayName: "other-bundle",
+          aiExplanation: {
+            category: "dataAnalytics",
+            summary: "数据说明。",
+            useCases: ["分析数据", "生成结论"],
+            instructions: "提供数据。",
+            language: "zhCn",
+            contentFingerprint: "fingerprint",
+            stale: false,
+          },
+        }),
+      ]),
+    );
+
+    render(<App client={client} />);
+    const category = await screen.findByRole("combobox", { name: "分类" });
+    expect(within(category).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "全部分类",
+      "开发与工程",
+      "数据与分析",
+      "写作与沟通",
+    ]);
+
+    await user.selectOptions(category, "writingCommunication");
+
+    expect(
+      screen.getByRole("region", { name: "example-bundle" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "other-bundle" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "beta" })).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "查看 Bundle example-bundle",
+      }),
+    );
+
+    const members = screen.getByRole("list", {
+      name: "example-bundle 的 Skill",
+    });
+    expect(within(members).getByText("beta")).toBeInTheDocument();
+    expect(within(members).queryByText("alpha")).not.toBeInTheDocument();
+    expect(within(members).queryByText("gamma")).not.toBeInTheDocument();
+    expect(within(members).getByText("写作与沟通")).toBeInTheDocument();
+    expect(within(members).getByText("写作说明。")).toBeInTheDocument();
+    expect(within(members).getByText("起草文档")).toBeInTheDocument();
+    expect(within(members).getByText("提供写作目标。")).toBeInTheDocument();
+  });
+
+  it("主清单明确区分未整理和待重新整理，不生成说明占位内容", async () => {
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          id: "managed:missing",
+          memberId: "missing",
+          skillName: "missing",
+          bundleId: "bundle-missing",
+          bundleDisplayName: "missing-bundle",
+        }),
+        createManagedEntry({
+          id: "managed:stale",
+          memberId: "stale",
+          skillName: "stale",
+          bundleId: "bundle-stale",
+          bundleDisplayName: "stale-bundle",
+          aiExplanation: {
+            category: "researchLearning",
+            summary: "旧说明仍可查看。",
+            useCases: ["旧场景一", "旧场景二"],
+            instructions: "旧使用说明。",
+            language: "zhCn",
+            contentFingerprint: "older-fingerprint",
+            stale: true,
+          },
+        }),
+      ]),
+    );
+
+    render(<App client={client} />);
+
+    const missing = await screen.findByRole("region", {
+      name: "missing-bundle",
+    });
+    expect(within(missing).getByText("未整理")).toBeInTheDocument();
+    expect(within(missing).queryByText(/用于|说明。/)).not.toBeInTheDocument();
+    const stale = screen.getByRole("region", { name: "stale-bundle" });
+    expect(within(stale).getByText("待重新整理")).toBeInTheDocument();
+    expect(within(stale).getByText("旧说明仍可查看。")).toBeInTheDocument();
+  });
+
   it("启动时使用后端恢复的英文偏好", async () => {
     const client = createClient(
       inventoryOutcome([createManagedEntry({ skillName: "example" })]),
@@ -2328,7 +2508,6 @@ describe("本机清单", () => {
       screen.getByRole("heading", { name: "saved" }),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回上一页" }));
-    await user.click(screen.getByRole("button", { name: "返回上一页" }));
     expect(
       screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
@@ -3300,7 +3479,7 @@ describe("本机清单", () => {
     ).toBeInTheDocument();
   });
 
-  it("左上角返回按钮按清单、Bundle、Skill 和挂载管理的层级返回", async () => {
+  it("左上角返回按钮按实际进入路径从挂载、单成员 Skill 和设置返回", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([createManagedEntry()]));
 
@@ -3315,11 +3494,6 @@ describe("本机清单", () => {
 
     await user.click(screen.getByRole("button", { name: "返回上一页" }));
     expect(screen.getByRole("heading", { name: "example" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "返回上一页" }));
-    expect(
-      screen.getByRole("heading", { name: "example-bundle" }),
-    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "返回上一页" }));
     expect(
@@ -3431,10 +3605,12 @@ describe("本机清单", () => {
     });
     await user.click(
       within(refreshedBundles[1]!).getByRole("button", {
-        name: "查看 Bundle mattpocock/skills",
+        name: "查看 Skill research",
       }),
     );
-    expect(screen.getByText("research")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "research" }),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
     expect(screen.getByRole("region", { name: "local-copy" })).toHaveTextContent(
@@ -3887,9 +4063,11 @@ describe("English installation and takeover flows", () => {
     );
     expect(alert).not.toHaveTextContent("SQLite 暂时不可写");
     await user.click(
-      screen.getByRole("button", { name: "View Bundle example-bundle" }),
+      screen.getByRole("button", { name: "View Skill preserved" }),
     );
-    expect(screen.getByText("preserved")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "preserved" }),
+    ).toBeInTheDocument();
   });
 });
 
@@ -6559,8 +6737,19 @@ async function openManagedSkillDetails(
   bundleDisplayName = "example-bundle",
   skillName = "example",
 ) {
+  const bundle = await screen.findByRole("region", {
+    name: bundleDisplayName,
+  });
+  // 单成员 Bundle 直接进入 Skill；多成员 Bundle 仍先进入成员清单。
+  const directSkill = within(bundle).queryByRole("button", {
+    name: `查看 Skill ${skillName}`,
+  });
+  if (directSkill) {
+    await user.click(directSkill);
+    return;
+  }
   await user.click(
-    await screen.findByRole("button", {
+    within(bundle).getByRole("button", {
       name: `查看 Bundle ${bundleDisplayName}`,
     }),
   );
