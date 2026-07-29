@@ -681,6 +681,12 @@ const EN_MESSAGES = {
   "问问这个 Skill 能做什么…": "Ask what this Skill can do…",
   "发送": "Send",
   "正在阅读并回答…": "Reading and answering…",
+  "参考链接": "Reference link",
+  "可准备安装预览": "Installation preview available",
+  "查看安装预览": "Preview installation",
+  "查看 {title} 的安装预览": "Preview installation for {title}",
+  "无法准备这个来源的安装预览，请稍后重试。":
+    "Unable to prepare an installation preview for this Source. Please try again.",
   "这次回答没有完成，请稍后重试。":
     "This answer could not be completed. Please try again.",
   "请先在设置中启用 AI": "Enable AI in Settings first",

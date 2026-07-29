@@ -247,6 +247,23 @@ pub struct AgentConversationMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentSearchResultKind {
+    Github,
+    DirectUrl,
+    Reference,
+}
+
+/// 联网结果只保留 Provider 实际引用；不附加 SkillYard 自创的排序分数。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSearchResult {
+    pub title: String,
+    pub url: String,
+    pub kind: AgentSearchResultKind,
+}
+
 impl AiProvider {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -1550,6 +1567,8 @@ pub enum UiOutcome {
         reply: String,
         /// #56 只在本机没有合适结果时继续联网；前端不自行推断文本含义。
         local_match_found: bool,
+        searched_public_web: bool,
+        search_results: Vec<AgentSearchResult>,
     },
     UnsupportedPlatform {
         actual_os: String,

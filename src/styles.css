@@ -2492,6 +2492,61 @@ code {
   background: #355a41;
 }
 
+.agent-search-results {
+  display: grid;
+  gap: 8px;
+  margin: 9px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-search-results li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 11px;
+  border: 1px solid rgb(55 86 64 / 12%);
+  border-radius: 12px;
+  background: #fafcf7;
+}
+
+.agent-search-results li > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.agent-search-results a {
+  overflow: hidden;
+  color: #315b3e;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-search-results small {
+  color: #78837b;
+  font-size: 0.72rem;
+}
+
+.agent-search-results button {
+  flex: none;
+  padding: 7px 9px;
+  border: 1px solid rgb(55 86 64 / 16%);
+  border-radius: 9px;
+  color: #31533b;
+  background: #e7f0e1;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 750;
+}
+
+.agent-search-results button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .agent-thinking,
 .agent-configuration-note {
   margin: 0;

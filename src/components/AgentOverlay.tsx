@@ -4,6 +4,7 @@ import type {
   AgentConversationMessage,
   AgentPageContext,
   AgentReply,
+  AgentSearchResult,
   AiPreferences,
 } from "../domain";
 import { useI18n } from "../i18n";
@@ -15,18 +16,23 @@ interface AgentOverlayProps {
     context: AgentPageContext,
     messages: AgentConversationMessage[],
   ): Promise<AgentReply>;
+  onPreviewInstall(result: AgentSearchResult): Promise<void>;
 }
 
 export function AgentOverlay({
   context,
   aiPreferences,
   onAsk,
+  onPreviewInstall,
 }: AgentOverlayProps) {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
-  const [messages, setMessages] = useState<AgentConversationMessage[]>([]);
+  const [messages, setMessages] = useState<
+    Array<AgentConversationMessage & { searchResults?: AgentSearchResult[] }>
+  >([]);
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [previewingUrl, setPreviewingUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sessionGeneration = useRef(0);
   const isReady =
@@ -43,6 +49,7 @@ export function AgentOverlay({
     setDraft("");
     setError(null);
     setIsSending(false);
+    setPreviewingUrl(null);
   };
 
   const send = async (event: FormEvent) => {
@@ -59,11 +66,20 @@ export function AgentOverlay({
     setIsSending(true);
     const activeGeneration = sessionGeneration.current;
     try {
-      const reply = await onAsk(context, nextMessages);
+      // 搜索结果只用于本地 UI 操作，不作为下一轮对话内容回传 Provider。
+      const conversation = nextMessages.map(({ role, content }) => ({
+        role,
+        content,
+      }));
+      const reply = await onAsk(context, conversation);
       if (sessionGeneration.current !== activeGeneration) return;
       setMessages((current) => [
         ...current,
-        { role: "assistant", content: reply.reply },
+        {
+          role: "assistant",
+          content: reply.reply,
+          searchResults: reply.searchResults,
+        },
       ]);
     } catch (cause) {
       if (sessionGeneration.current !== activeGeneration) return;
@@ -81,6 +97,23 @@ export function AgentOverlay({
       if (sessionGeneration.current === activeGeneration) {
         setIsSending(false);
       }
+    }
+  };
+
+  const previewInstall = async (result: AgentSearchResult) => {
+    if (previewingUrl) return;
+    setPreviewingUrl(result.url);
+    setError(null);
+    try {
+      await onPreviewInstall(result);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : t("无法准备这个来源的安装预览，请稍后重试。"),
+      );
+    } finally {
+      setPreviewingUrl(null);
     }
   };
 
@@ -127,6 +160,43 @@ export function AgentOverlay({
                     {message.role === "user" ? t("你") : t("SkillYard")}
                   </span>
                   <p>{message.content}</p>
+                  {message.searchResults &&
+                  message.searchResults.length > 0 ? (
+                    <ul className="agent-search-results">
+                      {message.searchResults.map((result) => (
+                        <li key={result.url}>
+                          <div>
+                            <a
+                              href={result.url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {result.title}
+                            </a>
+                            <small>
+                              {result.kind === "reference"
+                                ? t("参考链接")
+                                : t("可准备安装预览")}
+                            </small>
+                          </div>
+                          {result.kind !== "reference" ? (
+                            <button
+                              type="button"
+                              aria-label={t("查看 {title} 的安装预览", {
+                                title: result.title,
+                              })}
+                              disabled={previewingUrl !== null}
+                              onClick={() => previewInstall(result)}
+                            >
+                              {previewingUrl === result.url
+                                ? t("正在准备…")
+                                : t("查看安装预览")}
+                            </button>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
               ))
             )}

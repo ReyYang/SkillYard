@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -12,7 +13,13 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use url::Url;
 
-use crate::domain::{AgentConversationMessage, AgentMessageRole, AiProvider, InterfaceLanguage};
+use crate::{
+    domain::{
+        AgentConversationMessage, AgentMessageRole, AgentSearchResult, AgentSearchResultKind,
+        AiProvider, InterfaceLanguage,
+    },
+    github_source::parse_github_source,
+};
 
 const KEYCHAIN_SERVICE: &str = "com.reyyang.skillyard.ai";
 const MAX_PROVIDER_RESPONSE_BYTES: u64 = 1_048_576;
@@ -23,12 +30,20 @@ const MAX_SKILL_FILE_BYTES: u64 = 32_768;
 const MAX_SKILL_MATERIAL_BYTES: usize = 131_072;
 const MAX_LOCAL_SKILLS: usize = 128;
 const MAX_LOCAL_CATALOG_BYTES: usize = 524_288;
+const MAX_PUBLIC_SEARCH_RESULTS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentAnswer {
     pub(crate) reply: String,
     pub(crate) local_match_found: bool,
+    pub(crate) search_public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublicSearchAnswer {
+    pub(crate) reply: String,
+    pub(crate) results: Vec<AgentSearchResult>,
 }
 
 #[derive(Debug, Error)]
@@ -264,6 +279,98 @@ pub(crate) fn answer_agent(
         return Err(AgentError::InvalidCapability("Structured Agent Answer"));
     }
     Ok(answer)
+}
+
+/// 联网只调用当前 Provider 的原生 Web Search，并只返回响应中真实携带的引用。
+pub(crate) fn search_public_skills(
+    endpoints: &AgentProviderEndpoints,
+    provider: AiProvider,
+    model: &str,
+    api_key: &str,
+    language: InterfaceLanguage,
+    query: &str,
+) -> Result<PublicSearchAnswer, AgentError> {
+    let client = provider_client()?;
+    let instruction = public_search_prompt(language);
+    let response = match provider {
+        AiProvider::OpenAi => send_json(
+            &client,
+            &endpoints.open_ai_responses(),
+            api_key,
+            &json!({
+                "model": model,
+                "instructions": instruction,
+                "input": query,
+                "tools": [{ "type": "web_search" }],
+                "stream": false,
+                "store": false
+            }),
+        )?,
+        AiProvider::Glm => send_json(
+            &client,
+            &endpoints.glm_chat_completions(),
+            api_key,
+            &json!({
+                "model": model,
+                "messages": [
+                    { "role": "system", "content": instruction },
+                    { "role": "user", "content": query }
+                ],
+                "tools": [{
+                    "type": "web_search",
+                    "web_search": {
+                        "enable": true,
+                        "search_query": query,
+                        "search_result": true
+                    }
+                }],
+                "tool_choice": "auto",
+                "stream": false
+            }),
+        )?,
+        AiProvider::DeepSeek => send_anthropic_json(
+            &client,
+            &endpoints.deep_seek_messages(),
+            api_key,
+            &json!({
+                "model": model,
+                "max_tokens": 2048,
+                "system": instruction,
+                "messages": [{
+                    "role": "user",
+                    "content": [{ "type": "text", "text": query }]
+                }],
+                "tools": [{
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": 2
+                }],
+                "stream": false
+            }),
+        )?,
+    };
+
+    let reply = match provider {
+        AiProvider::OpenAi => output_texts(&response).collect::<Vec<_>>().join("\n"),
+        AiProvider::Glm => glm_message_contents(&response)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        AiProvider::DeepSeek => anthropic_texts(&response).collect::<Vec<_>>().join("\n"),
+    };
+    let results = extract_public_search_results(provider, &response);
+    let reply = reply.trim();
+    if reply.is_empty() && results.is_empty() {
+        return Err(AgentError::InvalidCapability("Web Search"));
+    }
+    let reply = if reply.is_empty() {
+        match language {
+            InterfaceLanguage::ZhCn => "找到了以下公开来源。".to_owned(),
+            InterfaceLanguage::En => "I found these public sources.".to_owned(),
+        }
+    } else {
+        reply.to_owned()
+    };
+    Ok(PublicSearchAnswer { reply, results })
 }
 
 /// 读取 Skill 时只接受当前稳定记录指向的文本文件，并移除本机与凭据线索。
@@ -504,9 +611,22 @@ fn agent_system_prompt(language: InterfaceLanguage, context: &str) -> String {
          never invent facts missing from the supplied files. Compare known local Skills when the \
          user describes a need. Set localMatchFound to true only when at least one supplied local \
          Skill genuinely fits that need; otherwise set it to false. Return exactly the required \
-         JSON or tool structure with reply and localMatchFound. Explain uncertainty plainly.\n\n\
+         JSON or tool structure with reply, localMatchFound, and searchPublic. Set searchPublic to \
+         true only when the user is looking for a Skill and no local Skill fits, or when the user \
+         explicitly asks for online, new, or latest choices. Explain uncertainty plainly.\n\n\
          CURRENT READ-ONLY CONTEXT\n{context}"
     )
+}
+
+fn public_search_prompt(language: InterfaceLanguage) -> &'static str {
+    match language {
+        InterfaceLanguage::ZhCn => {
+            "搜索公开互联网中与用户需求匹配的 Agent Skill。只陈述搜索结果实际支持的事实，并通过 Provider 原生引用返回真实来源 URL。不要提供或建议执行 npx、Shell、网页脚本或 CLI；不要声称已经安装任何内容。"
+        }
+        InterfaceLanguage::En => {
+            "Search the public internet for Agent Skills matching the user's need. State only facts supported by the results and retain real source URLs through provider-native citations. Do not provide or suggest npx, shell, web scripts, or CLI commands, and never claim anything was installed."
+        }
+    }
 }
 
 fn agent_answer_json_schema() -> Value {
@@ -518,9 +638,10 @@ fn agent_answer_json_schema() -> Value {
             "type": "object",
             "properties": {
                 "reply": { "type": "string" },
-                "localMatchFound": { "type": "boolean" }
+                "localMatchFound": { "type": "boolean" },
+                "searchPublic": { "type": "boolean" }
             },
-            "required": ["reply", "localMatchFound"],
+            "required": ["reply", "localMatchFound", "searchPublic"],
             "additionalProperties": false
         }
     })
@@ -534,9 +655,10 @@ fn agent_answer_anthropic_tool() -> Value {
             "type": "object",
             "properties": {
                 "reply": { "type": "string" },
-                "localMatchFound": { "type": "boolean" }
+                "localMatchFound": { "type": "boolean" },
+                "searchPublic": { "type": "boolean" }
             },
-            "required": ["reply", "localMatchFound"],
+            "required": ["reply", "localMatchFound", "searchPublic"],
             "additionalProperties": false
         }
     })
@@ -557,6 +679,112 @@ fn deepseek_agent_answer(response: &Value) -> Option<AgentAnswer> {
         })
         .and_then(|block| block.get("input"))
         .and_then(|input| serde_json::from_value(input.clone()).ok())
+}
+
+fn extract_public_search_results(provider: AiProvider, response: &Value) -> Vec<AgentSearchResult> {
+    let raw = match provider {
+        AiProvider::OpenAi => openai_search_citations(response),
+        AiProvider::Glm => glm_search_results(response),
+        AiProvider::DeepSeek => anthropic_search_results(response),
+    };
+    let mut seen = BTreeSet::new();
+    raw.into_iter()
+        .filter_map(|(title, url)| {
+            if !seen.insert(url.clone()) {
+                return None;
+            }
+            classify_public_result(title, url)
+        })
+        .take(MAX_PUBLIC_SEARCH_RESULTS)
+        .collect()
+}
+
+fn openai_search_citations(response: &Value) -> Vec<(String, String)> {
+    response
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .flat_map(|content| {
+            content
+                .get("annotations")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|annotation| annotation.get("type").and_then(Value::as_str) == Some("url_citation"))
+        .filter_map(|annotation| {
+            let url = annotation.get("url").and_then(Value::as_str)?;
+            let title = annotation
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or(url);
+            Some((title.to_owned(), url.to_owned()))
+        })
+        .collect()
+}
+
+fn glm_search_results(response: &Value) -> Vec<(String, String)> {
+    response
+        .get("web_search")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let url = item.get("link").and_then(Value::as_str)?;
+            let title = item.get("title").and_then(Value::as_str).unwrap_or(url);
+            Some((title.to_owned(), url.to_owned()))
+        })
+        .collect()
+}
+
+fn anthropic_search_results(response: &Value) -> Vec<(String, String)> {
+    response
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("web_search_tool_result"))
+        .flat_map(|block| {
+            block
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|result| result.get("type").and_then(Value::as_str) == Some("web_search_result"))
+        .filter_map(|result| {
+            let url = result.get("url").and_then(Value::as_str)?;
+            let title = result.get("title").and_then(Value::as_str).unwrap_or(url);
+            Some((title.to_owned(), url.to_owned()))
+        })
+        .collect()
+}
+
+fn classify_public_result(title: String, url: String) -> Option<AgentSearchResult> {
+    let parsed = Url::parse(&url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    let kind = if parse_github_source(&url, None).is_ok() {
+        AgentSearchResultKind::Github
+    } else if parsed.scheme() == "https"
+        && matches!(
+            parsed.path().to_ascii_lowercase().as_str(),
+            path if path.ends_with(".zip") || path.ends_with(".skill")
+        )
+    {
+        AgentSearchResultKind::DirectUrl
+    } else {
+        AgentSearchResultKind::Reference
+    };
+    Some(AgentSearchResult { title, url, kind })
 }
 
 fn sanitize_local_text(text: &str, home: &Path) -> String {
@@ -931,6 +1159,16 @@ fn glm_message_contents(response: &Value) -> impl Iterator<Item = &str> {
                 .and_then(|message| message.get("content"))
                 .and_then(Value::as_str)
         })
+}
+
+fn anthropic_texts(response: &Value) -> impl Iterator<Item = &str> {
+    response
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
 }
 
 fn contains_glm_public_url(response: &Value) -> bool {

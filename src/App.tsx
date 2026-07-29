@@ -25,6 +25,7 @@ import { TakeoverPlanPage } from "./components/TakeoverPlanPage";
 import { TakeoverSelectionPage } from "./components/TakeoverSelectionPage";
 import type {
   AgentPageContext,
+  AgentSearchResult,
   AiConfigurationInput,
   AiPreferences,
   BatchMountPlan,
@@ -70,6 +71,8 @@ interface AppCoreProps {
   onDeleteAiApiKey(): Promise<void>;
   onTestAiConnection(): Promise<void>;
   onAgentContextChange(context: AgentPageContext): void;
+  agentInstallPlan: InstallPlan | null;
+  onAgentInstallPlanClear(): void;
 }
 
 type AiOperation =
@@ -126,6 +129,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     type: "page",
     page: "inventory",
   });
+  const [agentInstallPlan, setAgentInstallPlan] = useState<InstallPlan | null>(
+    null,
+  );
 
   useEffect(() => {
     let active = true;
@@ -178,6 +184,32 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
+  const previewAgentInstall = async (result: AgentSearchResult) => {
+    if (result.kind === "reference") return;
+    if (result.kind === "directUrl") {
+      setAgentInstallPlan(await client.createUrlInstallPlan(result.url));
+      return;
+    }
+    const source = await client.addGithubSource(result.url, null);
+    if (source.type === "sourceRefChangePlan") {
+      throw new Error(
+        language === "en"
+          ? "This Source needs a Tracked Ref confirmation on the installation page first."
+          : "这个 Source 需要先在安装页确认 Tracked Ref。",
+      );
+    }
+    if (!source.highlightedSourceId) {
+      throw new Error(
+        language === "en"
+          ? "SkillYard could not identify the saved Source."
+          : "SkillYard 无法识别刚刚保存的 Source。",
+      );
+    }
+    setAgentInstallPlan(
+      await client.createGithubInstallPlan(source.highlightedSourceId),
+    );
+  };
+
   if (preferenceError) {
     return (
       <main className="state-page" role="alert">
@@ -207,6 +239,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           aiOperation={aiOperation}
           aiError={aiError}
           onAgentContextChange={setAgentContext}
+          agentInstallPlan={agentInstallPlan}
+          onAgentInstallPlanClear={() => setAgentInstallPlan(null)}
           onLanguageChange={changeLanguage}
           onAiConfigurationChange={(configuration) =>
             runAiOperation("savingConfiguration", () =>
@@ -227,6 +261,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           context={agentContext}
           aiPreferences={aiPreferences}
           onAsk={(context, messages) => client.askAgent(context, messages)}
+          onPreviewInstall={previewAgentInstall}
         />
       </>
     </I18nProvider>
@@ -247,6 +282,8 @@ function AppCore({
   onDeleteAiApiKey,
   onTestAiConnection,
   onAgentContextChange,
+  agentInstallPlan,
+  onAgentInstallPlanClear,
 }: AppCoreProps) {
   const { t } = useI18n();
   const formatError = (error: unknown) => formatErrorMessage(error, language);
@@ -316,6 +353,11 @@ function AppCore({
   >(null);
   const [pendingInstallPlan, setPendingInstallPlan] =
     useState<InstallPlan | null>(null);
+  const activeInstallPlan = pendingInstallPlan ?? agentInstallPlan;
+  const clearActiveInstallPlan = () => {
+    setPendingInstallPlan(null);
+    onAgentInstallPlanClear();
+  };
   const [isInstalling, setIsInstalling] = useState(false);
   const [isDiscardingInstallPlan, setIsDiscardingInstallPlan] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
@@ -419,7 +461,7 @@ function AppCore({
     if (isInstalling) {
       return {
         title:
-          pendingInstallPlan?.mode === "update"
+          activeInstallPlan?.mode === "update"
             ? t("正在更新 Bundle")
             : t("正在安装 Bundle"),
         detail: t("确认后的文件系统操作不能取消，SkillYard 会自动完成或恢复。"),
@@ -1305,24 +1347,24 @@ function AppCore({
   };
 
   const discardInstallPlan = async () => {
-    if (!pendingInstallPlan || isInstalling || isDiscardingInstallPlan) return;
+    if (!activeInstallPlan || isInstalling || isDiscardingInstallPlan) return;
     setIsDiscardingInstallPlan(true);
     setInstallError(null);
     try {
-      await client.discardInstallPlan(pendingInstallPlan.id);
-      setPendingInstallPlan(null);
+      await client.discardInstallPlan(activeInstallPlan.id);
+      clearActiveInstallPlan();
     } catch (error) {
       if (errorCode(error) === "installPlanConsumed") {
         const message = formatError(error);
         try {
           // 另一实例已经开始确认时，本页 Plan 永远不能再使用；回到持久化最终状态。
           const outcome = await client.getStartupState();
-          setPendingInstallPlan(null);
+          clearActiveInstallPlan();
           setSourceDiscovery(null);
           setViewState({ status: "ready", outcome });
           setInstallError(message);
         } catch (recoveryError) {
-          setPendingInstallPlan(null);
+          clearActiveInstallPlan();
           setSourceDiscovery(null);
           setViewState({
             status: "error",
@@ -1342,15 +1384,15 @@ function AppCore({
   };
 
   const confirmInstall = async (selectedCandidateIds: string[]) => {
-    if (!pendingInstallPlan || isInstalling) return;
+    if (!activeInstallPlan || isInstalling) return;
     setIsInstalling(true);
     setInstallError(null);
     try {
       const outcome = await client.confirmInstallPlan(
-        pendingInstallPlan.id,
+        activeInstallPlan.id,
         selectedCandidateIds,
       );
-      setPendingInstallPlan(null);
+      clearActiveInstallPlan();
       setSourceDiscovery(null);
       setViewState({ status: "ready", outcome });
     } catch (error) {
@@ -1358,12 +1400,12 @@ function AppCore({
       // Plan 一旦确认就可能已消费；失败后重新读取后端最终状态，不能让用户重试旧 Plan。
       try {
         const outcome = await client.getStartupState();
-        setPendingInstallPlan(null);
+        clearActiveInstallPlan();
         setSourceDiscovery(null);
         setViewState({ status: "ready", outcome });
         setInstallError(message);
       } catch (recoveryError) {
-        setPendingInstallPlan(null);
+        clearActiveInstallPlan();
         setSourceDiscovery(null);
         setViewState({
           status: "error",
@@ -1837,10 +1879,10 @@ function AppCore({
       />,
     );
   }
-  if (pendingInstallPlan) {
+  if (activeInstallPlan) {
     return renderOperationSurface(
       <InstallPlanPage
-        plan={pendingInstallPlan}
+        plan={activeInstallPlan}
         isInstalling={isInstalling}
         isDiscarding={isDiscardingInstallPlan}
         error={installError}

@@ -46,6 +46,16 @@ export interface AgentReply {
   reply: string;
   // 后续联网分支只使用 Rust Core 的结构化判断，不解析回答文案。
   localMatchFound: boolean;
+  searchedPublicWeb: boolean;
+  searchResults: AgentSearchResult[];
+}
+
+export type AgentSearchResultKind = "github" | "directUrl" | "reference";
+
+export interface AgentSearchResult {
+  title: string;
+  url: string;
+  kind: AgentSearchResultKind;
 }
 
 export interface SupportedAppSummary {
@@ -609,6 +619,8 @@ export type UiOutcome =
       type: "agentReply";
       reply: string;
       localMatchFound: boolean;
+      searchedPublicWeb: boolean;
+      searchResults: AgentSearchResult[];
     }
   | {
       type: "unsupportedPlatform";

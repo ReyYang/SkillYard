@@ -101,6 +101,8 @@ describe("Tauri IPC contract", () => {
       type: "agentReply",
       reply: "fixture answer",
       localMatchFound: true,
+      searchedPublicWeb: false,
+      searchResults: [],
     });
     const context = {
       type: "skill" as const,

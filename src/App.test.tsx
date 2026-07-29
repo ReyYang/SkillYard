@@ -120,6 +120,8 @@ describe("本机清单", () => {
     vi.mocked(client.askAgent).mockResolvedValue({
       reply: "这是一个示例 Skill。",
       localMatchFound: true,
+      searchedPublicWeb: false,
+      searchResults: [],
     });
 
     render(<App client={client} />);
@@ -164,7 +166,12 @@ describe("本机清单", () => {
   it("关闭助手后忽略仍在返回的旧 Session 回答", async () => {
     const user = userEvent.setup();
     let finishReply:
-      | ((value: { reply: string; localMatchFound: boolean }) => void)
+      | ((value: {
+          reply: string;
+          localMatchFound: boolean;
+          searchedPublicWeb: boolean;
+          searchResults: [];
+        }) => void)
       | undefined;
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     vi.mocked(client.getPreferences).mockResolvedValue({
@@ -198,13 +205,117 @@ describe("本机清单", () => {
       screen.getByRole("button", { name: "关闭 SkillYard 助手" }),
     );
     await act(async () =>
-      finishReply?.({ reply: "不应恢复的旧回答", localMatchFound: true }),
+      finishReply?.({
+        reply: "不应恢复的旧回答",
+        localMatchFound: true,
+        searchedPublicWeb: false,
+        searchResults: [],
+      }),
     );
 
     await user.click(
       screen.getByRole("button", { name: "打开 SkillYard 助手" }),
     );
     expect(screen.queryByText("不应恢复的旧回答")).not.toBeInTheDocument();
+  });
+
+  it("全网结果区分安装候选与参考链接，并只在用户点击后进入标准安装预览", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+    vi.mocked(client.askAgent).mockResolvedValue({
+      reply: "找到三个公开结果。",
+      localMatchFound: false,
+      searchedPublicWeb: true,
+      searchResults: [
+        {
+          title: "Vercel Skills",
+          url: "https://github.com/vercel-labs/skills",
+          kind: "github",
+        },
+        {
+          title: "Review Skills ZIP",
+          url: "https://downloads.example.com/review-skills.zip",
+          kind: "directUrl",
+        },
+        {
+          title: "Forum discussion",
+          url: "https://forum.example.com/review-skills",
+          kind: "reference",
+        },
+      ],
+    });
+    vi.mocked(client.addGithubSource).mockResolvedValue(
+      sourceDiscoveryOutcome(
+        [
+          createSource({
+            id: "source-search",
+            canonicalIdentity: "github:vercel-labs/skills",
+            displayName: "vercel-labs/skills",
+            locator: "https://github.com/vercel-labs/skills",
+          }),
+        ],
+        { highlightedSourceId: "source-search" },
+      ),
+    );
+    vi.mocked(client.createGithubInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        inputKind: "github",
+        bundleDisplayName: "vercel-labs/skills",
+      }),
+    );
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
+      "帮我找一个代码审查 Skill",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(
+      await screen.findByRole("link", { name: "Forum discussion" }),
+    ).toHaveAttribute("href", "https://forum.example.com/review-skills");
+    expect(
+      screen.queryByRole("button", {
+        name: "查看 Forum discussion 的安装预览",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "查看 Review Skills ZIP 的安装预览",
+      }),
+    ).toBeEnabled();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "查看 Vercel Skills 的安装预览",
+      }),
+    );
+
+    expect(client.addGithubSource).toHaveBeenCalledWith(
+      "https://github.com/vercel-labs/skills",
+      null,
+    );
+    expect(client.createGithubInstallPlan).toHaveBeenCalledWith(
+      "source-search",
+    );
+    expect(
+      await screen.findByRole("heading", { name: "确认安装这个 Bundle" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("vercel-labs/skills")).toBeInTheDocument();
   });
 
   it("启动时使用后端恢复的英文偏好", async () => {

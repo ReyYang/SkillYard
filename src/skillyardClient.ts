@@ -192,6 +192,8 @@ export const tauriSkillYardClient: SkillYardClient = {
     return {
       reply: outcome.reply,
       localMatchFound: outcome.localMatchFound,
+      searchedPublicWeb: outcome.searchedPublicWeb,
+      searchResults: outcome.searchResults,
     };
   },
   getStartupState: () => invoke<UiOutcome>("get_startup_state"),

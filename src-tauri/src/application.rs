@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::{
     agent::{
         AgentError, AgentProviderEndpoints, KeychainSecretStore, SharedSecretStore, answer_agent,
-        build_local_skill_catalog, read_skill_material, verify_provider,
+        build_local_skill_catalog, read_skill_material, search_public_skills, verify_provider,
     },
     bundle_update_batch::{
         BundleUpdateBatchError, acknowledge_bundle_update_batch, confirm_bundle_update_batch_plan,
@@ -570,9 +570,28 @@ impl SkillYardApplication {
             &messages,
             &context,
         )?;
+        let (reply, searched_public_web, search_results) = if answer.search_public {
+            let query = messages
+                .last()
+                .map(|message| message.content.as_str())
+                .ok_or(AgentError::EmptyConversation)?;
+            let search = search_public_skills(
+                &self.agent_endpoints,
+                ai.provider,
+                &ai.model,
+                &api_key,
+                language,
+                query,
+            )?;
+            (search.reply, true, search.results)
+        } else {
+            (answer.reply, false, Vec::new())
+        };
         Ok(UiOutcome::AgentReply {
-            reply: answer.reply,
+            reply,
             local_match_found: answer.local_match_found,
+            searched_public_web,
+            search_results,
         })
     }
 
