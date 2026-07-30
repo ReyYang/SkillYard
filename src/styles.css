@@ -346,8 +346,14 @@ code {
 }
 
 .discover-search {
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.7rem;
   margin: 2.2rem 0 1.4rem;
+}
+
+.discover-search label {
+  min-width: 0;
 }
 
 .discover-search input {
@@ -359,6 +365,21 @@ code {
   background: var(--sy-surface);
   box-shadow: var(--sy-shadow);
   font: inherit;
+}
+
+.discover-search > button {
+  min-width: 8.5rem;
+  border: 1px solid var(--sy-accent);
+  border-radius: var(--sy-radius-small);
+  color: var(--sy-accent-contrast);
+  background: var(--sy-accent);
+  font: inherit;
+  font-weight: 700;
+}
+
+.discover-search > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .discover-regions {
@@ -447,6 +468,67 @@ code {
   margin-top: 0.8rem;
 }
 
+.discover-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.discover-statuses span {
+  padding: 0.18rem 0.42rem;
+  border: 1px solid var(--sy-border);
+  border-radius: 999px;
+  background: var(--sy-surface);
+}
+
+.discover-member-list {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.discover-member-list li {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--sy-border);
+  font-size: 0.78rem;
+}
+
+.discover-member-list span {
+  color: var(--sy-muted);
+}
+
+.discover-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.8rem;
+}
+
+.discover-card-actions .compact-action {
+  margin-top: 0;
+}
+
+.discover-reference-link {
+  overflow: hidden;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  color: var(--sy-accent);
+  background: transparent;
+  font: inherit;
+  font-size: 0.78rem;
+  text-decoration: underline;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .discover-source-state {
   align-items: center;
 }
@@ -464,6 +546,14 @@ code {
 }
 
 @media (max-width: 920px) {
+  .discover-search {
+    grid-template-columns: 1fr;
+  }
+
+  .discover-search > button {
+    min-height: 2.8rem;
+  }
+
   .discover-regions {
     grid-template-columns: 1fr;
   }

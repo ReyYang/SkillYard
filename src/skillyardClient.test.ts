@@ -232,6 +232,20 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("open_discover");
   });
 
+  it("Discover 主动提交通过无 Session 命令执行全网搜索", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "discoverWebSearch",
+      query: "测试驱动开发",
+      results: [],
+    });
+
+    await tauriSkillYardClient.searchDiscoverWeb("测试驱动开发");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("search_discover_web", {
+      query: "测试驱动开发",
+    });
+  });
+
   it("只通过任务级命令开始首次扫描", async () => {
     mocks.invoke.mockResolvedValue({
       type: "inventory",

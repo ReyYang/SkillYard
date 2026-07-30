@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     path::Path,
     sync::{
         Arc, Mutex, TryLockError,
@@ -21,9 +22,10 @@ use crate::{
     },
     domain::{
         AgentConversationMessage, AgentPageContext, AgentPageKind, AgentStreamEvent, AiPreferences,
-        AiProvider, BundleUpdateStatus, DiscoverLocalSkill, EditableLocalRelinkMember,
-        InterfaceLanguage, MergeContentChoice, PlatformInfo, SourceKind, SourceMemberMappingChoice,
-        TakeoverPlanRequest, ThemePreset, UiIntent, UiOutcome,
+        AiProvider, BundleUpdateStatus, DiscoverLocalSkill, DiscoverWebResult,
+        DiscoverWebResultKind, EditableLocalRelinkMember, InterfaceLanguage, MergeContentChoice,
+        PlatformInfo, SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, ThemePreset,
+        UiIntent, UiOutcome,
     },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
@@ -56,7 +58,10 @@ use crate::{
         SourceAssociationError, confirm_source_association_plan, create_source_association_plan,
         discard_source_association_plan, recover_pending_source_association_transactions,
     },
-    source_input::{SourceFilesystemIdentity, SourceInputError, inspect_editable_local_source},
+    source_input::{
+        SourceFilesystemIdentity, SourceInputError, canonical_direct_url_identity,
+        inspect_editable_local_source,
+    },
     storage::{
         NewEditableLocalRelinkPlan, NewGitHubSource, NewSourceCatalogMember,
         SaveGitHubSourceResult, Storage, StorageError, StoredGithubSource,
@@ -287,6 +292,7 @@ impl SkillYardApplication {
                 self.with_write_operation(|| self.check_editable_local_bundle(bundle_id))
             }
             UiIntent::OpenDiscover => self.with_write_operation(|| self.open_discover()),
+            UiIntent::SearchDiscoverWeb { query } => self.search_discover_web(query),
             UiIntent::OpenSourceDiscovery => {
                 self.with_write_operation(|| self.open_source_discovery())
             }
@@ -1022,22 +1028,34 @@ impl SkillYardApplication {
     fn open_discover(&self) -> Result<UiOutcome, ApplicationError> {
         let mut storage = self.open_recovered_storage()?;
         ensure_onboarding_completed(&storage)?;
+        // Source 关系与 Inventory 来自同一打开时刻，供前端合并 canonical 结果。
+        let sources = storage.read_source_summaries()?;
         let local_skills = match storage.read_initial_scan()? {
             Some(UiOutcome::Inventory { entries, .. }) => entries
                 .into_iter()
                 .filter(|entry| !entry.stale)
-                .map(|entry| DiscoverLocalSkill {
-                    description: read_skill_description(Path::new(&entry.skill_file)),
-                    ai_summary: entry
-                        .ai_explanation
-                        .as_ref()
-                        .map(|explanation| explanation.summary.clone()),
-                    inventory_id: entry.id,
-                    skill_name: entry.skill_name,
-                    management_kind: entry.management_kind,
-                    bundle_id: entry.bundle_id,
-                    bundle_display_name: entry.bundle_display_name,
-                    source_display_name: entry.source_display_name,
+                .map(|entry| {
+                    let linked_source = entry.bundle_id.as_ref().and_then(|bundle_id| {
+                        sources
+                            .iter()
+                            .find(|source| source.bundle_id.as_ref() == Some(bundle_id))
+                    });
+                    DiscoverLocalSkill {
+                        description: read_skill_description(Path::new(&entry.skill_file)),
+                        ai_summary: entry
+                            .ai_explanation
+                            .as_ref()
+                            .map(|explanation| explanation.summary.clone()),
+                        inventory_id: entry.id,
+                        skill_name: entry.skill_name,
+                        management_kind: entry.management_kind,
+                        bundle_id: entry.bundle_id,
+                        bundle_display_name: entry.bundle_display_name,
+                        source_id: linked_source.map(|source| source.id.clone()),
+                        source_canonical_identity: linked_source
+                            .map(|source| source.canonical_identity.clone()),
+                        source_display_name: entry.source_display_name,
+                    }
                 })
                 .collect(),
             _ => {
@@ -1045,11 +1063,77 @@ impl SkillYardApplication {
             }
         };
         // Discover 只读取最近一次本地快照；网络刷新仍由 Source 管理页显式触发。
-        let sources = storage.read_source_summaries()?;
         Ok(UiOutcome::Discover {
             local_skills,
             sources,
         })
+    }
+
+    fn search_discover_web(&self, query: String) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let query = query.trim().to_owned();
+        if query.is_empty() {
+            return Err(AgentError::EmptyConversation.into());
+        }
+        let (ai, api_key, language) = self.ready_ai_context(&storage)?;
+        let provider_request = AgentProviderRequest::new(
+            &self.agent_endpoints,
+            ai.provider,
+            &ai.model,
+            &api_key,
+            language,
+        );
+        let search = stream_public_skills(&provider_request, &query, |_| true, || false)?;
+        let sources = storage.read_source_summaries()?;
+        let mut seen = BTreeSet::new();
+        let mut results = Vec::new();
+        for result in search.results {
+            let (kind, canonical_identity) = match result.kind {
+                crate::domain::AgentSearchResultKind::Github => {
+                    match parse_github_source(&result.url, None) {
+                        Ok(source) => (
+                            DiscoverWebResultKind::Github,
+                            Some(format!(
+                                "github:{}/{}",
+                                source.owner.to_ascii_lowercase(),
+                                source.repository.to_ascii_lowercase()
+                            )),
+                        ),
+                        Err(_) => (DiscoverWebResultKind::Reference, None),
+                    }
+                }
+                crate::domain::AgentSearchResultKind::DirectUrl => {
+                    match canonical_direct_url_identity(&result.url) {
+                        Ok((_, identity)) => (DiscoverWebResultKind::DirectUrl, Some(identity)),
+                        Err(_) => (DiscoverWebResultKind::Reference, None),
+                    }
+                }
+                crate::domain::AgentSearchResultKind::Reference => {
+                    (DiscoverWebResultKind::Reference, None)
+                }
+            };
+            let dedupe_key = canonical_identity
+                .clone()
+                .unwrap_or_else(|| format!("reference:{}", result.url));
+            if !seen.insert(dedupe_key) {
+                continue;
+            }
+            let existing_source_id = canonical_identity.as_ref().and_then(|identity| {
+                sources
+                    .iter()
+                    .find(|source| source.canonical_identity == *identity)
+                    .map(|source| source.id.clone())
+            });
+            results.push(DiscoverWebResult {
+                title: result.title,
+                url: result.url,
+                kind,
+                canonical_identity,
+                existing_source_id,
+            });
+        }
+        Ok(UiOutcome::DiscoverWebSearch { query, results })
     }
 
     fn search_skills_sh(&self, query: String) -> Result<UiOutcome, ApplicationError> {

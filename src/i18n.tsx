@@ -154,7 +154,10 @@ const EN_MESSAGES = {
   "发现": "Discover",
   "输入时只筛选本机与已保存的 Source 目录，不会自动联网或修改任何内容。":
     "Typing filters only local Skills and saved Source catalogs. It does not access the network or change content.",
+  "输入会立即筛选本机与已保存的 Source；只有主动提交才会使用当前 Provider 搜索全网。":
+    "Typing immediately filters local Skills and saved Sources. The current Provider searches the web only after you submit.",
   "描述你需要的 Skill": "Describe the Skill you need",
+  "搜索全网": "Search the web",
   "本机已有": "On this Mac",
   "本机没有匹配的 Skill": "No local Skills match",
   "输入关键词以筛选本机 Skill": "Type to filter local Skills",
@@ -170,6 +173,15 @@ const EN_MESSAGES = {
   "前往 Source 管理": "Open Source management",
   "全网发现": "Discover on the web",
   "尚未提交全网搜索": "No web search submitted",
+  "正在搜索公开互联网…": "Searching the public web…",
+  "全网没有返回可核验结果": "No verifiable web results were returned",
+  "线上结果已合并到本机或 Source":
+    "Web results were merged into local or Source results",
+  "已添加 Source": "Source added",
+  "包含全网引用": "Includes web references",
+  "本机 Skill": "Local Skills",
+  "Source 成员": "Source members",
+  "打开 {title}": "Open {title}",
   "无法打开发现页": "Unable to open Discover",
   "搜索 Bundle 或 Skill": "Search Bundles or Skills",
   "从 GitHub、归档、直接 URL、个人编辑目录或本机已有安装开始。内容进入 SkillYard 后默认不会挂载到任何应用。":

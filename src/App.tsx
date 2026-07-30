@@ -31,6 +31,7 @@ import type {
   AiPreferences,
   BatchMountPlan,
   BatchMountRequest,
+  DiscoverWebResult,
   EditableLocalRelinkPlan,
   InstallPlan,
   InterfaceLanguage,
@@ -80,6 +81,7 @@ interface AppCoreProps {
   onAgentContextChange(context: AgentPageContext): void;
   agentInstallPlan: InstallPlan | null;
   onAgentInstallPlanClear(): void;
+  onPreviewDiscoverInstall(result: DiscoverWebResult): Promise<void>;
 }
 
 type AiOperation =
@@ -96,6 +98,10 @@ type ViewState =
 
 type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
 type DiscoverOutcome = Extract<UiOutcome, { type: "discover" }>;
+type DiscoverWebSearchOutcome = Extract<
+  UiOutcome,
+  { type: "discoverWebSearch" }
+>;
 type SkillsShSearchOutcome = Extract<UiOutcome, { type: "skillsShSearch" }>;
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 
@@ -222,10 +228,21 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     }
   };
 
-  const previewAgentInstall = async (result: AgentSearchResult) => {
+  const previewSearchInstall = async (
+    result: AgentSearchResult | DiscoverWebResult,
+  ) => {
     if (result.kind === "reference") return;
     if (result.kind === "directUrl") {
       setAgentInstallPlan(await client.createUrlInstallPlan(result.url));
+      return;
+    }
+    const existingSourceId =
+      "existingSourceId" in result ? result.existingSourceId : null;
+    if (existingSourceId) {
+      await client.reloadGithubSource(existingSourceId);
+      setAgentInstallPlan(
+        await client.createGithubInstallPlan(existingSourceId),
+      );
       return;
     }
     const source = await client.addGithubSource(result.url, null);
@@ -284,6 +301,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           onAgentContextChange={setAgentContext}
           agentInstallPlan={agentInstallPlan}
           onAgentInstallPlanClear={() => setAgentInstallPlan(null)}
+          onPreviewDiscoverInstall={previewSearchInstall}
           onLanguageChange={changeLanguage}
           onThemeChange={changeTheme}
           onAiConfigurationChange={(configuration) =>
@@ -309,7 +327,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           }
           onCancel={(requestId) => client.cancelAgent(requestId)}
           onOpenExternalUrl={(url) => client.openExternalUrl(url)}
-          onPreviewInstall={previewAgentInstall}
+          onPreviewInstall={previewSearchInstall}
         />
       </div>
     </I18nProvider>
@@ -336,6 +354,7 @@ function AppCore({
   onAgentContextChange,
   agentInstallPlan,
   onAgentInstallPlanClear,
+  onPreviewDiscoverInstall,
 }: AppCoreProps) {
   const { t } = useI18n();
   const formatError = (error: unknown) => formatErrorMessage(error, language);
@@ -379,6 +398,10 @@ function AppCore({
   >(null);
   // Inventory 保留为主界面基座；Source 页面只是临时路由，不覆盖已加载清单。
   const [discover, setDiscover] = useState<DiscoverOutcome | null>(null);
+  const [discoverWebSearch, setDiscoverWebSearch] =
+    useState<DiscoverWebSearchOutcome | null>(null);
+  const [isSearchingDiscoverWeb, setIsSearchingDiscoverWeb] = useState(false);
+  const [discoverWebError, setDiscoverWebError] = useState<string | null>(null);
   const [isOpeningDiscover, setIsOpeningDiscover] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [sourceDiscovery, setSourceDiscovery] =
@@ -1017,6 +1040,8 @@ function AppCore({
     if (isOpeningDiscover) return;
     setIsOpeningDiscover(true);
     setDiscoverError(null);
+    setDiscoverWebSearch(null);
+    setDiscoverWebError(null);
     try {
       setDiscover(await client.openDiscover());
     } catch (error) {
@@ -1024,6 +1049,30 @@ function AppCore({
       setDiscoverError(formatError(error));
     } finally {
       setIsOpeningDiscover(false);
+    }
+  };
+
+  const searchDiscoverWeb = async (query: string) => {
+    if (isSearchingDiscoverWeb) return;
+    setIsSearchingDiscoverWeb(true);
+    setDiscoverWebError(null);
+    try {
+      setDiscoverWebSearch(await client.searchDiscoverWeb(query));
+    } catch (error) {
+      // Provider 失败只替换全网区域的状态，本机和 Source 结果继续可用。
+      setDiscoverWebError(formatError(error));
+    } finally {
+      setIsSearchingDiscoverWeb(false);
+    }
+  };
+
+  const previewDiscoverInstall = async (result: DiscoverWebResult) => {
+    setDiscoverError(null);
+    try {
+      await onPreviewDiscoverInstall(result);
+    } catch (error) {
+      // 安装交接失败尚未产生 Plan，发现结果继续保留供用户核验来源。
+      setDiscoverError(formatError(error));
     }
   };
 
@@ -1043,6 +1092,8 @@ function AppCore({
         highlightedMemberPath: memberRelativePath,
       });
       setDiscover(null);
+      setDiscoverWebSearch(null);
+      setDiscoverWebError(null);
     } catch (error) {
       setDiscoverError(formatError(error));
     } finally {
@@ -1185,6 +1236,8 @@ function AppCore({
     setReadOnlyInventoryScreen(INVENTORY_LIST_SCREEN);
     setDiscover(null);
     setDiscoverError(null);
+    setDiscoverWebSearch(null);
+    setDiscoverWebError(null);
     setSourceDiscovery(null);
     setSkillsShSearch(null);
     setPendingSourceRefChange(null);
@@ -2145,11 +2198,21 @@ function AppCore({
     return (
       <DiscoverPage
         outcome={discover}
+        webSearch={discoverWebSearch}
+        isSearchingWeb={isSearchingDiscoverWeb}
+        webSearchError={discoverWebError}
         error={discoverError}
         onBack={() => {
           setDiscoverError(null);
+          setDiscoverWebSearch(null);
+          setDiscoverWebError(null);
           setDiscover(null);
         }}
+        onSearchWeb={searchDiscoverWeb}
+        onOpenExternalUrl={(url) => {
+          void client.openExternalUrl(url);
+        }}
+        onPreviewInstall={previewDiscoverInstall}
         onOpenSourceManagement={openSourceManagementFromDiscover}
       />
     );

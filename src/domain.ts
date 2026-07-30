@@ -431,7 +431,20 @@ export interface DiscoverLocalSkill {
     | "projectManaged";
   bundleId: string | null;
   bundleDisplayName: string | null;
+  sourceId: string | null;
+  sourceCanonicalIdentity: string | null;
   sourceDisplayName: string | null;
+}
+
+export type DiscoverWebResultKind = "github" | "directUrl" | "reference";
+
+// 全网结果只携带真实引用与既有 Source 关联，不携带任何可执行命令。
+export interface DiscoverWebResult {
+  title: string;
+  url: string;
+  kind: DiscoverWebResultKind;
+  canonicalIdentity: string | null;
+  existingSourceId: string | null;
 }
 
 export type RemovalKind =
@@ -699,6 +712,11 @@ export type UiOutcome =
       type: "discover";
       localSkills: DiscoverLocalSkill[];
       sources: SourceSummary[];
+    }
+  | {
+      type: "discoverWebSearch";
+      query: string;
+      results: DiscoverWebResult[];
     }
   | {
       type: "sourceDiscovery";

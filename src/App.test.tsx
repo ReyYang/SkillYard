@@ -5891,6 +5891,8 @@ describe("GitHub Source 安装", () => {
           managementKind: "takeoverCandidate",
           bundleId: null,
           bundleDisplayName: null,
+          sourceId: null,
+          sourceCanonicalIdentity: null,
           sourceDisplayName: null,
         },
       ],
@@ -5917,6 +5919,118 @@ describe("GitHub Source 安装", () => {
     expect(
       screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
+  });
+
+  it("发现页提交不进入 Agent Session，并只把可安装全网结果交给既有安装预览", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createEntry()]));
+    vi.mocked(client.openDiscover).mockResolvedValue({
+      type: "discover",
+      localSkills: [
+        {
+          inventoryId: "inventory-tdd",
+          skillName: "tdd",
+          description: "测试驱动开发",
+          aiSummary: null,
+          managementKind: "takeoverCandidate",
+          bundleId: null,
+          bundleDisplayName: null,
+          sourceId: null,
+          sourceCanonicalIdentity: null,
+          sourceDisplayName: null,
+        },
+      ],
+      sources: [],
+    });
+    vi.mocked(client.searchDiscoverWeb).mockResolvedValue({
+      type: "discoverWebSearch",
+      query: "测试驱动开发",
+      results: [
+        {
+          title: "Review Skills ZIP",
+          url: "https://downloads.example.com/review-skills.zip",
+          kind: "directUrl",
+          canonicalIdentity:
+            "direct-url:https://downloads.example.com/review-skills.zip",
+          existingSourceId: null,
+        },
+        {
+          title: "Review discussion",
+          url: "https://forum.example.com/review",
+          kind: "reference",
+          canonicalIdentity: null,
+          existingSourceId: null,
+        },
+      ],
+    });
+    vi.mocked(client.createUrlInstallPlan).mockResolvedValue(
+      createInstallPlan({
+        inputKind: "directUrl",
+        bundleDisplayName: "review-skills",
+      }),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "发现" }));
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 Skill" }),
+      "测试驱动开发",
+    );
+    await user.click(screen.getByRole("button", { name: "搜索全网" }));
+
+    expect(client.searchDiscoverWeb).toHaveBeenCalledWith("测试驱动开发");
+    expect(client.askAgent).not.toHaveBeenCalled();
+    await user.click(
+      await screen.findByRole("button", {
+        name: "查看 Review Skills ZIP 的安装预览",
+      }),
+    );
+    expect(client.createUrlInstallPlan).toHaveBeenCalledWith(
+      "https://downloads.example.com/review-skills.zip",
+    );
+    expect(
+      await screen.findByRole("heading", { name: "确认安装这个 Bundle" }),
+    ).toBeInTheDocument();
+  });
+
+  it("发现页 Provider 失败只更新全网区域，本机结果保持可用", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createEntry()]));
+    vi.mocked(client.openDiscover).mockResolvedValue({
+      type: "discover",
+      localSkills: [
+        {
+          inventoryId: "inventory-tdd",
+          skillName: "tdd",
+          description: "测试驱动开发",
+          aiSummary: null,
+          managementKind: "takeoverCandidate",
+          bundleId: null,
+          bundleDisplayName: null,
+          sourceId: null,
+          sourceCanonicalIdentity: null,
+          sourceDisplayName: null,
+        },
+      ],
+      sources: [],
+    });
+    vi.mocked(client.searchDiscoverWeb).mockRejectedValue(
+      new Error("无法连接模型 Provider"),
+    );
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "发现" }));
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 Skill" }),
+      "测试驱动开发",
+    );
+    await user.click(screen.getByRole("button", { name: "搜索全网" }));
+
+    expect(await screen.findByText("无法连接模型 Provider")).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "tdd" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "本机已有" }),
+    ).toHaveTextContent("tdd");
   });
 
   it("打开安装页期间保留清单浏览，但禁用全部写入口", async () => {
@@ -7931,6 +8045,7 @@ function createClient(startup: UiOutcome): SkillYardClient {
     checkBundleUpdates: vi.fn(),
     checkEditableLocalBundle: vi.fn(),
     openDiscover: vi.fn(),
+    searchDiscoverWeb: vi.fn(),
     createBundleUpdateBatchPlan: vi.fn(),
     confirmBundleUpdateBatchPlan: vi.fn(),
     discardBundleUpdateBatchPlan: vi.fn(),

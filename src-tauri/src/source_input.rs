@@ -229,8 +229,7 @@ pub(crate) fn prepare_direct_url_source(
     plan_id: &str,
 ) -> Result<PreparedSourceSnapshot, SourceInputError> {
     validate_plan_id(plan_id)?;
-    let url = Url::parse(input.trim()).map_err(|_| SourceInputError::InvalidDirectUrl)?;
-    validate_direct_archive_url(&url)?;
+    let (url, canonical_identity) = canonical_direct_url_identity(input)?;
     let display_name =
         archive_display_name(Path::new(url.path())).ok_or(SourceInputError::InvalidDirectUrl)?;
     let locator = url.as_str().to_owned();
@@ -239,7 +238,7 @@ pub(crate) fn prepare_direct_url_source(
         plan_id,
         display_name,
         PreparedSourceKind::DirectUrl,
-        format!("direct-url:{locator}"),
+        canonical_identity,
         locator,
         None,
     )?;
@@ -268,6 +267,16 @@ pub(crate) fn prepare_direct_url_source(
     fs::remove_file(&temporary_archive).map_err(|_| SourceInputError::StagingUnavailable)?;
     prepared.marker = marker;
     Ok(prepared)
+}
+
+/// 发现页只做格式判断；真正下载与归档校验仍必须进入既有 Install Plan。
+pub(crate) fn canonical_direct_url_identity(
+    input: &str,
+) -> Result<(Url, String), SourceInputError> {
+    let url = Url::parse(input.trim()).map_err(|_| SourceInputError::InvalidDirectUrl)?;
+    validate_direct_archive_url(&url)?;
+    let identity = format!("direct-url:{}", url.as_str());
+    Ok((url, identity))
 }
 
 /// Editable Local Source 保留用户原目录，只把同一时刻的完整安全目录复制成 Plan 快照。

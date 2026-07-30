@@ -36,6 +36,9 @@ pub enum UiIntent {
         bundle_id: String,
     },
     OpenDiscover,
+    SearchDiscoverWeb {
+        query: String,
+    },
     OpenSourceDiscovery,
     SearchSkillsSh {
         query: String,
@@ -1104,7 +1107,28 @@ pub struct DiscoverLocalSkill {
     pub management_kind: ManagementKind,
     pub bundle_id: Option<String>,
     pub bundle_display_name: Option<String>,
+    pub source_id: Option<String>,
+    pub source_canonical_identity: Option<String>,
     pub source_display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiscoverWebResultKind {
+    Github,
+    DirectUrl,
+    Reference,
+}
+
+/// 全网发现只返回可核验引用和既有 Source 的关联事实，不携带可执行命令。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverWebResult {
+    pub title: String,
+    pub url: String,
+    pub kind: DiscoverWebResultKind,
+    pub canonical_identity: Option<String>,
+    pub existing_source_id: Option<String>,
 }
 
 /// 状态描述 Bundle 与更新来源的关系，不代表成员级版本。
@@ -1719,6 +1743,10 @@ pub enum UiOutcome {
     Discover {
         local_skills: Vec<DiscoverLocalSkill>,
         sources: Vec<SourceSummary>,
+    },
+    DiscoverWebSearch {
+        query: String,
+        results: Vec<DiscoverWebResult>,
     },
     SourceDiscovery {
         sources: Vec<SourceSummary>,

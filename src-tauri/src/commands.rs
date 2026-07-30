@@ -269,6 +269,19 @@ pub fn open_discover(application: State<'_, SkillYardApplication>) -> Result<UiO
 }
 
 #[tauri::command(async)]
+pub fn search_discover_web(
+    application: State<'_, SkillYardApplication>,
+    query: String,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::SearchDiscoverWeb { query })? {
+        outcome @ UiOutcome::DiscoverWebSearch { .. } => Ok(outcome),
+        _ => Err(invalid_outcome(
+            "SkillYard 没有返回结构化的 Discover 全网结果",
+        )),
+    }
+}
+
+#[tauri::command(async)]
 pub fn open_source_discovery(
     application: State<'_, SkillYardApplication>,
 ) -> Result<UiOutcome, UiError> {
