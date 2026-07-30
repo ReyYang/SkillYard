@@ -950,6 +950,11 @@ describe("本机清单", () => {
     expect(client.setThemePreset).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(
+      within(screen.getByRole("group", { name: "Theme" }))
+        .getAllByRole("radio")
+        .map((radio) => radio.getAttribute("aria-label")),
+    ).toEqual(["Ledger", "Archive", "Layers"]);
     expect(screen.getByRole("radio", { name: "Ledger" })).not.toBeChecked();
     expect(screen.getByRole("radio", { name: "Archive" })).toBeChecked();
     expect(screen.queryByRole("radio", { name: "档案" })).not.toBeInTheDocument();
@@ -1024,6 +1029,170 @@ describe("本机清单", () => {
         "你可以继续使用现有安装方式，再主动刷新本机。",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("设置切换 Layers 时保留当前 Bundle、搜索与 Agent Session", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          id: "managed:layers-alpha",
+          memberId: "layers-alpha",
+          bundleId: "layers-bundle-alpha",
+          bundleDisplayName: "Layers Alpha",
+          skillName: "layers-alpha",
+        }),
+        createManagedEntry({
+          id: "managed:layers-beta",
+          memberId: "layers-beta",
+          bundleId: "layers-bundle-beta",
+          bundleDisplayName: "Layers Beta",
+          skillName: "layers-beta",
+        }),
+      ]),
+    );
+    const ai = {
+      ...defaultAiPreferences(),
+      enabled: true,
+      disclosureAccepted: true,
+      hasApiKey: true,
+      verified: true,
+    };
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      theme: "archive",
+      ai,
+    });
+    vi.mocked(client.setThemePreset).mockResolvedValue({
+      language: "zhCn",
+      theme: "layers",
+      ai,
+    });
+    vi.mocked(client.askAgent).mockResolvedValue({
+      reply: "Layers 中仍保留。",
+      localMatchFound: true,
+      searchedPublicWeb: false,
+      searchResults: [],
+    });
+
+    render(<App client={client} />);
+    const archive = await screen.findByRole("region", {
+      name: "Archive Bundle Library",
+    });
+    await user.click(
+      within(archive).getByRole("button", { name: "Layers Beta" }),
+    );
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 Skill" }),
+      "beta",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
+      "保留",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("Layers 中仍保留。")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await user.click(screen.getByRole("radio", { name: "Layers" }));
+
+    expect(client.setThemePreset).toHaveBeenCalledWith("layers");
+    expect(document.querySelector(".application-theme")).toHaveAttribute(
+      "data-theme-preset",
+      "layers",
+    );
+    expect(screen.getByText("Layers 中仍保留。")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    const layers = screen.getByRole("region", {
+      name: "Layers Bundle Library",
+    });
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toHaveValue(
+      "beta",
+    );
+    expect(
+      within(layers).getByRole("button", { name: "Layers Beta" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("从持久化偏好恢复 Layers，并在大量长名称 Bundle 中保持键盘焦点", async () => {
+    const user = userEvent.setup();
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 640,
+    });
+    window.dispatchEvent(new Event("resize"));
+    const entries = Array.from({ length: 48 }, (_, index) => {
+      const sequence = String(index + 1).padStart(2, "0");
+      return createManagedEntry({
+        id: `managed:layers-member-${sequence}`,
+        memberId: `layers-member-${sequence}`,
+        bundleId: `layers-bundle-${sequence}`,
+        bundleDisplayName:
+          index === 47
+            ? "layers-final-bundle-with-a-name-long-enough-to-remain-readable"
+            : `Layers Bundle ${sequence}`,
+        skillName: `layers-skill-${sequence}`,
+      });
+    });
+    const client = createClient(inventoryOutcome(entries));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      theme: "layers",
+      ai: defaultAiPreferences(),
+    });
+
+    render(<App client={client} />);
+
+    const layers = await screen.findByRole("region", {
+      name: "Layers Bundle Library",
+    });
+    expect(client.setThemePreset).not.toHaveBeenCalled();
+    const stack = within(layers).getByRole("navigation", { name: "Bundle" });
+    expect(within(stack).getAllByRole("button")).toHaveLength(48);
+
+    await user.click(
+      within(stack).getByRole("button", { name: "Layers Bundle 01" }),
+    );
+    await user.keyboard("{End}");
+    const finalName =
+      "layers-final-bundle-with-a-name-long-enough-to-remain-readable";
+    const finalBundle = within(stack).getByRole("button", { name: finalName });
+    expect(finalBundle).toHaveAttribute("aria-pressed", "true");
+    expect(finalBundle).toHaveFocus();
+    expect(
+      within(layers).getByRole("heading", { name: finalName }),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Home}");
+    expect(
+      within(stack).getByRole("button", { name: "Layers Bundle 01" }),
+    ).toHaveFocus();
+
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: previousWidth,
+    });
+  });
+
+  it("Layers 空清单沿用共享的明确空状态", async () => {
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      theme: "layers",
+      ai: defaultAiPreferences(),
+    });
+
+    render(<App client={client} />);
+
+    const layers = await screen.findByRole("region", {
+      name: "Layers Bundle Library",
+    });
+    expect(within(layers).getByText("未发现 Skill")).toBeInTheDocument();
   });
 
   it("API Key 可以在保存前由用户主动显示或隐藏", async () => {

@@ -1,6 +1,6 @@
 .theme-preset-options {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.75rem;
   margin: 0;
   padding: 0;
@@ -42,8 +42,8 @@
 }
 
 /*
- * Archive 只覆盖语义 token 和共用控件的视觉材质；页面结构与生命周期仍由
- * 原有组件负责，避免主题变成第二套应用。
+ * 每个 Theme Preset 只定义语义 token；页面结构与生命周期仍由原有组件负责，
+ * 避免视觉选择变成第二套应用。
  */
 .application-theme[data-theme-preset="archive"] {
   --sy-canvas: #1c151b;
@@ -67,16 +67,39 @@
     var(--sy-canvas);
 }
 
-.application-theme[data-theme-preset="archive"] h1,
-.application-theme[data-theme-preset="archive"] .detail-header h1,
-.application-theme[data-theme-preset="archive"] .inventory-header h1 {
+.application-theme[data-theme-preset="layers"] {
+  --sy-canvas: #eeece7;
+  --sy-surface: rgb(251 250 246 / 92%);
+  --sy-surface-subtle: rgb(241 240 235 / 92%);
+  --sy-surface-strong: #fdfcf8;
+  --sy-text: #282b27;
+  --sy-muted: #6f746e;
+  --sy-border: rgb(57 62 55 / 16%);
+  --sy-accent: #6b8336;
+  --sy-accent-strong: #3f5921;
+  --sy-selected: #e8eddc;
+  --sy-danger: #9a493b;
+  --sy-shadow: 0 24px 62px rgb(44 48 42 / 12%);
+  --sy-radius-large: 18px;
+  --sy-radius-small: 10px;
+  color-scheme: light;
+  background:
+    linear-gradient(90deg, rgb(95 104 88 / 5%) 1px, transparent 1px),
+    linear-gradient(rgb(95 104 88 / 5%) 1px, transparent 1px),
+    var(--sy-canvas);
+  background-size: 40px 40px;
+}
+
+.application-theme:not([data-theme-preset="ledger"]) h1,
+.application-theme:not([data-theme-preset="ledger"]) .detail-header h1,
+.application-theme:not([data-theme-preset="ledger"]) .inventory-header h1 {
   color: var(--sy-text);
   font-family: var(--sy-display-font);
   font-weight: 500;
   letter-spacing: -0.05em;
 }
 
-.application-theme[data-theme-preset="archive"] :is(
+.application-theme:not([data-theme-preset="ledger"]) :is(
     .inventory-summary,
     .refresh-summary,
     .section-eyebrow,
@@ -90,7 +113,7 @@
   color: var(--sy-muted);
 }
 
-.application-theme[data-theme-preset="archive"] :is(
+.application-theme:not([data-theme-preset="ledger"]) :is(
     .inventory-controls,
     .inventory-section,
     .settings-card,
@@ -108,7 +131,7 @@
   box-shadow: var(--sy-shadow);
 }
 
-.application-theme[data-theme-preset="archive"] :is(
+.application-theme:not([data-theme-preset="ledger"]) :is(
     .secondary-action,
     .bundle-open-action,
     .filter-group button,
@@ -121,7 +144,7 @@
   box-shadow: none;
 }
 
-.application-theme[data-theme-preset="archive"] :is(
+.application-theme:not([data-theme-preset="ledger"]) :is(
     .primary-action,
     .filter-group button[aria-pressed="true"],
     .agent-composer button
@@ -131,7 +154,7 @@
   box-shadow: 0 10px 28px rgb(200 243 106 / 14%);
 }
 
-.application-theme[data-theme-preset="archive"] :is(
+.application-theme:not([data-theme-preset="ledger"]) :is(
     input,
     textarea,
     select
@@ -141,12 +164,12 @@
   background-color: var(--sy-surface-subtle);
 }
 
-.application-theme[data-theme-preset="archive"] .search-field input {
+.application-theme:not([data-theme-preset="ledger"]) .search-field input {
   color: var(--sy-text);
   background: transparent;
 }
 
-.application-theme[data-theme-preset="archive"] :is(
+.application-theme:not([data-theme-preset="ledger"]) :is(
     .agent-window-header,
     .agent-composer
   ) {
@@ -154,7 +177,7 @@
   background: var(--sy-surface);
 }
 
-.application-theme[data-theme-preset="archive"] :is(
+.application-theme:not([data-theme-preset="ledger"]) :is(
     .agent-message p,
     .agent-empty,
     .agent-search-results li
@@ -164,19 +187,24 @@
   background: var(--sy-surface-subtle);
 }
 
-.application-theme[data-theme-preset="archive"] .agent-message.user p {
+.application-theme:not([data-theme-preset="ledger"]) .agent-message.user p {
   color: #18200f;
   background: var(--sy-accent);
 }
 
-.application-theme[data-theme-preset="archive"] button:focus-visible,
-.application-theme[data-theme-preset="archive"] input:focus-visible,
-.application-theme[data-theme-preset="archive"] select:focus-visible,
-.application-theme[data-theme-preset="archive"] textarea:focus-visible {
+.application-theme:not([data-theme-preset="ledger"]) button:focus-visible,
+.application-theme:not([data-theme-preset="ledger"]) input:focus-visible,
+.application-theme:not([data-theme-preset="ledger"]) select:focus-visible,
+.application-theme:not([data-theme-preset="ledger"]) textarea:focus-visible {
   outline-color: var(--sy-accent);
 }
 
-.application-theme[data-theme-preset="archive"] :is(button, input, select, textarea) {
+.application-theme:not([data-theme-preset="ledger"]) :is(
+    button,
+    input,
+    select,
+    textarea
+  ) {
   transition:
     color 140ms ease,
     background-color 140ms ease,
@@ -191,7 +219,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .application-theme[data-theme-preset="archive"] :is(
+  .application-theme:not([data-theme-preset="ledger"]) :is(
       button,
       input,
       select,

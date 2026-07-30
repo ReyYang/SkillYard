@@ -1171,8 +1171,13 @@ function InventorySettingsPage({
         </div>
         <fieldset className="theme-preset-options" disabled={isSavingTheme}>
           <legend className="visually-hidden">{t("主题")}</legend>
-          {(["ledger", "archive"] as const).map((preset) => {
-            const label = preset === "ledger" ? "Ledger" : "Archive";
+          {(["ledger", "archive", "layers"] as const).map((preset) => {
+            const label =
+              preset === "ledger"
+                ? "Ledger"
+                : preset === "archive"
+                  ? "Archive"
+                  : "Layers";
             return (
               <label className="theme-preset-option" key={preset}>
                 <input
@@ -1189,7 +1194,9 @@ function InventorySettingsPage({
                   <small>
                     {preset === "ledger"
                       ? t("清晰的清单与详情布局")
-                      : t("突出当前 Bundle 的收藏架布局")}
+                      : preset === "archive"
+                        ? t("突出当前 Bundle 的收藏架布局")
+                        : t("层叠浏览 Bundle 与当前详情")}
                   </small>
                 </span>
               </label>

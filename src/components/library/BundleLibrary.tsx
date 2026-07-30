@@ -35,7 +35,8 @@ export function BundleLibrary({
       : (items[0]?.id ?? null);
 
   if (items.length === 0 || !activeId) {
-    const renderedTheme = theme === "archive" ? "archive" : "ledger";
+    const renderedTheme =
+      theme === "archive" || theme === "layers" ? theme : "ledger";
     return (
       <section
         className={`bundle-library ${renderedTheme}-library`}
@@ -59,7 +60,17 @@ export function BundleLibrary({
     );
   }
 
-  // Layers 在自己的交付切片开放前，继续使用已经完整交付的 Ledger。
+  if (theme === "layers") {
+    return (
+      <LayersLibrary
+        items={items}
+        activeId={activeId}
+        onSelect={onSelect}
+        renderDetails={renderDetails}
+      />
+    );
+  }
+
   return (
     <section
       className="bundle-library ledger-library"
@@ -158,6 +169,59 @@ function ArchiveLibrary({
           </button>
         ))}
       </nav>
+    </section>
+  );
+}
+
+function LayersLibrary({
+  items,
+  activeId,
+  onSelect,
+  renderDetails,
+}: {
+  items: BundleLibraryItem[];
+  activeId: string;
+  onSelect(id: string): void;
+  renderDetails(id: string): ReactNode;
+}) {
+  return (
+    <section
+      className="bundle-library layers-library"
+      role="region"
+      aria-label="Layers Bundle Library"
+      data-theme-preset="layers"
+    >
+      <nav
+        className="layers-library-stack"
+        aria-label="Bundle"
+        onKeyDown={(event) =>
+          moveKeyboardSelection(event, items, activeId, onSelect)
+        }
+      >
+        {items.map((item, index) => (
+          <button
+            className="layers-library-card"
+            type="button"
+            key={item.id}
+            data-library-select
+            aria-label={item.title}
+            aria-pressed={item.id === activeId}
+            onClick={() => onSelect(item.id)}
+          >
+            <span className="layers-library-card-index">
+              {String(index + 1).padStart(2, "0")}
+            </span>
+            <span className="layers-library-card-copy">
+              <strong>{item.title}</strong>
+              <small>
+                {item.skillCount} Skill · {item.eyebrow}
+              </small>
+              {item.category ? <em>{item.category}</em> : null}
+            </span>
+          </button>
+        ))}
+      </nav>
+      <div className="layers-library-detail">{renderDetails(activeId)}</div>
     </section>
   );
 }

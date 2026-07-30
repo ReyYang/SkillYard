@@ -64,6 +64,8 @@ const EN_MESSAGES = {
   "清晰的清单与详情布局": "A clear list-and-detail layout",
   "突出当前 Bundle 的收藏架布局":
     "A collection layout centered on the current Bundle",
+  "层叠浏览 Bundle 与当前详情":
+    "A layered Bundle browser with current details",
   "主题未保存": "Theme was not saved",
   "AI 功能": "AI features",
   "所有 AI 功能共用这一组 Provider 和模型。SkillYard 不会自动测试连接。":
