@@ -1,9 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   AgentConversationMessage,
   AgentPageContext,
-  AgentReply,
+  AgentStreamEvent,
   AiConfigurationInput,
   BatchMountPlan,
   BatchMountRequest,
@@ -46,9 +46,13 @@ export interface SkillYardClient {
   deleteAiApiKey(): Promise<UserPreferences>;
   testAiConnection(): Promise<UserPreferences>;
   askAgent(
+    requestId: string,
     context: AgentPageContext,
     messages: AgentConversationMessage[],
-  ): Promise<AgentReply>;
+    onEvent: (event: AgentStreamEvent) => void,
+  ): Promise<void>;
+  cancelAgent(requestId: string): Promise<void>;
+  openExternalUrl(url: string): Promise<void>;
   generateSkillAiExplanation(inventoryId: string): Promise<InventoryOutcome>;
   organizeSkillAiExplanations(): Promise<InventoryOutcome>;
   getStartupState(): Promise<UiOutcome>;
@@ -195,18 +199,17 @@ export const tauriSkillYardClient: SkillYardClient = {
     );
     return { language: outcome.language, theme: outcome.theme, ai: outcome.ai };
   },
-  askAgent: async (context, messages) => {
-    const outcome = await invoke<Extract<UiOutcome, { type: "agentReply" }>>(
-      "ask_agent",
-      { context, messages },
-    );
-    return {
-      reply: outcome.reply,
-      localMatchFound: outcome.localMatchFound,
-      searchedPublicWeb: outcome.searchedPublicWeb,
-      searchResults: outcome.searchResults,
-    };
+  askAgent: async (requestId, context, messages, onEvent) => {
+    const channel = new Channel<AgentStreamEvent>(onEvent);
+    await invoke<void>("ask_agent", {
+      requestId,
+      context,
+      messages,
+      onEvent: channel,
+    });
   },
+  cancelAgent: (requestId) => invoke<void>("cancel_agent", { requestId }),
+  openExternalUrl: (url) => invoke<void>("open_external_url", { url }),
   generateSkillAiExplanation: (inventoryId) =>
     invoke<InventoryOutcome>("generate_skill_ai_explanation", {
       inventoryId,

@@ -44,14 +44,6 @@ export interface AgentConversationMessage {
   content: string;
 }
 
-export interface AgentReply {
-  reply: string;
-  // 后续联网分支只使用 Rust Core 的结构化判断，不解析回答文案。
-  localMatchFound: boolean;
-  searchedPublicWeb: boolean;
-  searchResults: AgentSearchResult[];
-}
-
 export type AgentSearchResultKind = "github" | "directUrl" | "reference";
 
 export interface AgentSearchResult {
@@ -59,6 +51,17 @@ export interface AgentSearchResult {
   url: string;
   kind: AgentSearchResultKind;
 }
+
+// Provider 私有 SSE 事件不能越过 typed Tauri Channel。
+export type AgentStreamEvent =
+  | { type: "delta"; text: string }
+  | {
+      type: "completed";
+      localMatchFound: boolean;
+      searchedPublicWeb: boolean;
+      searchResults: AgentSearchResult[];
+    }
+  | { type: "failed"; message: string };
 
 export type SkillCategory =
   | "developmentEngineering"

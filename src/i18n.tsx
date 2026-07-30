@@ -730,6 +730,7 @@ const EN_MESSAGES = {
     "Unable to prepare an installation preview for this Source. Please try again.",
   "这次回答没有完成，请稍后重试。":
     "This answer could not be completed. Please try again.",
+  "回答未完成": "Answer incomplete",
   "请先在设置中启用 AI": "Enable AI in Settings first",
   "请先在设置中完成当前模型的连接测试":
     "Complete the connection test for the current model in Settings first",

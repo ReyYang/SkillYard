@@ -302,7 +302,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
         <AgentOverlay
           context={agentContext}
           aiPreferences={aiPreferences}
-          onAsk={(context, messages) => client.askAgent(context, messages)}
+          onAsk={(requestId, context, messages, onEvent) =>
+            client.askAgent(requestId, context, messages, onEvent)
+          }
+          onCancel={(requestId) => client.cancelAgent(requestId)}
+          onOpenExternalUrl={(url) => client.openExternalUrl(url)}
           onPreviewInstall={previewAgentInstall}
         />
       </div>

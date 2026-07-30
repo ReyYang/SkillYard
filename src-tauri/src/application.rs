@@ -1,15 +1,18 @@
 use std::{
     path::Path,
-    sync::{Arc, Mutex, TryLockError},
+    sync::{
+        Arc, Mutex, TryLockError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use thiserror::Error;
 
 use crate::{
     agent::{
-        AgentError, AgentProviderEndpoints, KeychainSecretStore, SharedSecretStore, answer_agent,
-        build_local_skill_catalog, generate_skill_ai_explanation, read_skill_material,
-        search_public_skills, verify_provider,
+        AgentError, AgentProviderEndpoints, AgentProviderRequest, KeychainSecretStore,
+        SharedSecretStore, build_local_skill_catalog, generate_skill_ai_explanation,
+        read_skill_material, stream_agent_answer, stream_public_skills, verify_provider,
     },
     bundle_update_batch::{
         BundleUpdateBatchError, acknowledge_bundle_update_batch, confirm_bundle_update_batch_plan,
@@ -17,10 +20,10 @@ use crate::{
         read_open_bundle_update_batch_outcome, recover_running_bundle_update_batch,
     },
     domain::{
-        AgentConversationMessage, AgentPageContext, AgentPageKind, AiPreferences, AiProvider,
-        BundleUpdateStatus, EditableLocalRelinkMember, InterfaceLanguage, MergeContentChoice,
-        PlatformInfo, SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, ThemePreset,
-        UiIntent, UiOutcome,
+        AgentConversationMessage, AgentPageContext, AgentPageKind, AgentStreamEvent, AiPreferences,
+        AiProvider, BundleUpdateStatus, EditableLocalRelinkMember, InterfaceLanguage,
+        MergeContentChoice, PlatformInfo, SourceKind, SourceMemberMappingChoice,
+        TakeoverPlanRequest, ThemePreset, UiIntent, UiOutcome,
     },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
@@ -65,6 +68,11 @@ use crate::{
 };
 
 const SOURCE_REF_PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
+
+struct ActiveAgentRequest {
+    id: String,
+    cancelled: Arc<AtomicBool>,
+}
 
 fn default_source_transport() -> Option<SharedSourceTransport> {
     // HTTP client 初始化失败也必须等到用户真正访问 Source 时作为普通错误呈现。
@@ -112,6 +120,7 @@ pub struct SkillYardApplication {
     source_transport: Option<SharedSourceTransport>,
     secret_store: SharedSecretStore,
     agent_endpoints: AgentProviderEndpoints,
+    active_agent_request: Mutex<Option<ActiveAgentRequest>>,
 }
 
 impl SkillYardApplication {
@@ -200,6 +209,7 @@ impl SkillYardApplication {
             source_transport,
             secret_store,
             agent_endpoints,
+            active_agent_request: Mutex::new(None),
         }
     }
 
@@ -260,7 +270,6 @@ impl SkillYardApplication {
             | UiIntent::TestAiConnection => {
                 unreachable!("偏好意图已在平台检查前处理")
             }
-            UiIntent::AskAgent { context, messages } => self.ask_agent(context, messages),
             UiIntent::GenerateSkillAiExplanation { inventory_id } => {
                 self.generate_skill_ai_explanation(inventory_id)
             }
@@ -513,11 +522,75 @@ impl SkillYardApplication {
         self.preferences_outcome(&storage)
     }
 
-    fn ask_agent(
+    /// typed Tauri Channel 与 Rust 集成测试共用这个唯一流式生产入口。
+    pub fn stream_agent(
+        &self,
+        request_id: String,
+        context: AgentPageContext,
+        messages: Vec<AgentConversationMessage>,
+        mut emit: impl FnMut(AgentStreamEvent) -> bool,
+    ) -> Result<(), ApplicationError> {
+        let cancellation = {
+            let mut active = self
+                .active_agent_request
+                .lock()
+                .map_err(|_| AgentError::SessionUnavailable)?;
+            if active.is_some() {
+                emit(AgentStreamEvent::Failed {
+                    message: AgentError::RequestInProgress.to_string(),
+                });
+                return Ok(());
+            }
+            let cancellation = Arc::new(AtomicBool::new(false));
+            *active = Some(ActiveAgentRequest {
+                id: request_id.clone(),
+                cancelled: Arc::clone(&cancellation),
+            });
+            cancellation
+        };
+        let outcome = self.run_agent_stream(context, messages, &cancellation, &mut emit);
+        {
+            let mut active = self
+                .active_agent_request
+                .lock()
+                .map_err(|_| AgentError::SessionUnavailable)?;
+            if active
+                .as_ref()
+                .is_some_and(|request| request.id == request_id)
+            {
+                *active = None;
+            }
+        }
+        match outcome {
+            Ok(()) | Err(ApplicationError::Agent(AgentError::Cancelled)) => Ok(()),
+            Err(error) => {
+                emit(AgentStreamEvent::Failed {
+                    message: error.to_string(),
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// 关闭对话框是唯一取消入口；重复关闭或已完成请求保持幂等。
+    pub fn cancel_agent(&self, request_id: &str) -> Result<(), ApplicationError> {
+        let active = self
+            .active_agent_request
+            .lock()
+            .map_err(|_| AgentError::SessionUnavailable)?;
+        if let Some(request) = active.as_ref().filter(|request| request.id == request_id) {
+            request.cancelled.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn run_agent_stream(
         &self,
         context: AgentPageContext,
         messages: Vec<AgentConversationMessage>,
-    ) -> Result<UiOutcome, ApplicationError> {
+        cancellation: &AtomicBool,
+        emit: &mut impl FnMut(AgentStreamEvent) -> bool,
+    ) -> Result<(), ApplicationError> {
         let storage = self.open_storage()?;
         let ai = storage.read_ai_preferences()?;
         if !ai.enabled {
@@ -578,38 +651,49 @@ impl SkillYardApplication {
             self.paths.home(),
         );
         let context = format!("{material}\n\n{catalog}");
-        let answer = answer_agent(
+        let cancelled = || cancellation.load(Ordering::Acquire);
+        let provider_request = AgentProviderRequest::new(
             &self.agent_endpoints,
             ai.provider,
             &ai.model,
             &api_key,
             language,
+        );
+        let answer = stream_agent_answer(
+            &provider_request,
             &messages,
             &context,
+            |text| emit(AgentStreamEvent::Delta { text }),
+            cancelled,
         )?;
-        let (reply, searched_public_web, search_results) = if answer.search_public {
+        let (searched_public_web, search_results) = if answer.search_public {
             let query = messages
                 .last()
                 .map(|message| message.content.as_str())
                 .ok_or(AgentError::EmptyConversation)?;
-            let search = search_public_skills(
-                &self.agent_endpoints,
-                ai.provider,
-                &ai.model,
-                &api_key,
-                language,
+            if !emit(AgentStreamEvent::Delta {
+                text: "\n\n".to_owned(),
+            }) {
+                return Err(AgentError::Cancelled.into());
+            }
+            let search = stream_public_skills(
+                &provider_request,
                 query,
+                |text| emit(AgentStreamEvent::Delta { text }),
+                cancelled,
             )?;
-            (search.reply, true, search.results)
+            (true, search.results)
         } else {
-            (answer.reply, false, Vec::new())
+            (false, Vec::new())
         };
-        Ok(UiOutcome::AgentReply {
-            reply,
+        if !emit(AgentStreamEvent::Completed {
             local_match_found: answer.local_match_found,
             searched_public_web,
             search_results,
-        })
+        }) {
+            return Err(AgentError::Cancelled.into());
+        }
+        Ok(())
     }
 
     fn generate_skill_ai_explanation(

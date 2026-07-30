@@ -1,14 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  channels: [] as Array<{ onmessage: (event: unknown) => void }>,
+}));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: mocks.invoke,
+  Channel: class {
+    onmessage: (event: unknown) => void;
+
+    constructor(onmessage: (event: unknown) => void) {
+      this.onmessage = onmessage;
+      mocks.channels.push(this);
+    }
+  },
+}));
 
 import { tauriSkillYardClient } from "./skillyardClient";
 
 describe("Tauri IPC contract", () => {
   beforeEach(() => {
     mocks.invoke.mockReset();
+    mocks.channels.length = 0;
   });
 
   it("只通过任务级命令读取启动状态", async () => {
@@ -116,12 +130,14 @@ describe("Tauri IPC contract", () => {
   });
 
   it("全局助手只提交稳定页面身份和内存会话，不提交本机路径", async () => {
-    mocks.invoke.mockResolvedValue({
-      type: "agentReply",
-      reply: "fixture answer",
-      localMatchFound: true,
-      searchedPublicWeb: false,
-      searchResults: [],
+    const events: unknown[] = [];
+    mocks.invoke.mockImplementation(async (command) => {
+      if (command === "ask_agent") {
+        mocks.channels[0]?.onmessage({
+          type: "delta",
+          text: "fixture answer",
+        });
+      }
     });
     const context = {
       type: "skill" as const,
@@ -131,12 +147,24 @@ describe("Tauri IPC contract", () => {
       { role: "user" as const, content: "解释这个 Skill" },
     ];
 
-    await tauriSkillYardClient.askAgent(context, messages);
-
-    expect(mocks.invoke).toHaveBeenCalledWith("ask_agent", {
+    await tauriSkillYardClient.askAgent(
+      "request-fixture",
       context,
       messages,
+      (event) => events.push(event),
+    );
+    await tauriSkillYardClient.cancelAgent("request-fixture");
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "ask_agent", {
+      requestId: "request-fixture",
+      context,
+      messages,
+      onEvent: mocks.channels[0],
     });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "cancel_agent", {
+      requestId: "request-fixture",
+    });
+    expect(events).toEqual([{ type: "delta", text: "fixture answer" }]);
   });
 
   it("生成 Skill 说明时只提交稳定 Inventory ID", async () => {

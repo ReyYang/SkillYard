@@ -10,8 +10,8 @@ use std::{
 use serde_json::Value;
 use skillyard_lib::{
     AgentConversationMessage, AgentMessageRole, AgentPageContext, AgentProviderEndpoints,
-    AgentSearchResultKind, AiProvider, ApplicationPaths, PlatformInfo, SecretStore,
-    SecretStoreError, SkillYardApplication, UiIntent, UiOutcome,
+    AgentSearchResult, AgentSearchResultKind, AgentStreamEvent, AiProvider, ApplicationPaths,
+    PlatformInfo, SecretStore, SecretStoreError, SkillYardApplication, UiIntent, UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -68,18 +68,18 @@ fn skill_detail_agent_resolves_stable_id_and_filters_local_sensitive_content() {
         .clone();
 
     assert_eq!(
-        application
-            .handle(UiIntent::AskAgent {
-                context: AgentPageContext::Skill {
-                    inventory_id: inventory_id.clone(),
-                },
-                messages: vec![AgentConversationMessage {
-                    role: AgentMessageRole::User,
-                    content: "这个 Skill 是做什么的？".to_owned(),
-                }],
-            })
-            .expect("Agent 应解释当前 Skill"),
-        UiOutcome::AgentReply {
+        collect_agent_reply(
+            &application,
+            AgentPageContext::Skill {
+                inventory_id: inventory_id.clone(),
+            },
+            vec![AgentConversationMessage {
+                role: AgentMessageRole::User,
+                content: "这个 Skill 是做什么的？".to_owned(),
+            }],
+        )
+        .expect("Agent 应解释当前 Skill"),
+        AgentReplyFixture {
             reply: "这是一个用于解释代码的 Skill。".to_owned(),
             local_match_found: true,
             searched_public_web: false,
@@ -107,18 +107,18 @@ fn skill_detail_agent_resolves_stable_id_and_filters_local_sensitive_content() {
         "只读 Agent 不能修改 Skill"
     );
 
-    let error = application
-        .handle(UiIntent::AskAgent {
-            context: AgentPageContext::Skill {
-                inventory_id: "unknown-inventory-id".to_owned(),
-            },
-            messages: vec![AgentConversationMessage {
-                role: AgentMessageRole::User,
-                content: "解释它".to_owned(),
-            }],
-        })
-        .expect_err("前端不能用不存在的稳定 ID 读取路径");
-    assert_eq!(error.to_string(), "当前页面对应的 Skill 已不存在");
+    let error = collect_agent_reply(
+        &application,
+        AgentPageContext::Skill {
+            inventory_id: "unknown-inventory-id".to_owned(),
+        },
+        vec![AgentConversationMessage {
+            role: AgentMessageRole::User,
+            content: "解释它".to_owned(),
+        }],
+    )
+    .expect_err("前端不能用不存在的稳定 ID 读取路径");
+    assert_eq!(error, "当前页面对应的 Skill 已不存在");
 }
 
 #[test]
@@ -214,18 +214,18 @@ fn local_search_reads_every_known_skill_kind_without_enabling_web_search() {
         .expect("应读取搜索前清单");
 
     assert_eq!(
-        application
-            .handle(UiIntent::AskAgent {
-                context: AgentPageContext::Page {
-                    page: skillyard_lib::AgentPageKind::Inventory,
-                },
-                messages: vec![AgentConversationMessage {
-                    role: AgentMessageRole::User,
-                    content: "我需要一个能做代码审查的 Skill".to_owned(),
-                }],
-            })
-            .expect("本机 Skill 比较应返回匹配结果"),
-        UiOutcome::AgentReply {
+        collect_agent_reply(
+            &application,
+            AgentPageContext::Page {
+                page: skillyard_lib::AgentPageKind::Inventory,
+            },
+            vec![AgentConversationMessage {
+                role: AgentMessageRole::User,
+                content: "我需要一个能做代码审查的 Skill".to_owned(),
+            }],
+        )
+        .expect("本机 Skill 比较应返回匹配结果"),
+        AgentReplyFixture {
             reply: "本机已有四个可用于代码审查的 Skill。".to_owned(),
             local_match_found: true,
             searched_public_web: false,
@@ -326,24 +326,21 @@ fn explicit_online_request_searches_even_when_a_local_skill_matches() {
         .handle(UiIntent::StartInitialScan)
         .expect("应扫描本机匹配项");
 
-    let UiOutcome::AgentReply {
+    let AgentReplyFixture {
         local_match_found,
         searched_public_web,
         ..
-    } = application
-        .handle(UiIntent::AskAgent {
-            context: AgentPageContext::Page {
-                page: skillyard_lib::AgentPageKind::Inventory,
-            },
-            messages: vec![AgentConversationMessage {
-                role: AgentMessageRole::User,
-                content: "我想看看最新的线上代码审查 Skill".to_owned(),
-            }],
-        })
-        .expect("显式线上请求应覆盖本地优先短路")
-    else {
-        panic!("应返回联网结果");
-    };
+    } = collect_agent_reply(
+        &application,
+        AgentPageContext::Page {
+            page: skillyard_lib::AgentPageKind::Inventory,
+        },
+        vec![AgentConversationMessage {
+            role: AgentMessageRole::User,
+            content: "我想看看最新的线上代码审查 Skill".to_owned(),
+        }],
+    )
+    .expect("显式线上请求应覆盖本地优先短路");
     assert!(local_match_found);
     assert!(searched_public_web);
     let recorded = requests.recv().expect("应读取显式联网请求");
@@ -373,18 +370,18 @@ fn public_search_failure_does_not_mutate_local_state() {
         .handle(UiIntent::GetStartupState)
         .expect("应读取失败前状态");
 
-    let error = application
-        .handle(UiIntent::AskAgent {
-            context: AgentPageContext::Page {
-                page: skillyard_lib::AgentPageKind::Inventory,
-            },
-            messages: vec![AgentConversationMessage {
-                role: AgentMessageRole::User,
-                content: "找一个代码审查 Skill".to_owned(),
-            }],
-        })
-        .expect_err("Provider Web Search 失败应只终止本次回答");
-    assert!(error.to_string().contains("无法连接模型 Provider"));
+    let error = collect_agent_reply(
+        &application,
+        AgentPageContext::Page {
+            page: skillyard_lib::AgentPageKind::Inventory,
+        },
+        vec![AgentConversationMessage {
+            role: AgentMessageRole::User,
+            content: "找一个代码审查 Skill".to_owned(),
+        }],
+    )
+    .expect_err("Provider Web Search 失败应只终止本次回答");
+    assert!(error.contains("无法连接模型 Provider"));
     assert_eq!(
         application
             .handle(UiIntent::GetStartupState)
@@ -438,26 +435,23 @@ fn assert_provider_web_search(
         .handle(UiIntent::GetStartupState)
         .expect("应读取搜索前状态");
 
-    let UiOutcome::AgentReply {
+    let AgentReplyFixture {
         reply,
         local_match_found,
         searched_public_web,
         search_results,
-    } = application
-        .handle(UiIntent::AskAgent {
-            context: AgentPageContext::Page {
-                page: skillyard_lib::AgentPageKind::Inventory,
-            },
-            messages: vec![AgentConversationMessage {
-                role: AgentMessageRole::User,
-                content: "我想找一个可以做代码审查的 Skill".to_owned(),
-            }],
-        })
-        .expect("没有本机匹配时应搜索公开互联网")
-    else {
-        panic!("应返回 Agent 搜索结果");
-    };
-    assert_eq!(reply, "找到三个公开结果。");
+    } = collect_agent_reply(
+        &application,
+        AgentPageContext::Page {
+            page: skillyard_lib::AgentPageKind::Inventory,
+        },
+        vec![AgentConversationMessage {
+            role: AgentMessageRole::User,
+            content: "我想找一个可以做代码审查的 Skill".to_owned(),
+        }],
+    )
+    .expect("没有本机匹配时应搜索公开互联网");
+    assert!(reply.ends_with("找到三个公开结果。"));
     assert!(!local_match_found);
     assert!(searched_public_web);
     assert_eq!(search_results.len(), 3);
@@ -601,16 +595,16 @@ fn assert_provider_chat(
     let inventory_id = entries.first().expect("应发现 Provider Skill").id.clone();
 
     assert_eq!(
-        application
-            .handle(UiIntent::AskAgent {
-                context: AgentPageContext::Skill { inventory_id },
-                messages: vec![AgentConversationMessage {
-                    role: AgentMessageRole::User,
-                    content: "explain".to_owned(),
-                }],
-            })
-            .expect("当前 Provider 应返回对话回答"),
-        UiOutcome::AgentReply {
+        collect_agent_reply(
+            &application,
+            AgentPageContext::Skill { inventory_id },
+            vec![AgentConversationMessage {
+                role: AgentMessageRole::User,
+                content: "explain".to_owned(),
+            }],
+        )
+        .expect("当前 Provider 应返回对话回答"),
+        AgentReplyFixture {
             reply: "fixture answer".to_owned(),
             local_match_found: true,
             searched_public_web: false,
@@ -631,6 +625,57 @@ fn assert_provider_chat(
         !recorded[2].to_string().contains("web_search"),
         "普通解释路径不能启用 Provider Web Search；DeepSeek 只允许结构化回答工具"
     );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AgentReplyFixture {
+    reply: String,
+    local_match_found: bool,
+    searched_public_web: bool,
+    search_results: Vec<AgentSearchResult>,
+}
+
+fn collect_agent_reply(
+    application: &SkillYardApplication,
+    context: AgentPageContext,
+    messages: Vec<AgentConversationMessage>,
+) -> Result<AgentReplyFixture, String> {
+    let mut reply = String::new();
+    let mut completed = None;
+    let mut failure = None;
+    application
+        .stream_agent(
+            "agent-chat-fixture".to_owned(),
+            context,
+            messages,
+            |event| {
+                match event {
+                    AgentStreamEvent::Delta { text } => reply.push_str(&text),
+                    AgentStreamEvent::Completed {
+                        local_match_found,
+                        searched_public_web,
+                        search_results,
+                    } => {
+                        completed = Some((local_match_found, searched_public_web, search_results));
+                    }
+                    AgentStreamEvent::Failed { message } => failure = Some(message),
+                }
+                true
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
+    let Some((local_match_found, searched_public_web, search_results)) = completed else {
+        return Err("Agent 流没有返回完成事件".to_owned());
+    };
+    Ok(AgentReplyFixture {
+        reply,
+        local_match_found,
+        searched_public_web,
+        search_results,
+    })
 }
 
 #[derive(Default)]
@@ -692,6 +737,13 @@ fn spawn_agent_server<const N: usize>(
     let listener = TcpListener::bind("127.0.0.1:0").expect("应启动 Agent Fake Server");
     let address = listener.local_addr().expect("应读取 Fake Server 地址");
     let (sender, receiver) = mpsc::channel();
+    let provider = if base_path.contains("anthropic") {
+        AiProvider::DeepSeek
+    } else if base_path.contains("paas") {
+        AiProvider::Glm
+    } else {
+        AiProvider::OpenAi
+    };
     thread::spawn(move || {
         let mut recorded = Vec::new();
         for response in responses {
@@ -702,11 +754,19 @@ fn spawn_agent_server<const N: usize>(
                 .position(|window| window == b"\r\n\r\n")
                 .map(|index| index + 4)
                 .expect("请求应包含 HTTP body 分隔符");
-            recorded.push(
-                serde_json::from_slice(&request[body_start..]).expect("请求应包含 JSON body"),
-            );
+            let request_body: Value =
+                serde_json::from_slice(&request[body_start..]).expect("请求应包含 JSON body");
+            let (content_type, response) = if request_body["stream"] == true {
+                (
+                    "text/event-stream",
+                    json_response_to_sse(provider, response),
+                )
+            } else {
+                ("application/json", response.to_owned())
+            };
+            recorded.push(request_body);
             let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response.len(),
                 response
             );
@@ -717,6 +777,84 @@ fn spawn_agent_server<const N: usize>(
         sender.send(recorded).expect("应返回 Provider 请求记录");
     });
     (format!("http://{address}{base_path}"), receiver)
+}
+
+fn json_response_to_sse(provider: AiProvider, response: &str) -> String {
+    let response: Value = serde_json::from_str(response).expect("fixture 响应应为 JSON");
+    match provider {
+        AiProvider::OpenAi => {
+            let text = response["output"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            let delta = serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": text,
+            });
+            let completed = serde_json::json!({
+                "type": "response.completed",
+                "response": response,
+            });
+            format!("data: {delta}\n\ndata: {completed}\n\ndata: [DONE]\n\n")
+        }
+        AiProvider::Glm => {
+            let text = response["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or_default();
+            let event = serde_json::json!({
+                "choices": [{
+                    "delta": { "content": text },
+                    "finish_reason": "stop"
+                }],
+                "web_search": response.get("web_search").cloned().unwrap_or(Value::Null),
+            });
+            format!("data: {event}\n\ndata: [DONE]\n\n")
+        }
+        AiProvider::DeepSeek => {
+            let mut events = String::new();
+            for block in response["content"].as_array().into_iter().flatten() {
+                match block["type"].as_str() {
+                    Some("tool_use") => {
+                        let start = serde_json::json!({
+                            "type": "content_block_start",
+                            "content_block": {
+                                "type": "tool_use",
+                                "name": block["name"],
+                                "input": {}
+                            }
+                        });
+                        let delta = serde_json::json!({
+                            "type": "content_block_delta",
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": block["input"].to_string()
+                            }
+                        });
+                        events.push_str(&format!("data: {start}\n\ndata: {delta}\n\n"));
+                    }
+                    Some("text") => {
+                        let delta = serde_json::json!({
+                            "type": "content_block_delta",
+                            "delta": {
+                                "type": "text_delta",
+                                "text": block["text"]
+                            }
+                        });
+                        events.push_str(&format!("data: {delta}\n\n"));
+                    }
+                    Some("web_search_tool_result") => {
+                        let start = serde_json::json!({
+                            "type": "content_block_start",
+                            "content_block": block
+                        });
+                        events.push_str(&format!("data: {start}\n\n"));
+                    }
+                    _ => {}
+                }
+            }
+            events.push_str("data: {\"type\":\"message_stop\"}\n\ndata: [DONE]\n\n");
+            events
+        }
+    }
 }
 
 fn read_http_request(stream: &mut impl Read) -> Vec<u8> {

@@ -24,10 +24,6 @@ pub enum UiIntent {
     },
     DeleteAiApiKey,
     TestAiConnection,
-    AskAgent {
-        context: AgentPageContext,
-        messages: Vec<AgentConversationMessage>,
-    },
     GenerateSkillAiExplanation {
         inventory_id: String,
     },
@@ -297,6 +293,27 @@ pub struct AgentSearchResult {
     pub title: String,
     pub url: String,
     pub kind: AgentSearchResultKind,
+}
+
+/// 三家 Provider 的私有事件只在 Rust 内解析；React 只接收这三个稳定事件。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum AgentStreamEvent {
+    Delta {
+        text: String,
+    },
+    Completed {
+        local_match_found: bool,
+        searched_public_web: bool,
+        search_results: Vec<AgentSearchResult>,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -1660,13 +1677,6 @@ pub enum UiOutcome {
         language: InterfaceLanguage,
         theme: ThemePreset,
         ai: AiPreferences,
-    },
-    AgentReply {
-        reply: String,
-        /// #56 只在本机没有合适结果时继续联网；前端不自行推断文本含义。
-        local_match_found: bool,
-        searched_public_web: bool,
-        search_results: Vec<AgentSearchResult>,
     },
     UnsupportedPlatform {
         actual_os: String,

@@ -3,38 +3,51 @@ import { useRef, useState, type FormEvent } from "react";
 import type {
   AgentConversationMessage,
   AgentPageContext,
-  AgentReply,
   AgentSearchResult,
+  AgentStreamEvent,
   AiPreferences,
 } from "../domain";
 import { useI18n } from "../i18n";
+import { AgentMarkdown } from "./AgentMarkdown";
 
 interface AgentOverlayProps {
   context: AgentPageContext;
   aiPreferences: AiPreferences;
   onAsk(
+    requestId: string,
     context: AgentPageContext,
     messages: AgentConversationMessage[],
-  ): Promise<AgentReply>;
+    onEvent: (event: AgentStreamEvent) => void,
+  ): Promise<void>;
+  onCancel(requestId: string): Promise<void>;
+  onOpenExternalUrl(url: string): Promise<void>;
   onPreviewInstall(result: AgentSearchResult): Promise<void>;
+}
+
+interface AgentUiMessage extends AgentConversationMessage {
+  id: string;
+  status: "complete" | "streaming" | "incomplete";
+  searchResults?: AgentSearchResult[];
 }
 
 export function AgentOverlay({
   context,
   aiPreferences,
   onAsk,
+  onCancel,
+  onOpenExternalUrl,
   onPreviewInstall,
 }: AgentOverlayProps) {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
-  const [messages, setMessages] = useState<
-    Array<AgentConversationMessage & { searchResults?: AgentSearchResult[] }>
-  >([]);
+  const [messages, setMessages] = useState<AgentUiMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [previewingUrl, setPreviewingUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sessionGeneration = useRef(0);
+  const sequence = useRef(0);
+  const activeRequestId = useRef<string | null>(null);
   const isReady =
     aiPreferences.enabled &&
     aiPreferences.disclosureAccepted &&
@@ -43,6 +56,13 @@ export function AgentOverlay({
 
   const closeSession = () => {
     // 明确关闭就是 Session 的唯一销毁点；失焦和页面导航不触发这里。
+    const requestId = activeRequestId.current;
+    if (requestId) {
+      void onCancel(requestId).catch(() => {
+        // Session 已在本地销毁；取消失败不能让旧回答重新进入新 Session。
+      });
+    }
+    activeRequestId.current = null;
     sessionGeneration.current += 1;
     setIsOpen(false);
     setMessages([]);
@@ -56,33 +76,100 @@ export function AgentOverlay({
     event.preventDefault();
     const question = draft.trim();
     if (!question || isSending || !isReady) return;
-    const nextMessages = [
-      ...messages,
+    const requestId = `agent-${sessionGeneration.current}-${++sequence.current}`;
+    const userMessage: AgentUiMessage = {
+      id: `${requestId}-user`,
+      role: "user",
+      content: question,
+      status: "complete",
+    };
+    const assistantMessage: AgentUiMessage = {
+      id: `${requestId}-assistant`,
+      role: "assistant",
+      content: "",
+      status: "streaming",
+    };
+    const conversation = [
+      ...messages
+        .filter(
+          (message) =>
+            message.role === "user" || message.status === "complete",
+        )
+        .map(({ role, content }) => ({ role, content })),
       { role: "user", content: question } satisfies AgentConversationMessage,
     ];
-    setMessages(nextMessages);
+    setMessages((current) => [
+      ...current,
+      userMessage,
+      assistantMessage,
+    ]);
     setDraft("");
     setError(null);
     setIsSending(true);
+    activeRequestId.current = requestId;
     const activeGeneration = sessionGeneration.current;
+    let terminalReceived = false;
     try {
-      // 搜索结果只用于本地 UI 操作，不作为下一轮对话内容回传 Provider。
-      const conversation = nextMessages.map(({ role, content }) => ({
-        role,
-        content,
-      }));
-      const reply = await onAsk(context, conversation);
-      if (sessionGeneration.current !== activeGeneration) return;
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content: reply.reply,
-          searchResults: reply.searchResults,
-        },
-      ]);
+      await onAsk(requestId, context, conversation, (streamEvent) => {
+        if (
+          sessionGeneration.current !== activeGeneration ||
+          activeRequestId.current !== requestId
+        ) {
+          return;
+        }
+        if (streamEvent.type === "delta") {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessage.id
+                ? { ...message, content: message.content + streamEvent.text }
+                : message,
+            ),
+          );
+          return;
+        }
+        terminalReceived = true;
+        activeRequestId.current = null;
+        setIsSending(false);
+        if (streamEvent.type === "completed") {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessage.id
+                ? {
+                    ...message,
+                    status: "complete",
+                    searchResults: streamEvent.searchResults,
+                  }
+                : message,
+            ),
+          );
+          return;
+        }
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === assistantMessage.id
+              ? { ...message, status: "incomplete" }
+              : message,
+          ),
+        );
+        setError(streamEvent.message);
+      });
+      if (
+        !terminalReceived &&
+        sessionGeneration.current === activeGeneration &&
+        activeRequestId.current === requestId
+      ) {
+        throw new Error(t("这次回答没有完成，请稍后重试。"));
+      }
     } catch (cause) {
       if (sessionGeneration.current !== activeGeneration) return;
+      activeRequestId.current = null;
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantMessage.id
+            ? { ...message, status: "incomplete" }
+            : message,
+        ),
+      );
       setError(
         cause instanceof Error
           ? cause.message
@@ -95,6 +182,9 @@ export function AgentOverlay({
       );
     } finally {
       if (sessionGeneration.current === activeGeneration) {
+        if (activeRequestId.current === requestId) {
+          activeRequestId.current = null;
+        }
         setIsSending(false);
       }
     }
@@ -151,28 +241,49 @@ export function AgentOverlay({
                 </p>
               </div>
             ) : (
-              messages.map((message, index) => (
+              messages.map((message) => (
                 <div
                   className={`agent-message ${message.role}`}
-                  key={`${message.role}-${index}`}
+                  key={message.id}
                 >
                   <span>
                     {message.role === "user" ? t("你") : t("SkillYard")}
                   </span>
-                  <p>{message.content}</p>
-                  {message.searchResults &&
+                  {message.role === "assistant" ? (
+                    message.content ? (
+                      <AgentMarkdown
+                        streaming={message.status === "streaming"}
+                        onOpenExternalUrl={(url) => {
+                          void onOpenExternalUrl(url);
+                        }}
+                      >
+                        {message.content}
+                      </AgentMarkdown>
+                    ) : null
+                  ) : (
+                    <p>{message.content}</p>
+                  )}
+                  {message.status === "incomplete" ? (
+                    <small className="agent-incomplete">
+                      {t("回答未完成")}
+                    </small>
+                  ) : null}
+                  {message.status === "complete" &&
+                  message.searchResults &&
                   message.searchResults.length > 0 ? (
                     <ul className="agent-search-results">
                       {message.searchResults.map((result) => (
                         <li key={result.url}>
                           <div>
-                            <a
-                              href={result.url}
-                              target="_blank"
-                              rel="noreferrer"
+                            <button
+                              className="agent-result-link"
+                              type="button"
+                              onClick={() => {
+                                void onOpenExternalUrl(result.url);
+                              }}
                             >
                               {result.title}
-                            </a>
+                            </button>
                             <small>
                               {result.kind === "reference"
                                 ? t("参考链接")

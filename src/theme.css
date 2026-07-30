@@ -178,7 +178,8 @@
 }
 
 .application-theme:not([data-theme-preset="ledger"]) :is(
-    .agent-message p,
+    .agent-message > p,
+    .agent-markdown,
     .agent-empty,
     .agent-search-results li
   ) {
@@ -187,7 +188,7 @@
   background: var(--sy-surface-subtle);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) .agent-message.user p {
+.application-theme:not([data-theme-preset="ledger"]) .agent-message.user > p {
   color: #18200f;
   background: var(--sy-accent);
 }

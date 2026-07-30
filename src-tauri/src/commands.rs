@@ -1,12 +1,13 @@
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use url::Url;
 
 use crate::{
-    AgentConversationMessage, AgentPageContext, AiProvider, BatchMountPlan, BatchMountRequest,
-    EditableLocalRelinkPlan, InstallPlan, InterfaceLanguage, MergeContentChoice, MountPlan,
-    MountScope, ProjectSelection, SkillYardApplication, SourceAssociationPlan,
+    AgentConversationMessage, AgentPageContext, AgentStreamEvent, AiProvider, BatchMountPlan,
+    BatchMountRequest, EditableLocalRelinkPlan, InstallPlan, InterfaceLanguage, MergeContentChoice,
+    MountPlan, MountScope, ProjectSelection, SkillYardApplication, SourceAssociationPlan,
     SourceMemberMappingChoice, SupportedAppId, TakeoverPlan, TakeoverPlanRequest, ThemePreset,
     UiIntent, UiOutcome, application::ApplicationError,
 };
@@ -92,13 +93,24 @@ pub fn test_ai_connection(
 #[tauri::command(async)]
 pub fn ask_agent(
     application: State<'_, SkillYardApplication>,
+    request_id: String,
     context: AgentPageContext,
     messages: Vec<AgentConversationMessage>,
-) -> Result<UiOutcome, UiError> {
-    match dispatch(&application, UiIntent::AskAgent { context, messages })? {
-        outcome @ UiOutcome::AgentReply { .. } => Ok(outcome),
-        _ => Err(invalid_outcome("SkillYard 没有返回 Agent 回答")),
-    }
+    on_event: Channel<AgentStreamEvent>,
+) -> Result<(), UiError> {
+    application
+        .stream_agent(request_id, context, messages, |event| {
+            on_event.send(event).is_ok()
+        })
+        .map_err(Into::into)
+}
+
+#[tauri::command(async)]
+pub fn cancel_agent(
+    application: State<'_, SkillYardApplication>,
+    request_id: String,
+) -> Result<(), UiError> {
+    application.cancel_agent(&request_id).map_err(Into::into)
 }
 
 #[tauri::command(async)]
@@ -184,6 +196,27 @@ pub fn open_central_store(
         .map_err(|error| UiError {
             code: "openPathError",
             message: format!("无法在 Finder 中打开 Central Store：{error}"),
+        })
+}
+
+/// AI 文本中的链接只能通过受控命令交给系统浏览器，WKWebView 不直接导航。
+#[tauri::command(async)]
+pub fn open_external_url(app: AppHandle, url: String) -> Result<(), UiError> {
+    let parsed = Url::parse(&url).map_err(|_| UiError {
+        code: "invalidUrl",
+        message: "只能打开有效的 HTTP 或 HTTPS 链接".to_owned(),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(UiError {
+            code: "invalidUrl",
+            message: "只能打开有效的 HTTP 或 HTTPS 链接".to_owned(),
+        });
+    }
+    app.opener()
+        .open_url(parsed.as_str(), None::<&str>)
+        .map_err(|error| UiError {
+            code: "openUrlError",
+            message: format!("无法在默认浏览器中打开链接：{error}"),
         })
 }
 

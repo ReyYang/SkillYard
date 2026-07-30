@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -179,6 +179,33 @@ impl AgentProviderEndpoints {
     }
 }
 
+/// 单次 Agent 请求共享同一组已验证 Provider 配置，不把 Key 或 endpoint 暴露给前端。
+pub(crate) struct AgentProviderRequest<'a> {
+    endpoints: &'a AgentProviderEndpoints,
+    provider: AiProvider,
+    model: &'a str,
+    api_key: &'a str,
+    language: InterfaceLanguage,
+}
+
+impl<'a> AgentProviderRequest<'a> {
+    pub(crate) fn new(
+        endpoints: &'a AgentProviderEndpoints,
+        provider: AiProvider,
+        model: &'a str,
+        api_key: &'a str,
+        language: InterfaceLanguage,
+    ) -> Self {
+        Self {
+            endpoints,
+            provider,
+            model,
+            api_key,
+            language,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AgentError {
     #[error(transparent)]
@@ -207,61 +234,59 @@ pub enum AgentError {
     ProviderRejected(u16),
     #[error("模型 Provider 没有返回 SkillYard 需要的 {0} 能力")]
     InvalidCapability(&'static str),
+    #[error("当前 Agent 请求已取消")]
+    Cancelled,
+    #[error("已有一个 Agent 请求正在生成回答")]
+    RequestInProgress,
+    #[error("Agent Session 状态当前不可用")]
+    SessionUnavailable,
 }
 
-/// 只读 Agent 的输入已经由 Rust Core 解析并过滤，不接受前端提供的文件内容或路径。
-pub(crate) fn answer_agent(
-    endpoints: &AgentProviderEndpoints,
-    provider: AiProvider,
-    model: &str,
-    api_key: &str,
-    language: InterfaceLanguage,
+/// 三家 Provider 都在这里归一为正文增量；调用方看不到任何 Provider 私有事件。
+pub(crate) fn stream_agent_answer(
+    request: &AgentProviderRequest<'_>,
     messages: &[AgentConversationMessage],
     context: &str,
+    mut emit: impl FnMut(String) -> bool,
+    cancelled: impl Fn() -> bool,
 ) -> Result<AgentAnswer, AgentError> {
     let messages = sanitize_conversation(messages)?;
-    let system = agent_system_prompt(language, context);
+    let system = agent_system_prompt(request.language, context);
     let client = provider_client()?;
-    let response = match provider {
-        AiProvider::OpenAi => send_json(
-            &client,
-            &endpoints.open_ai_responses(),
-            api_key,
-            &json!({
-                "model": model,
+    let (endpoint, body) = match request.provider {
+        AiProvider::OpenAi => (
+            request.endpoints.open_ai_responses(),
+            json!({
+                "model": request.model,
                 "instructions": system,
                 "input": messages,
-                "stream": false,
+                "stream": true,
                 "store": false,
                 "text": {
                     "format": agent_answer_json_schema()
                 }
             }),
-        )?,
+        ),
         AiProvider::Glm => {
             let mut glm_messages = vec![json!({
                 "role": "system",
                 "content": system
             })];
             glm_messages.extend(messages);
-            send_json(
-                &client,
-                &endpoints.glm_chat_completions(),
-                api_key,
-                &json!({
-                    "model": model,
+            (
+                request.endpoints.glm_chat_completions(),
+                json!({
+                    "model": request.model,
                     "messages": glm_messages,
                     "response_format": { "type": "json_object" },
-                    "stream": false
+                    "stream": true
                 }),
-            )?
+            )
         }
-        AiProvider::DeepSeek => send_anthropic_json(
-            &client,
-            &endpoints.deep_seek_messages(),
-            api_key,
-            &json!({
-                "model": model,
+        AiProvider::DeepSeek => (
+            request.endpoints.deep_seek_messages(),
+            json!({
+                "model": request.model,
                 "max_tokens": 2048,
                 "system": system,
                 "messages": messages,
@@ -272,57 +297,75 @@ pub(crate) fn answer_agent(
                     "type": "tool",
                     "name": "skillyard_agent_answer"
                 },
-                "stream": false
+                "stream": true
             }),
-        )?,
+        ),
     };
-
-    let answer = match provider {
-        AiProvider::OpenAi => output_texts(&response).find_map(parse_agent_answer),
-        AiProvider::Glm => glm_message_contents(&response).find_map(parse_agent_answer),
-        AiProvider::DeepSeek => deepseek_agent_answer(&response),
-    };
-    let Some(mut answer) = answer else {
+    let mut emitted = String::new();
+    let capture = send_provider_stream(
+        &client,
+        request.provider,
+        &endpoint,
+        request.api_key,
+        &body,
+        |_fragment, accumulated| {
+            let Some(reply) = extract_json_string_prefix(accumulated, "reply") else {
+                return true;
+            };
+            if !reply.starts_with(&emitted) {
+                return false;
+            }
+            let suffix = &reply[emitted.len()..];
+            if !suffix.is_empty() {
+                if !emit(suffix.to_owned()) {
+                    return false;
+                }
+                emitted = reply;
+            }
+            true
+        },
+        &cancelled,
+    )?;
+    let answer = parse_agent_answer(capture.text.trim())
+        .ok_or(AgentError::InvalidCapability("Structured Agent Answer"))?;
+    if answer.reply.trim().is_empty() {
         return Err(AgentError::InvalidCapability("Structured Agent Answer"));
-    };
-    answer.reply = answer.reply.trim().to_owned();
-    if answer.reply.is_empty() {
+    }
+    if !answer.reply.starts_with(&emitted) {
         return Err(AgentError::InvalidCapability("Structured Agent Answer"));
+    }
+    let remainder = &answer.reply[emitted.len()..];
+    if !remainder.is_empty() && !emit(remainder.to_owned()) {
+        return Err(AgentError::Cancelled);
     }
     Ok(answer)
 }
 
-/// 联网只调用当前 Provider 的原生 Web Search，并只返回响应中真实携带的引用。
-pub(crate) fn search_public_skills(
-    endpoints: &AgentProviderEndpoints,
-    provider: AiProvider,
-    model: &str,
-    api_key: &str,
-    language: InterfaceLanguage,
+/// 联网回答同样流式输出正文，但引用只在完成后作为结构化结果交给 React。
+pub(crate) fn stream_public_skills(
+    request: &AgentProviderRequest<'_>,
     query: &str,
+    mut emit: impl FnMut(String) -> bool,
+    cancelled: impl Fn() -> bool,
 ) -> Result<PublicSearchAnswer, AgentError> {
     let client = provider_client()?;
-    let instruction = public_search_prompt(language);
-    let response = match provider {
-        AiProvider::OpenAi => send_json(
-            &client,
-            &endpoints.open_ai_responses(),
-            api_key,
-            &json!({
-                "model": model,
+    let instruction = public_search_prompt(request.language);
+    let (endpoint, body) = match request.provider {
+        AiProvider::OpenAi => (
+            request.endpoints.open_ai_responses(),
+            json!({
+                "model": request.model,
                 "instructions": instruction,
                 "input": query,
                 "tools": [{ "type": "web_search" }],
-                "stream": false,
+                "stream": true,
                 "store": false
             }),
-        )?,
-        AiProvider::Glm => send_json(
-            &client,
-            &endpoints.glm_chat_completions(),
-            api_key,
-            &json!({
-                "model": model,
+        ),
+        AiProvider::Glm => (
+            request.endpoints.glm_chat_completions(),
+            json!({
+                "model": request.model,
                 "messages": [
                     { "role": "system", "content": instruction },
                     { "role": "user", "content": query }
@@ -336,15 +379,13 @@ pub(crate) fn search_public_skills(
                     }
                 }],
                 "tool_choice": "auto",
-                "stream": false
+                "stream": true
             }),
-        )?,
-        AiProvider::DeepSeek => send_anthropic_json(
-            &client,
-            &endpoints.deep_seek_messages(),
-            api_key,
-            &json!({
-                "model": model,
+        ),
+        AiProvider::DeepSeek => (
+            request.endpoints.deep_seek_messages(),
+            json!({
+                "model": request.model,
                 "max_tokens": 2048,
                 "system": instruction,
                 "messages": [{
@@ -356,28 +397,35 @@ pub(crate) fn search_public_skills(
                     "name": "web_search",
                     "max_uses": 2
                 }],
-                "stream": false
+                "stream": true
             }),
-        )?,
+        ),
     };
-
-    let reply = match provider {
-        AiProvider::OpenAi => output_texts(&response).collect::<Vec<_>>().join("\n"),
-        AiProvider::Glm => glm_message_contents(&response)
-            .collect::<Vec<_>>()
-            .join("\n"),
-        AiProvider::DeepSeek => anthropic_texts(&response).collect::<Vec<_>>().join("\n"),
-    };
-    let results = extract_public_search_results(provider, &response);
+    let capture = send_provider_stream(
+        &client,
+        request.provider,
+        &endpoint,
+        request.api_key,
+        &body,
+        |fragment, _| fragment.is_empty() || emit(fragment.to_owned()),
+        &cancelled,
+    )?;
+    let response = capture.citation_response(request.provider);
+    let reply = capture.text;
+    let results = extract_public_search_results(request.provider, &response);
     let reply = reply.trim();
     if reply.is_empty() && results.is_empty() {
         return Err(AgentError::InvalidCapability("Web Search"));
     }
     let reply = if reply.is_empty() {
-        match language {
+        let fallback = match request.language {
             InterfaceLanguage::ZhCn => "找到了以下公开来源。".to_owned(),
             InterfaceLanguage::En => "I found these public sources.".to_owned(),
+        };
+        if !emit(fallback.clone()) {
+            return Err(AgentError::Cancelled);
         }
+        fallback
     } else {
         reply.to_owned()
     };
@@ -698,7 +746,8 @@ fn agent_system_prompt(language: InterfaceLanguage, context: &str) -> String {
          Skill genuinely fits that need; otherwise set it to false. Return exactly the required \
          JSON or tool structure with reply, localMatchFound, and searchPublic. Set searchPublic to \
          true only when the user is looking for a Skill and no local Skill fits, or when the user \
-         explicitly asks for online, new, or latest choices. Explain uncertainty plainly.\n\n\
+         explicitly asks for online, new, or latest choices. Return object keys in this exact order: \
+         localMatchFound, searchPublic, reply. Explain uncertainty plainly.\n\n\
          CURRENT READ-ONLY CONTEXT\n{context}"
     )
 }
@@ -733,11 +782,11 @@ fn agent_answer_json_schema() -> Value {
         "schema": {
             "type": "object",
             "properties": {
-                "reply": { "type": "string" },
                 "localMatchFound": { "type": "boolean" },
-                "searchPublic": { "type": "boolean" }
+                "searchPublic": { "type": "boolean" },
+                "reply": { "type": "string" }
             },
-            "required": ["reply", "localMatchFound", "searchPublic"],
+            "required": ["localMatchFound", "searchPublic", "reply"],
             "additionalProperties": false
         }
     })
@@ -750,11 +799,11 @@ fn agent_answer_anthropic_tool() -> Value {
         "input_schema": {
             "type": "object",
             "properties": {
-                "reply": { "type": "string" },
                 "localMatchFound": { "type": "boolean" },
-                "searchPublic": { "type": "boolean" }
+                "searchPublic": { "type": "boolean" },
+                "reply": { "type": "string" }
             },
-            "required": ["reply", "localMatchFound", "searchPublic"],
+            "required": ["localMatchFound", "searchPublic", "reply"],
             "additionalProperties": false
         }
     })
@@ -812,19 +861,6 @@ fn skill_explanation_anthropic_tool() -> Value {
 
 fn parse_agent_answer(text: &str) -> Option<AgentAnswer> {
     serde_json::from_str(text).ok()
-}
-
-fn deepseek_agent_answer(response: &Value) -> Option<AgentAnswer> {
-    response
-        .get("content")
-        .and_then(Value::as_array)?
-        .iter()
-        .find(|block| {
-            block.get("type").and_then(Value::as_str) == Some("tool_use")
-                && block.get("name").and_then(Value::as_str) == Some("skillyard_agent_answer")
-        })
-        .and_then(|block| block.get("input"))
-        .and_then(|input| serde_json::from_value(input.clone()).ok())
 }
 
 fn parse_skill_explanation(text: &str) -> Option<SkillAiExplanationDraft> {
@@ -1223,6 +1259,219 @@ fn verify_openai(
     Ok(())
 }
 
+#[derive(Default)]
+struct ProviderStreamCapture {
+    text: String,
+    openai_response: Option<Value>,
+    glm_search_results: Vec<Value>,
+    anthropic_blocks: Vec<Value>,
+}
+
+impl ProviderStreamCapture {
+    fn record_event(&mut self, provider: AiProvider, event: &Value) -> Option<String> {
+        match provider {
+            AiProvider::OpenAi => {
+                if event.get("type").and_then(Value::as_str) == Some("response.completed") {
+                    self.openai_response = event.get("response").cloned();
+                }
+            }
+            AiProvider::Glm => {
+                self.glm_search_results.extend(
+                    event
+                        .get("web_search")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+            }
+            AiProvider::DeepSeek => {
+                if event.get("type").and_then(Value::as_str) == Some("content_block_start")
+                    && let Some(block) = event.get("content_block")
+                {
+                    self.anthropic_blocks.push(block.clone());
+                }
+            }
+        }
+        provider_stream_delta(provider, event).map(str::to_owned)
+    }
+
+    fn citation_response(&self, provider: AiProvider) -> Value {
+        match provider {
+            AiProvider::OpenAi => self.openai_response.clone().unwrap_or(Value::Null),
+            AiProvider::Glm => json!({ "web_search": self.glm_search_results }),
+            AiProvider::DeepSeek => json!({ "content": self.anthropic_blocks }),
+        }
+    }
+}
+
+fn provider_stream_delta(provider: AiProvider, event: &Value) -> Option<&str> {
+    match provider {
+        AiProvider::OpenAi => (event.get("type").and_then(Value::as_str)
+            == Some("response.output_text.delta"))
+        .then(|| event.get("delta").and_then(Value::as_str))
+        .flatten(),
+        AiProvider::Glm => event
+            .get("choices")
+            .and_then(Value::as_array)?
+            .first()?
+            .get("delta")?
+            .get("content")
+            .and_then(Value::as_str),
+        AiProvider::DeepSeek => {
+            let delta = event.get("delta")?;
+            delta
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| delta.get("partial_json").and_then(Value::as_str))
+        }
+    }
+}
+
+fn send_provider_stream(
+    client: &Client,
+    provider: AiProvider,
+    endpoint: &str,
+    api_key: &str,
+    body: &Value,
+    mut on_fragment: impl FnMut(&str, &str) -> bool,
+    cancelled: &impl Fn() -> bool,
+) -> Result<ProviderStreamCapture, AgentError> {
+    let request = client.post(endpoint).json(body);
+    let request = match provider {
+        AiProvider::DeepSeek => request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        AiProvider::OpenAi | AiProvider::Glm => request.bearer_auth(api_key),
+    };
+    let response = request
+        .send()
+        .map_err(|_| AgentError::ProviderUnavailable)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AgentError::ProviderRejected(status.as_u16()));
+    }
+
+    let mut capture = ProviderStreamCapture::default();
+    let mut data = String::new();
+    let reader = BufReader::new(response.take(MAX_PROVIDER_RESPONSE_BYTES));
+    for line in reader.lines() {
+        if cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        let line = line.map_err(|_| AgentError::ProviderUnavailable)?;
+        if line.is_empty() {
+            consume_provider_sse_data(provider, &mut capture, &data, &mut on_fragment)?;
+            data.clear();
+            continue;
+        }
+        if let Some(fragment) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(fragment.trim_start());
+        }
+    }
+    consume_provider_sse_data(provider, &mut capture, &data, &mut on_fragment)?;
+    if cancelled() {
+        return Err(AgentError::Cancelled);
+    }
+    Ok(capture)
+}
+
+fn consume_provider_sse_data(
+    provider: AiProvider,
+    capture: &mut ProviderStreamCapture,
+    data: &str,
+    on_fragment: &mut impl FnMut(&str, &str) -> bool,
+) -> Result<(), AgentError> {
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(());
+    }
+    let event: Value = serde_json::from_str(data).map_err(|_| AgentError::ProviderUnavailable)?;
+    if event.get("type").and_then(Value::as_str) == Some("error")
+        || event.get("error").is_some_and(|error| !error.is_null())
+    {
+        return Err(AgentError::ProviderUnavailable);
+    }
+    if let Some(fragment) = capture.record_event(provider, &event) {
+        capture.text.push_str(&fragment);
+        if !on_fragment(&fragment, &capture.text) {
+            return Err(AgentError::Cancelled);
+        }
+    }
+    Ok(())
+}
+
+/// 返回当前已经完整解码的 JSON 字符串前缀；不完整 escape 等待下一块再显示。
+fn extract_json_string_prefix(document: &str, key: &str) -> Option<String> {
+    let key = format!("\"{key}\"");
+    let after_key = document.get(document.find(&key)? + key.len()..)?;
+    let after_colon = after_key.get(after_key.find(':')? + 1..)?.trim_start();
+    let raw = after_colon.strip_prefix('"')?;
+    decode_json_string_prefix(raw)
+}
+
+fn decode_json_string_prefix(raw: &str) -> Option<String> {
+    let mut chars = raw.chars();
+    let mut decoded = String::new();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => return Some(decoded),
+            '\\' => {
+                let Some(escape) = chars.next() else {
+                    return Some(decoded);
+                };
+                match escape {
+                    '"' => decoded.push('"'),
+                    '\\' => decoded.push('\\'),
+                    '/' => decoded.push('/'),
+                    'b' => decoded.push('\u{0008}'),
+                    'f' => decoded.push('\u{000c}'),
+                    'n' => decoded.push('\n'),
+                    'r' => decoded.push('\r'),
+                    't' => decoded.push('\t'),
+                    'u' => {
+                        let Some(first) = read_json_hex_quad(&mut chars) else {
+                            return Some(decoded);
+                        };
+                        let scalar = if (0xD800..=0xDBFF).contains(&first) {
+                            if chars.next() != Some('\\') || chars.next() != Some('u') {
+                                return Some(decoded);
+                            }
+                            let Some(second) = read_json_hex_quad(&mut chars) else {
+                                return Some(decoded);
+                            };
+                            if !(0xDC00..=0xDFFF).contains(&second) {
+                                return None;
+                            }
+                            0x10000 + (((first as u32) - 0xD800) << 10) + ((second as u32) - 0xDC00)
+                        } else if (0xDC00..=0xDFFF).contains(&first) {
+                            return None;
+                        } else {
+                            first as u32
+                        };
+                        decoded.push(char::from_u32(scalar)?);
+                    }
+                    _ => return None,
+                }
+            }
+            value => decoded.push(value),
+        }
+    }
+    Some(decoded)
+}
+
+fn read_json_hex_quad(chars: &mut impl Iterator<Item = char>) -> Option<u16> {
+    let mut value = 0_u16;
+    for _ in 0..4 {
+        value = value
+            .checked_mul(16)?
+            .checked_add(chars.next()?.to_digit(16)? as u16)?;
+    }
+    Some(value)
+}
+
 fn provider_client() -> Result<Client, AgentError> {
     Client::builder()
         .timeout(Duration::from_secs(45))
@@ -1357,16 +1606,6 @@ fn glm_message_contents(response: &Value) -> impl Iterator<Item = &str> {
                 .and_then(|message| message.get("content"))
                 .and_then(Value::as_str)
         })
-}
-
-fn anthropic_texts(response: &Value) -> impl Iterator<Item = &str> {
-    response
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
 }
 
 fn contains_glm_public_url(response: &Value) -> bool {

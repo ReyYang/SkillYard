@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type {
+  AgentSearchResult,
+  AgentStreamEvent,
   AiPreferences,
   BatchMountPlan,
   BundleUpdateBatchPlan,
@@ -237,7 +239,7 @@ describe("本机清单", () => {
         verified: true,
       },
     });
-    vi.mocked(client.askAgent).mockResolvedValue({
+    mockAgentStream(client, {
       reply: "这是一个示例 Skill。",
       localMatchFound: true,
       searchedPublicWeb: false,
@@ -256,8 +258,10 @@ describe("本机清单", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(client.askAgent).toHaveBeenCalledWith(
+      expect.any(String),
       { type: "skill", inventoryId: "managed:member-1" },
       [{ role: "user", content: "这个 Skill 做什么？" }],
+      expect.any(Function),
     );
     expect(await screen.findByText("这是一个示例 Skill。")).toBeInTheDocument();
 
@@ -285,14 +289,8 @@ describe("本机清单", () => {
 
   it("关闭助手后忽略仍在返回的旧 Session 回答", async () => {
     const user = userEvent.setup();
-    let finishReply:
-      | ((value: {
-          reply: string;
-          localMatchFound: boolean;
-          searchedPublicWeb: boolean;
-          searchResults: [];
-        }) => void)
-      | undefined;
+    let finishReply: (() => void) | undefined;
+    let emitEvent: ((event: AgentStreamEvent) => void) | undefined;
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
@@ -307,9 +305,10 @@ describe("本机清单", () => {
       },
     });
     vi.mocked(client.askAgent).mockImplementation(
-      () =>
+      (_requestId, _context, _messages, onEvent) =>
         new Promise((resolve) => {
-          finishReply = resolve;
+          emitEvent = onEvent;
+          finishReply = () => resolve();
         }),
     );
 
@@ -325,19 +324,133 @@ describe("本机清单", () => {
     await user.click(
       screen.getByRole("button", { name: "关闭 SkillYard 助手" }),
     );
-    await act(async () =>
-      finishReply?.({
-        reply: "不应恢复的旧回答",
+    expect(client.cancelAgent).toHaveBeenCalledWith(expect.any(String));
+    await act(async () => {
+      emitEvent?.({
+        type: "delta",
+        text: "不应恢复的旧回答",
+      });
+      emitEvent?.({
+        type: "completed",
         localMatchFound: true,
         searchedPublicWeb: false,
         searchResults: [],
-      }),
-    );
+      });
+      finishReply?.();
+    });
 
     await user.click(
       screen.getByRole("button", { name: "打开 SkillYard 助手" }),
     );
     expect(screen.queryByText("不应恢复的旧回答")).not.toBeInTheDocument();
+  });
+
+  it("首个正文增量会立即显示，完成前禁止第二次发送", async () => {
+    const user = userEvent.setup();
+    let finishRequest: (() => void) | undefined;
+    let emitEvent: ((event: AgentStreamEvent) => void) | undefined;
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      theme: "ledger",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+    vi.mocked(client.askAgent).mockImplementation(
+      (_requestId, _context, _messages, onEvent) =>
+        new Promise((resolve) => {
+          emitEvent = onEvent;
+          onEvent({ type: "delta", text: "第一段已经可见" });
+          finishRequest = () => resolve();
+        }),
+    );
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
+      "开始流式回答",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("第一段已经可见")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    await act(async () => {
+      emitEvent?.({
+        type: "completed",
+        localMatchFound: true,
+        searchedPublicWeb: false,
+        searchResults: [],
+      });
+      finishRequest?.();
+    });
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(
+      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
+    ).toBeEnabled();
+  });
+
+  it("中途失败保留可见正文，并且不把未完成回答放入下一轮上下文", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      theme: "ledger",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "openAi",
+        model: "gpt-5.6-terra",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+    vi.mocked(client.askAgent)
+      .mockImplementationOnce(async (_id, _context, _messages, onEvent) => {
+        onEvent({ type: "delta", text: "仍然有用的部分" });
+        onEvent({ type: "failed", message: "fixture stream failed" });
+      })
+      .mockImplementationOnce(async (_id, _context, _messages, onEvent) => {
+        onEvent({ type: "delta", text: "第二次回答" });
+        onEvent({
+          type: "completed",
+          localMatchFound: true,
+          searchedPublicWeb: false,
+          searchResults: [],
+        });
+      });
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    const input = screen.getByRole("textbox", { name: "向 SkillYard 提问" });
+    await user.type(input, "第一次问题");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("仍然有用的部分")).toBeInTheDocument();
+    expect(screen.getByText("回答未完成")).toBeInTheDocument();
+
+    await user.type(input, "第二次问题");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("第二次回答")).toBeInTheDocument();
+    expect(client.askAgent).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      { type: "page", page: "inventory" },
+      [
+        { role: "user", content: "第一次问题" },
+        { role: "user", content: "第二次问题" },
+      ],
+      expect.any(Function),
+    );
   });
 
   it("全网结果区分安装候选与参考链接，并只在用户点击后进入标准安装预览", async () => {
@@ -355,7 +468,7 @@ describe("本机清单", () => {
         verified: true,
       },
     });
-    vi.mocked(client.askAgent).mockResolvedValue({
+    mockAgentStream(client, {
       reply: "找到三个公开结果。",
       localMatchFound: false,
       searchedPublicWeb: true,
@@ -407,9 +520,12 @@ describe("本机清单", () => {
     );
     await user.click(screen.getByRole("button", { name: "发送" }));
 
-    expect(
-      await screen.findByRole("link", { name: "Forum discussion" }),
-    ).toHaveAttribute("href", "https://forum.example.com/review-skills");
+    await user.click(
+      await screen.findByRole("button", { name: "Forum discussion" }),
+    );
+    expect(client.openExternalUrl).toHaveBeenCalledWith(
+      "https://forum.example.com/review-skills",
+    );
     expect(
       screen.queryByRole("button", {
         name: "查看 Forum discussion 的安装预览",
@@ -880,7 +996,7 @@ describe("本机清单", () => {
       theme: "archive",
       ai,
     });
-    vi.mocked(client.askAgent).mockResolvedValue({
+    mockAgentStream(client, {
       reply: "这个 Session 仍然存在。",
       localMatchFound: true,
       searchedPublicWeb: false,
@@ -1068,7 +1184,7 @@ describe("本机清单", () => {
       theme: "layers",
       ai,
     });
-    vi.mocked(client.askAgent).mockResolvedValue({
+    mockAgentStream(client, {
       reply: "Layers 中仍保留。",
       localMatchFound: true,
       searchedPublicWeb: false,
@@ -7725,6 +7841,29 @@ function createEditableLocalRelinkPlan(
   };
 }
 
+function mockAgentStream(
+  client: SkillYardClient,
+  reply: {
+    reply: string;
+    localMatchFound: boolean;
+    searchedPublicWeb: boolean;
+    searchResults: AgentSearchResult[];
+  },
+) {
+  vi.mocked(client.askAgent).mockImplementation(
+    async (_requestId, _context, _messages, onEvent) => {
+      // 测试替身也按生产顺序发送正文增量和完成元数据。
+      onEvent({ type: "delta", text: reply.reply });
+      onEvent({
+        type: "completed",
+        localMatchFound: reply.localMatchFound,
+        searchedPublicWeb: reply.searchedPublicWeb,
+        searchResults: reply.searchResults,
+      });
+    },
+  );
+}
+
 function createClient(startup: UiOutcome): SkillYardClient {
   return {
     getPreferences: vi.fn().mockResolvedValue({
@@ -7739,6 +7878,8 @@ function createClient(startup: UiOutcome): SkillYardClient {
     deleteAiApiKey: vi.fn(),
     testAiConnection: vi.fn(),
     askAgent: vi.fn(),
+    cancelAgent: vi.fn().mockResolvedValue(undefined),
+    openExternalUrl: vi.fn().mockResolvedValue(undefined),
     generateSkillAiExplanation: vi.fn(),
     organizeSkillAiExplanations: vi.fn(),
     getStartupState: vi.fn().mockResolvedValue(startup),

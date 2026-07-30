@@ -2672,13 +2672,108 @@ code {
   font-weight: 750;
 }
 
-.agent-message p {
+.agent-message > p,
+.agent-markdown {
   margin: 0;
   padding: 12px 14px;
   border-radius: 15px;
   background: #eef3e9;
   line-height: 1.55;
+}
+
+.agent-message > p {
   white-space: pre-wrap;
+}
+
+.agent-markdown > :first-child {
+  margin-top: 0;
+}
+
+.agent-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-markdown h1,
+.agent-markdown h2,
+.agent-markdown h3 {
+  margin: 1em 0 0.45em;
+  color: inherit;
+  line-height: 1.25;
+}
+
+.agent-markdown p,
+.agent-markdown ul,
+.agent-markdown ol,
+.agent-markdown blockquote,
+.agent-markdown pre,
+.agent-markdown table {
+  margin: 0.65em 0;
+}
+
+.agent-markdown ul,
+.agent-markdown ol {
+  padding-left: 1.35em;
+}
+
+.agent-markdown blockquote {
+  padding-left: 0.85em;
+  border-left: 3px solid rgb(55 86 64 / 28%);
+  color: #5d6c62;
+}
+
+.agent-markdown code {
+  border-radius: 5px;
+  background: rgb(36 65 44 / 8%);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.88em;
+}
+
+.agent-markdown pre {
+  max-width: 100%;
+  padding: 11px 12px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: #e5ece1;
+}
+
+.agent-markdown pre code {
+  background: transparent;
+}
+
+.agent-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.agent-markdown th,
+.agent-markdown td {
+  padding: 7px 8px;
+  border: 1px solid rgb(55 86 64 / 16%);
+  text-align: left;
+}
+
+.agent-markdown-link,
+.agent-result-link {
+  padding: 0;
+  border: 0;
+  color: #315b3e;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 750;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.agent-incomplete {
+  display: inline-block;
+  margin-top: 6px;
+  color: #a34c3c;
+  font-size: 0.74rem;
+  font-weight: 750;
 }
 
 .agent-message.user {
@@ -2719,10 +2814,8 @@ code {
   gap: 3px;
 }
 
-.agent-search-results a {
+.agent-search-results .agent-result-link {
   overflow: hidden;
-  color: #315b3e;
-  font-weight: 750;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
