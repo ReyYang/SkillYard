@@ -61,6 +61,7 @@ export interface SkillYardClient {
   refreshLocalInventory(): Promise<UiOutcome>;
   checkBundleUpdates(): Promise<InventoryOutcome>;
   checkEditableLocalBundle(bundleId: string): Promise<InventoryOutcome>;
+  openDiscover(): Promise<Extract<UiOutcome, { type: "discover" }>>;
   createBundleUpdateBatchPlan(): Promise<BundleUpdateBatchPlanOutcome>;
   confirmBundleUpdateBatchPlan(
     planId: string,
@@ -255,6 +256,8 @@ export const tauriSkillYardClient: SkillYardClient = {
     invoke<Extract<UiOutcome, { type: "sourceDiscovery" }>>(
       "open_source_discovery",
     ),
+  openDiscover: () =>
+    invoke<Extract<UiOutcome, { type: "discover" }>>("open_discover"),
   searchSkillsSh: (query) =>
     invoke<Extract<UiOutcome, { type: "skillsShSearch" }>>(
       "search_skills_sh",

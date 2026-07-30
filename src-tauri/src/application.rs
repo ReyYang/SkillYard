@@ -21,8 +21,8 @@ use crate::{
     },
     domain::{
         AgentConversationMessage, AgentPageContext, AgentPageKind, AgentStreamEvent, AiPreferences,
-        AiProvider, BundleUpdateStatus, EditableLocalRelinkMember, InterfaceLanguage,
-        MergeContentChoice, PlatformInfo, SourceKind, SourceMemberMappingChoice,
+        AiProvider, BundleUpdateStatus, DiscoverLocalSkill, EditableLocalRelinkMember,
+        InterfaceLanguage, MergeContentChoice, PlatformInfo, SourceKind, SourceMemberMappingChoice,
         TakeoverPlanRequest, ThemePreset, UiIntent, UiOutcome,
     },
     github_source::{
@@ -50,7 +50,7 @@ use crate::{
         create_bundle_removal_plan, create_project_removal_plan, create_source_removal_plan,
         discard_removal_plan, read_open_removal_plan, recover_pending_removals,
     },
-    scanner::{scan, scan_projects, scan_with_projects},
+    scanner::{read_skill_description, scan, scan_projects, scan_with_projects},
     skills_sh::{SkillsShError, search_skills_sh},
     source_association::{
         SourceAssociationError, confirm_source_association_plan, create_source_association_plan,
@@ -286,6 +286,7 @@ impl SkillYardApplication {
             UiIntent::CheckEditableLocalBundle { bundle_id } => {
                 self.with_write_operation(|| self.check_editable_local_bundle(bundle_id))
             }
+            UiIntent::OpenDiscover => self.with_write_operation(|| self.open_discover()),
             UiIntent::OpenSourceDiscovery => {
                 self.with_write_operation(|| self.open_source_discovery())
             }
@@ -629,6 +630,7 @@ impl SkillYardApplication {
                 let page = match page {
                     AgentPageKind::Onboarding => "Onboarding",
                     AgentPageKind::Inventory => "Bundle inventory",
+                    AgentPageKind::Discover => "Skill discovery",
                     AgentPageKind::Settings => "Settings",
                     AgentPageKind::SourceDiscovery => "Source discovery",
                     AgentPageKind::Operation => "Lifecycle preview or operation",
@@ -1014,6 +1016,39 @@ impl SkillYardApplication {
             sources,
             highlighted_source_id: None,
             highlighted_member_path: None,
+        })
+    }
+
+    fn open_discover(&self) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_recovered_storage()?;
+        ensure_onboarding_completed(&storage)?;
+        let local_skills = match storage.read_initial_scan()? {
+            Some(UiOutcome::Inventory { entries, .. }) => entries
+                .into_iter()
+                .filter(|entry| !entry.stale)
+                .map(|entry| DiscoverLocalSkill {
+                    description: read_skill_description(Path::new(&entry.skill_file)),
+                    ai_summary: entry
+                        .ai_explanation
+                        .as_ref()
+                        .map(|explanation| explanation.summary.clone()),
+                    inventory_id: entry.id,
+                    skill_name: entry.skill_name,
+                    management_kind: entry.management_kind,
+                    bundle_id: entry.bundle_id,
+                    bundle_display_name: entry.bundle_display_name,
+                    source_display_name: entry.source_display_name,
+                })
+                .collect(),
+            _ => {
+                return Err(ApplicationError::InvalidState("首次扫描状态已经丢失"));
+            }
+        };
+        // Discover 只读取最近一次本地快照；网络刷新仍由 Source 管理页显式触发。
+        let sources = storage.read_source_summaries()?;
+        Ok(UiOutcome::Discover {
+            local_skills,
+            sources,
         })
     }
 

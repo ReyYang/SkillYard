@@ -261,6 +261,14 @@ pub fn check_editable_local_bundle(
 }
 
 #[tauri::command(async)]
+pub fn open_discover(application: State<'_, SkillYardApplication>) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::OpenDiscover)? {
+        outcome @ UiOutcome::Discover { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回 Discover 只读清单")),
+    }
+}
+
+#[tauri::command(async)]
 pub fn open_source_discovery(
     application: State<'_, SkillYardApplication>,
 ) -> Result<UiOutcome, UiError> {

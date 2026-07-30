@@ -220,6 +220,18 @@ describe("Tauri IPC contract", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("open_central_store");
   });
 
+  it("独立发现页只通过无参数只读命令取得本机与 Source 快照", async () => {
+    mocks.invoke.mockResolvedValue({
+      type: "discover",
+      localSkills: [],
+      sources: [],
+    });
+
+    await tauriSkillYardClient.openDiscover();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("open_discover");
+  });
+
   it("只通过任务级命令开始首次扫描", async () => {
     mocks.invoke.mockResolvedValue({
       type: "inventory",

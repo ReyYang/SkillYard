@@ -32,6 +32,7 @@ export type AgentPageContext =
       page:
         | "onboarding"
         | "inventory"
+        | "discover"
         | "settings"
         | "sourceDiscovery"
         | "operation"
@@ -417,6 +418,22 @@ export interface SourceSummary {
   members: SourceCatalogMemberSummary[];
 }
 
+// Discover 使用无路径的只读摘要；搜索词和结果选择都不会持久化。
+export interface DiscoverLocalSkill {
+  inventoryId: string;
+  skillName: string;
+  description: string | null;
+  aiSummary: string | null;
+  managementKind:
+    | "skillYardManaged"
+    | "takeoverCandidate"
+    | "agentManaged"
+    | "projectManaged";
+  bundleId: string | null;
+  bundleDisplayName: string | null;
+  sourceDisplayName: string | null;
+}
+
 export type RemovalKind =
   | "project"
   | "source"
@@ -677,6 +694,11 @@ export type UiOutcome =
       mounts: MountSummary[];
       // 更新状态属于 Bundle read model，前端不能根据 Source marker 自行推断。
       bundleUpdates: BundleUpdateSummary[];
+    }
+  | {
+      type: "discover";
+      localSkills: DiscoverLocalSkill[];
+      sources: SourceSummary[];
     }
   | {
       type: "sourceDiscovery";

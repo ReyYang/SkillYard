@@ -5877,6 +5877,48 @@ describe("GitHub Source 安装", () => {
     expect(client.getStartupState).toHaveBeenCalledTimes(1);
   });
 
+  it("独立打开发现页，输入筛选不会调用 Agent 或 Source 网络入口", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createEntry()]));
+    vi.mocked(client.openDiscover).mockResolvedValue({
+      type: "discover",
+      localSkills: [
+        {
+          inventoryId: "inventory-tdd",
+          skillName: "tdd",
+          description: "测试驱动开发",
+          aiSummary: null,
+          managementKind: "takeoverCandidate",
+          bundleId: null,
+          bundleDisplayName: null,
+          sourceDisplayName: null,
+        },
+      ],
+      sources: [],
+    });
+    render(<App client={client} />);
+
+    await screen.findByRole("heading", { name: "Bundle 清单" });
+    await user.click(screen.getByRole("button", { name: "发现" }));
+
+    expect(client.openDiscover).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findByRole("heading", { name: "发现 Skill" }),
+    ).toBeInTheDocument();
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 Skill" }),
+      "测试驱动",
+    );
+    expect(screen.getByRole("article", { name: "tdd" })).toBeInTheDocument();
+    expect(client.askAgent).not.toHaveBeenCalled();
+    expect(client.openSourceDiscovery).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    expect(
+      screen.getByRole("heading", { name: "Bundle 清单" }),
+    ).toBeInTheDocument();
+  });
+
   it("打开安装页期间保留清单浏览，但禁用全部写入口", async () => {
     const user = userEvent.setup();
     let finishOpening:
@@ -7888,6 +7930,7 @@ function createClient(startup: UiOutcome): SkillYardClient {
     refreshLocalInventory: vi.fn(),
     checkBundleUpdates: vi.fn(),
     checkEditableLocalBundle: vi.fn(),
+    openDiscover: vi.fn(),
     createBundleUpdateBatchPlan: vi.fn(),
     confirmBundleUpdateBatchPlan: vi.fn(),
     discardBundleUpdateBatchPlan: vi.fn(),

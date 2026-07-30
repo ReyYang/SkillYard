@@ -5,6 +5,7 @@ import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
 import { BundleMountPage } from "./components/BundleMountPage";
 import { BundleUpdateBatchPage } from "./components/BundleUpdateBatchPage";
 import { CurrentOperationBanner } from "./components/CurrentOperationBanner";
+import { DiscoverPage } from "./components/DiscoverPage";
 import { EditableLocalRelinkPage } from "./components/EditableLocalRelinkPage";
 import {
   InventoryPage,
@@ -94,6 +95,7 @@ type ViewState =
   | { status: "error"; message: string };
 
 type SourceDiscoveryOutcome = Extract<UiOutcome, { type: "sourceDiscovery" }>;
+type DiscoverOutcome = Extract<UiOutcome, { type: "discover" }>;
 type SkillsShSearchOutcome = Extract<UiOutcome, { type: "skillsShSearch" }>;
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 
@@ -376,6 +378,9 @@ function AppCore({
     string | null
   >(null);
   // Inventory 保留为主界面基座；Source 页面只是临时路由，不覆盖已加载清单。
+  const [discover, setDiscover] = useState<DiscoverOutcome | null>(null);
+  const [isOpeningDiscover, setIsOpeningDiscover] = useState(false);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [sourceDiscovery, setSourceDiscovery] =
     useState<SourceDiscoveryOutcome | null>(null);
   const [skillsShSearch, setSkillsShSearch] =
@@ -559,6 +564,9 @@ function AppCore({
     sourceOperation?.type === "opening";
 
   const currentAgentContext = useMemo<AgentPageContext>(() => {
+    if (discover) {
+      return { type: "page", page: "discover" };
+    }
     if (sourceDiscovery) {
       return { type: "page", page: "sourceDiscovery" };
     }
@@ -597,6 +605,7 @@ function AppCore({
     return { type: "page", page: "operation" };
   }, [
     committedInventory,
+    discover,
     hasCurrentOperation,
     inventoryScreen,
     isBrowsingCommittedInventory,
@@ -1004,6 +1013,43 @@ function AppCore({
     }
   };
 
+  const openDiscover = async () => {
+    if (isOpeningDiscover) return;
+    setIsOpeningDiscover(true);
+    setDiscoverError(null);
+    try {
+      setDiscover(await client.openDiscover());
+    } catch (error) {
+      // Discover 打开失败不能覆盖已经加载的 Inventory。
+      setDiscoverError(formatError(error));
+    } finally {
+      setIsOpeningDiscover(false);
+    }
+  };
+
+  const openSourceManagementFromDiscover = async (
+    sourceId: string,
+    memberRelativePath: string | null,
+  ) => {
+    if (sourceOperation) return;
+    setSourceOperation({ type: "opening" });
+    setDiscoverError(null);
+    try {
+      const outcome = await client.openSourceDiscovery();
+      // 高亮只属于本次页面导航，不写入 Source 或 Discover 状态。
+      setSourceDiscovery({
+        ...outcome,
+        highlightedSourceId: sourceId,
+        highlightedMemberPath: memberRelativePath,
+      });
+      setDiscover(null);
+    } catch (error) {
+      setDiscoverError(formatError(error));
+    } finally {
+      setSourceOperation(null);
+    }
+  };
+
   const openSourceAssociation = async (bundleId: string) => {
     if (sourceOperation) return;
     setSourceOperation({ type: "opening" });
@@ -1137,6 +1183,8 @@ function AppCore({
     setReadOnlyManagedMemberId(null);
     setInventoryScreen(INVENTORY_LIST_SCREEN);
     setReadOnlyInventoryScreen(INVENTORY_LIST_SCREEN);
+    setDiscover(null);
+    setDiscoverError(null);
     setSourceDiscovery(null);
     setSkillsShSearch(null);
     setPendingSourceRefChange(null);
@@ -1819,12 +1867,14 @@ function AppCore({
       removingBundleId={null}
       unmountingBundleId={null}
       removingProjectId={null}
+      isOpeningDiscover={false}
       isOpeningInstaller={false}
       isAddingProject={false}
       isOpeningCentralStore={false}
       isResettingApplication={false}
       refreshError={null}
       updateError={null}
+      discoverError={null}
       installError={null}
       projectError={null}
       removalError={null}
@@ -1848,6 +1898,7 @@ function AppCore({
       onRemoveBundle={() => undefined}
       onUnmountBundle={() => undefined}
       onRemoveProject={() => undefined}
+      onDiscover={() => undefined}
       onInstall={() => undefined}
       onAddProject={() => undefined}
       onOpenCentralStore={() => undefined}
@@ -2090,6 +2141,20 @@ function AppCore({
     );
   }
 
+  if (discover) {
+    return (
+      <DiscoverPage
+        outcome={discover}
+        error={discoverError}
+        onBack={() => {
+          setDiscoverError(null);
+          setDiscover(null);
+        }}
+        onOpenSourceManagement={openSourceManagementFromDiscover}
+      />
+    );
+  }
+
   if (
     sourceAssociationBundleId &&
     sourceDiscovery &&
@@ -2319,6 +2384,7 @@ function AppCore({
       isResettingApplication={isResettingApplication}
       refreshError={refreshError}
       updateError={updateError}
+      discoverError={discoverError}
       installError={installError ?? sourceError}
       projectError={projectError}
       removalError={removalError}
@@ -2356,6 +2422,7 @@ function AppCore({
           ? removalOperation.targetId
           : null
       }
+      isOpeningDiscover={isOpeningDiscover}
       onUpdateBundle={createBundleUpdatePlan}
       onChooseBundleReplacement={chooseBundleReplacementPlan}
       onCheckEditableLocalBundle={checkEditableLocalBundle}
@@ -2369,6 +2436,7 @@ function AppCore({
       onRemoveProject={(projectId) =>
         createRemovalPlan("project", projectId)
       }
+      onDiscover={openDiscover}
       onInstall={openSourceDiscovery}
       onAddProject={chooseProjectDirectory}
       onOpenCentralStore={openCentralStore}

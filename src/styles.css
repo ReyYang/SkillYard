@@ -85,6 +85,7 @@ button:focus-visible {
 .inventory-shell,
 .install-shell,
 .mount-shell,
+.discover-shell,
 .source-shell,
 .association-shell,
 .batch-update-shell,
@@ -250,6 +251,7 @@ code {
 .inventory-shell,
 .install-shell,
 .mount-shell,
+.discover-shell,
 .source-shell,
 .association-shell,
 .batch-update-shell,
@@ -323,6 +325,148 @@ code {
 
 .source-shell {
   max-width: 1180px;
+}
+
+.discover-shell {
+  max-width: 1180px;
+}
+
+.discover-header {
+  max-width: 720px;
+}
+
+.discover-header h1 {
+  font-size: clamp(2.7rem, 6vw, 4.5rem);
+}
+
+.discover-header > p:last-child {
+  margin: 1.2rem 0 0;
+  color: var(--sy-muted);
+  line-height: 1.65;
+}
+
+.discover-search {
+  display: block;
+  margin: 2.2rem 0 1.4rem;
+}
+
+.discover-search input {
+  width: 100%;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--sy-border);
+  border-radius: var(--sy-radius-small);
+  color: var(--sy-text);
+  background: var(--sy-surface);
+  box-shadow: var(--sy-shadow);
+  font: inherit;
+}
+
+.discover-regions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.discover-region {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--sy-border);
+  border-radius: var(--sy-radius-large);
+  color: var(--sy-text);
+  background: var(--sy-surface);
+  box-shadow: var(--sy-shadow);
+}
+
+.discover-region > header,
+.discover-result-card > header,
+.discover-source-state {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.discover-region > header {
+  padding: 0.15rem 0.15rem 0.85rem;
+  border-bottom: 1px solid var(--sy-border);
+}
+
+.discover-region h2,
+.discover-result-card h3 {
+  margin: 0;
+}
+
+.discover-region > header > span,
+.discover-result-card header span {
+  color: var(--sy-muted);
+  font-size: 0.74rem;
+}
+
+.discover-region-results {
+  display: grid;
+  gap: 0.7rem;
+  padding-top: 0.8rem;
+}
+
+.discover-result-card,
+.discover-source-state {
+  padding: 0.85rem;
+  border: 1px solid var(--sy-border);
+  border-radius: var(--sy-radius-small);
+  background: var(--sy-surface-subtle);
+}
+
+.discover-result-card > header > div,
+.discover-source-state > div {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.discover-result-card header small {
+  overflow: hidden;
+  color: var(--sy-muted);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discover-result-card p {
+  margin: 0.75rem 0 0;
+  color: var(--sy-muted);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.discover-result-card .discover-ai-summary {
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--sy-border);
+}
+
+.discover-result-card .compact-action {
+  margin-top: 0.8rem;
+}
+
+.discover-source-state {
+  align-items: center;
+}
+
+.discover-source-state span,
+.discover-empty {
+  color: var(--sy-muted);
+  font-size: 0.8rem;
+}
+
+.discover-empty {
+  margin: 0;
+  padding: 1.2rem 0.25rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 920px) {
+  .discover-regions {
+    grid-template-columns: 1fr;
+  }
 }
 
 .source-header {

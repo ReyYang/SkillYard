@@ -77,12 +77,14 @@ interface InventoryPageProps {
   removingBundleId: string | null;
   unmountingBundleId: string | null;
   removingProjectId: string | null;
+  isOpeningDiscover: boolean;
   isOpeningInstaller: boolean;
   isAddingProject: boolean;
   isOpeningCentralStore: boolean;
   isResettingApplication: boolean;
   refreshError: string | null;
   updateError: string | null;
+  discoverError: string | null;
   installError: string | null;
   projectError: string | null;
   removalError: string | null;
@@ -106,6 +108,7 @@ interface InventoryPageProps {
   onRemoveBundle(bundleId: string): void;
   onUnmountBundle(bundleId: string): void;
   onRemoveProject(projectId: string): void;
+  onDiscover(): void;
   onInstall(): void;
   onAddProject(): void;
   onOpenCentralStore(): void;
@@ -193,12 +196,14 @@ export function InventoryPage({
   removingBundleId,
   unmountingBundleId,
   removingProjectId,
+  isOpeningDiscover,
   isOpeningInstaller,
   isAddingProject,
   isOpeningCentralStore,
   isResettingApplication,
   refreshError,
   updateError,
+  discoverError,
   installError,
   projectError,
   removalError,
@@ -222,6 +227,7 @@ export function InventoryPage({
   onRemoveBundle,
   onUnmountBundle,
   onRemoveProject,
+  onDiscover,
   onInstall,
   onAddProject,
   onOpenCentralStore,
@@ -442,6 +448,14 @@ export function InventoryPage({
           </p>
         </div>
         <div className="inventory-actions">
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isOpeningDiscover}
+            onClick={onDiscover}
+          >
+            {isOpeningDiscover ? t("正在打开…") : t("发现")}
+          </button>
           <button
             className="secondary-action"
             type="button"
@@ -671,6 +685,13 @@ export function InventoryPage({
         <div className="inline-error" role="alert">
           <strong>{t("无法准备安装")}</strong>
           <span>{installError}</span>
+        </div>
+      ) : null}
+
+      {discoverError ? (
+        <div className="inline-error" role="alert">
+          <strong>{t("无法打开发现页")}</strong>
+          <span>{discoverError}</span>
         </div>
       ) : null}
 

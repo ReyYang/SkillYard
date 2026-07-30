@@ -721,6 +721,16 @@ fn read_skill_metadata(path: &Path, directory_name: &str) -> (Option<String>, Sk
     (name, status)
 }
 
+/// Discover 只读取已登记入口文档中的有效 description；单个失效文件不阻止其他结果。
+pub(crate) fn read_skill_description(path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let frontmatter = extract_frontmatter(&contents)?;
+    let metadata = serde_yaml_ng::from_str::<SkillFrontmatter>(frontmatter).ok()?;
+    let description = metadata.description?;
+    let length = description.trim().chars().count();
+    (1..=1024).contains(&length).then_some(description)
+}
+
 fn is_valid_skill_name(name: &str, directory_name: &str) -> bool {
     let length = name.len();
     (1..=64).contains(&length)

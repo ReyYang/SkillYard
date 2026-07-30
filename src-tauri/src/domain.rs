@@ -35,6 +35,7 @@ pub enum UiIntent {
     CheckEditableLocalBundle {
         bundle_id: String,
     },
+    OpenDiscover,
     OpenSourceDiscovery,
     SearchSkillsSh {
         query: String,
@@ -257,6 +258,7 @@ pub enum AgentPageContext {
 pub enum AgentPageKind {
     Onboarding,
     Inventory,
+    Discover,
     Settings,
     SourceDiscovery,
     Operation,
@@ -1091,6 +1093,20 @@ pub struct SourceSummary {
     pub members: Vec<SourceCatalogMemberSummary>,
 }
 
+/// Discover 的本机条目只暴露搜索和展示所需事实，不把本机路径带到前端。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverLocalSkill {
+    pub inventory_id: String,
+    pub skill_name: String,
+    pub description: Option<String>,
+    pub ai_summary: Option<String>,
+    pub management_kind: ManagementKind,
+    pub bundle_id: Option<String>,
+    pub bundle_display_name: Option<String>,
+    pub source_display_name: Option<String>,
+}
+
 /// 状态描述 Bundle 与更新来源的关系，不代表成员级版本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1699,6 +1715,10 @@ pub enum UiOutcome {
         projects: Vec<ProjectSummary>,
         mounts: Vec<MountSummary>,
         bundle_updates: Vec<BundleUpdateSummary>,
+    },
+    Discover {
+        local_skills: Vec<DiscoverLocalSkill>,
+        sources: Vec<SourceSummary>,
     },
     SourceDiscovery {
         sources: Vec<SourceSummary>,
