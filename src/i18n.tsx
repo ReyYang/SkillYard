@@ -58,6 +58,13 @@ const EN_MESSAGES = {
   "语言": "Language",
   "切换后立即更新，并在下次启动时保留。":
     "Changes apply immediately and remain after restart.",
+  "主题": "Theme",
+  "切换后立即应用，并在下次启动时保留。":
+    "Changes apply immediately and remain after restart.",
+  "清晰的清单与详情布局": "A clear list-and-detail layout",
+  "突出当前 Bundle 的收藏架布局":
+    "A collection layout centered on the current Bundle",
+  "主题未保存": "Theme was not saved",
   "AI 功能": "AI features",
   "所有 AI 功能共用这一组 Provider 和模型。SkillYard 不会自动测试连接。":
     "All AI features use this Provider and model. SkillYard never tests the connection automatically.",

@@ -843,6 +843,189 @@ describe("本机清单", () => {
     expect(screen.queryByRole("option", { name: "Simplified Chinese" })).toBeNull();
   });
 
+  it("设置使用固定名称切换 Archive，并保留当前清单与 Agent Session", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          id: "managed:alpha",
+          memberId: "member-alpha",
+          bundleId: "bundle-alpha",
+          bundleDisplayName: "Alpha",
+          skillName: "alpha",
+        }),
+        createManagedEntry({
+          id: "managed:beta",
+          memberId: "member-beta",
+          bundleId: "bundle-beta",
+          bundleDisplayName: "Beta",
+          skillName: "beta",
+        }),
+      ]),
+    );
+    const ai = {
+      ...defaultAiPreferences(),
+      enabled: true,
+      disclosureAccepted: true,
+      hasApiKey: true,
+      verified: true,
+    };
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      theme: "ledger",
+      ai,
+    });
+    vi.mocked(client.setThemePreset).mockResolvedValue({
+      language: "zhCn",
+      theme: "archive",
+      ai,
+    });
+    vi.mocked(client.askAgent).mockResolvedValue({
+      reply: "这个 Session 仍然存在。",
+      localMatchFound: true,
+      searchedPublicWeb: false,
+      searchResults: [],
+    });
+    render(<App client={client} />);
+
+    const ledger = await screen.findByRole("region", {
+      name: "Ledger Bundle Library",
+    });
+    await user.click(within(ledger).getByRole("button", { name: "Beta" }));
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索 Skill" }),
+      "beta",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "打开 SkillYard 助手" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
+      "保留这个会话",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("这个 Session 仍然存在。"))
+      .toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("radio", { name: "Ledger" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Archive" })).not.toBeChecked();
+    await user.click(screen.getByRole("radio", { name: "Archive" }));
+
+    expect(client.setThemePreset).toHaveBeenCalledWith("archive");
+    expect(document.querySelector(".application-theme")).toHaveAttribute(
+      "data-theme-preset",
+      "archive",
+    );
+    expect(screen.getByText("这个 Session 仍然存在。")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    const archive = screen.getByRole("region", {
+      name: "Archive Bundle Library",
+    });
+    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toHaveValue(
+      "beta",
+    );
+    expect(within(archive).getByRole("button", { name: "Beta" }))
+      .toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("从持久化偏好恢复 Archive，并在英文设置中保留固定主题名称", async () => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      theme: "archive",
+      ai: defaultAiPreferences(),
+    });
+
+    render(<App client={client} />);
+
+    const archive = await screen.findByRole("region", {
+      name: "Archive Bundle Library",
+    });
+    expect(archive).toHaveAttribute("data-theme-preset", "archive");
+    expect(client.setThemePreset).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("radio", { name: "Ledger" })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: "Archive" })).toBeChecked();
+    expect(screen.queryByRole("radio", { name: "档案" })).not.toBeInTheDocument();
+  });
+
+  it("Archive 在窄窗口和大量长名称 Bundle 中仍可用键盘浏览", async () => {
+    const user = userEvent.setup();
+    const entries = Array.from({ length: 48 }, (_, index) => {
+      const sequence = String(index + 1).padStart(2, "0");
+      return createManagedEntry({
+        id: `managed:archive-member-${sequence}`,
+        memberId: `archive-member-${sequence}`,
+        bundleId: `archive-bundle-${sequence}`,
+        bundleDisplayName:
+          index === 47
+            ? "archive-final-bundle-with-a-name-long-enough-to-wrap-without-hiding-actions"
+            : `Archive Bundle ${sequence}`,
+        skillName: `archive-skill-${sequence}`,
+      });
+    });
+    const client = createClient(inventoryOutcome(entries));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      theme: "archive",
+      ai: defaultAiPreferences(),
+    });
+
+    render(<App client={client} />);
+
+    const archive = await screen.findByRole("region", {
+      name: "Archive Bundle Library",
+    });
+    const shelf = within(archive).getByRole("navigation", { name: "Bundle" });
+    expect(within(shelf).getAllByRole("button")).toHaveLength(48);
+
+    await user.click(
+      within(shelf).getByRole("button", { name: "Archive Bundle 01" }),
+    );
+    await user.keyboard("{End}");
+
+    const finalName =
+      "archive-final-bundle-with-a-name-long-enough-to-wrap-without-hiding-actions";
+    const finalBundle = within(shelf).getByRole("button", { name: finalName });
+    expect(finalBundle).toHaveAttribute("aria-pressed", "true");
+    expect(finalBundle).toHaveFocus();
+    expect(
+      within(archive).getByRole("heading", { name: finalName }),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{ArrowLeft}");
+    expect(
+      within(shelf).getByRole("button", { name: "Archive Bundle 47" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("Archive 在空清单中仍提供明确的空状态", async () => {
+    const client = createClient(inventoryOutcome([]));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "zhCn",
+      theme: "archive",
+      ai: defaultAiPreferences(),
+    });
+
+    render(<App client={client} />);
+
+    const archive = await screen.findByRole("region", {
+      name: "Archive Bundle Library",
+    });
+    expect(within(archive).getByText("未发现 Skill")).toBeInTheDocument();
+    expect(
+      within(archive).getByText(
+        "你可以继续使用现有安装方式，再主动刷新本机。",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("API Key 可以在保存前由用户主动显示或隐藏", async () => {
     const user = userEvent.setup();
     const client = createClient(

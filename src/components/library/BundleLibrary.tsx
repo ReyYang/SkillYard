@@ -20,10 +20,7 @@ interface BundleLibraryProps {
   emptyState: ReactNode;
 }
 
-/**
- * 三种 Library renderer 只接收同一份只读条目和选择回调，不能拥有领域状态。
- * #61 先交付 Ledger；后续 renderer 继续复用这个合同。
- */
+/** 三种 Library renderer 只接收同一份只读条目和选择回调，不能拥有领域状态。 */
 export function BundleLibrary({
   theme,
   items,
@@ -38,26 +35,37 @@ export function BundleLibrary({
       : (items[0]?.id ?? null);
 
   if (items.length === 0 || !activeId) {
+    const renderedTheme = theme === "archive" ? "archive" : "ledger";
     return (
       <section
-        className="bundle-library ledger-library"
+        className={`bundle-library ${renderedTheme}-library`}
         role="region"
-        aria-label="Ledger Bundle Library"
-        data-theme-preset="ledger"
+        aria-label={`${capitalize(renderedTheme)} Bundle Library`}
+        data-theme-preset={renderedTheme}
       >
         {emptyState}
       </section>
     );
   }
 
-  // #62、#63 开放主题选择前，未知的视觉分支仍安全退回已经完整交付的 Ledger。
-  const renderedTheme = theme === "ledger" ? theme : "ledger";
+  if (theme === "archive") {
+    return (
+      <ArchiveLibrary
+        items={items}
+        activeId={activeId}
+        onSelect={onSelect}
+        renderDetails={renderDetails}
+      />
+    );
+  }
+
+  // Layers 在自己的交付切片开放前，继续使用已经完整交付的 Ledger。
   return (
     <section
-      className={`bundle-library ${renderedTheme}-library`}
+      className="bundle-library ledger-library"
       role="region"
       aria-label="Ledger Bundle Library"
-      data-theme-preset={renderedTheme}
+      data-theme-preset="ledger"
     >
       <nav
         className="ledger-library-list"
@@ -94,13 +102,80 @@ export function BundleLibrary({
   );
 }
 
+function ArchiveLibrary({
+  items,
+  activeId,
+  onSelect,
+  renderDetails,
+}: {
+  items: BundleLibraryItem[];
+  activeId: string;
+  onSelect(id: string): void;
+  renderDetails(id: string): ReactNode;
+}) {
+  const activeItem = items.find((item) => item.id === activeId) ?? items[0]!;
+  return (
+    <section
+      className="bundle-library archive-library"
+      role="region"
+      aria-label="Archive Bundle Library"
+      data-theme-preset="archive"
+    >
+      <div className="archive-library-stage">
+        <div className="archive-library-cover" aria-hidden="true">
+          <span>{bundleInitial(activeItem.title)}</span>
+          <small>{activeItem.skillCount} Skill</small>
+        </div>
+        <div className="archive-library-detail">{renderDetails(activeId)}</div>
+      </div>
+      <nav
+        className="archive-library-shelf"
+        aria-label="Bundle"
+        onKeyDown={(event) =>
+          moveKeyboardSelection(event, items, activeId, onSelect)
+        }
+      >
+        {items.map((item) => (
+          <button
+            className="archive-library-book"
+            type="button"
+            key={item.id}
+            data-library-select
+            aria-label={item.title}
+            aria-pressed={item.id === activeId}
+            onClick={() => onSelect(item.id)}
+          >
+            <span className="archive-library-book-mark">
+              {bundleInitial(item.title)}
+            </span>
+            <span className="archive-library-book-copy">
+              <strong>{item.title}</strong>
+              <small>
+                {item.skillCount} Skill · {item.eyebrow}
+              </small>
+              {item.category ? <em>{item.category}</em> : null}
+            </span>
+          </button>
+        ))}
+      </nav>
+    </section>
+  );
+}
+
 function moveKeyboardSelection(
   event: KeyboardEvent<HTMLElement>,
   items: BundleLibraryItem[],
   activeId: string,
   onSelect: (id: string) => void,
 ) {
-  const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+  const keys = [
+    "ArrowDown",
+    "ArrowUp",
+    "ArrowRight",
+    "ArrowLeft",
+    "Home",
+    "End",
+  ];
   if (!keys.includes(event.key)) return;
   event.preventDefault();
 
@@ -113,7 +188,7 @@ function moveKeyboardSelection(
       ? 0
       : event.key === "End"
         ? items.length - 1
-        : event.key === "ArrowDown"
+        : event.key === "ArrowDown" || event.key === "ArrowRight"
           ? (currentIndex + 1) % items.length
           : (currentIndex - 1 + items.length) % items.length;
   onSelect(items[nextIndex]!.id);
@@ -121,4 +196,13 @@ function moveKeyboardSelection(
     "[data-library-select]",
   );
   buttons[nextIndex]?.focus();
+}
+
+function bundleInitial(title: string): string {
+  const first = Array.from(title.trim())[0];
+  return first ? first.toLocaleUpperCase() : "S";
+}
+
+function capitalize(value: string): string {
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }

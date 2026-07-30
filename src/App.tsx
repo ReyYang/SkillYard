@@ -66,9 +66,12 @@ interface AppCoreProps {
   aiPreferences: AiPreferences;
   isSavingLanguage: boolean;
   languageError: string | null;
+  isSavingTheme: boolean;
+  themeError: string | null;
   aiOperation: AiOperation;
   aiError: string | null;
   onLanguageChange(language: InterfaceLanguage): Promise<void>;
+  onThemeChange(theme: ThemePreset): Promise<void>;
   onAiConfigurationChange(configuration: AiConfigurationInput): Promise<void>;
   onSaveAiApiKey(apiKey: string): Promise<void>;
   onDeleteAiApiKey(): Promise<void>;
@@ -127,6 +130,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [isSavingLanguage, setIsSavingLanguage] = useState(false);
   const [languageError, setLanguageError] = useState<string | null>(null);
+  const [isSavingTheme, setIsSavingTheme] = useState(false);
+  const [themeError, setThemeError] = useState<string | null>(null);
   const [aiOperation, setAiOperation] = useState<AiOperation>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [agentContext, setAgentContext] = useState<AgentPageContext>({
@@ -169,6 +174,22 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       setLanguageError(formatErrorMessage(error, language ?? "zhCn"));
     } finally {
       setIsSavingLanguage(false);
+    }
+  };
+
+  const changeTheme = async (nextTheme: ThemePreset) => {
+    if (isSavingTheme || nextTheme === theme) return;
+    setIsSavingTheme(true);
+    setThemeError(null);
+    try {
+      const preferences = await client.setThemePreset(nextTheme);
+      setLanguage(preferences.language);
+      setTheme(preferences.theme);
+      setAiPreferences(preferences.ai);
+    } catch (error) {
+      setThemeError(formatErrorMessage(error, language ?? "zhCn"));
+    } finally {
+      setIsSavingTheme(false);
     }
   };
 
@@ -254,12 +275,15 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           aiPreferences={aiPreferences}
           isSavingLanguage={isSavingLanguage}
           languageError={languageError}
+          isSavingTheme={isSavingTheme}
+          themeError={themeError}
           aiOperation={aiOperation}
           aiError={aiError}
           onAgentContextChange={setAgentContext}
           agentInstallPlan={agentInstallPlan}
           onAgentInstallPlanClear={() => setAgentInstallPlan(null)}
           onLanguageChange={changeLanguage}
+          onThemeChange={changeTheme}
           onAiConfigurationChange={(configuration) =>
             runAiOperation("savingConfiguration", () =>
               client.setAiConfiguration(configuration),
@@ -293,9 +317,12 @@ function AppCore({
   aiPreferences,
   isSavingLanguage,
   languageError,
+  isSavingTheme,
+  themeError,
   aiOperation,
   aiError,
   onLanguageChange,
+  onThemeChange,
   onAiConfigurationChange,
   onSaveAiApiKey,
   onDeleteAiApiKey,
@@ -1768,9 +1795,12 @@ function AppCore({
       aiPreferences={aiPreferences}
       isSavingLanguage={isSavingLanguage}
       languageError={languageError}
+      isSavingTheme={isSavingTheme}
+      themeError={themeError}
       aiOperation={aiOperation}
       aiError={aiError}
       onLanguageChange={onLanguageChange}
+      onThemeChange={onThemeChange}
       onAiConfigurationChange={onAiConfigurationChange}
       onSaveAiApiKey={onSaveAiApiKey}
       onDeleteAiApiKey={onDeleteAiApiKey}
@@ -2264,9 +2294,12 @@ function AppCore({
       aiPreferences={aiPreferences}
       isSavingLanguage={isSavingLanguage}
       languageError={languageError}
+      isSavingTheme={isSavingTheme}
+      themeError={themeError}
       aiOperation={aiOperation}
       aiError={aiError}
       onLanguageChange={onLanguageChange}
+      onThemeChange={onThemeChange}
       onAiConfigurationChange={onAiConfigurationChange}
       onSaveAiApiKey={onSaveAiApiKey}
       onDeleteAiApiKey={onDeleteAiApiKey}

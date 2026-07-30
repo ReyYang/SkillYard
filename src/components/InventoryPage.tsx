@@ -58,6 +58,8 @@ interface InventoryPageProps {
   aiPreferences: AiPreferences;
   isSavingLanguage: boolean;
   languageError: string | null;
+  isSavingTheme: boolean;
+  themeError: string | null;
   aiOperation:
     | "savingConfiguration"
     | "savingKey"
@@ -109,6 +111,7 @@ interface InventoryPageProps {
   onOpenCentralStore(): void;
   onResetApplication(): void;
   onLanguageChange(language: InterfaceLanguage): void;
+  onThemeChange(theme: ThemePreset): void;
   onAiConfigurationChange(configuration: AiConfigurationInput): Promise<void>;
   onSaveAiApiKey(apiKey: string): Promise<void>;
   onDeleteAiApiKey(): Promise<void>;
@@ -176,6 +179,8 @@ export function InventoryPage({
   aiPreferences,
   isSavingLanguage,
   languageError,
+  isSavingTheme,
+  themeError,
   aiOperation,
   aiError,
   isWriteBlocked,
@@ -222,6 +227,7 @@ export function InventoryPage({
   onOpenCentralStore,
   onResetApplication,
   onLanguageChange,
+  onThemeChange,
   onAiConfigurationChange,
   onSaveAiApiKey,
   onDeleteAiApiKey,
@@ -333,9 +339,12 @@ export function InventoryPage({
     return (
       <InventorySettingsPage
         language={language}
+        theme={theme}
         aiPreferences={aiPreferences}
         isSavingLanguage={isSavingLanguage}
         languageError={languageError}
+        isSavingTheme={isSavingTheme}
+        themeError={themeError}
         aiOperation={aiOperation}
         aiError={aiError}
         isWriteBlocked={isWriteBlocked}
@@ -346,6 +355,7 @@ export function InventoryPage({
         onOpenCentralStore={onOpenCentralStore}
         onResetApplication={onResetApplication}
         onLanguageChange={onLanguageChange}
+        onThemeChange={onThemeChange}
         onAiConfigurationChange={onAiConfigurationChange}
         onSaveAiApiKey={onSaveAiApiKey}
         onDeleteAiApiKey={onDeleteAiApiKey}
@@ -1042,9 +1052,12 @@ function InventorySection({
 
 function InventorySettingsPage({
   language,
+  theme,
   aiPreferences,
   isSavingLanguage,
   languageError,
+  isSavingTheme,
+  themeError,
   aiOperation,
   aiError,
   isWriteBlocked,
@@ -1055,6 +1068,7 @@ function InventorySettingsPage({
   onOpenCentralStore,
   onResetApplication,
   onLanguageChange,
+  onThemeChange,
   onAiConfigurationChange,
   onSaveAiApiKey,
   onDeleteAiApiKey,
@@ -1062,9 +1076,12 @@ function InventorySettingsPage({
   onBack,
 }: {
   language: InterfaceLanguage;
+  theme: ThemePreset;
   aiPreferences: AiPreferences;
   isSavingLanguage: boolean;
   languageError: string | null;
+  isSavingTheme: boolean;
+  themeError: string | null;
   aiOperation:
     | "savingConfiguration"
     | "savingKey"
@@ -1080,6 +1097,7 @@ function InventorySettingsPage({
   onOpenCentralStore(): void;
   onResetApplication(): void;
   onLanguageChange(language: InterfaceLanguage): void;
+  onThemeChange(theme: ThemePreset): void;
   onAiConfigurationChange(configuration: AiConfigurationInput): Promise<void>;
   onSaveAiApiKey(apiKey: string): Promise<void>;
   onDeleteAiApiKey(): Promise<void>;
@@ -1143,6 +1161,47 @@ function InventorySettingsPage({
             <option value="zhCn">简体中文</option>
           </select>
         </label>
+      </section>
+
+      <section className="settings-card settings-card-stack">
+        <div>
+          <p className="section-eyebrow">APPEARANCE</p>
+          <h2>{t("主题")}</h2>
+          <p>{t("切换后立即应用，并在下次启动时保留。")}</p>
+        </div>
+        <fieldset className="theme-preset-options" disabled={isSavingTheme}>
+          <legend className="visually-hidden">{t("主题")}</legend>
+          {(["ledger", "archive"] as const).map((preset) => {
+            const label = preset === "ledger" ? "Ledger" : "Archive";
+            return (
+              <label className="theme-preset-option" key={preset}>
+                <input
+                  type="radio"
+                  name="theme-preset"
+                  value={preset}
+                  aria-label={label}
+                  checked={theme === preset}
+                  onChange={() => onThemeChange(preset)}
+                />
+                <span>
+                  {/* Preset 名称是稳定的产品标识，不跟随界面语言翻译。 */}
+                  <strong>{label}</strong>
+                  <small>
+                    {preset === "ledger"
+                      ? t("清晰的清单与详情布局")
+                      : t("突出当前 Bundle 的收藏架布局")}
+                  </small>
+                </span>
+              </label>
+            );
+          })}
+        </fieldset>
+        {themeError ? (
+          <p className="inline-error" role="alert">
+            <strong>{t("主题未保存")}</strong>
+            <span>{themeError}</span>
+          </p>
+        ) : null}
       </section>
 
       <section className="settings-card settings-card-stack">

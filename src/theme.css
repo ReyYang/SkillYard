@@ -1,0 +1,202 @@
+.theme-preset-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.theme-preset-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.9rem;
+  border: 1px solid var(--sy-border);
+  border-radius: var(--sy-radius-small);
+  color: var(--sy-text);
+  background: var(--sy-surface-subtle);
+  cursor: pointer;
+}
+
+.theme-preset-option:has(input:checked) {
+  border-color: var(--sy-accent);
+  background: var(--sy-selected);
+  box-shadow: inset 0 0 0 1px var(--sy-accent);
+}
+
+.theme-preset-option input {
+  margin-top: 0.2rem;
+  accent-color: var(--sy-accent);
+}
+
+.theme-preset-option > span {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.theme-preset-option small {
+  color: var(--sy-muted);
+  line-height: 1.45;
+}
+
+/*
+ * Archive 只覆盖语义 token 和共用控件的视觉材质；页面结构与生命周期仍由
+ * 原有组件负责，避免主题变成第二套应用。
+ */
+.application-theme[data-theme-preset="archive"] {
+  --sy-canvas: #1c151b;
+  --sy-surface: rgb(46 34 44 / 88%);
+  --sy-surface-subtle: rgb(58 43 53 / 88%);
+  --sy-surface-strong: #49343f;
+  --sy-text: #f0dfca;
+  --sy-muted: #b9a9a7;
+  --sy-border: rgb(239 211 183 / 18%);
+  --sy-accent: #c8f36a;
+  --sy-accent-strong: #e4ff9d;
+  --sy-selected: rgb(125 96 112 / 35%);
+  --sy-danger: #ef8a77;
+  --sy-shadow: 0 24px 70px rgb(0 0 0 / 34%);
+  --sy-radius-large: 20px;
+  --sy-radius-small: 12px;
+  color-scheme: dark;
+  background:
+    radial-gradient(circle at 72% 12%, rgb(132 91 115 / 18%), transparent 31rem),
+    radial-gradient(circle at 14% 22%, rgb(111 77 100 / 20%), transparent 34rem),
+    var(--sy-canvas);
+}
+
+.application-theme[data-theme-preset="archive"] h1,
+.application-theme[data-theme-preset="archive"] .detail-header h1,
+.application-theme[data-theme-preset="archive"] .inventory-header h1 {
+  color: var(--sy-text);
+  font-family: var(--sy-display-font);
+  font-weight: 500;
+  letter-spacing: -0.05em;
+}
+
+.application-theme[data-theme-preset="archive"] :is(
+    .inventory-summary,
+    .refresh-summary,
+    .section-eyebrow,
+    .settings-card p:not(.section-eyebrow),
+    .bundle-context,
+    .settings-select,
+    .settings-key-field,
+    .settings-ai-status,
+    .settings-check
+  ) {
+  color: var(--sy-muted);
+}
+
+.application-theme[data-theme-preset="archive"] :is(
+    .inventory-controls,
+    .inventory-section,
+    .settings-card,
+    .skill-detail-card,
+    .registered-projects,
+    .source-card,
+    .mount-panel,
+    .install-plan,
+    .agent-window,
+    .confirmation-dialog
+  ) {
+  border-color: var(--sy-border);
+  color: var(--sy-text);
+  background: var(--sy-surface);
+  box-shadow: var(--sy-shadow);
+}
+
+.application-theme[data-theme-preset="archive"] :is(
+    .secondary-action,
+    .bundle-open-action,
+    .filter-group button,
+    .page-back-action,
+    .agent-close
+  ) {
+  border-color: var(--sy-border);
+  color: var(--sy-text);
+  background: var(--sy-surface-subtle);
+  box-shadow: none;
+}
+
+.application-theme[data-theme-preset="archive"] :is(
+    .primary-action,
+    .filter-group button[aria-pressed="true"],
+    .agent-composer button
+  ) {
+  color: #18200f;
+  background: var(--sy-accent);
+  box-shadow: 0 10px 28px rgb(200 243 106 / 14%);
+}
+
+.application-theme[data-theme-preset="archive"] :is(
+    input,
+    textarea,
+    select
+  ) {
+  border-color: var(--sy-border);
+  color: var(--sy-text);
+  background-color: var(--sy-surface-subtle);
+}
+
+.application-theme[data-theme-preset="archive"] .search-field input {
+  color: var(--sy-text);
+  background: transparent;
+}
+
+.application-theme[data-theme-preset="archive"] :is(
+    .agent-window-header,
+    .agent-composer
+  ) {
+  border-color: var(--sy-border);
+  background: var(--sy-surface);
+}
+
+.application-theme[data-theme-preset="archive"] :is(
+    .agent-message p,
+    .agent-empty,
+    .agent-search-results li
+  ) {
+  border-color: var(--sy-border);
+  color: var(--sy-text);
+  background: var(--sy-surface-subtle);
+}
+
+.application-theme[data-theme-preset="archive"] .agent-message.user p {
+  color: #18200f;
+  background: var(--sy-accent);
+}
+
+.application-theme[data-theme-preset="archive"] button:focus-visible,
+.application-theme[data-theme-preset="archive"] input:focus-visible,
+.application-theme[data-theme-preset="archive"] select:focus-visible,
+.application-theme[data-theme-preset="archive"] textarea:focus-visible {
+  outline-color: var(--sy-accent);
+}
+
+.application-theme[data-theme-preset="archive"] :is(button, input, select, textarea) {
+  transition:
+    color 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+@media (max-width: 620px) {
+  .theme-preset-options {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .application-theme[data-theme-preset="archive"] :is(
+      button,
+      input,
+      select,
+      textarea
+    ) {
+    transition: none;
+  }
+}
