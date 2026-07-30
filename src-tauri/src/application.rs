@@ -19,8 +19,8 @@ use crate::{
     domain::{
         AgentConversationMessage, AgentPageContext, AgentPageKind, AiPreferences, AiProvider,
         BundleUpdateStatus, EditableLocalRelinkMember, InterfaceLanguage, MergeContentChoice,
-        PlatformInfo, SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, UiIntent,
-        UiOutcome,
+        PlatformInfo, SourceKind, SourceMemberMappingChoice, TakeoverPlanRequest, ThemePreset,
+        UiIntent, UiOutcome,
     },
     github_source::{
         GithubCatalogTarget, GithubSourceError, ReqwestSourceTransport, SharedSourceTransport,
@@ -210,6 +210,9 @@ impl SkillYardApplication {
             UiIntent::SetInterfaceLanguage { language } => {
                 return self.with_write_operation(|| self.set_interface_language(*language));
             }
+            UiIntent::SetThemePreset { theme } => {
+                return self.with_write_operation(|| self.set_theme_preset(*theme));
+            }
             UiIntent::SetAiConfiguration {
                 enabled,
                 disclosure_accepted,
@@ -250,6 +253,7 @@ impl SkillYardApplication {
         match intent {
             UiIntent::GetPreferences
             | UiIntent::SetInterfaceLanguage { .. }
+            | UiIntent::SetThemePreset { .. }
             | UiIntent::SetAiConfiguration { .. }
             | UiIntent::SaveAiApiKey { .. }
             | UiIntent::DeleteAiApiKey
@@ -424,6 +428,7 @@ impl SkillYardApplication {
         let storage = self.open_storage()?;
         Ok(UiOutcome::Preferences {
             language: storage.read_interface_language()?,
+            theme: storage.read_theme_preset()?,
             ai: self.read_ai_preferences(&storage)?,
         })
     }
@@ -436,8 +441,15 @@ impl SkillYardApplication {
         storage.save_interface_language(language)?;
         Ok(UiOutcome::Preferences {
             language,
+            theme: storage.read_theme_preset()?,
             ai: self.read_ai_preferences(&storage)?,
         })
+    }
+
+    fn set_theme_preset(&self, theme: ThemePreset) -> Result<UiOutcome, ApplicationError> {
+        let mut storage = self.open_storage()?;
+        storage.save_theme_preset(theme)?;
+        self.preferences_outcome(&storage)
     }
 
     fn set_ai_configuration(
@@ -711,6 +723,7 @@ impl SkillYardApplication {
     fn preferences_outcome(&self, storage: &Storage) -> Result<UiOutcome, ApplicationError> {
         Ok(UiOutcome::Preferences {
             language: storage.read_interface_language()?,
+            theme: storage.read_theme_preset()?,
             ai: self.read_ai_preferences(storage)?,
         })
     }

@@ -21,7 +21,7 @@ use crate::domain::{
     ProjectSummary, RecoveryIssue, ScanIssue, ScanIssueCode, ScanRootIdentity, ScanRootKey,
     SkillAiExplanation, SkillCategory, SkillMetadataStatus, SourceCatalogMemberSummary,
     SourceCatalogStatus, SourceKind, SourceRefChangePlan, SourceSummary, SupportedAppId,
-    SupportedAppSummary, TakeoverPlan, UiOutcome,
+    SupportedAppSummary, TakeoverPlan, ThemePreset, UiOutcome,
 };
 use crate::github_source::parse_github_source;
 use crate::installation_chain::takeover_group_evidence;
@@ -104,6 +104,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         29,
         include_str!("../migrations/0029_skill_ai_explanations.sql"),
     ),
+    (30, include_str!("../migrations/0030_theme_preset.sql")),
 ];
 
 #[derive(Debug, Error)]
@@ -128,6 +129,8 @@ pub enum StorageError {
     SavePreferences(#[source] rusqlite::Error),
     #[error("SQLite 中包含未知界面语言：{0}")]
     UnknownInterfaceLanguage(String),
+    #[error("SQLite 中包含未知 Theme Preset：{0}")]
+    UnknownThemePreset(String),
     #[error("无法读取 AI 偏好：{0}")]
     ReadAiPreferences(#[source] rusqlite::Error),
     #[error("无法保存 AI 偏好：{0}")]
@@ -1358,6 +1361,37 @@ impl Storage {
                  SET interface_language = ?1
                  WHERE singleton_id = 1",
                 [language.as_str()],
+            )
+            .map_err(StorageError::SavePreferences)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::SavePreferences(
+                rusqlite::Error::QueryReturnedNoRows,
+            ))
+        }
+    }
+
+    pub(crate) fn read_theme_preset(&self) -> Result<ThemePreset, StorageError> {
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT theme_preset FROM app_preferences WHERE singleton_id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(StorageError::ReadPreferences)?;
+        ThemePreset::from_str(&stored).ok_or(StorageError::UnknownThemePreset(stored))
+    }
+
+    pub(crate) fn save_theme_preset(&mut self, theme: ThemePreset) -> Result<(), StorageError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE app_preferences
+                 SET theme_preset = ?1
+                 WHERE singleton_id = 1",
+                [theme.as_str()],
             )
             .map_err(StorageError::SavePreferences)?;
         if changed == 1 {
@@ -14646,7 +14680,7 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=29).collect::<Vec<_>>());
+        assert_eq!(versions, (1..=30).collect::<Vec<_>>());
         for table in [
             "projects",
             "mount_plans",

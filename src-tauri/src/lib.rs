@@ -43,7 +43,7 @@ pub use domain::{
     SourceKind, SourceMemberMappingChoice, SourceRefChangePlan, SourceSummary, SupportedAppId,
     TakeoverIdentityBasis, TakeoverMemberRequest, TakeoverOriginDisposition, TakeoverPlan,
     TakeoverPlanMember, TakeoverPlanOrigin, TakeoverPlanRequest, TakeoverPlanTarget,
-    TakeoverSharedTargetRequest, UiIntent, UiOutcome,
+    TakeoverSharedTargetRequest, ThemePreset, UiIntent, UiOutcome,
 };
 pub use github_source::{
     GithubSourceError, ReqwestSourceTransport, ResolvedGithubSource, SharedSourceTransport,
@@ -70,6 +70,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_preferences,
             commands::set_interface_language,
+            commands::set_theme_preset,
             commands::set_ai_configuration,
             commands::save_ai_api_key,
             commands::delete_ai_api_key,

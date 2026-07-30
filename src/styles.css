@@ -1,9 +1,27 @@
 :root {
-  font-family:
+  --sy-canvas: #f4f2ec;
+  --sy-surface: rgb(255 255 252 / 88%);
+  --sy-surface-subtle: rgb(246 247 242 / 86%);
+  --sy-surface-strong: #fffefa;
+  --sy-text: #1f241f;
+  --sy-muted: #697169;
+  --sy-border: rgb(48 58 49 / 14%);
+  --sy-accent: #55752d;
+  --sy-accent-strong: #304d25;
+  --sy-selected: #edf2e7;
+  --sy-danger: #8c3e32;
+  --sy-shadow: 0 22px 58px rgb(32 41 33 / 9%);
+  --sy-radius-large: 20px;
+  --sy-radius-small: 12px;
+  --sy-display-font:
+    "New York", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --sy-ui-font:
     Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display",
     "PingFang SC", sans-serif;
-  color: #172019;
-  background: #f2f1e9;
+  font-family:
+    var(--sy-ui-font);
+  color: var(--sy-text);
+  background: var(--sy-canvas);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -16,9 +34,15 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background: var(--sy-canvas);
+}
+
+.application-theme {
+  min-height: 100vh;
+  color: var(--sy-text);
   background:
-    radial-gradient(circle at 12% 12%, rgb(212 237 185 / 46%), transparent 32rem),
-    #f2f1e9;
+    radial-gradient(circle at 12% 12%, rgb(211 225 194 / 34%), transparent 34rem),
+    var(--sy-canvas);
 }
 
 button,

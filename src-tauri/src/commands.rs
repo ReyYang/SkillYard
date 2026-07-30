@@ -7,8 +7,8 @@ use crate::{
     AgentConversationMessage, AgentPageContext, AiProvider, BatchMountPlan, BatchMountRequest,
     EditableLocalRelinkPlan, InstallPlan, InterfaceLanguage, MergeContentChoice, MountPlan,
     MountScope, ProjectSelection, SkillYardApplication, SourceAssociationPlan,
-    SourceMemberMappingChoice, SupportedAppId, TakeoverPlan, TakeoverPlanRequest, UiIntent,
-    UiOutcome, application::ApplicationError,
+    SourceMemberMappingChoice, SupportedAppId, TakeoverPlan, TakeoverPlanRequest, ThemePreset,
+    UiIntent, UiOutcome, application::ApplicationError,
 };
 
 #[derive(Debug, Serialize)]
@@ -34,6 +34,17 @@ pub fn set_interface_language(
     match dispatch(&application, UiIntent::SetInterfaceLanguage { language })? {
         outcome @ UiOutcome::Preferences { .. } => Ok(outcome),
         _ => Err(invalid_outcome("SkillYard 没有返回更新后的界面偏好")),
+    }
+}
+
+#[tauri::command(async)]
+pub fn set_theme_preset(
+    application: State<'_, SkillYardApplication>,
+    theme: ThemePreset,
+) -> Result<UiOutcome, UiError> {
+    match dispatch(&application, UiIntent::SetThemePreset { theme })? {
+        outcome @ UiOutcome::Preferences { .. } => Ok(outcome),
+        _ => Err(invalid_outcome("SkillYard 没有返回更新后的主题偏好")),
     }
 }
 

@@ -10,6 +10,9 @@ pub enum UiIntent {
     SetInterfaceLanguage {
         language: InterfaceLanguage,
     },
+    SetThemePreset {
+        theme: ThemePreset,
+    },
     SetAiConfiguration {
         enabled: bool,
         disclosure_accepted: bool,
@@ -202,6 +205,34 @@ impl InterfaceLanguage {
         match value {
             "zh_cn" => Some(Self::ZhCn),
             "en" => Some(Self::En),
+            _ => None,
+        }
+    }
+}
+
+/// 三种固定主题共享同一份领域状态，只改变视觉 token 和 Bundle Library 构图。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThemePreset {
+    Archive,
+    Layers,
+    Ledger,
+}
+
+impl ThemePreset {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Archive => "archive",
+            Self::Layers => "layers",
+            Self::Ledger => "ledger",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "archive" => Some(Self::Archive),
+            "layers" => Some(Self::Layers),
+            "ledger" => Some(Self::Ledger),
             _ => None,
         }
     }
@@ -1627,6 +1658,7 @@ impl SkillMetadataStatus {
 pub enum UiOutcome {
     Preferences {
         language: InterfaceLanguage,
+        theme: ThemePreset,
         ai: AiPreferences,
     },
     AgentReply {

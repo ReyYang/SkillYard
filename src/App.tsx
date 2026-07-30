@@ -45,7 +45,9 @@ import type {
   SupportedAppId,
   TakeoverPlan,
   TakeoverPlanRequest,
+  ThemePreset,
   UiOutcome,
+  UserPreferences,
 } from "./domain";
 import { I18nProvider, useI18n } from "./i18n";
 import {
@@ -60,6 +62,7 @@ interface AppProps {
 interface AppCoreProps {
   client: SkillYardClient;
   language: InterfaceLanguage;
+  theme: ThemePreset;
   aiPreferences: AiPreferences;
   isSavingLanguage: boolean;
   languageError: string | null;
@@ -119,6 +122,7 @@ type RemovalOperation =
 
 export function App({ client = tauriSkillYardClient }: AppProps) {
   const [language, setLanguage] = useState<InterfaceLanguage | null>(null);
+  const [theme, setTheme] = useState<ThemePreset | null>(null);
   const [aiPreferences, setAiPreferences] = useState<AiPreferences | null>(null);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [isSavingLanguage, setIsSavingLanguage] = useState(false);
@@ -139,6 +143,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       (preferences) => {
         if (active) {
           setLanguage(preferences.language);
+          setTheme(preferences.theme);
           setAiPreferences(preferences.ai);
         }
       },
@@ -158,6 +163,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     try {
       const preferences = await client.setInterfaceLanguage(nextLanguage);
       setLanguage(preferences.language);
+      setTheme(preferences.theme);
       setAiPreferences(preferences.ai);
     } catch (error) {
       setLanguageError(formatErrorMessage(error, language ?? "zhCn"));
@@ -168,7 +174,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
 
   const runAiOperation = async (
     operation: Exclude<AiOperation, null>,
-    action: () => Promise<{ language: InterfaceLanguage; ai: AiPreferences }>,
+    action: () => Promise<UserPreferences>,
   ) => {
     if (aiOperation) return;
     setAiOperation(operation);
@@ -176,6 +182,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
     try {
       const preferences = await action();
       setLanguage(preferences.language);
+      setTheme(preferences.theme);
       setAiPreferences(preferences.ai);
     } catch (error) {
       const message = formatErrorMessage(error, language ?? "zhCn");
@@ -228,7 +235,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       </main>
     );
   }
-  if (!language || !aiPreferences) {
+  if (!language || !theme || !aiPreferences) {
     return (
       <main className="state-page" aria-label="SkillYard 正在启动">
         <span className="loading-mark" aria-hidden="true" />
@@ -239,10 +246,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
 
   return (
     <I18nProvider language={language}>
-      <>
+      <div className="application-theme" data-theme-preset={theme}>
         <AppCore
           client={client}
           language={language}
+          theme={theme}
           aiPreferences={aiPreferences}
           isSavingLanguage={isSavingLanguage}
           languageError={languageError}
@@ -273,7 +281,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           onAsk={(context, messages) => client.askAgent(context, messages)}
           onPreviewInstall={previewAgentInstall}
         />
-      </>
+      </div>
     </I18nProvider>
   );
 }
@@ -281,6 +289,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
 function AppCore({
   client,
   language,
+  theme,
   aiPreferences,
   isSavingLanguage,
   languageError,
@@ -1092,7 +1101,7 @@ function AppCore({
 
     setIsResettingApplication(true);
     setResetError(null);
-    // 1.0 没有持久化偏好；重置只丢弃当前窗口中的临时展示状态。
+    // 重置只丢弃窗口内临时状态，不改动已经保存的语言、主题或 AI 配置。
     setIsBrowsingCommittedInventory(false);
     setReadOnlyManagedMemberId(null);
     setInventoryScreen(INVENTORY_LIST_SCREEN);
@@ -1755,6 +1764,7 @@ function AppCore({
       screen={readOnlyInventoryScreen}
       onScreenChange={setReadOnlyInventoryScreen}
       language={language}
+      theme={theme}
       aiPreferences={aiPreferences}
       isSavingLanguage={isSavingLanguage}
       languageError={languageError}
@@ -2250,6 +2260,7 @@ function AppCore({
       screen={inventoryScreen}
       onScreenChange={setInventoryScreen}
       language={language}
+      theme={theme}
       aiPreferences={aiPreferences}
       isSavingLanguage={isSavingLanguage}
       languageError={languageError}

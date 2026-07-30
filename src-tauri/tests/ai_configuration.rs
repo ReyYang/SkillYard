@@ -10,7 +10,8 @@ use std::{
 use serde_json::Value;
 use skillyard_lib::{
     AgentProviderEndpoints, AiPreferences, AiProvider, ApplicationPaths, InterfaceLanguage,
-    PlatformInfo, SecretStore, SecretStoreError, SkillYardApplication, UiIntent, UiOutcome,
+    PlatformInfo, SecretStore, SecretStoreError, SkillYardApplication, ThemePreset, UiIntent,
+    UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -321,6 +322,7 @@ fn deepseek_provider_error_is_normalized_without_exposing_response_content() {
 fn preferences(ai: AiPreferences) -> UiOutcome {
     UiOutcome::Preferences {
         language: InterfaceLanguage::ZhCn,
+        theme: ThemePreset::Ledger,
         ai,
     }
 }

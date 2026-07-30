@@ -11,9 +11,14 @@ import type {
   MountSummary,
   SkillCategory,
   SupportedAppId,
+  ThemePreset,
   UiOutcome,
 } from "../domain";
 import { useI18n, type TranslationKey } from "../i18n";
+import {
+  BundleLibrary,
+  type BundleLibraryItem,
+} from "./library/BundleLibrary";
 import { PageBackButton } from "./PageBackButton";
 
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
@@ -49,6 +54,7 @@ interface InventoryPageProps {
   screen: InventoryScreen;
   onScreenChange(screen: InventoryScreen): void;
   language: InterfaceLanguage;
+  theme: ThemePreset;
   aiPreferences: AiPreferences;
   isSavingLanguage: boolean;
   languageError: string | null;
@@ -166,6 +172,7 @@ export function InventoryPage({
   screen,
   onScreenChange,
   language,
+  theme,
   aiPreferences,
   isSavingLanguage,
   languageError,
@@ -232,6 +239,10 @@ export function InventoryPage({
   const [filter, setFilter] = useState<ManagementFilter>("all");
   const [categoryFilter, setCategoryFilter] =
     useState<CategoryFilter>("all");
+  // 选择状态属于 InventoryPage；renderer 切换时只改变构图，不重建领域状态。
+  const [selectedLibraryGroupId, setSelectedLibraryGroupId] = useState<
+    string | null
+  >(null);
 
   const groups = useMemo(
     () => groupInventoryEntries(outcome.entries, t, language),
@@ -267,6 +278,23 @@ export function InventoryPage({
       ),
     );
   }, [categoryFilter, filter, groups, language, query]);
+  const libraryItems = useMemo<BundleLibraryItem[]>(
+    () =>
+      visibleGroups.map((group) => {
+        const singleEntry = group.entries.length === 1 ? group.entries[0]! : null;
+        return {
+          id: group.id,
+          title: group.title,
+          eyebrow: t(groupEyebrow(group.kind)),
+          skillCount: group.entries.length,
+          summary: singleEntry?.aiExplanation?.summary ?? null,
+          category: singleEntry?.aiExplanation
+            ? t(skillCategoryLabel(singleEntry.aiExplanation.category))
+            : null,
+        };
+      }),
+    [t, visibleGroups],
+  );
   // 主清单中的每张分组卡都是用户看到的 Bundle，包括只读的插件与项目分组。
   const bundleCount = groups.length;
   const updatableBundleCount = useMemo(
@@ -706,79 +734,83 @@ export function InventoryPage({
       )}
 
       <div className="inventory-content">
-        {visibleGroups.map((group) => (
-          <InventorySection
-            key={group.id}
-            title={group.title}
-            eyebrow={t(groupEyebrow(group.kind))}
-            entries={group.entries}
-            language={language}
-            actionsDisabled={isWriteBlocked}
-            batchMountBundleId={group.bundleId}
-            onBatchMount={onBatchMount}
-            canAssociateSource={
-              group.kind === "managedBundle" && !group.hasSource
-            }
-            onAssociateSource={onAssociateSource}
-            bundleUpdate={
-              group.kind === "managedBundle" && group.bundleId
-                ? outcome.bundleUpdates.find(
-                    (update) => update.bundleId === group.bundleId,
-                  ) ?? null
-                : null
-            }
-            preparingBundleUpdateId={preparingBundleUpdateId}
-            checkingEditableBundleId={checkingEditableBundleId}
-            onUpdateBundle={onUpdateBundle}
-            onChooseBundleReplacement={onChooseBundleReplacement}
-            onCheckEditableLocalBundle={onCheckEditableLocalBundle}
-            removingBundleId={
-              group.kind === "managedBundle" ? removingBundleId : null
-            }
-            onRemoveBundle={onRemoveBundle}
-            bundleMountCount={
-              group.kind === "managedBundle"
-                ? outcome.mounts.filter((mount) =>
-                    group.entries.some(
-                      (entry) => entry.memberId === mount.memberId,
-                    ),
-                  ).length
-                : 0
-            }
-            unmountingBundleId={
-              group.kind === "managedBundle" ? unmountingBundleId : null
-            }
-            onUnmountBundle={onUnmountBundle}
-            onTakeover={
-              group.kind === "takeoverBundle" ? onTakeover : undefined
-            }
-            onOpen={() => {
-              const singleEntry = group.entries.length === 1
-                ? group.entries[0]
-                : null;
-              onScreenChange(
-                singleEntry
-                  ? {
-                      type: "skill",
-                      groupId: group.id,
-                      entryId: singleEntry.id,
-                    }
-                  : { type: "group", groupId: group.id },
-              );
-            }}
-            openLabel={
-              group.entries.length === 1
-                ? t("查看 Skill {skill}", {
-                    skill: group.entries[0]!.skillName,
-                  })
-                : group.kind === "managedBundle" ||
-                    group.kind === "takeoverBundle"
-                ? t("查看 Bundle {bundle}", { bundle: group.title })
-                : t("查看分组 {group}", { group: group.title })
-            }
-          />
-        ))}
-        {visibleGroups.length === 0 ? (
+        <BundleLibrary
+          theme={theme}
+          items={libraryItems}
+          selectedId={selectedLibraryGroupId}
+          onSelect={setSelectedLibraryGroupId}
+          renderDetails={(groupId) => {
+            const group =
+              visibleGroups.find((candidate) => candidate.id === groupId) ??
+              null;
+            if (!group) return null;
+            const groupMounts = outcome.mounts.filter((mount) =>
+              group.entries.some((entry) => entry.memberId === mount.memberId),
+            );
+            return (
+              <InventorySection
+                title={group.title}
+                eyebrow={t(groupEyebrow(group.kind))}
+                entries={group.entries}
+                language={language}
+                actionsDisabled={isWriteBlocked}
+                batchMountBundleId={group.bundleId}
+                onBatchMount={onBatchMount}
+                canAssociateSource={
+                  group.kind === "managedBundle" && !group.hasSource
+                }
+                onAssociateSource={onAssociateSource}
+                bundleUpdate={
+                  group.kind === "managedBundle" && group.bundleId
+                    ? outcome.bundleUpdates.find(
+                        (update) => update.bundleId === group.bundleId,
+                      ) ?? null
+                    : null
+                }
+                preparingBundleUpdateId={preparingBundleUpdateId}
+                checkingEditableBundleId={checkingEditableBundleId}
+                onUpdateBundle={onUpdateBundle}
+                onChooseBundleReplacement={onChooseBundleReplacement}
+                onCheckEditableLocalBundle={onCheckEditableLocalBundle}
+                removingBundleId={
+                  group.kind === "managedBundle" ? removingBundleId : null
+                }
+                onRemoveBundle={onRemoveBundle}
+                mounts={group.kind === "managedBundle" ? groupMounts : []}
+                unmountingBundleId={
+                  group.kind === "managedBundle" ? unmountingBundleId : null
+                }
+                onUnmountBundle={onUnmountBundle}
+                onTakeover={
+                  group.kind === "takeoverBundle" ? onTakeover : undefined
+                }
+                onOpen={() => {
+                  const singleEntry =
+                    group.entries.length === 1 ? group.entries[0] : null;
+                  onScreenChange(
+                    singleEntry
+                      ? {
+                          type: "skill",
+                          groupId: group.id,
+                          entryId: singleEntry.id,
+                        }
+                      : { type: "group", groupId: group.id },
+                  );
+                }}
+                openLabel={
+                  group.entries.length === 1
+                    ? t("查看 Skill {skill}", {
+                        skill: group.entries[0]!.skillName,
+                      })
+                    : group.kind === "managedBundle" ||
+                        group.kind === "takeoverBundle"
+                      ? t("查看 Bundle {bundle}", { bundle: group.title })
+                      : t("查看分组 {group}", { group: group.title })
+                }
+              />
+            );
+          }}
+          emptyState={
           <section className="empty-inventory">
             <h2>
               {outcome.entries.length === 0
@@ -791,7 +823,8 @@ export function InventoryPage({
                 : t("换一个关键词或管理状态看看。")}
             </p>
           </section>
-        ) : null}
+          }
+        />
       </div>
     </main>
   );
@@ -815,7 +848,7 @@ function InventorySection({
   onCheckEditableLocalBundle,
   removingBundleId = null,
   onRemoveBundle,
-  bundleMountCount = 0,
+  mounts = [],
   unmountingBundleId = null,
   onUnmountBundle,
   onTakeover,
@@ -839,7 +872,7 @@ function InventorySection({
   onCheckEditableLocalBundle?(bundleId: string): void;
   removingBundleId?: string | null;
   onRemoveBundle?(bundleId: string): void;
-  bundleMountCount?: number;
+  mounts?: MountSummary[];
   unmountingBundleId?: string | null;
   onUnmountBundle?(bundleId: string): void;
   onTakeover?(observationId: string): void;
@@ -848,6 +881,15 @@ function InventorySection({
 }) {
   const { t } = useI18n();
   if (entries.length === 0) return null;
+  const sourceNames = [
+    ...new Set(
+      entries.flatMap((entry) => {
+        const sourceName =
+          entry.sourceDisplayName ?? entry.installationChain?.source;
+        return sourceName ? [sourceName] : [];
+      }),
+    ),
+  ];
   return (
     <section className="inventory-section" aria-label={title}>
       <header>
@@ -903,7 +945,7 @@ function InventorySection({
               {t("批量挂载")}
             </button>
           ) : null}
-          {batchMountBundleId && bundleMountCount > 0 ? (
+          {batchMountBundleId && mounts.length > 0 ? (
             <button
               className="compact-action"
               type="button"
@@ -945,6 +987,32 @@ function InventorySection({
           <span>{t("{count} 个 Skill", { count: entries.length })}</span>
         </div>
       </header>
+      <dl className="bundle-library-metadata">
+        <div>
+          <dt>{t("来源")}</dt>
+          <dd>{sourceNames.join("、") || t("来源未知")}</dd>
+        </div>
+        <div>
+          <dt>{t("当前挂载")}</dt>
+          <dd>
+            {mounts.length > 0
+              ? `${t("{count} 个 Mount", { count: mounts.length })} · ${[
+                  ...new Set(mounts.map((mount) => supportedAppLabel(mount.appId))),
+                ].join("、")}`
+              : t("未挂载")}
+          </dd>
+        </div>
+      </dl>
+      {entries.length > 1 ? (
+        <ul
+          className="bundle-library-members"
+          aria-label={t("{group} 的 Skill", { group: title })}
+        >
+          {entries.map((entry) => (
+            <li key={entry.id}>{entry.skillName}</li>
+          ))}
+        </ul>
+      ) : null}
       {entries.length === 1 ? (
         <SkillAiPresentation
           entry={entries[0]!}

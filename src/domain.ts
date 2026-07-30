@@ -1,5 +1,6 @@
 export type SupportedAppId = "codex" | "claudeCode" | "gitHubCopilot";
 export type InterfaceLanguage = "zhCn" | "en";
+export type ThemePreset = "archive" | "layers" | "ledger";
 export type AiProvider = "openAi" | "glm" | "deepSeek";
 
 export interface AiPreferences {
@@ -14,6 +15,7 @@ export interface AiPreferences {
 
 export interface UserPreferences {
   language: InterfaceLanguage;
+  theme: ThemePreset;
   ai: AiPreferences;
 }
 
@@ -636,6 +638,7 @@ export type UiOutcome =
   | {
       type: "preferences";
       language: InterfaceLanguage;
+      theme: ThemePreset;
       ai: AiPreferences;
     }
   | {

@@ -1,8 +1,13 @@
-use std::fs;
+use std::{
+    collections::BTreeMap,
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use skillyard_lib::{
-    AiPreferences, AiProvider, ApplicationPaths, InterfaceLanguage, PlatformInfo,
-    SkillYardApplication, UiIntent, UiOutcome,
+    AgentProviderEndpoints, AiPreferences, AiProvider, ApplicationPaths, InterfaceLanguage,
+    PlatformInfo, SecretStore, SecretStoreError, SkillYardApplication, ThemePreset, UiIntent,
+    UiOutcome,
 };
 use tempfile::tempdir;
 
@@ -18,7 +23,13 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
     fs::write(&skill_file, original).expect("应写入 Skill fixture");
 
     let paths = ApplicationPaths::for_home(data_root, home);
-    let application = SkillYardApplication::new(paths.clone(), PlatformInfo::supported_for_test());
+    let secrets = Arc::new(FixtureSecretStore::default());
+    let application = SkillYardApplication::new_with_agent_dependencies(
+        paths.clone(),
+        PlatformInfo::supported_for_test(),
+        secrets.clone(),
+        AgentProviderEndpoints::for_test("http://127.0.0.1:9".to_owned()),
+    );
 
     assert_eq!(
         application
@@ -26,6 +37,20 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
             .expect("首次读取偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::ZhCn,
+            theme: ThemePreset::Ledger,
+            ai: default_ai_preferences(),
+        }
+    );
+
+    assert_eq!(
+        application
+            .handle(UiIntent::SetThemePreset {
+                theme: ThemePreset::Archive,
+            })
+            .expect("保存主题偏好应成功"),
+        UiOutcome::Preferences {
+            language: InterfaceLanguage::ZhCn,
+            theme: ThemePreset::Archive,
             ai: default_ai_preferences(),
         }
     );
@@ -38,17 +63,24 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
             .expect("保存英文偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::En,
+            theme: ThemePreset::Archive,
             ai: default_ai_preferences(),
         }
     );
 
-    let reopened = SkillYardApplication::new(paths, PlatformInfo::supported_for_test());
+    let reopened = SkillYardApplication::new_with_agent_dependencies(
+        paths,
+        PlatformInfo::supported_for_test(),
+        secrets,
+        AgentProviderEndpoints::for_test("http://127.0.0.1:9".to_owned()),
+    );
     assert_eq!(
         reopened
             .handle(UiIntent::GetPreferences)
             .expect("重启后读取偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::En,
+            theme: ThemePreset::Archive,
             ai: default_ai_preferences(),
         }
     );
@@ -66,5 +98,37 @@ fn default_ai_preferences() -> AiPreferences {
         model: "gpt-5.6-terra".to_owned(),
         has_api_key: false,
         verified: false,
+    }
+}
+
+#[derive(Default)]
+struct FixtureSecretStore {
+    values: Mutex<BTreeMap<String, String>>,
+}
+
+impl SecretStore for FixtureSecretStore {
+    fn read(&self, account: &str) -> Result<Option<String>, SecretStoreError> {
+        Ok(self
+            .values
+            .lock()
+            .expect("fixture secret lock 应可用")
+            .get(account)
+            .cloned())
+    }
+
+    fn write(&self, account: &str, value: &str) -> Result<(), SecretStoreError> {
+        self.values
+            .lock()
+            .expect("fixture secret lock 应可用")
+            .insert(account.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn delete(&self, account: &str) -> Result<(), SecretStoreError> {
+        self.values
+            .lock()
+            .expect("fixture secret lock 应可用")
+            .remove(account);
+        Ok(())
     }
 }

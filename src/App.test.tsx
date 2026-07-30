@@ -79,7 +79,7 @@ describe("首次使用", () => {
     expect(
       screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("example")).toBeInTheDocument();
+    expect(screen.getAllByText("example")).not.toHaveLength(0);
   });
 
   it("首次扫描无法保存时显示 Rust 返回的结构化错误", async () => {
@@ -103,11 +103,131 @@ describe("首次使用", () => {
 });
 
 describe("本机清单", () => {
+  it("默认使用 Ledger，并以 Bundle 清单和当前详情浏览同一份 Inventory", async () => {
+    const user = userEvent.setup();
+    const longBundleName =
+      "a-very-long-bundle-name-that-must-remain-readable-in-a-narrow-window";
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          id: "managed:alpha",
+          memberId: "member-alpha",
+          bundleId: "bundle-alpha",
+          bundleDisplayName: longBundleName,
+          skillName: "alpha",
+          aiExplanation: {
+            category: "developmentEngineering",
+            summary: "用于测试工程工作流。",
+            useCases: ["运行测试", "检查质量"],
+            instructions: "在项目中调用。",
+            language: "zhCn",
+            contentFingerprint: "fingerprint",
+            stale: false,
+          },
+        }),
+        createManagedEntry({
+          id: "managed:beta",
+          memberId: "member-beta",
+          bundleId: "bundle-beta",
+          bundleDisplayName: "beta-bundle",
+          skillName: "beta",
+        }),
+      ]),
+    );
+
+    render(<App client={client} />);
+
+    const library = await screen.findByRole("region", {
+      name: "Ledger Bundle Library",
+    });
+    expect(library).toHaveAttribute("data-theme-preset", "ledger");
+    expect(
+      within(library).getByRole("button", { name: longBundleName }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(within(library).getByText("用于测试工程工作流。")).toBeInTheDocument();
+
+    await user.click(
+      within(library).getByRole("button", { name: "beta-bundle" }),
+    );
+    expect(
+      within(library).getByRole("button", { name: "beta-bundle" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(library).getByRole("heading", { name: "beta-bundle" }),
+    ).toBeInTheDocument();
+  });
+
+  it("Ledger 在窄窗口和大量 Bundle 中仍可用键盘浏览公共详情", async () => {
+    const user = userEvent.setup();
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 640,
+    });
+    window.dispatchEvent(new Event("resize"));
+    const entries = Array.from({ length: 48 }, (_, index) => {
+      const sequence = String(index + 1).padStart(2, "0");
+      return createManagedEntry({
+        id: `managed:member-${sequence}`,
+        memberId: `member-${sequence}`,
+        bundleId: `bundle-${sequence}`,
+        bundleDisplayName:
+          index === 47
+            ? "zzzz-very-long-final-bundle-name-that-remains-keyboard-accessible"
+            : `Bundle ${sequence}`,
+        skillName: `skill-${sequence}`,
+        sourceDisplayName:
+          index === 0 ? "github.com/example/catalog" : null,
+      });
+    });
+    const client = createClient(
+      inventoryOutcome(entries, null, {
+        mounts: [createMount({ memberId: "member-01" })],
+      }),
+    );
+
+    render(<App client={client} />);
+
+    const library = await screen.findByRole("region", {
+      name: "Ledger Bundle Library",
+    });
+    const navigation = within(library).getByRole("navigation", {
+      name: "Bundle",
+    });
+    const selectors = within(navigation).getAllByRole("button");
+    expect(selectors).toHaveLength(48);
+    await user.click(
+      within(navigation).getByRole("button", { name: "Bundle 01" }),
+    );
+    expect(within(library).getByText("github.com/example/catalog"))
+      .toBeInTheDocument();
+    expect(within(library).getByText("1 个 Mount · Codex")).toBeInTheDocument();
+
+    await user.keyboard("{End}");
+
+    const finalName =
+      "zzzz-very-long-final-bundle-name-that-remains-keyboard-accessible";
+    expect(
+      within(navigation).getByRole("button", { name: finalName }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(library).getByRole("heading", { name: finalName }),
+    ).toBeInTheDocument();
+    expect(within(library).getByRole("button", { name: "批量挂载" }))
+      .toBeEnabled();
+
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: previousWidth,
+    });
+  });
+
   it("全局助手使用稳定 Skill ID，跨页面保持，并在明确关闭后销毁 Session", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -176,6 +296,7 @@ describe("本机清单", () => {
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -224,6 +345,7 @@ describe("本机清单", () => {
     const client = createClient(inventoryOutcome([]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -325,6 +447,7 @@ describe("本机清单", () => {
     const client = createClient(initial);
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -392,6 +515,7 @@ describe("本机清单", () => {
     const client = createClient(initial);
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -457,6 +581,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -652,6 +777,9 @@ describe("本机清单", () => {
     });
     expect(within(missing).getByText("未整理")).toBeInTheDocument();
     expect(within(missing).queryByText(/用于|说明。/)).not.toBeInTheDocument();
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "stale-bundle" }));
     const stale = screen.getByRole("region", { name: "stale-bundle" });
     expect(within(stale).getByText("待重新整理")).toBeInTheDocument();
     expect(within(stale).getByText("旧说明仍可查看。")).toBeInTheDocument();
@@ -663,6 +791,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "en",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     });
 
@@ -682,6 +811,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.setInterfaceLanguage).mockResolvedValue({
       language: "en",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     });
 
@@ -741,6 +871,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.setAiConfiguration).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -752,6 +883,7 @@ describe("本机清单", () => {
     });
     vi.mocked(client.saveAiApiKey).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -763,6 +895,7 @@ describe("本机清单", () => {
     });
     vi.mocked(client.testAiConnection).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -817,6 +950,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: true,
         disclosureAccepted: true,
@@ -850,6 +984,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: false,
         disclosureAccepted: false,
@@ -861,6 +996,7 @@ describe("本机清单", () => {
     });
     vi.mocked(client.setAiConfiguration).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: false,
         disclosureAccepted: true,
@@ -896,6 +1032,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.setAiConfiguration).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: false,
         disclosureAccepted: false,
@@ -934,6 +1071,7 @@ describe("本机清单", () => {
     );
     vi.mocked(client.setAiConfiguration).mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: {
         enabled: false,
         disclosureAccepted: false,
@@ -973,7 +1111,7 @@ describe("本机清单", () => {
     expect(
       await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("saved")).toBeInTheDocument();
+    expect(screen.getAllByText("saved")).not.toHaveLength(0);
     expect(client.startInitialScan).not.toHaveBeenCalled();
     expect(client.refreshLocalInventory).not.toHaveBeenCalled();
   });
@@ -989,7 +1127,7 @@ describe("本机清单", () => {
     );
     render(<App client={client} />);
 
-    await screen.findByText("saved-after-reset");
+    await screen.findAllByText("saved-after-reset");
     await user.click(screen.getByRole("button", { name: "刷新本机" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("临时刷新失败");
 
@@ -1002,7 +1140,7 @@ describe("本机清单", () => {
     await user.click(screen.getByRole("button", { name: "设置" }));
     await user.click(screen.getByRole("button", { name: "重置应用" }));
 
-    expect(await screen.findByText("saved-after-reset")).toBeInTheDocument();
+    expect(await screen.findAllByText("saved-after-reset")).not.toHaveLength(0);
     expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toHaveValue(
       "",
     );
@@ -2114,6 +2252,9 @@ describe("本机清单", () => {
     expect(
       screen.queryByRole("button", { name: "全部更新" }),
     ).not.toBeInTheDocument();
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Manual" }));
     expect(
       screen.getByRole("button", { name: "导入新内容 Manual" }),
     ).toBeEnabled();
@@ -2148,12 +2289,9 @@ describe("本机清单", () => {
     expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "更新 Alpha" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Beta" }));
     expect(screen.getByRole("button", { name: "更新 Beta" })).toBeDisabled();
-    expect(
-      screen
-        .getAllByRole("button", { name: "批量挂载" })
-        .every((button) => button.hasAttribute("disabled")),
-    ).toBe(true);
+    expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
     expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
 
     await act(async () => {
@@ -2594,7 +2732,7 @@ describe("本机清单", () => {
     expect(
       screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("example-bundle")).toBeInTheDocument();
+    expect(screen.getAllByText("example-bundle")).not.toHaveLength(0);
     expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "安装 Skill" })).toBeDisabled();
@@ -2629,7 +2767,7 @@ describe("本机清单", () => {
       screen.getByRole("searchbox", { name: "搜索 Skill" }),
       "saved",
     );
-    expect(screen.getByText("example-bundle")).toBeInTheDocument();
+    expect(screen.getAllByText("example-bundle")).not.toHaveLength(0);
     await user.click(
       screen.getByRole("button", { name: "返回当前操作" }),
     );
@@ -2715,7 +2853,7 @@ describe("本机清单", () => {
     await user.click(await screen.findByRole("button", { name: "添加项目" }));
 
     expect(client.chooseProjectDirectory).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("preserved")).toBeInTheDocument();
+    expect(screen.getAllByText("preserved")).not.toHaveLength(0);
     expect(client.registerProject).not.toHaveBeenCalled();
   });
 
@@ -2746,7 +2884,7 @@ describe("本机清单", () => {
     expect(client.registerProject).toHaveBeenCalledWith("/tmp/example-project");
     expect(screen.queryByRole("dialog", { name: "确认添加项目" }))
       .not.toBeInTheDocument();
-    expect(screen.getByText("project-skill")).toBeInTheDocument();
+    expect(screen.getAllByText("project-skill")).not.toHaveLength(0);
   });
 
   it("Skill 详情显示三个应用的真实 Mount", async () => {
@@ -3553,10 +3691,15 @@ describe("本机清单", () => {
     expect(
       await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("mattpocock/skills")).toBeInTheDocument();
+    expect(screen.getAllByText("mattpocock/skills")).not.toHaveLength(0);
     expect(screen.getByText("2 个 Skill")).toBeInTheDocument();
-    expect(screen.queryByText("qa")).not.toBeInTheDocument();
-    expect(screen.queryByText("tdd")).not.toBeInTheDocument();
+    const memberPreview = screen.getByRole("list", {
+      name: "mattpocock/skills 的 Skill",
+    });
+    expect(within(memberPreview).getByText("qa")).toBeInTheDocument();
+    expect(within(memberPreview).getByText("tdd")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "qa" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "tdd" })).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "重置应用" }),
     ).not.toBeInTheDocument();
@@ -3697,15 +3840,21 @@ describe("本机清单", () => {
     expect(
       await screen.findByText("本机已有 5 个 Bundle · 6 个 Skill"),
     ).toBeInTheDocument();
-    const bundles = await screen.findAllByRole("region", {
+    const library = await screen.findByRole("region", {
+      name: "Ledger Bundle Library",
+    });
+    const bundleSelectors = within(library).getAllByRole("button", {
       name: "mattpocock/skills",
     });
-    expect(bundles).toHaveLength(2);
-    expect(bundles[0]).toHaveTextContent("2 个 Skill");
-    expect(bundles[1]).toHaveTextContent("1 个 Skill");
+    expect(bundleSelectors).toHaveLength(2);
 
+    await user.click(bundleSelectors[0]!);
+    let currentBundle = screen.getByRole("region", {
+      name: "mattpocock/skills",
+    });
+    expect(currentBundle).toHaveTextContent("2 个 Skill");
     await user.click(
-      within(bundles[0]!).getByRole("button", {
+      within(currentBundle).getByRole("button", {
         name: "查看 Bundle mattpocock/skills",
       }),
     );
@@ -3713,11 +3862,17 @@ describe("本机清单", () => {
     expect(screen.getByText("tdd")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
-    const refreshedBundles = screen.getAllByRole("region", {
+    await user.click(
+      within(
+        screen.getByRole("region", { name: "Ledger Bundle Library" }),
+      ).getAllByRole("button", { name: "mattpocock/skills" })[1]!,
+    );
+    currentBundle = screen.getByRole("region", {
       name: "mattpocock/skills",
     });
+    expect(currentBundle).toHaveTextContent("1 个 Skill");
     await user.click(
-      within(refreshedBundles[1]!).getByRole("button", {
+      within(currentBundle).getByRole("button", {
         name: "查看 Skill research",
       }),
     );
@@ -3726,11 +3881,10 @@ describe("本机清单", () => {
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回上一页" }));
 
-    expect(screen.getByRole("region", { name: "local-copy" })).toHaveTextContent(
-      "待接管",
-    );
-    expect(screen.getByRole("region", { name: "browser" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "SkillYard" })).toBeInTheDocument();
+    const localCopy = await selectLibraryBundle(user, "local-copy");
+    expect(localCopy).toHaveTextContent("待接管");
+    expect(await selectLibraryBundle(user, "browser")).toBeInTheDocument();
+    expect(await selectLibraryBundle(user, "SkillYard")).toBeInTheDocument();
   });
 
   it("搜索和管理状态筛选只改变当前显示，不调用任何生命周期命令", async () => {
@@ -3749,12 +3903,12 @@ describe("本机清单", () => {
 
     await screen.findByRole("heading", { name: "Bundle 清单" });
     await user.type(screen.getByRole("searchbox", { name: "搜索 Skill" }), "agent");
-    expect(screen.getByText("Codex 管理")).toBeInTheDocument();
+    expect(screen.getAllByText("Codex 管理")).not.toHaveLength(0);
     expect(screen.queryByText("local-copy")).not.toBeInTheDocument();
 
     await user.clear(screen.getByRole("searchbox", { name: "搜索 Skill" }));
     await user.click(screen.getByRole("button", { name: "待接管" }));
-    expect(screen.getByText("local-copy")).toBeInTheDocument();
+    expect(screen.getAllByText("local-copy")).not.toHaveLength(0);
     expect(screen.queryByText("Codex 管理")).not.toBeInTheDocument();
     expect(client.startInitialScan).not.toHaveBeenCalled();
     expect(client.refreshLocalInventory).not.toHaveBeenCalled();
@@ -3777,7 +3931,7 @@ describe("本机清单", () => {
     await user.click(await screen.findByRole("button", { name: "刷新本机" }));
 
     expect(client.refreshLocalInventory).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("old-skill")).toBeInTheDocument();
+    expect(screen.getAllByText("old-skill")).not.toHaveLength(0);
     expect(
       screen.getByRole("button", { name: "正在刷新本机…" }),
     ).toBeDisabled();
@@ -3798,7 +3952,7 @@ describe("本机清单", () => {
         }),
       );
     });
-    expect(screen.getByText("new-skill")).toBeInTheDocument();
+    expect(screen.getAllByText("new-skill")).not.toHaveLength(0);
     expect(screen.queryByText("old-skill")).not.toBeInTheDocument();
     expect(screen.getByLabelText("最近刷新结果")).toHaveTextContent(
       "新增 1 · 变化 0 · 移除 1",
@@ -3819,7 +3973,7 @@ describe("本机清单", () => {
     await user.click(await screen.findByRole("button", { name: "刷新本机" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("SQLite 暂时不可写");
-    expect(screen.getByText("preserved-skill")).toBeInTheDocument();
+    expect(screen.getAllByText("preserved-skill")).not.toHaveLength(0);
   });
 
   it("部分目录失败时解释保留的是上次结果", async () => {
@@ -3912,7 +4066,7 @@ describe("本机清单", () => {
     const recovery = await screen.findByRole("region", { name: "需要人工恢复" });
     expect(recovery).toHaveTextContent("damaged-bundle");
     expect(recovery).toHaveTextContent("只停止修改相关 Bundle");
-    expect(screen.getByText("still-readable")).toBeInTheDocument();
+    expect(screen.getAllByText("still-readable")).not.toHaveLength(0);
     expect(screen.getByRole("button", { name: "安装 Skill" })).toBeEnabled();
 
     await user.click(
@@ -3933,7 +4087,7 @@ describe("本机清单", () => {
     expect(client.openCentralStore).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole("button", { name: "返回上一页" }));
-    expect(screen.getByText("still-readable")).toBeInTheDocument();
+    expect(screen.getAllByText("still-readable")).not.toHaveLength(0);
   });
 });
 
@@ -3953,6 +4107,7 @@ describe("English installation and takeover flows", () => {
     });
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "en",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     });
 
@@ -3972,6 +4127,7 @@ describe("English installation and takeover flows", () => {
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "en",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     });
     vi.mocked(client.chooseProjectDirectory).mockResolvedValue({
@@ -4005,6 +4161,7 @@ describe("English installation and takeover flows", () => {
     const client = createClient(inventoryOutcome([]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "en",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     });
     vi.mocked(client.chooseFolderInstallPlan).mockResolvedValue(
@@ -4052,6 +4209,7 @@ describe("English installation and takeover flows", () => {
     const client = createClient(inventoryOutcome([candidate]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "en",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     });
     vi.mocked(client.createTakeoverPlan).mockResolvedValue(
@@ -4113,6 +4271,7 @@ describe("English installation and takeover flows", () => {
     const client = createClient(initial);
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "en",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     });
     vi.mocked(client.createBundleMountRemovalPlan).mockResolvedValue({
@@ -4157,6 +4316,7 @@ describe("English installation and takeover flows", () => {
     );
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "en",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     });
     vi.mocked(client.refreshLocalInventory).mockRejectedValue({
@@ -4772,10 +4932,22 @@ describe("接管已有 Skill", () => {
     );
     render(<App client={client} />);
 
-    const bundles = await screen.findAllByRole("region", { name: "example" });
-    const codexBundle = bundles.find((bundle) =>
-      within(bundle).queryByText(/\/tmp\/codex\/example/),
-    );
+    const library = await screen.findByRole("region", {
+      name: "Ledger Bundle Library",
+    });
+    const selectors = within(library).getAllByRole("button", {
+      name: "example",
+    });
+    expect(selectors).toHaveLength(2);
+    let codexBundle: HTMLElement | undefined;
+    for (const selector of selectors) {
+      await user.click(selector);
+      const current = screen.getByRole("region", { name: "example" });
+      if (within(current).queryByText(/\/tmp\/codex\/example/)) {
+        codexBundle = current;
+        break;
+      }
+    }
     expect(codexBundle).toBeDefined();
     await user.click(
       within(codexBundle!).getByRole("button", {
@@ -5233,7 +5405,7 @@ describe("GitHub Source 安装", () => {
 
     await user.click(screen.getByRole("button", { name: "接管已有安装" }));
 
-    expect(screen.getByText("saved")).toBeInTheDocument();
+    expect(screen.getAllByText("saved")).not.toHaveLength(0);
     expect(client.getStartupState).toHaveBeenCalledTimes(1);
   });
 
@@ -5259,6 +5431,7 @@ describe("GitHub Source 安装", () => {
     expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();
+    await selectLibraryBundle(user, "example");
     expect(
       screen.getByRole("button", { name: "接管 Bundle example" }),
     ).toBeDisabled();
@@ -5823,7 +5996,7 @@ describe("GitHub Source 安装", () => {
     );
     expect(client.getStartupState).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("button", { name: "确认安装" })).not.toBeInTheDocument();
-    expect(screen.getByText("installed-elsewhere")).toBeInTheDocument();
+    expect(screen.getAllByText("installed-elsewhere")).not.toHaveLength(0);
   });
 
   it("补装只提交未安装成员，并明确不覆盖已有内容和 Mount", async () => {
@@ -5928,6 +6101,7 @@ describe("GitHub Source 安装", () => {
 
 describe("补充来源与 Bundle 归并", () => {
   it("只给没有 Source 的受管 Bundle 提供补充来源入口", async () => {
+    const user = userEvent.setup();
     const client = createClient(
       inventoryOutcome([
         createManagedEntry(),
@@ -5946,10 +6120,10 @@ describe("补充来源与 Bundle 归并", () => {
     const unlinked = await screen.findByRole("region", {
       name: "example-bundle",
     });
-    const linked = screen.getByRole("region", { name: "linked-bundle" });
     expect(
       within(unlinked).getByRole("button", { name: "补充来源" }),
     ).toBeEnabled();
+    const linked = await selectLibraryBundle(user, "linked-bundle");
     expect(
       within(linked).queryByRole("button", { name: "补充来源" }),
     ).not.toBeInTheDocument();
@@ -6845,14 +7019,31 @@ async function openLocalFolderPicker(
   );
 }
 
+async function selectLibraryBundle(
+  user: ReturnType<typeof userEvent.setup>,
+  bundleDisplayName: string,
+  occurrence = 0,
+) {
+  const library = await screen.findByRole("region", {
+    name: "Ledger Bundle Library",
+  });
+  const selectors = within(library).getAllByRole("button", {
+    name: bundleDisplayName,
+  });
+  await user.click(selectors[occurrence]!);
+  return within(library).getByRole("region", {
+    name: bundleDisplayName,
+  });
+}
+
 async function openManagedSkillDetails(
   user: ReturnType<typeof userEvent.setup>,
   bundleDisplayName = "example-bundle",
   skillName = "example",
 ) {
-  const bundle = await screen.findByRole("region", {
-    name: bundleDisplayName,
-  });
+  const bundle =
+    screen.queryByRole("region", { name: bundleDisplayName }) ??
+    (await selectLibraryBundle(user, bundleDisplayName));
   // 单成员 Bundle 直接进入 Skill；多成员 Bundle 仍先进入成员清单。
   const directSkill = within(bundle).queryByRole("button", {
     name: `查看 Skill ${skillName}`,
@@ -7186,9 +7377,11 @@ function createClient(startup: UiOutcome): SkillYardClient {
   return {
     getPreferences: vi.fn().mockResolvedValue({
       language: "zhCn",
+      theme: "ledger",
       ai: defaultAiPreferences(),
     }),
     setInterfaceLanguage: vi.fn(),
+    setThemePreset: vi.fn(),
     setAiConfiguration: vi.fn(),
     saveAiApiKey: vi.fn(),
     deleteAiApiKey: vi.fn(),

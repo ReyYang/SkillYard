@@ -19,6 +19,7 @@ import type {
   SupportedAppId,
   TakeoverPlan,
   TakeoverPlanRequest,
+  ThemePreset,
   UiOutcome,
   UserPreferences,
 } from "./domain";
@@ -37,6 +38,7 @@ type RemovalPlanOutcome = Extract<UiOutcome, { type: "removalPlan" }>;
 export interface SkillYardClient {
   getPreferences(): Promise<UserPreferences>;
   setInterfaceLanguage(language: InterfaceLanguage): Promise<UserPreferences>;
+  setThemePreset(theme: ThemePreset): Promise<UserPreferences>;
   setAiConfiguration(
     configuration: AiConfigurationInput,
   ): Promise<UserPreferences>;
@@ -151,40 +153,47 @@ export const tauriSkillYardClient: SkillYardClient = {
     const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
       "get_preferences",
     );
-    return { language: outcome.language, ai: outcome.ai };
+    return { language: outcome.language, theme: outcome.theme, ai: outcome.ai };
   },
   setInterfaceLanguage: async (language) => {
     const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
       "set_interface_language",
       { language },
     );
-    return { language: outcome.language, ai: outcome.ai };
+    return { language: outcome.language, theme: outcome.theme, ai: outcome.ai };
+  },
+  setThemePreset: async (theme) => {
+    const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
+      "set_theme_preset",
+      { theme },
+    );
+    return { language: outcome.language, theme: outcome.theme, ai: outcome.ai };
   },
   setAiConfiguration: async (configuration) => {
     const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
       "set_ai_configuration",
       { ...configuration },
     );
-    return { language: outcome.language, ai: outcome.ai };
+    return { language: outcome.language, theme: outcome.theme, ai: outcome.ai };
   },
   saveAiApiKey: async (apiKey) => {
     const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
       "save_ai_api_key",
       { apiKey },
     );
-    return { language: outcome.language, ai: outcome.ai };
+    return { language: outcome.language, theme: outcome.theme, ai: outcome.ai };
   },
   deleteAiApiKey: async () => {
     const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
       "delete_ai_api_key",
     );
-    return { language: outcome.language, ai: outcome.ai };
+    return { language: outcome.language, theme: outcome.theme, ai: outcome.ai };
   },
   testAiConnection: async () => {
     const outcome = await invoke<Extract<UiOutcome, { type: "preferences" }>>(
       "test_ai_connection",
     );
-    return { language: outcome.language, ai: outcome.ai };
+    return { language: outcome.language, theme: outcome.theme, ai: outcome.ai };
   },
   askAgent: async (context, messages) => {
     const outcome = await invoke<Extract<UiOutcome, { type: "agentReply" }>>(
