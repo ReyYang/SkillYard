@@ -309,6 +309,7 @@ describe("本机清单", () => {
       "https://github.com/vercel-labs/skills",
       null,
     );
+    expect(client.reloadGithubSource).toHaveBeenCalledWith("source-search");
     expect(client.createGithubInstallPlan).toHaveBeenCalledWith(
       "source-search",
     );

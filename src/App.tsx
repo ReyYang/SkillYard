@@ -213,6 +213,8 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           : "SkillYard 无法识别刚刚保存的 Source。",
       );
     }
+    // Agent 只负责交接来源；安装 Plan 仍必须复用 Source Catalog 的真实加载步骤。
+    await client.reloadGithubSource(source.highlightedSourceId);
     setAgentInstallPlan(
       await client.createGithubInstallPlan(source.highlightedSourceId),
     );
