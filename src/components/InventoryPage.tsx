@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { GearIcon } from "@phosphor-icons/react";
 
 import type {
   AiConfigurationInput,
@@ -294,6 +295,26 @@ export function InventoryPage({
     () =>
       visibleGroups.map((group) => {
         const singleEntry = group.entries.length === 1 ? group.entries[0]! : null;
+        const groupMounts = outcome.mounts.filter((mount) =>
+          group.entries.some((entry) => entry.memberId === mount.memberId),
+        );
+        const hasUpdate =
+          group.bundleId !== null &&
+          outcome.bundleUpdates.some(
+            (update) =>
+              update.bundleId === group.bundleId && update.action === "update",
+          );
+        const status =
+          group.kind === "takeoverBundle"
+            ? t("待接管")
+            : group.kind === "agentManaged" ||
+                group.kind === "projectManaged"
+              ? t("只读")
+              : hasUpdate
+                ? t("可更新")
+                : groupMounts.length > 0
+                  ? t("已挂载")
+                  : t("未挂载");
         return {
           id: group.id,
           title: group.title,
@@ -303,9 +324,16 @@ export function InventoryPage({
           category: singleEntry?.aiExplanation
             ? t(skillCategoryLabel(singleEntry.aiExplanation.category))
             : null,
+          status,
+          statusTone: hasUpdate
+            ? "warning"
+            : group.kind === "managedBundle" ||
+                group.kind === "takeoverBundle"
+              ? "accent"
+              : "muted",
         };
       }),
-    [t, visibleGroups],
+    [outcome.bundleUpdates, outcome.mounts, t, visibleGroups],
   );
   // 主清单中的每张分组卡都是用户看到的 Bundle，包括只读的插件与项目分组。
   const bundleCount = groups.length;
@@ -430,31 +458,167 @@ export function InventoryPage({
   }
 
   return (
-    <main className="inventory-shell">
-      <header className="inventory-header">
-        <div>
-          <p className="eyebrow">SKILLYARD · LOCAL INVENTORY</p>
-          <h1>{t("Bundle 清单")}</h1>
-          <p className="inventory-summary">
-            {outcome.entries.length === 0
-              ? t("本机暂未发现 Bundle")
-              : t(
-                  "本机已有 {bundleCount} 个 Bundle · {skillCount} 个 Skill",
-                  {
-                    bundleCount,
-                    skillCount: outcome.entries.length,
-                  },
-                )}
-          </p>
-        </div>
-        <div className="inventory-actions">
+    <main
+      className={`inventory-library-shell inventory-library-shell--${theme}`}
+    >
+      <h1 className="sr-only">{t("Bundle 清单")}</h1>
+      <header
+        className="library-topbar"
+        data-library-chrome={theme}
+        data-tauri-drag-region
+      >
+        <span className="library-brand" aria-label="SkillYard">
+          <span className="library-brand-mark" aria-hidden="true" />
+        </span>
+        <nav className="library-primary-navigation" aria-label={t("主要导航")}>
+          <span aria-current="page">{t("技能库")}</span>
           <button
-            className="secondary-action"
+            className="library-navigation-action"
             type="button"
             disabled={isOpeningDiscover}
             onClick={onDiscover}
           >
             {isOpeningDiscover ? t("正在打开…") : t("发现")}
+          </button>
+          <button
+            className="library-navigation-action library-takeover-action"
+            type="button"
+            aria-label={t("打开待接管筛选")}
+            aria-pressed={filter === "takeover"}
+            onClick={() =>
+              setFilter((current) =>
+                current === "takeover" ? "all" : "takeover",
+              )
+            }
+          >
+            {t("待接管")}
+          </button>
+          <details className="library-project-menu">
+            <summary>{t("项目")}</summary>
+            <div className="library-popover">
+              {outcome.projects.length > 0 ? (
+                <section
+                  className="registered-projects"
+                  aria-label={t("已登记项目")}
+                >
+                  <header>
+                    <div>
+                      <p className="section-eyebrow">REGISTERED PROJECTS</p>
+                      <h2>{t("已登记项目")}</h2>
+                    </div>
+                    <span>{outcome.projects.length}</span>
+                  </header>
+                  <p>
+                    {t(
+                      "移除项目会先清理其中全部 SkillYard-managed project Mount，再删除登记记录。",
+                    )}
+                  </p>
+                  <ul>
+                    {outcome.projects.map((project) => (
+                      <li key={project.id}>
+                        <div>
+                          <strong>{project.displayName}</strong>
+                          <code title={project.rootPath}>
+                            {project.rootPath}
+                          </code>
+                        </div>
+                        <button
+                          className="danger-outline-action"
+                          type="button"
+                          aria-label={t("移除项目 {project}", {
+                            project: project.displayName,
+                          })}
+                          disabled={isWriteBlocked}
+                          onClick={() => onRemoveProject(project.id)}
+                        >
+                          {removingProjectId === project.id
+                            ? t("正在准备移除…")
+                            : t("移除项目")}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+              <button
+                className="secondary-action"
+                type="button"
+                disabled={isWriteBlocked || isAddingProject}
+                onClick={onAddProject}
+              >
+                {isAddingProject ? t("正在选择项目…") : t("添加项目")}
+              </button>
+            </div>
+          </details>
+        </nav>
+        <label className="library-search-field">
+          <span className="sr-only">{t("搜索 Skill")}</span>
+          <input
+            type="search"
+            value={query}
+            placeholder={t("搜索 Bundle 或 Skill")}
+            aria-label={t("搜索 Skill")}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <details className="library-filter-menu">
+          <summary aria-label={t("筛选")}>
+            {theme === "ledger" ? t("全部 Bundle") : t("筛选")}
+          </summary>
+          <div className="library-popover library-filter-panel">
+            <label className="category-filter">
+              <span>{t("分类")}</span>
+              <select
+                aria-label={t("分类")}
+                value={categoryFilter}
+                onChange={(event) =>
+                  setCategoryFilter(event.target.value as CategoryFilter)
+                }
+              >
+                <option value="all">{t("全部分类")}</option>
+                {availableCategories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {t(category.label)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="filter-group" aria-label={t("管理状态")}>
+              {FILTERS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-pressed={filter === item.id}
+                  onClick={() => setFilter(item.id)}
+                >
+                  {t(item.label)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </details>
+        <button
+          className="library-install-action"
+          type="button"
+          aria-label={t("安装 Skill")}
+          disabled={isWriteBlocked || isOpeningInstaller}
+          onClick={onInstall}
+        >
+          {isOpeningInstaller ? t("正在打开…") : t("添加 Bundle")}
+        </button>
+        <details className="library-maintenance-menu">
+          <summary aria-label={t("更多操作")}>
+            <span>{t("更多")}</span>
+            <span className="library-profile-mark" aria-hidden="true" />
+          </summary>
+          <div className="library-popover library-maintenance-actions">
+          <button
+            className="secondary-action library-menu-install-action"
+            type="button"
+            disabled={isWriteBlocked || isOpeningInstaller}
+            onClick={onInstall}
+          >
+            {isOpeningInstaller ? t("正在打开…") : t("添加 Bundle")}
           </button>
           <button
             className="secondary-action"
@@ -491,22 +655,6 @@ export function InventoryPage({
             </button>
           ) : null}
           <button
-            className="primary-action"
-            type="button"
-            disabled={isWriteBlocked || isOpeningInstaller}
-            onClick={onInstall}
-          >
-            {isOpeningInstaller ? t("正在打开…") : t("安装 Skill")}
-          </button>
-          <button
-            className="secondary-action"
-            type="button"
-            disabled={isWriteBlocked || isAddingProject}
-            onClick={onAddProject}
-          >
-            {isAddingProject ? t("正在选择项目…") : t("添加项目")}
-          </button>
-          <button
             className="secondary-action"
             type="button"
             disabled={isWriteBlocked || isRefreshing}
@@ -514,16 +662,52 @@ export function InventoryPage({
           >
             {isRefreshing ? t("正在刷新本机…") : t("刷新本机")}
           </button>
-          <button
-            className="secondary-action"
-            type="button"
-            onClick={() => onScreenChange({ type: "settings" })}
-          >
-            {t("设置")}
-          </button>
-        </div>
+            <p className="refresh-summary" aria-label={t("最近刷新结果")}>
+              {outcome.lastLocalRefresh
+                ? t(
+                    "最近刷新：新增 {added} · 变化 {changed} · 移除 {removed}",
+                    {
+                      added: outcome.lastLocalRefresh.added,
+                      changed: outcome.lastLocalRefresh.changed,
+                      removed: outcome.lastLocalRefresh.removed,
+                    },
+                  )
+                : t("尚未执行本机刷新")}
+              {outcome.lastLocalRefresh ? (
+                <span>
+                  {formatTimestamp(
+                    outcome.lastLocalRefresh.completedAt,
+                    language,
+                  )}
+                </span>
+              ) : null}
+            </p>
+          </div>
+        </details>
       </header>
+      <button
+        className="library-settings-action"
+        type="button"
+        onClick={() => onScreenChange({ type: "settings" })}
+      >
+        <GearIcon
+          className="library-settings-icon"
+          size={20}
+          weight="regular"
+          aria-hidden
+        />
+        <span>{t("设置")}</span>
+      </button>
+      <p className="sr-only">
+        {outcome.entries.length === 0
+          ? t("本机暂未发现 Bundle")
+          : t("本机已有 {bundleCount} 个 Bundle · {skillCount} 个 Skill", {
+              bundleCount,
+              skillCount: outcome.entries.length,
+            })}
+      </p>
 
+      <section className="library-notice-stack" aria-label={t("状态提示")}>
       {aiOrganizationFeedback ? (
         <p
           className="recovery-notice"
@@ -543,46 +727,6 @@ export function InventoryPage({
         <p className="recovery-notice" role="status">
           {t("已恢复上次中断的操作")}
         </p>
-      ) : null}
-
-      {outcome.projects.length > 0 ? (
-        <section className="registered-projects" aria-label={t("已登记项目")}>
-          <header>
-            <div>
-              <p className="section-eyebrow">REGISTERED PROJECTS</p>
-              <h2>{t("已登记项目")}</h2>
-            </div>
-            <span>{outcome.projects.length}</span>
-          </header>
-          <p>
-            {t(
-              "移除项目会先清理其中全部 SkillYard-managed project Mount，再删除登记记录。",
-            )}
-          </p>
-          <ul>
-            {outcome.projects.map((project) => (
-              <li key={project.id}>
-                <div>
-                  <strong>{project.displayName}</strong>
-                  <code title={project.rootPath}>{project.rootPath}</code>
-                </div>
-                <button
-                  className="danger-outline-action"
-                  type="button"
-                  aria-label={t("移除项目 {project}", {
-                    project: project.displayName,
-                  })}
-                  disabled={isWriteBlocked}
-                  onClick={() => onRemoveProject(project.id)}
-                >
-                  {removingProjectId === project.id
-                    ? t("正在准备移除…")
-                    : t("移除项目")}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
       ) : null}
 
       {outcome.recoveryIssues.length > 0 ? (
@@ -616,48 +760,6 @@ export function InventoryPage({
           <p>{t("请保留 Central Store 中的现有内容，不要手动删除相关目录。")}</p>
         </section>
       ) : null}
-
-      <section className="inventory-controls" aria-label={t("清单筛选")}>
-        <label className="search-field">
-          <span className="sr-only">{t("搜索 Skill")}</span>
-          <input
-            type="search"
-            value={query}
-            placeholder={t("搜索 Bundle 或 Skill")}
-            aria-label={t("搜索 Skill")}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-        <label className="category-filter">
-          <span>{t("分类")}</span>
-          <select
-            aria-label={t("分类")}
-            value={categoryFilter}
-            onChange={(event) =>
-              setCategoryFilter(event.target.value as CategoryFilter)
-            }
-          >
-            <option value="all">{t("全部分类")}</option>
-            {availableCategories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {t(category.label)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="filter-group" aria-label={t("管理状态")}>
-          {FILTERS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              aria-pressed={filter === item.id}
-              onClick={() => setFilter(item.id)}
-            >
-              {t(item.label)}
-            </button>
-          ))}
-        </div>
-      </section>
 
       {refreshError ? (
         <div className="inline-error" role="alert">
@@ -748,23 +850,9 @@ export function InventoryPage({
           </ul>
         </section>
       ) : null}
+      </section>
 
-      {outcome.lastLocalRefresh ? (
-        <p className="refresh-summary" aria-label={t("最近刷新结果")}>
-          {t("最近刷新：新增 {added} · 变化 {changed} · 移除 {removed}", {
-            added: outcome.lastLocalRefresh.added,
-            changed: outcome.lastLocalRefresh.changed,
-            removed: outcome.lastLocalRefresh.removed,
-          })}
-          <span>
-            {formatTimestamp(outcome.lastLocalRefresh.completedAt, language)}
-          </span>
-        </p>
-      ) : (
-        <p className="refresh-summary">{t("尚未执行本机刷新")}</p>
-      )}
-
-      <div className="inventory-content">
+      <section className="library-workspace">
         <BundleLibrary
           theme={theme}
           items={libraryItems}
@@ -842,21 +930,21 @@ export function InventoryPage({
             );
           }}
           emptyState={
-          <section className="empty-inventory">
-            <h2>
-              {outcome.entries.length === 0
-                ? t("未发现 Skill")
-                : t("没有匹配结果")}
-            </h2>
-            <p>
-              {outcome.entries.length === 0
-                ? t("你可以继续使用现有安装方式，再主动刷新本机。")
-                : t("换一个关键词或管理状态看看。")}
-            </p>
-          </section>
+            <section className="empty-inventory">
+              <h2>
+                {outcome.entries.length === 0
+                  ? t("未发现 Skill")
+                  : t("没有匹配结果")}
+              </h2>
+              <p>
+                {outcome.entries.length === 0
+                  ? t("你可以继续使用现有安装方式，再主动刷新本机。")
+                  : t("换一个关键词或管理状态看看。")}
+              </p>
+            </section>
           }
         />
-      </div>
+      </section>
     </main>
   );
 }
@@ -921,6 +1009,9 @@ function InventorySection({
       }),
     ),
   ];
+  const previewEntries = entries.slice(0, 5);
+  const remainingEntryCount = entries.length - previewEntries.length;
+  const hasLifecycleActions = Boolean(batchMountBundleId || onTakeover);
   return (
     <section className="inventory-section" aria-label={title}>
       <header>
@@ -956,65 +1047,6 @@ function InventorySection({
               }
             />
           ) : null}
-          {batchMountBundleId && canAssociateSource ? (
-            <button
-              className="compact-action"
-              type="button"
-              disabled={actionsDisabled}
-              onClick={() => onAssociateSource?.(batchMountBundleId)}
-            >
-              {t("补充来源")}
-            </button>
-          ) : null}
-          {batchMountBundleId ? (
-            <button
-              className="compact-action"
-              type="button"
-              disabled={actionsDisabled}
-              onClick={() => onBatchMount?.(batchMountBundleId)}
-            >
-              {t("批量挂载")}
-            </button>
-          ) : null}
-          {batchMountBundleId && mounts.length > 0 ? (
-            <button
-              className="compact-action"
-              type="button"
-              aria-label={t("解除 Bundle {bundle} 的全部挂载", {
-                bundle: title,
-              })}
-              disabled={actionsDisabled}
-              onClick={() => onUnmountBundle?.(batchMountBundleId)}
-            >
-              {unmountingBundleId === batchMountBundleId
-                ? t("正在准备解除…")
-                : t("解除全部挂载")}
-            </button>
-          ) : null}
-          {batchMountBundleId ? (
-            <button
-              className="danger-outline-action"
-              type="button"
-              aria-label={t("删除 Bundle {bundle}", { bundle: title })}
-              disabled={actionsDisabled}
-              onClick={() => onRemoveBundle?.(batchMountBundleId)}
-            >
-              {removingBundleId === batchMountBundleId
-                ? t("正在准备删除…")
-                : t("删除 Bundle")}
-            </button>
-          ) : null}
-          {onTakeover ? (
-            <button
-              className="compact-action"
-              type="button"
-              disabled={actionsDisabled}
-              aria-label={t("接管 Bundle {bundle}", { bundle: title })}
-              onClick={() => onTakeover(entries[0]!.id)}
-            >
-              {t("接管 Bundle")}
-            </button>
-          ) : null}
           <span>{t("{count} 个 Skill", { count: entries.length })}</span>
         </div>
       </header>
@@ -1035,14 +1067,29 @@ function InventorySection({
         </div>
       </dl>
       {entries.length > 1 ? (
-        <ul
-          className="bundle-library-members"
-          aria-label={t("{group} 的 Skill", { group: title })}
-        >
-          {entries.map((entry) => (
-            <li key={entry.id}>{entry.skillName}</li>
-          ))}
-        </ul>
+        <>
+          <p className="bundle-library-members-label">{t("精选成员")}</p>
+          <ul
+            className="bundle-library-members"
+            aria-label={t("{group} 的 Skill", { group: title })}
+          >
+            {previewEntries.map((entry) => (
+              <li key={entry.id}>
+                <strong>{entry.skillName}</strong>
+                {entry.aiExplanation?.summary ? (
+                  <small>{entry.aiExplanation.summary}</small>
+                ) : null}
+              </li>
+            ))}
+            {remainingEntryCount > 0 ? (
+              <li className="bundle-library-members-more">
+                <strong>
+                  {t("还有 {count} 个 Skill", { count: remainingEntryCount })}
+                </strong>
+              </li>
+            ) : null}
+          </ul>
+        </>
       ) : null}
       {entries.length === 1 ? (
         <SkillAiPresentation
@@ -1051,14 +1098,82 @@ function InventorySection({
           detailed={false}
         />
       ) : null}
-      <button
-        className="bundle-open-action"
-        type="button"
-        aria-label={openLabel}
-        onClick={onOpen}
-      >
-        {entries.length === 1 ? t("查看详情") : t("查看成员")}
-      </button>
+      <footer className="inventory-section-footer">
+        <button
+          className="bundle-open-action"
+          type="button"
+          aria-label={openLabel}
+          onClick={onOpen}
+        >
+          {entries.length === 1 ? t("查看详情") : t("查看成员")}
+        </button>
+        {hasLifecycleActions ? (
+          <details className="inventory-section-menu">
+            <summary aria-label={t("Bundle 操作")}>{t("更多")}</summary>
+            <div className="inventory-section-actions">
+              {batchMountBundleId && canAssociateSource ? (
+                <button
+                  className="compact-action"
+                  type="button"
+                  disabled={actionsDisabled}
+                  onClick={() => onAssociateSource?.(batchMountBundleId)}
+                >
+                  {t("补充来源")}
+                </button>
+              ) : null}
+              {batchMountBundleId ? (
+                <button
+                  className="compact-action"
+                  type="button"
+                  disabled={actionsDisabled}
+                  onClick={() => onBatchMount?.(batchMountBundleId)}
+                >
+                  {t("批量挂载")}
+                </button>
+              ) : null}
+              {batchMountBundleId && mounts.length > 0 ? (
+                <button
+                  className="compact-action"
+                  type="button"
+                  aria-label={t("解除 Bundle {bundle} 的全部挂载", {
+                    bundle: title,
+                  })}
+                  disabled={actionsDisabled}
+                  onClick={() => onUnmountBundle?.(batchMountBundleId)}
+                >
+                  {unmountingBundleId === batchMountBundleId
+                    ? t("正在准备解除…")
+                    : t("解除全部挂载")}
+                </button>
+              ) : null}
+              {batchMountBundleId ? (
+                <button
+                  className="danger-outline-action"
+                  type="button"
+                  aria-label={t("删除 Bundle {bundle}", { bundle: title })}
+                  disabled={actionsDisabled}
+                  onClick={() => onRemoveBundle?.(batchMountBundleId)}
+                >
+                  {removingBundleId === batchMountBundleId
+                    ? t("正在准备删除…")
+                    : t("删除 Bundle")}
+                </button>
+              ) : null}
+              {onTakeover ? (
+                <button
+                  className="compact-action"
+                  type="button"
+                  disabled={actionsDisabled}
+                  aria-label={t("接管 Bundle {bundle}", { bundle: title })}
+                  onClick={() => onTakeover(entries[0]!.id)}
+                >
+                  {t("接管 Bundle")}
+                </button>
+              ) : null}
+            </div>
+          </details>
+        ) : null}
+      </footer>
       {entries.length === 1 && !batchMountBundleId ? (
         <small className="bundle-context">
           {entries[0]!.observedBy.map(supportedAppLabel).join("、") ||

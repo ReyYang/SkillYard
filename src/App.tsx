@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
 import { AgentOverlay } from "./components/AgentOverlay";
 import { BatchMountPlanPage } from "./components/BatchMountPlanPage";
@@ -106,6 +113,17 @@ type SkillsShSearchOutcome = Extract<UiOutcome, { type: "skillsShSearch" }>;
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 
 const INVENTORY_LIST_SCREEN: InventoryScreen = { type: "list" };
+const LIBRARY_REFERENCE_WIDTH = 1180;
+const LIBRARY_REFERENCE_HEIGHT = 840;
+
+function libraryScaleForViewport(): number {
+  if (typeof window === "undefined") return 1;
+  // 三套主题共享同一设计坐标系；窗口变化时只做统一缩放，不能各自重排。
+  return Math.min(
+    window.innerWidth / LIBRARY_REFERENCE_WIDTH,
+    window.innerHeight / LIBRARY_REFERENCE_HEIGHT,
+  );
+}
 
 interface CurrentOperationSummary {
   title: string;
@@ -140,6 +158,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [languageError, setLanguageError] = useState<string | null>(null);
   const [isSavingTheme, setIsSavingTheme] = useState(false);
   const [themeError, setThemeError] = useState<string | null>(null);
+  const [libraryScale, setLibraryScale] = useState(libraryScaleForViewport);
   const [aiOperation, setAiOperation] = useState<AiOperation>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [agentContext, setAgentContext] = useState<AgentPageContext>({
@@ -149,6 +168,13 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [agentInstallPlan, setAgentInstallPlan] = useState<InstallPlan | null>(
     null,
   );
+
+  useEffect(() => {
+    const updateLibraryScale = () =>
+      setLibraryScale(libraryScaleForViewport());
+    window.addEventListener("resize", updateLibraryScale);
+    return () => window.removeEventListener("resize", updateLibraryScale);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -286,49 +312,59 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
 
   return (
     <I18nProvider language={language}>
-      <div className="application-theme" data-theme-preset={theme}>
-        <AppCore
-          client={client}
-          language={language}
-          theme={theme}
-          aiPreferences={aiPreferences}
-          isSavingLanguage={isSavingLanguage}
-          languageError={languageError}
-          isSavingTheme={isSavingTheme}
-          themeError={themeError}
-          aiOperation={aiOperation}
-          aiError={aiError}
-          onAgentContextChange={setAgentContext}
-          agentInstallPlan={agentInstallPlan}
-          onAgentInstallPlanClear={() => setAgentInstallPlan(null)}
-          onPreviewDiscoverInstall={previewSearchInstall}
-          onLanguageChange={changeLanguage}
-          onThemeChange={changeTheme}
-          onAiConfigurationChange={(configuration) =>
-            runAiOperation("savingConfiguration", () =>
-              client.setAiConfiguration(configuration),
-            )
-          }
-          onSaveAiApiKey={(apiKey) =>
-            runAiOperation("savingKey", () => client.saveAiApiKey(apiKey))
-          }
-          onDeleteAiApiKey={() =>
-            runAiOperation("deletingKey", () => client.deleteAiApiKey())
-          }
-          onTestAiConnection={() =>
-            runAiOperation("testing", () => client.testAiConnection())
-          }
-        />
-        <AgentOverlay
-          context={agentContext}
-          aiPreferences={aiPreferences}
-          onAsk={(requestId, context, messages, onEvent) =>
-            client.askAgent(requestId, context, messages, onEvent)
-          }
-          onCancel={(requestId) => client.cancelAgent(requestId)}
-          onOpenExternalUrl={(url) => client.openExternalUrl(url)}
-          onPreviewInstall={previewSearchInstall}
-        />
+      <div
+        className="application-theme"
+        data-theme-preset={theme}
+        style={
+          {
+            "--library-scale": String(libraryScale),
+          } as CSSProperties
+        }
+      >
+        <div className="application-frame">
+          <AppCore
+            client={client}
+            language={language}
+            theme={theme}
+            aiPreferences={aiPreferences}
+            isSavingLanguage={isSavingLanguage}
+            languageError={languageError}
+            isSavingTheme={isSavingTheme}
+            themeError={themeError}
+            aiOperation={aiOperation}
+            aiError={aiError}
+            onAgentContextChange={setAgentContext}
+            agentInstallPlan={agentInstallPlan}
+            onAgentInstallPlanClear={() => setAgentInstallPlan(null)}
+            onPreviewDiscoverInstall={previewSearchInstall}
+            onLanguageChange={changeLanguage}
+            onThemeChange={changeTheme}
+            onAiConfigurationChange={(configuration) =>
+              runAiOperation("savingConfiguration", () =>
+                client.setAiConfiguration(configuration),
+              )
+            }
+            onSaveAiApiKey={(apiKey) =>
+              runAiOperation("savingKey", () => client.saveAiApiKey(apiKey))
+            }
+            onDeleteAiApiKey={() =>
+              runAiOperation("deletingKey", () => client.deleteAiApiKey())
+            }
+            onTestAiConnection={() =>
+              runAiOperation("testing", () => client.testAiConnection())
+            }
+          />
+          <AgentOverlay
+            context={agentContext}
+            aiPreferences={aiPreferences}
+            onAsk={(requestId, context, messages, onEvent) =>
+              client.askAgent(requestId, context, messages, onEvent)
+            }
+            onCancel={(requestId) => client.cancelAgent(requestId)}
+            onOpenExternalUrl={(url) => client.openExternalUrl(url)}
+            onPreviewInstall={previewSearchInstall}
+          />
+        </div>
       </div>
     </I18nProvider>
   );

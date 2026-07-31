@@ -2,6 +2,8 @@
 
 > 调研日期：2026-07-28
 >
+> 状态：历史技术调研。SkillYard 1.1.0 已确认采用 OpenAI、智谱 GLM、DeepSeek 的 API-first BYOK 方案，不捆绑、下载或运行本地模型。本文保留本地翻译模型的实测事实，不再作为 1.1.0 实施建议；当前产品边界见 [1.1.0 Agent 产品规格](../prd/0002-skillyard-1.1.0-agent.md)。
+>
 > 目标环境：macOS 14、Apple Silicon、Tauri 2
 >
 > 目标任务：把 Skill 作者提供的英文 `description` 离线翻译为简体中文；同时判断同一模型是否适合继续承担分类和摘要。
@@ -96,7 +98,7 @@ Mozilla 已归档的 [firefox-translations-models](https://github.com/mozilla/fi
 
 ### 本机真实 smoke test
 
-在本机 Apple Silicon 上，使用官方 `@browsermt/bergamot-translator@0.4.9` WASM runtime 与当前 Mozilla `en-zh` Release 的四个文件运行了 `node /private/tmp/skillyard-model-research/test-bergamot.mjs`。临时脚本和模型没有写入仓库。
+在本机 Apple Silicon 上，使用官方 `@browsermt/bergamot-translator@0.4.9` WASM runtime 与当前 Mozilla `en-zh` Release 的四个文件，在隔离的临时目录中运行了 `node test-bergamot.mjs`。临时脚本和模型没有写入仓库。
 
 | 英文输入摘要 | 实际输出 | 单次耗时 |
 | --- | --- | ---: |

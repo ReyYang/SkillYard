@@ -2,6 +2,8 @@
 
 > 调研日期：2026-07-28
 >
+> 状态：历史条件评估。SkillYard 1.1.0 已确认不集成本地 Qwen 或其他本地 LLM，本文只说明“如果未来重新选择 Qwen”时的硬件推导，不能作为当前系统要求或实施计划；当前产品边界见 [1.1.0 Agent 产品规格](../prd/0002-skillyard-1.1.0-agent.md)。
+>
 > 评估对象：`Qwen2.5-0.5B-Instruct-GGUF` 的官方 `Q4_K_M` 权重
 >
 > 运行假设：SkillYard 内嵌原生 `llama.cpp`，使用 Apple Silicon 的 Metal／Accelerate 路径；不要求用户安装 Ollama、Python 或独立 localhost Server

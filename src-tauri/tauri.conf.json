@@ -14,10 +14,16 @@
       {
         "label": "main",
         "title": "SkillYard",
-        "width": 1120,
-        "height": 760,
+        "width": 1180,
+        "height": 840,
         "minWidth": 760,
         "minHeight": 560,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 18
+        },
         "center": true
       }
     ],

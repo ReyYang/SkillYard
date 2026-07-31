@@ -105,6 +105,117 @@ describe("首次使用", () => {
 });
 
 describe("本机清单", () => {
+  it("窗口尺寸变化时按同一比例缩放完整主题画布", async () => {
+    const previousWidth = window.innerWidth;
+    const previousHeight = window.innerHeight;
+    Object.defineProperties(window, {
+      innerWidth: { configurable: true, value: 1180 },
+      innerHeight: { configurable: true, value: 840 },
+    });
+
+    try {
+      const client = createClient(
+        inventoryOutcome([
+          createManagedEntry({
+            bundleDisplayName: "scale-fixture",
+            skillName: "scale-fixture",
+          }),
+        ]),
+      );
+      const { container } = render(<App client={client} />);
+
+      await screen.findByRole("region", { name: "Ledger Bundle Library" });
+      const theme = container.querySelector<HTMLElement>(".application-theme");
+      expect(container.querySelector(".application-frame")).toBeInTheDocument();
+      expect(theme?.style.getPropertyValue("--library-scale")).toBe("1");
+
+      // 宽度或高度任一方向受限时，整套画布必须使用同一个较小比例缩放。
+      act(() => {
+        Object.defineProperties(window, {
+          innerWidth: { configurable: true, value: 590 },
+          innerHeight: { configurable: true, value: 840 },
+        });
+        window.dispatchEvent(new Event("resize"));
+      });
+      expect(theme?.style.getPropertyValue("--library-scale")).toBe("0.5");
+
+      act(() => {
+        Object.defineProperties(window, {
+          innerWidth: { configurable: true, value: 1180 },
+          innerHeight: { configurable: true, value: 420 },
+        });
+        window.dispatchEvent(new Event("resize"));
+      });
+      expect(theme?.style.getPropertyValue("--library-scale")).toBe("0.5");
+    } finally {
+      Object.defineProperties(window, {
+        innerWidth: { configurable: true, value: previousWidth },
+        innerHeight: { configurable: true, value: previousHeight },
+      });
+      window.dispatchEvent(new Event("resize"));
+    }
+  });
+
+  it("主题首页使用单屏 Library 外壳，不再叠加旧清单页面与内部滚动区", async () => {
+    const client = createClient(
+      inventoryOutcome([
+        createManagedEntry({
+          bundleDisplayName: "layout-fixture",
+          skillName: "layout-fixture",
+        }),
+      ]),
+    );
+
+    const { container } = render(<App client={client} />);
+
+    await screen.findByRole("region", { name: "Ledger Bundle Library" });
+    const shell = container.querySelector("main.inventory-library-shell");
+    expect(shell).toBeInTheDocument();
+    expect(shell?.querySelector(".inventory-header")).not.toBeInTheDocument();
+    expect(shell?.querySelector(".inventory-controls")).not.toBeInTheDocument();
+    expect(
+      within(shell as HTMLElement).getByRole("navigation", {
+        name: "主要导航",
+      }),
+    ).toBeInTheDocument();
+    expect(shell?.querySelectorAll("[data-library-scroll-region]")).toHaveLength(
+      1,
+    );
+  });
+
+  it.each([
+    ["ledger", "Ledger Bundle Library", "ledger-library-detail"],
+    ["archive", "Archive Bundle Library", "archive-library-cover-texture"],
+    ["layers", "Layers Bundle Library", "layers-library-sheet"],
+  ] as const)(
+    "%s 使用自己的导航和主构图，不复用普通清单卡片",
+    async (theme, regionName, structureClass) => {
+      const client = createClient(
+        inventoryOutcome([
+          createManagedEntry({
+            bundleDisplayName: "visual-fixture",
+            skillName: "visual-fixture",
+          }),
+        ]),
+      );
+      vi.mocked(client.getPreferences).mockResolvedValue({
+        language: "zhCn",
+        theme,
+        ai: defaultAiPreferences(),
+      });
+
+      const { container } = render(<App client={client} />);
+
+      await screen.findByRole("region", { name: regionName });
+      expect(
+        container.querySelector(`[data-library-chrome="${theme}"]`),
+      ).toBeInTheDocument();
+      expect(container.querySelector(`.${structureClass}`)).toBeInTheDocument();
+      expect(container.querySelector(".inventory-controls")).not
+        .toBeInTheDocument();
+    },
+  );
+
   it("默认使用 Ledger，并以 Bundle 清单和当前详情浏览同一份 Inventory", async () => {
     const user = userEvent.setup();
     const longBundleName =
@@ -916,7 +1027,9 @@ describe("本机清单", () => {
     expect(
       await screen.findByRole("heading", { name: "Bundle inventory" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    const settingsButton = screen.getByRole("button", { name: "Settings" });
+    expect(settingsButton).toBeInTheDocument();
+    expect(settingsButton.querySelector("svg")).toBeInTheDocument();
     expect(client.setInterfaceLanguage).not.toHaveBeenCalled();
   });
 
@@ -6051,7 +6164,11 @@ describe("GitHub Source 安装", () => {
 
     await user.click(await screen.findByRole("button", { name: "安装 Skill" }));
 
-    expect(screen.getByRole("button", { name: "正在打开…" })).toBeDisabled();
+    const openingInstaller = screen.getByRole("button", {
+      name: "安装 Skill",
+    });
+    expect(openingInstaller).toBeDisabled();
+    expect(openingInstaller).toHaveTextContent("正在打开…");
     expect(screen.getByRole("button", { name: "添加项目" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "刷新本机" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "批量挂载" })).toBeDisabled();

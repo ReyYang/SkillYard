@@ -201,6 +201,7 @@ impl SecretStore for FixtureSecretStore {
 }
 
 fn openai_responses() -> Vec<(&'static str, String)> {
+    // 前两次连接验证仍是 JSON；第三次发现请求必须按生产合同返回 SSE。
     vec![
         (
             "application/json",
@@ -211,8 +212,13 @@ fn openai_responses() -> Vec<(&'static str, String)> {
             r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"SkillYard","annotations":[{"type":"url_citation","url":"https://github.com/ReyYang/SkillYard"}]}]}]}"#.to_owned(),
         ),
         (
-            "application/json",
-            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"找到公开结果。","annotations":[{"type":"url_citation","url":"https://github.com/acme/review-skills","title":"Review Skills"},{"type":"url_citation","url":"https://github.com/acme/review-skills/tree/main/skills/tdd","title":"Review Skills TDD"},{"type":"url_citation","url":"https://downloads.example.com/review-skills.zip","title":"Review Skills ZIP"},{"type":"url_citation","url":"https://forum.example.com/review-skills","title":"Forum"}]}]}]}"#.to_owned(),
+            "text/event-stream",
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"找到公开结果。\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"找到公开结果。\",\"annotations\":[{\"type\":\"url_citation\",\"url\":\"https://github.com/acme/review-skills\",\"title\":\"Review Skills\"},{\"type\":\"url_citation\",\"url\":\"https://github.com/acme/review-skills/tree/main/skills/tdd\",\"title\":\"Review Skills TDD\"},{\"type\":\"url_citation\",\"url\":\"https://downloads.example.com/review-skills.zip\",\"title\":\"Review Skills ZIP\"},{\"type\":\"url_citation\",\"url\":\"https://forum.example.com/review-skills\",\"title\":\"Forum\"}]}]}]}}\n\n",
+                "data: [DONE]\n\n"
+            )
+            .to_owned(),
         ),
     ]
 }
@@ -228,8 +234,13 @@ fn glm_responses() -> Vec<(&'static str, String)> {
             r#"{"choices":[{"message":{"content":"SkillYard"}}],"web_search":[{"title":"SkillYard","link":"https://github.com/ReyYang/SkillYard"}]}"#.to_owned(),
         ),
         (
-            "application/json",
-            r#"{"choices":[{"message":{"content":"找到公开结果。"}}],"web_search":[{"title":"Review Skills","link":"https://github.com/acme/review-skills"},{"title":"Review Skills TDD","link":"https://github.com/acme/review-skills/tree/main/skills/tdd"},{"title":"Review Skills ZIP","link":"https://downloads.example.com/review-skills.zip"},{"title":"Forum","link":"https://forum.example.com/review-skills"}]}"#.to_owned(),
+            "text/event-stream",
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"找到公开结果。\"}}],\"web_search\":[{\"title\":\"Review Skills\",\"link\":\"https://github.com/acme/review-skills\"},{\"title\":\"Review Skills TDD\",\"link\":\"https://github.com/acme/review-skills/tree/main/skills/tdd\"},{\"title\":\"Review Skills ZIP\",\"link\":\"https://downloads.example.com/review-skills.zip\"},{\"title\":\"Forum\",\"link\":\"https://forum.example.com/review-skills\"}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            )
+            .to_owned(),
         ),
     ]
 }
@@ -245,8 +256,14 @@ fn deepseek_responses() -> Vec<(&'static str, String)> {
             r#"{"content":[{"type":"web_search_tool_result","content":[{"type":"web_search_result","url":"https://github.com/ReyYang/SkillYard","title":"SkillYard"}]}]}"#.to_owned(),
         ),
         (
-            "application/json",
-            r#"{"content":[{"type":"text","text":"找到公开结果。"},{"type":"web_search_tool_result","content":[{"type":"web_search_result","url":"https://github.com/acme/review-skills","title":"Review Skills"},{"type":"web_search_result","url":"https://github.com/acme/review-skills/tree/main/skills/tdd","title":"Review Skills TDD"},{"type":"web_search_result","url":"https://downloads.example.com/review-skills.zip","title":"Review Skills ZIP"},{"type":"web_search_result","url":"https://forum.example.com/review-skills","title":"Forum"}]}]}"#.to_owned(),
+            "text/event-stream",
+            concat!(
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"找到公开结果。\"}}\n\n",
+                "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"web_search_tool_result\",\"content\":[{\"type\":\"web_search_result\",\"url\":\"https://github.com/acme/review-skills\",\"title\":\"Review Skills\"},{\"type\":\"web_search_result\",\"url\":\"https://github.com/acme/review-skills/tree/main/skills/tdd\",\"title\":\"Review Skills TDD\"},{\"type\":\"web_search_result\",\"url\":\"https://downloads.example.com/review-skills.zip\",\"title\":\"Review Skills ZIP\"},{\"type\":\"web_search_result\",\"url\":\"https://forum.example.com/review-skills\",\"title\":\"Forum\"}]}}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
+                "data: [DONE]\n\n"
+            )
+            .to_owned(),
         ),
     ]
 }

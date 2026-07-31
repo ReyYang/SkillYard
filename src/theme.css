@@ -46,15 +46,15 @@
  * 避免视觉选择变成第二套应用。
  */
 .application-theme[data-theme-preset="archive"] {
-  --sy-canvas: #1c151b;
-  --sy-surface: rgb(46 34 44 / 88%);
-  --sy-surface-subtle: rgb(58 43 53 / 88%);
-  --sy-surface-strong: #49343f;
-  --sy-text: #f0dfca;
-  --sy-muted: #b9a9a7;
-  --sy-border: rgb(239 211 183 / 18%);
-  --sy-accent: #c8f36a;
-  --sy-accent-strong: #e4ff9d;
+  --sy-canvas: #211821;
+  --sy-surface: rgb(55 40 52 / 82%);
+  --sy-surface-subtle: rgb(66 49 62 / 86%);
+  --sy-surface-strong: #493640;
+  --sy-text: #ead8c2;
+  --sy-muted: #ad9fa0;
+  --sy-border: rgb(233 210 185 / 18%);
+  --sy-accent: #c7f25e;
+  --sy-accent-strong: #e3ff99;
   --sy-selected: rgb(125 96 112 / 35%);
   --sy-danger: #ef8a77;
   --sy-shadow: 0 24px 70px rgb(0 0 0 / 34%);
@@ -68,14 +68,14 @@
 }
 
 .application-theme[data-theme-preset="layers"] {
-  --sy-canvas: #eeece7;
-  --sy-surface: rgb(251 250 246 / 92%);
-  --sy-surface-subtle: rgb(241 240 235 / 92%);
-  --sy-surface-strong: #fdfcf8;
-  --sy-text: #282b27;
-  --sy-muted: #6f746e;
-  --sy-border: rgb(57 62 55 / 16%);
-  --sy-accent: #6b8336;
+  --sy-canvas: #e9e6e1;
+  --sy-surface: rgb(250 248 244 / 94%);
+  --sy-surface-subtle: rgb(241 238 232 / 94%);
+  --sy-surface-strong: #fbf9f5;
+  --sy-text: #292b26;
+  --sy-muted: #73766f;
+  --sy-border: rgb(66 67 61 / 14%);
+  --sy-accent: #72883c;
   --sy-accent-strong: #3f5921;
   --sy-selected: #e8eddc;
   --sy-danger: #9a493b;
@@ -83,11 +83,7 @@
   --sy-radius-large: 18px;
   --sy-radius-small: 10px;
   color-scheme: light;
-  background:
-    linear-gradient(90deg, rgb(95 104 88 / 5%) 1px, transparent 1px),
-    linear-gradient(rgb(95 104 88 / 5%) 1px, transparent 1px),
-    var(--sy-canvas);
-  background-size: 40px 40px;
+  background: var(--sy-canvas);
 }
 
 .application-theme:not([data-theme-preset="ledger"]) h1,

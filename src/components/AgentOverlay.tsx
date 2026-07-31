@@ -356,13 +356,7 @@ export function AgentOverlay({
         aria-expanded={isOpen}
         onClick={() => setIsOpen(true)}
       >
-        <svg viewBox="0 0 48 48" aria-hidden="true">
-          <path d="M11 37V15.5C11 12.5 13.5 10 16.5 10H31" />
-          <path d="M18 37V22.5C18 19.5 20.5 17 23.5 17H37" />
-          <path d="M25 37V29.5C25 26.5 27.5 24 30.5 24H37" />
-          <circle cx="11" cy="37" r="2.5" />
-          <circle cx="37" cy="17" r="2.5" />
-        </svg>
+        <span className="agent-launcher-mark" aria-hidden="true" />
       </button>
     </aside>
   );
