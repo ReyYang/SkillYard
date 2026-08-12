@@ -7,6 +7,7 @@ import type {
   AgentStreamEvent,
   AiPreferences,
 } from "../domain";
+import agentMark from "../assets/ui/skillyard-agent-sprout-mark.png";
 import { useI18n } from "../i18n";
 import { AgentMarkdown } from "./AgentMarkdown";
 
@@ -54,8 +55,13 @@ export function AgentOverlay({
     aiPreferences.hasApiKey &&
     aiPreferences.verified;
 
-  const closeSession = () => {
-    // 明确关闭就是 Session 的唯一销毁点；失焦和页面导航不触发这里。
+  const closeDrawer = () => {
+    // 关闭只收起抽屉，返回后仍能继续当前只读会话。
+    setIsOpen(false);
+  };
+
+  const endSession = () => {
+    // 只有“结束会话”会取消请求并清空当前 Session。
     const requestId = activeRequestId.current;
     if (requestId) {
       void onCancel(requestId).catch(() => {
@@ -64,7 +70,6 @@ export function AgentOverlay({
     }
     activeRequestId.current = null;
     sessionGeneration.current += 1;
-    setIsOpen(false);
     setMessages([]);
     setDraft("");
     setError(null);
@@ -216,18 +221,27 @@ export function AgentOverlay({
           aria-label={t("SkillYard 助手")}
         >
           <header className="agent-window-header">
-            <div>
-              <p className="section-eyebrow">SKILLYARD · ASSIST</p>
-              <h2>{t("SkillYard 助手")}</h2>
+            <div className="agent-window-title">
+              <p className="section-eyebrow">{t("只读解释与搜索")}</p>
+              <h2>SkillYard Agent</h2>
             </div>
-            <button
-              className="agent-close"
-              type="button"
-              aria-label={t("关闭 SkillYard 助手")}
-              onClick={closeSession}
-            >
-              ×
-            </button>
+            <div className="agent-window-actions">
+              <button
+                className="agent-session-action"
+                type="button"
+                onClick={endSession}
+              >
+                {t("结束会话")}
+              </button>
+              <button
+                className="agent-close"
+                type="button"
+                aria-label={t("关闭 SkillYard Agent")}
+                onClick={closeDrawer}
+              >
+                {t("关闭")}
+              </button>
+            </div>
           </header>
 
           <div className="agent-messages" aria-live="polite">
@@ -330,12 +344,11 @@ export function AgentOverlay({
           <form className="agent-composer" onSubmit={send}>
             <label>
               <span className="visually-hidden">{t("向 SkillYard 提问")}</span>
-              <textarea
+              <input
                 aria-label={t("向 SkillYard 提问")}
                 value={draft}
                 disabled={!isReady || isSending}
-                placeholder={t("问问这个 Skill 能做什么…")}
-                rows={3}
+                placeholder={t("搜索 Bundle，或询问挂载状态")}
                 onChange={(event) => setDraft(event.target.value)}
               />
             </label>
@@ -356,7 +369,11 @@ export function AgentOverlay({
         aria-expanded={isOpen}
         onClick={() => setIsOpen(true)}
       >
-        <span className="agent-launcher-mark" aria-hidden="true" />
+        <img className="agent-launcher-mark" src={agentMark} alt="" />
+        <span className="agent-launcher-copy">
+          <strong>Agent</strong>
+          <small>{t("只读 · 搜索")}</small>
+        </span>
       </button>
     </aside>
   );

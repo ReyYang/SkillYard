@@ -1,6 +1,6 @@
 export type SupportedAppId = "codex" | "claudeCode" | "gitHubCopilot";
 export type InterfaceLanguage = "zhCn" | "en";
-export type ThemePreset = "archive" | "layers" | "ledger";
+export type ThemePreset = "layers" | "ledger";
 export type AiProvider = "openAi" | "glm" | "deepSeek";
 
 export interface AiPreferences {

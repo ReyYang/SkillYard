@@ -295,6 +295,9 @@ export function InventoryPage({
     () =>
       visibleGroups.map((group) => {
         const singleEntry = group.entries.length === 1 ? group.entries[0]! : null;
+        const summaryEntry = group.entries.find(
+          (entry) => entry.aiExplanation?.summary,
+        );
         const groupMounts = outcome.mounts.filter((mount) =>
           group.entries.some((entry) => entry.memberId === mount.memberId),
         );
@@ -320,7 +323,7 @@ export function InventoryPage({
           title: group.title,
           eyebrow: t(groupEyebrow(group.kind)),
           skillCount: group.entries.length,
-          summary: singleEntry?.aiExplanation?.summary ?? null,
+          summary: summaryEntry?.aiExplanation?.summary ?? null,
           category: singleEntry?.aiExplanation
             ? t(skillCategoryLabel(singleEntry.aiExplanation.category))
             : null,
@@ -371,31 +374,94 @@ export function InventoryPage({
 
   if (screen.type === "settings") {
     return (
-      <InventorySettingsPage
-        language={language}
-        theme={theme}
-        aiPreferences={aiPreferences}
-        isSavingLanguage={isSavingLanguage}
-        languageError={languageError}
-        isSavingTheme={isSavingTheme}
-        themeError={themeError}
-        aiOperation={aiOperation}
-        aiError={aiError}
-        isWriteBlocked={isWriteBlocked}
-        isOpeningCentralStore={isOpeningCentralStore}
-        isResettingApplication={isResettingApplication}
-        centralStoreError={centralStoreError}
-        resetError={resetError}
-        onOpenCentralStore={onOpenCentralStore}
-        onResetApplication={onResetApplication}
-        onLanguageChange={onLanguageChange}
-        onThemeChange={onThemeChange}
-        onAiConfigurationChange={onAiConfigurationChange}
-        onSaveAiApiKey={onSaveAiApiKey}
-        onDeleteAiApiKey={onDeleteAiApiKey}
-        onTestAiConnection={onTestAiConnection}
-        onBack={() => onScreenChange({ type: "list" })}
-      />
+      <main
+        className={`inventory-library-shell inventory-library-shell--${theme} inventory-settings-shell`}
+      >
+        <header
+          className="library-topbar"
+          data-library-chrome={theme}
+          data-tauri-drag-region
+        >
+          <span className="library-brand" aria-label="SkillYard">
+            <span className="library-brand-mark" aria-hidden="true" />
+          </span>
+          <nav className="library-primary-navigation" aria-label={t("主要导航")}>
+            <button
+              className="library-navigation-action library-navigation-current"
+              type="button"
+              onClick={() => onScreenChange({ type: "list" })}
+            >
+              {t("技能库")}
+            </button>
+            <button
+              className="library-navigation-action"
+              type="button"
+              disabled={isOpeningDiscover}
+              onClick={onDiscover}
+            >
+              {isOpeningDiscover ? t("正在打开…") : t("发现")}
+            </button>
+            <button
+              className="library-navigation-action"
+              type="button"
+              onClick={() => onScreenChange({ type: "list" })}
+            >
+              {t("项目")}
+            </button>
+          </nav>
+          <label className="library-search-field">
+            <span className="sr-only">{t("搜索 Skill")}</span>
+            <input
+              type="search"
+              value=""
+              readOnly
+              placeholder={t("搜索 Bundle 或 Skill")}
+              aria-label={t("搜索 Skill")}
+              onFocus={() => onScreenChange({ type: "list" })}
+            />
+          </label>
+          <button
+            className="library-install-action"
+            type="button"
+            aria-label={t("安装 Skill")}
+            disabled={isWriteBlocked || isOpeningInstaller}
+            onClick={onInstall}
+          >
+            {isOpeningInstaller ? t("正在打开…") : t("添加 Bundle")}
+          </button>
+          <span className="library-settings-profile" aria-hidden="true">
+            <span className="library-profile-mark" />
+          </span>
+        </header>
+        <InventorySettingsPage
+          language={language}
+          theme={theme}
+          aiPreferences={aiPreferences}
+          isSavingLanguage={isSavingLanguage}
+          languageError={languageError}
+          isSavingTheme={isSavingTheme}
+          themeError={themeError}
+          aiOperation={aiOperation}
+          aiError={aiError}
+          isWriteBlocked={isWriteBlocked}
+          isRefreshing={isRefreshing}
+          isCheckingUpdates={isCheckingUpdates}
+          isOpeningCentralStore={isOpeningCentralStore}
+          isResettingApplication={isResettingApplication}
+          centralStoreError={centralStoreError}
+          resetError={resetError}
+          onRefresh={onRefresh}
+          onCheckUpdates={onCheckUpdates}
+          onOpenCentralStore={onOpenCentralStore}
+          onResetApplication={onResetApplication}
+          onLanguageChange={onLanguageChange}
+          onThemeChange={onThemeChange}
+          onAiConfigurationChange={onAiConfigurationChange}
+          onSaveAiApiKey={onSaveAiApiKey}
+          onDeleteAiApiKey={onDeleteAiApiKey}
+          onTestAiConnection={onTestAiConnection}
+        />
+      </main>
     );
   }
 
@@ -1012,6 +1078,8 @@ function InventorySection({
   const previewEntries = entries.slice(0, 5);
   const remainingEntryCount = entries.length - previewEntries.length;
   const hasLifecycleActions = Boolean(batchMountBundleId || onTakeover);
+  const groupSummary = entries.find((entry) => entry.aiExplanation?.summary)
+    ?.aiExplanation?.summary;
   return (
     <section className="inventory-section" aria-label={title}>
       <header>
@@ -1050,13 +1118,27 @@ function InventorySection({
           <span>{t("{count} 个 Skill", { count: entries.length })}</span>
         </div>
       </header>
+      {entries.length > 1 ? (
+        <p className="bundle-library-summary">
+          {groupSummary ??
+            t("集中管理 {count} 个 Skill，并保留各自的来源与挂载状态。", {
+              count: entries.length,
+            })}
+        </p>
+      ) : null}
       <dl className="bundle-library-metadata">
         <div>
-          <dt>{t("来源")}</dt>
+          <dt>
+            <span className="bundle-source-mark" aria-hidden="true" />
+            {t("来源")}
+          </dt>
           <dd>{sourceNames.join("、") || t("来源未知")}</dd>
         </div>
         <div>
-          <dt>{t("当前挂载")}</dt>
+          <dt>
+            <span className="bundle-mount-mark" aria-hidden="true" />
+            {t("当前挂载")}
+          </dt>
           <dd>
             {mounts.length > 0
               ? `${t("{count} 个 Mount", { count: mounts.length })} · ${[
@@ -1075,10 +1157,15 @@ function InventorySection({
           >
             {previewEntries.map((entry) => (
               <li key={entry.id}>
-                <strong>{entry.skillName}</strong>
-                {entry.aiExplanation?.summary ? (
-                  <small>{entry.aiExplanation.summary}</small>
-                ) : null}
+                <span className="bundle-member-initial" aria-hidden="true">
+                  {skillInitials(entry.skillName)}
+                </span>
+                <span className="bundle-member-copy">
+                  <strong>{entry.skillName}</strong>
+                  {entry.aiExplanation?.summary ? (
+                    <small>{entry.aiExplanation.summary}</small>
+                  ) : null}
+                </span>
               </li>
             ))}
             {remainingEntryCount > 0 ? (
@@ -1105,7 +1192,8 @@ function InventorySection({
           aria-label={openLabel}
           onClick={onOpen}
         >
-          {entries.length === 1 ? t("查看详情") : t("查看成员")}
+          <span>{t("打开 Bundle")}</span>
+          <span className="bundle-open-arrow" aria-hidden="true" />
         </button>
         {hasLifecycleActions ? (
           <details className="inventory-section-menu">
@@ -1186,6 +1274,16 @@ function InventorySection({
   );
 }
 
+function skillInitials(name: string): string {
+  const initials = name
+    .split(/[\s/_-]+/u)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => Array.from(part)[0])
+    .join("");
+  return initials.toLocaleUpperCase() || "SY";
+}
+
 function InventorySettingsPage({
   language,
   theme,
@@ -1197,19 +1295,22 @@ function InventorySettingsPage({
   aiOperation,
   aiError,
   isWriteBlocked,
+  isRefreshing,
+  isCheckingUpdates,
   isOpeningCentralStore,
   isResettingApplication,
   centralStoreError,
   resetError,
   onOpenCentralStore,
   onResetApplication,
+  onRefresh,
+  onCheckUpdates,
   onLanguageChange,
   onThemeChange,
   onAiConfigurationChange,
   onSaveAiApiKey,
   onDeleteAiApiKey,
   onTestAiConnection,
-  onBack,
 }: {
   language: InterfaceLanguage;
   theme: ThemePreset;
@@ -1226,19 +1327,22 @@ function InventorySettingsPage({
     | null;
   aiError: string | null;
   isWriteBlocked: boolean;
+  isRefreshing: boolean;
+  isCheckingUpdates: boolean;
   isOpeningCentralStore: boolean;
   isResettingApplication: boolean;
   centralStoreError: string | null;
   resetError: string | null;
   onOpenCentralStore(): void;
   onResetApplication(): void;
+  onRefresh(): void;
+  onCheckUpdates(): void;
   onLanguageChange(language: InterfaceLanguage): void;
   onThemeChange(theme: ThemePreset): void;
   onAiConfigurationChange(configuration: AiConfigurationInput): Promise<void>;
   onSaveAiApiKey(apiKey: string): Promise<void>;
   onDeleteAiApiKey(): Promise<void>;
   onTestAiConnection(): Promise<void>;
-  onBack(): void;
 }) {
   const { t } = useI18n();
   const [apiKey, setApiKey] = useState("");
@@ -1267,16 +1371,18 @@ function InventorySettingsPage({
       model: changes.model ?? aiPreferences.model,
     });
   return (
-    <main className="inventory-shell inventory-subpage">
-      <PageBackButton onClick={onBack} />
-      <header className="detail-header">
+    <section className="inventory-settings-page">
+      <header className="settings-page-heading">
         <div>
-          <p className="eyebrow">SKILLYARD · SETTINGS</p>
+          <p className="section-eyebrow">{t("设置")}</p>
           <h1>{t("设置")}</h1>
+          <p className="settings-page-lead">
+            {t("主题只改变技能库的视觉表达；当前路由、搜索、筛选与 Agent 会话均会保留。")}
+          </p>
         </div>
       </header>
 
-      <section className="settings-card">
+      <section className="settings-card settings-language-card">
         <div>
           <p className="section-eyebrow">LANGUAGE</p>
           <h2>{t("语言")}</h2>
@@ -1299,21 +1405,16 @@ function InventorySettingsPage({
         </label>
       </section>
 
-      <section className="settings-card settings-card-stack">
+      <section className="settings-card settings-card-stack settings-theme-card">
         <div>
           <p className="section-eyebrow">APPEARANCE</p>
-          <h2>{t("主题")}</h2>
-          <p>{t("切换后立即应用，并在下次启动时保留。")}</p>
+          <h2>{t("技能库主题")}</h2>
+          <p>{t("两套主题共享同一产品状态与交互入口。")}</p>
         </div>
         <fieldset className="theme-preset-options" disabled={isSavingTheme}>
           <legend className="visually-hidden">{t("主题")}</legend>
-          {(["ledger", "archive", "layers"] as const).map((preset) => {
-            const label =
-              preset === "ledger"
-                ? "Ledger"
-                : preset === "archive"
-                  ? "Archive"
-                  : "Layers";
+          {(["layers", "ledger"] as const).map((preset) => {
+            const label = preset === "ledger" ? "Ledger" : "Layers";
             return (
               <label className="theme-preset-option" key={preset}>
                 <input
@@ -1329,10 +1430,8 @@ function InventorySettingsPage({
                   <strong>{label}</strong>
                   <small>
                     {preset === "ledger"
-                      ? t("清晰的清单与详情布局")
-                      : preset === "archive"
-                        ? t("突出当前 Bundle 的收藏架布局")
-                        : t("层叠浏览 Bundle 与当前详情")}
+                      ? t("高密度主从清单")
+                      : t("纸面、书脊与分层结构")}
                   </small>
                 </span>
               </label>
@@ -1347,41 +1446,16 @@ function InventorySettingsPage({
         ) : null}
       </section>
 
-      <section className="settings-card settings-card-stack">
+      <section className="settings-card settings-card-stack settings-provider-card">
         <div>
-          <p className="section-eyebrow">AI</p>
-          <h2>{t("AI 功能")}</h2>
+          <p className="section-eyebrow">AGENT PROVIDER</p>
+          <h2>Agent Provider</h2>
           <p>
-            {t(
-              "所有 AI 功能共用这一组 Provider 和模型。SkillYard 不会自动测试连接。",
-            )}
+            {t("Provider、模型与 Key 由用户配置；SkillYard 不会自动测试连接。")}
           </p>
         </div>
 
         <div className="settings-ai-controls">
-          <label className="settings-check">
-            <input
-              type="checkbox"
-              checked={aiPreferences.enabled}
-              disabled={aiBusy}
-              onChange={(event) => updateAi({ enabled: event.target.checked })}
-            />
-            <span>{t("启用 AI")}</span>
-          </label>
-          <label className="settings-check">
-            <input
-              type="checkbox"
-              checked={aiPreferences.disclosureAccepted}
-              disabled={aiBusy}
-              onChange={(event) =>
-                updateAi({ disclosureAccepted: event.target.checked })
-              }
-            />
-            <span>
-              {t("同意将非敏感 Skill 内容发送给所选 Provider")}
-            </span>
-          </label>
-
           <div className="settings-ai-grid">
             <label className="settings-select">
               <span>{t("模型供应商")}</span>
@@ -1420,85 +1494,150 @@ function InventorySettingsPage({
             </label>
           </div>
 
-          <div className="settings-key-row">
-            <div className="settings-key-field">
-              <span>API Key</span>
-              <div className="settings-key-input">
+          <details className="settings-provider-advanced">
+            <summary aria-label={t("管理 Agent Provider")}>
+              <span>
+                {aiPreferences.hasApiKey
+                  ? t("API Key 已保存在 macOS Keychain")
+                  : t("尚未保存 API Key")}
+              </span>
+              <span role="status" aria-live="polite">
+                {connectionStatus}
+              </span>
+            </summary>
+            <div className="settings-provider-advanced-content">
+              <label className="settings-check">
                 <input
-                  aria-label="API Key"
-                  type={isApiKeyVisible ? "text" : "password"}
-                  autoComplete="off"
-                  value={apiKey}
+                  type="checkbox"
+                  checked={aiPreferences.enabled}
                   disabled={aiBusy}
-                  onChange={(event) => setApiKey(event.target.value)}
+                  onChange={(event) =>
+                    updateAi({ enabled: event.target.checked })
+                  }
                 />
+                <span>{t("启用 AI")}</span>
+              </label>
+              <label className="settings-check">
+                <input
+                  type="checkbox"
+                  checked={aiPreferences.disclosureAccepted}
+                  disabled={aiBusy}
+                  onChange={(event) =>
+                    updateAi({ disclosureAccepted: event.target.checked })
+                  }
+                />
+                <span>
+                  {t("同意将非敏感 Skill 内容发送给所选 Provider")}
+                </span>
+              </label>
+
+              <div className="settings-key-row">
+                <div className="settings-key-field">
+                  <span>API Key</span>
+                  <div className="settings-key-input">
+                    <input
+                      aria-label="API Key"
+                      type={isApiKeyVisible ? "text" : "password"}
+                      autoComplete="off"
+                      value={apiKey}
+                      disabled={aiBusy}
+                      onChange={(event) => setApiKey(event.target.value)}
+                    />
+                    <button
+                      className="secondary-action compact-action"
+                      type="button"
+                      aria-pressed={isApiKeyVisible}
+                      disabled={aiBusy || apiKey.length === 0}
+                      onClick={() =>
+                        setIsApiKeyVisible((visible) => !visible)
+                      }
+                    >
+                      {isApiKeyVisible
+                        ? t("隐藏 API Key")
+                        : t("显示 API Key")}
+                    </button>
+                  </div>
+                </div>
                 <button
-                  className="secondary-action compact-action"
+                  className="secondary-action"
                   type="button"
-                  aria-pressed={isApiKeyVisible}
-                  disabled={aiBusy || apiKey.length === 0}
-                  onClick={() => setIsApiKeyVisible((visible) => !visible)}
+                  disabled={aiBusy || apiKey.trim().length === 0}
+                  onClick={async () => {
+                    await onSaveAiApiKey(apiKey);
+                    setApiKey("");
+                    setIsApiKeyVisible(false);
+                  }}
                 >
-                  {isApiKeyVisible ? t("隐藏 API Key") : t("显示 API Key")}
+                  {aiOperation === "savingKey"
+                    ? t("正在保存…")
+                    : t("保存 API Key")}
+                </button>
+                {aiPreferences.hasApiKey ? (
+                  <button
+                    className="secondary-action danger-muted"
+                    type="button"
+                    disabled={aiBusy}
+                    onClick={onDeleteAiApiKey}
+                  >
+                    {aiOperation === "deletingKey"
+                      ? t("正在删除…")
+                      : t("删除 API Key")}
+                  </button>
+                ) : null}
+              </div>
+
+              <div className="settings-ai-status">
+                <button
+                  className="primary-action compact-action"
+                  type="button"
+                  disabled={aiBusy || connectionTestDisabledReason !== null}
+                  onClick={onTestAiConnection}
+                >
+                  {aiOperation === "testing"
+                    ? t("正在测试…")
+                    : t("测试连接")}
                 </button>
               </div>
+              {aiError ? (
+                <p className="inline-error settings-ai-feedback" role="alert">
+                  <strong>{t("AI 设置未保存")}</strong>
+                  <span>{aiError}</span>
+                </p>
+              ) : null}
             </div>
-            <button
-              className="secondary-action"
-              type="button"
-              disabled={aiBusy || apiKey.trim().length === 0}
-              onClick={async () => {
-                await onSaveAiApiKey(apiKey);
-                setApiKey("");
-                setIsApiKeyVisible(false);
-              }}
-            >
-              {aiOperation === "savingKey"
-                ? t("正在保存…")
-                : t("保存 API Key")}
-            </button>
-            {aiPreferences.hasApiKey ? (
-              <button
-                className="secondary-action danger-muted"
-                type="button"
-                disabled={aiBusy}
-                onClick={onDeleteAiApiKey}
-              >
-                {aiOperation === "deletingKey"
-                  ? t("正在删除…")
-                  : t("删除 API Key")}
-              </button>
-            ) : null}
-          </div>
-
-          <div className="settings-ai-status">
-            <span>
-              {aiPreferences.hasApiKey
-                ? t("API Key 已保存在 macOS Keychain")
-                : t("尚未保存 API Key")}
-            </span>
-            <span role="status" aria-live="polite">
-              {connectionStatus}
-            </span>
-            <button
-              className="primary-action compact-action"
-              type="button"
-              disabled={aiBusy || connectionTestDisabledReason !== null}
-              onClick={onTestAiConnection}
-            >
-              {aiOperation === "testing" ? t("正在测试…") : t("测试连接")}
-            </button>
-          </div>
-          {aiError ? (
-            <p className="inline-error settings-ai-feedback" role="alert">
-              <strong>{t("AI 设置未保存")}</strong>
-              <span>{aiError}</span>
-            </p>
-          ) : null}
+          </details>
         </div>
       </section>
 
-      <section className="settings-card">
+      <section className="settings-card settings-maintenance-card">
+        <div>
+          <p className="section-eyebrow">MAINTENANCE</p>
+          <h2>{t("维护")}</h2>
+          <p>
+            {t("刷新本机是只读盘点；检查更新只访问已登记 Source，两者不会合并。")}
+          </p>
+        </div>
+        <div className="settings-maintenance-actions">
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isWriteBlocked || isRefreshing}
+            onClick={onRefresh}
+          >
+            {isRefreshing ? t("正在刷新本机…") : t("刷新本机")}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={isWriteBlocked || isCheckingUpdates}
+            onClick={onCheckUpdates}
+          >
+            {isCheckingUpdates ? t("正在检查更新…") : t("检查更新")}
+          </button>
+        </div>
+      </section>
+
+      <section className="settings-card settings-central-store-card">
         <div>
           <p className="section-eyebrow">CENTRAL STORE</p>
           <h2>{t("受管内容目录")}</h2>
@@ -1520,7 +1659,7 @@ function InventorySettingsPage({
         </button>
       </section>
 
-      <section className="settings-card">
+      <section className="settings-card settings-reset-card">
         <div>
           <p className="section-eyebrow">APPLICATION</p>
           <h2>{t("重置界面状态")}</h2>
@@ -1556,7 +1695,7 @@ function InventorySettingsPage({
           <span>{languageError}</span>
         </div>
       ) : null}
-    </main>
+    </section>
   );
 }
 

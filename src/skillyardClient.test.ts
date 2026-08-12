@@ -54,7 +54,7 @@ describe("Tauri IPC contract", () => {
       .mockResolvedValueOnce({
         type: "preferences",
         language: "en",
-        theme: "archive",
+        theme: "layers",
         ai: {
           enabled: false,
           disclosureAccepted: false,
@@ -67,7 +67,7 @@ describe("Tauri IPC contract", () => {
       .mockResolvedValueOnce({
         type: "preferences",
         language: "en",
-        theme: "archive",
+        theme: "layers",
         ai: {
           enabled: false,
           disclosureAccepted: false,
@@ -80,14 +80,14 @@ describe("Tauri IPC contract", () => {
 
     await tauriSkillYardClient.getPreferences();
     await tauriSkillYardClient.setInterfaceLanguage("en");
-    await tauriSkillYardClient.setThemePreset("archive");
+    await tauriSkillYardClient.setThemePreset("layers");
 
     expect(mocks.invoke).toHaveBeenNthCalledWith(1, "get_preferences");
     expect(mocks.invoke).toHaveBeenNthCalledWith(2, "set_interface_language", {
       language: "en",
     });
     expect(mocks.invoke).toHaveBeenNthCalledWith(3, "set_theme_preset", {
-      theme: "archive",
+      theme: "layers",
     });
   });
 

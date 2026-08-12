@@ -210,11 +210,10 @@ impl InterfaceLanguage {
     }
 }
 
-/// 三种固定主题共享同一份领域状态，只改变视觉 token 和 Bundle Library 构图。
+/// 两种固定主题共享同一份领域状态，只改变视觉 token 和 Bundle Library 构图。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ThemePreset {
-    Archive,
     Layers,
     Ledger,
 }
@@ -222,7 +221,6 @@ pub enum ThemePreset {
 impl ThemePreset {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Archive => "archive",
             Self::Layers => "layers",
             Self::Ledger => "ledger",
         }
@@ -230,7 +228,6 @@ impl ThemePreset {
 
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
-            "archive" => Some(Self::Archive),
             "layers" => Some(Self::Layers),
             "ledger" => Some(Self::Ledger),
             _ => None,
@@ -1900,6 +1897,14 @@ impl PlatformInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_preset_rejects_removed_archive_value() {
+        // Archive 已退出主题契约；旧值不能被静默映射到仍受支持的主题。
+        assert_eq!(ThemePreset::from_str("archive"), None);
+        assert_eq!(ThemePreset::from_str("layers"), Some(ThemePreset::Layers));
+        assert_eq!(ThemePreset::from_str("ledger"), Some(ThemePreset::Ledger));
+    }
 
     #[test]
     fn inventory_outcome_uses_the_frontend_camel_case_contract() {

@@ -64,6 +64,9 @@ const EN_MESSAGES = {
   "只读": "Read only",
   "Bundle 操作": "Bundle actions",
   "精选成员": "Featured members",
+  "打开 Bundle": "Open Bundle",
+  "集中管理 {count} 个 Skill，并保留各自的来源与挂载状态。":
+    "Manage {count} Skills together while preserving each Source and Mount state.",
   "还有 {count} 个 Skill": "{count} more Skills",
   "状态提示": "Status notices",
   "设置": "Settings",
@@ -76,6 +79,9 @@ const EN_MESSAGES = {
   "切换后立即更新，并在下次启动时保留。":
     "Changes apply immediately and remain after restart.",
   "主题": "Theme",
+  "技能库主题": "Skill Library theme",
+  "两套主题共享同一产品状态与交互入口。":
+    "Both themes share the same product state and interaction entry points.",
   "切换后立即应用，并在下次启动时保留。":
     "Changes apply immediately and remain after restart.",
   "清晰的清单与详情布局": "A clear list-and-detail layout",
@@ -85,13 +91,14 @@ const EN_MESSAGES = {
     "A layered Bundle browser with current details",
   "主题未保存": "Theme was not saved",
   "AI 功能": "AI features",
-  "所有 AI 功能共用这一组 Provider 和模型。SkillYard 不会自动测试连接。":
-    "All AI features use this Provider and model. SkillYard never tests the connection automatically.",
+  "Provider、模型与 Key 由用户配置；SkillYard 不会自动测试连接。":
+    "You configure the Provider, model, and key; SkillYard never tests the connection automatically.",
   "启用 AI": "Enable AI",
   "同意将非敏感 Skill 内容发送给所选 Provider":
     "Allow non-sensitive Skill content to be sent to the selected Provider",
   "模型供应商": "Model provider",
   "模型": "Model",
+  "管理 Agent Provider": "Manage Agent Provider",
   "正在保存…": "Saving…",
   "保存 API Key": "Save API Key",
   "显示 API Key": "Show API Key",
@@ -763,6 +770,18 @@ const EN_MESSAGES = {
   "SkillYard 助手": "SkillYard Assistant",
   "打开 SkillYard 助手": "Open SkillYard Assistant",
   "关闭 SkillYard 助手": "Close SkillYard Assistant",
+  "关闭 SkillYard Agent": "Close SkillYard Agent",
+  "只读解释与搜索": "Read-only explanations and search",
+  "结束会话": "End session",
+  "只读 · 搜索": "Read only · Search",
+  "搜索 Bundle，或询问挂载状态": "Search Bundles, or ask about Mount status",
+  "主题只改变技能库的视觉表达；当前路由、搜索、筛选与 Agent 会话均会保留。":
+    "Themes only change the Skill Library presentation; the current route, search, filters, and Agent session stay intact.",
+  "高密度主从清单": "Dense master-detail list",
+  "纸面、书脊与分层结构": "Paper, spines, and layered structure",
+  "维护": "Maintenance",
+  "刷新本机是只读盘点；检查更新只访问已登记 Source，两者不会合并。":
+    "Local refresh is a read-only inventory; update checks only visit registered Sources, and the two remain separate.",
   "可以从当前页面开始提问": "Ask from the current page",
   "助手只会读取 SkillYard 已知的内容并回答，不会执行安装、更新或删除。":
     "The assistant only reads content known to SkillYard and answers. It never installs, updates, or deletes anything.",

@@ -1,6 +1,6 @@
 .theme-preset-options {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.75rem;
   margin: 0;
   padding: 0;
@@ -41,32 +41,7 @@
   line-height: 1.45;
 }
 
-/*
- * 每个 Theme Preset 只定义语义 token；页面结构与生命周期仍由原有组件负责，
- * 避免视觉选择变成第二套应用。
- */
-.application-theme[data-theme-preset="archive"] {
-  --sy-canvas: #211821;
-  --sy-surface: rgb(55 40 52 / 82%);
-  --sy-surface-subtle: rgb(66 49 62 / 86%);
-  --sy-surface-strong: #493640;
-  --sy-text: #ead8c2;
-  --sy-muted: #ad9fa0;
-  --sy-border: rgb(233 210 185 / 18%);
-  --sy-accent: #c7f25e;
-  --sy-accent-strong: #e3ff99;
-  --sy-selected: rgb(125 96 112 / 35%);
-  --sy-danger: #ef8a77;
-  --sy-shadow: 0 24px 70px rgb(0 0 0 / 34%);
-  --sy-radius-large: 20px;
-  --sy-radius-small: 12px;
-  color-scheme: dark;
-  background:
-    radial-gradient(circle at 72% 12%, rgb(132 91 115 / 18%), transparent 31rem),
-    radial-gradient(circle at 14% 22%, rgb(111 77 100 / 20%), transparent 34rem),
-    var(--sy-canvas);
-}
-
+/* Theme Preset 只定义语义 token，领域状态与生命周期仍由原组件负责。 */
 .application-theme[data-theme-preset="layers"] {
   --sy-canvas: #e9e6e1;
   --sy-surface: rgb(250 248 244 / 94%);
@@ -86,16 +61,16 @@
   background: var(--sy-canvas);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) h1,
-.application-theme:not([data-theme-preset="ledger"]) .detail-header h1,
-.application-theme:not([data-theme-preset="ledger"]) .inventory-header h1 {
+.application-theme[data-theme-preset="layers"] h1,
+.application-theme[data-theme-preset="layers"] .detail-header h1,
+.application-theme[data-theme-preset="layers"] .inventory-header h1 {
   color: var(--sy-text);
   font-family: var(--sy-display-font);
   font-weight: 500;
   letter-spacing: -0.05em;
 }
 
-.application-theme:not([data-theme-preset="ledger"]) :is(
+.application-theme[data-theme-preset="layers"] :is(
     .inventory-summary,
     .refresh-summary,
     .section-eyebrow,
@@ -109,7 +84,7 @@
   color: var(--sy-muted);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) :is(
+.application-theme[data-theme-preset="layers"] :is(
     .inventory-controls,
     .inventory-section,
     .settings-card,
@@ -127,7 +102,7 @@
   box-shadow: var(--sy-shadow);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) :is(
+.application-theme[data-theme-preset="layers"] :is(
     .secondary-action,
     .bundle-open-action,
     .filter-group button,
@@ -140,7 +115,7 @@
   box-shadow: none;
 }
 
-.application-theme:not([data-theme-preset="ledger"]) :is(
+.application-theme[data-theme-preset="layers"] :is(
     .primary-action,
     .filter-group button[aria-pressed="true"],
     .agent-composer button
@@ -150,7 +125,7 @@
   box-shadow: 0 10px 28px rgb(200 243 106 / 14%);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) :is(
+.application-theme[data-theme-preset="layers"] :is(
     input,
     textarea,
     select
@@ -160,12 +135,12 @@
   background-color: var(--sy-surface-subtle);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) .search-field input {
+.application-theme[data-theme-preset="layers"] .search-field input {
   color: var(--sy-text);
   background: transparent;
 }
 
-.application-theme:not([data-theme-preset="ledger"]) :is(
+.application-theme[data-theme-preset="layers"] :is(
     .agent-window-header,
     .agent-composer
   ) {
@@ -173,7 +148,7 @@
   background: var(--sy-surface);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) :is(
+.application-theme[data-theme-preset="layers"] :is(
     .agent-message > p,
     .agent-markdown,
     .agent-empty,
@@ -184,19 +159,19 @@
   background: var(--sy-surface-subtle);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) .agent-message.user > p {
+.application-theme[data-theme-preset="layers"] .agent-message.user > p {
   color: #18200f;
   background: var(--sy-accent);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) button:focus-visible,
-.application-theme:not([data-theme-preset="ledger"]) input:focus-visible,
-.application-theme:not([data-theme-preset="ledger"]) select:focus-visible,
-.application-theme:not([data-theme-preset="ledger"]) textarea:focus-visible {
+.application-theme[data-theme-preset="layers"] button:focus-visible,
+.application-theme[data-theme-preset="layers"] input:focus-visible,
+.application-theme[data-theme-preset="layers"] select:focus-visible,
+.application-theme[data-theme-preset="layers"] textarea:focus-visible {
   outline-color: var(--sy-accent);
 }
 
-.application-theme:not([data-theme-preset="ledger"]) :is(
+.application-theme[data-theme-preset="layers"] :is(
     button,
     input,
     select,
@@ -212,16 +187,5 @@
 @media (max-width: 620px) {
   .theme-preset-options {
     grid-template-columns: 1fr;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .application-theme:not([data-theme-preset="ledger"]) :is(
-      button,
-      input,
-      select,
-      textarea
-    ) {
-    transition: none;
   }
 }

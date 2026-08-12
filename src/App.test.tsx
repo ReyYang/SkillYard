@@ -185,7 +185,6 @@ describe("本机清单", () => {
 
   it.each([
     ["ledger", "Ledger Bundle Library", "ledger-library-detail"],
-    ["archive", "Archive Bundle Library", "archive-library-cover-texture"],
     ["layers", "Layers Bundle Library", "layers-library-sheet"],
   ] as const)(
     "%s 使用自己的导航和主构图，不复用普通清单卡片",
@@ -315,6 +314,9 @@ describe("本机清单", () => {
     expect(within(library).getByText("github.com/example/catalog"))
       .toBeInTheDocument();
     expect(within(library).getByText("1 个 Mount · Codex")).toBeInTheDocument();
+    const detailBeforeKeyboardSelection = library.querySelector(
+      ".ledger-library-detail",
+    );
 
     await user.keyboard("{End}");
 
@@ -326,6 +328,9 @@ describe("本机清单", () => {
     expect(
       within(library).getByRole("heading", { name: finalName }),
     ).toBeInTheDocument();
+    expect(library.querySelector(".ledger-library-detail")).toBe(
+      detailBeforeKeyboardSelection,
+    );
     expect(within(library).getByRole("button", { name: "批量挂载" }))
       .toBeEnabled();
 
@@ -335,7 +340,7 @@ describe("本机清单", () => {
     });
   });
 
-  it("全局助手使用稳定 Skill ID，跨页面保持，并在明确关闭后销毁 Session", async () => {
+  it("全局助手使用稳定 Skill ID，关闭抽屉后保留，并只在结束会话后销毁 Session", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     vi.mocked(client.getPreferences).mockResolvedValue({
@@ -383,7 +388,7 @@ describe("本机清单", () => {
     expect(screen.getByText("这是一个示例 Skill。")).toBeInTheDocument();
 
     await user.click(
-      screen.getByRole("button", { name: "关闭 SkillYard 助手" }),
+      screen.getByRole("button", { name: "关闭 SkillYard Agent" }),
     );
     expect(
       screen.queryByRole("dialog", { name: "SkillYard 助手" }),
@@ -392,13 +397,16 @@ describe("本机清单", () => {
     await user.click(
       screen.getByRole("button", { name: "打开 SkillYard 助手" }),
     );
+    expect(screen.getByText("这是一个示例 Skill。")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "结束会话" }));
     expect(screen.queryByText("这是一个示例 Skill。")).not.toBeInTheDocument();
     expect(
       screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
     ).toHaveValue("");
   });
 
-  it("关闭助手后忽略仍在返回的旧 Session 回答", async () => {
+  it("结束会话后取消请求并忽略仍在返回的旧回答", async () => {
     const user = userEvent.setup();
     let finishReply: (() => void) | undefined;
     let emitEvent: ((event: AgentStreamEvent) => void) | undefined;
@@ -432,9 +440,7 @@ describe("本机清单", () => {
       "等待中的问题",
     );
     await user.click(screen.getByRole("button", { name: "发送" }));
-    await user.click(
-      screen.getByRole("button", { name: "关闭 SkillYard 助手" }),
-    );
+    await user.click(screen.getByRole("button", { name: "结束会话" }));
     expect(client.cancelAgent).toHaveBeenCalledWith(expect.any(String));
     await act(async () => {
       emitEvent?.({
@@ -450,9 +456,6 @@ describe("本机清单", () => {
       finishReply?.();
     });
 
-    await user.click(
-      screen.getByRole("button", { name: "打开 SkillYard 助手" }),
-    );
     expect(screen.queryByText("不应恢复的旧回答")).not.toBeInTheDocument();
   });
 
@@ -1062,7 +1065,9 @@ describe("本机清单", () => {
     expect(
       await screen.findByRole("heading", { name: "Settings" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Skill Library" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("设置")).toBeNull();
     expect(
       within(screen.getByRole("combobox", { name: "Interface language" }))
@@ -1070,194 +1075,6 @@ describe("本机清单", () => {
         .map((option) => option.textContent),
     ).toEqual(["English", "简体中文"]);
     expect(screen.queryByRole("option", { name: "Simplified Chinese" })).toBeNull();
-  });
-
-  it("设置使用固定名称切换 Archive，并保留当前清单与 Agent Session", async () => {
-    const user = userEvent.setup();
-    const client = createClient(
-      inventoryOutcome([
-        createManagedEntry({
-          id: "managed:alpha",
-          memberId: "member-alpha",
-          bundleId: "bundle-alpha",
-          bundleDisplayName: "Alpha",
-          skillName: "alpha",
-        }),
-        createManagedEntry({
-          id: "managed:beta",
-          memberId: "member-beta",
-          bundleId: "bundle-beta",
-          bundleDisplayName: "Beta",
-          skillName: "beta",
-        }),
-      ]),
-    );
-    const ai = {
-      ...defaultAiPreferences(),
-      enabled: true,
-      disclosureAccepted: true,
-      hasApiKey: true,
-      verified: true,
-    };
-    vi.mocked(client.getPreferences).mockResolvedValue({
-      language: "zhCn",
-      theme: "ledger",
-      ai,
-    });
-    vi.mocked(client.setThemePreset).mockResolvedValue({
-      language: "zhCn",
-      theme: "archive",
-      ai,
-    });
-    mockAgentStream(client, {
-      reply: "这个 Session 仍然存在。",
-      localMatchFound: true,
-      searchedPublicWeb: false,
-      searchResults: [],
-    });
-    render(<App client={client} />);
-
-    const ledger = await screen.findByRole("region", {
-      name: "Ledger Bundle Library",
-    });
-    await user.click(within(ledger).getByRole("button", { name: "Beta" }));
-    await user.type(
-      screen.getByRole("searchbox", { name: "搜索 Skill" }),
-      "beta",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "打开 SkillYard 助手" }),
-    );
-    await user.type(
-      screen.getByRole("textbox", { name: "向 SkillYard 提问" }),
-      "保留这个会话",
-    );
-    await user.click(screen.getByRole("button", { name: "发送" }));
-    expect(await screen.findByText("这个 Session 仍然存在。"))
-      .toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "设置" }));
-    expect(screen.getByRole("radio", { name: "Ledger" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "Archive" })).not.toBeChecked();
-    await user.click(screen.getByRole("radio", { name: "Archive" }));
-
-    expect(client.setThemePreset).toHaveBeenCalledWith("archive");
-    expect(document.querySelector(".application-theme")).toHaveAttribute(
-      "data-theme-preset",
-      "archive",
-    );
-    expect(screen.getByText("这个 Session 仍然存在。")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "返回上一页" }));
-    const archive = screen.getByRole("region", {
-      name: "Archive Bundle Library",
-    });
-    expect(screen.getByRole("searchbox", { name: "搜索 Skill" })).toHaveValue(
-      "beta",
-    );
-    expect(within(archive).getByRole("button", { name: "Beta" }))
-      .toHaveAttribute("aria-pressed", "true");
-  });
-
-  it("从持久化偏好恢复 Archive，并在英文设置中保留固定主题名称", async () => {
-    const user = userEvent.setup();
-    const client = createClient(
-      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
-    );
-    vi.mocked(client.getPreferences).mockResolvedValue({
-      language: "en",
-      theme: "archive",
-      ai: defaultAiPreferences(),
-    });
-
-    render(<App client={client} />);
-
-    const archive = await screen.findByRole("region", {
-      name: "Archive Bundle Library",
-    });
-    expect(archive).toHaveAttribute("data-theme-preset", "archive");
-    expect(client.setThemePreset).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "Settings" }));
-    expect(
-      within(screen.getByRole("group", { name: "Theme" }))
-        .getAllByRole("radio")
-        .map((radio) => radio.getAttribute("aria-label")),
-    ).toEqual(["Ledger", "Archive", "Layers"]);
-    expect(screen.getByRole("radio", { name: "Ledger" })).not.toBeChecked();
-    expect(screen.getByRole("radio", { name: "Archive" })).toBeChecked();
-    expect(screen.queryByRole("radio", { name: "档案" })).not.toBeInTheDocument();
-  });
-
-  it("Archive 在窄窗口和大量长名称 Bundle 中仍可用键盘浏览", async () => {
-    const user = userEvent.setup();
-    const entries = Array.from({ length: 48 }, (_, index) => {
-      const sequence = String(index + 1).padStart(2, "0");
-      return createManagedEntry({
-        id: `managed:archive-member-${sequence}`,
-        memberId: `archive-member-${sequence}`,
-        bundleId: `archive-bundle-${sequence}`,
-        bundleDisplayName:
-          index === 47
-            ? "archive-final-bundle-with-a-name-long-enough-to-wrap-without-hiding-actions"
-            : `Archive Bundle ${sequence}`,
-        skillName: `archive-skill-${sequence}`,
-      });
-    });
-    const client = createClient(inventoryOutcome(entries));
-    vi.mocked(client.getPreferences).mockResolvedValue({
-      language: "zhCn",
-      theme: "archive",
-      ai: defaultAiPreferences(),
-    });
-
-    render(<App client={client} />);
-
-    const archive = await screen.findByRole("region", {
-      name: "Archive Bundle Library",
-    });
-    const shelf = within(archive).getByRole("navigation", { name: "Bundle" });
-    expect(within(shelf).getAllByRole("button")).toHaveLength(48);
-
-    await user.click(
-      within(shelf).getByRole("button", { name: "Archive Bundle 01" }),
-    );
-    await user.keyboard("{End}");
-
-    const finalName =
-      "archive-final-bundle-with-a-name-long-enough-to-wrap-without-hiding-actions";
-    const finalBundle = within(shelf).getByRole("button", { name: finalName });
-    expect(finalBundle).toHaveAttribute("aria-pressed", "true");
-    expect(finalBundle).toHaveFocus();
-    expect(
-      within(archive).getByRole("heading", { name: finalName }),
-    ).toBeInTheDocument();
-
-    await user.keyboard("{ArrowLeft}");
-    expect(
-      within(shelf).getByRole("button", { name: "Archive Bundle 47" }),
-    ).toHaveAttribute("aria-pressed", "true");
-  });
-
-  it("Archive 在空清单中仍提供明确的空状态", async () => {
-    const client = createClient(inventoryOutcome([]));
-    vi.mocked(client.getPreferences).mockResolvedValue({
-      language: "zhCn",
-      theme: "archive",
-      ai: defaultAiPreferences(),
-    });
-
-    render(<App client={client} />);
-
-    const archive = await screen.findByRole("region", {
-      name: "Archive Bundle Library",
-    });
-    expect(within(archive).getByText("未发现 Skill")).toBeInTheDocument();
-    expect(
-      within(archive).getByText(
-        "你可以继续使用现有安装方式，再主动刷新本机。",
-      ),
-    ).toBeInTheDocument();
   });
 
   it("设置切换 Layers 时保留当前 Bundle、搜索与 Agent Session", async () => {
@@ -1289,7 +1106,7 @@ describe("本机清单", () => {
     };
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
-      theme: "archive",
+      theme: "ledger",
       ai,
     });
     vi.mocked(client.setThemePreset).mockResolvedValue({
@@ -1305,11 +1122,11 @@ describe("本机清单", () => {
     });
 
     render(<App client={client} />);
-    const archive = await screen.findByRole("region", {
-      name: "Archive Bundle Library",
+    const ledger = await screen.findByRole("region", {
+      name: "Ledger Bundle Library",
     });
     await user.click(
-      within(archive).getByRole("button", { name: "Layers Beta" }),
+      within(ledger).getByRole("button", { name: "Layers Beta" }),
     );
     await user.type(
       screen.getByRole("searchbox", { name: "搜索 Skill" }),
@@ -1326,6 +1143,12 @@ describe("本机清单", () => {
     expect(await screen.findByText("Layers 中仍保留。")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "设置" }));
+    expect(
+      within(screen.getByRole("group", { name: "主题" }))
+        .getAllByRole("radio")
+        .map((radio) => radio.getAttribute("aria-label")),
+    ).toEqual(["Layers", "Ledger"]);
+    expect(screen.queryByRole("radio", { name: "Archive" })).toBeNull();
     await user.click(screen.getByRole("radio", { name: "Layers" }));
 
     expect(client.setThemePreset).toHaveBeenCalledWith("layers");
@@ -1335,7 +1158,7 @@ describe("本机清单", () => {
     );
     expect(screen.getByText("Layers 中仍保留。")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+    await user.click(screen.getByRole("button", { name: "技能库" }));
     const layers = screen.getByRole("region", {
       name: "Layers Bundle Library",
     });
@@ -1343,11 +1166,14 @@ describe("本机清单", () => {
       "beta",
     );
     expect(
-      within(layers).getByRole("button", { name: "Layers Beta" }),
-    ).toHaveAttribute("aria-pressed", "true");
+      within(layers).getByRole("heading", { name: "Layers Beta" }),
+    ).toBeInTheDocument();
+    expect(
+      within(layers).queryByRole("button", { name: "Layers Beta" }),
+    ).toBeNull();
   });
 
-  it("从持久化偏好恢复 Layers，并在大量长名称 Bundle 中保持键盘焦点", async () => {
+  it("从持久化偏好恢复 Layers，并在大量长名称 Bundle 中用键盘切换纸张", async () => {
     const user = userEvent.setup();
     const previousWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", {
@@ -1382,25 +1208,22 @@ describe("本机清单", () => {
     });
     expect(client.setThemePreset).not.toHaveBeenCalled();
     const stack = within(layers).getByRole("navigation", { name: "Bundle" });
-    expect(within(stack).getAllByRole("button")).toHaveLength(48);
-
-    await user.click(
-      within(stack).getByRole("button", { name: "Layers Bundle 01" }),
+    expect(within(stack).getAllByRole("button")).toHaveLength(47);
+    const sheetBeforeKeyboardSelection = layers.querySelector(
+      ".layers-library-sheet",
     );
+
+    within(stack).getByRole("button", { name: "Layers Bundle 02" }).focus();
     await user.keyboard("{End}");
     const finalName =
       "layers-final-bundle-with-a-name-long-enough-to-remain-readable";
-    const finalBundle = within(stack).getByRole("button", { name: finalName });
-    expect(finalBundle).toHaveAttribute("aria-pressed", "true");
-    expect(finalBundle).toHaveFocus();
     expect(
       within(layers).getByRole("heading", { name: finalName }),
     ).toBeInTheDocument();
-
-    await user.keyboard("{Home}");
-    expect(
-      within(stack).getByRole("button", { name: "Layers Bundle 01" }),
-    ).toHaveFocus();
+    expect(layers.querySelector(".layers-library-sheet")).toBe(
+      sheetBeforeKeyboardSelection,
+    );
+    expect(within(stack).queryByRole("button", { name: finalName })).toBeNull();
 
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -1432,6 +1255,9 @@ describe("本机清单", () => {
 
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(
+      screen.getByLabelText("管理 Agent Provider"),
+    );
 
     const apiKeyInput = screen.getByLabelText("API Key");
     await user.type(apiKeyInput, "skillyard-fixture-visible-key");
@@ -1489,6 +1315,9 @@ describe("本机清单", () => {
 
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(
+      screen.getByLabelText("管理 Agent Provider"),
+    );
 
     expect(
       screen.getByRole("combobox", { name: "模型供应商" }),
@@ -1547,10 +1376,13 @@ describe("本机清单", () => {
 
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(
+      screen.getByLabelText("管理 Agent Provider"),
+    );
     await user.click(screen.getByRole("button", { name: "测试连接" }));
 
     const aiCard = screen
-      .getByRole("heading", { name: "AI 功能" })
+      .getByRole("heading", { name: "Agent Provider" })
       .closest("section");
     expect(aiCard).not.toBeNull();
     const feedback = await within(aiCard!).findByRole("alert");
@@ -1590,6 +1422,9 @@ describe("本机清单", () => {
 
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(
+      screen.getByLabelText("管理 Agent Provider"),
+    );
 
     const testButton = screen.getByRole("button", { name: "测试连接" });
     expect(testButton).toBeDisabled();
@@ -4273,7 +4108,7 @@ describe("本机清单", () => {
       await screen.findByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("mattpocock/skills")).not.toHaveLength(0);
-    expect(screen.getByText("2 个 Skill")).toBeInTheDocument();
+    expect(screen.getAllByText("2 个 Skill")).not.toHaveLength(0);
     const memberPreview = screen.getByRole("list", {
       name: "mattpocock/skills 的 Skill",
     });
@@ -4316,7 +4151,7 @@ describe("本机清单", () => {
     ).toBeInTheDocument();
   });
 
-  it("左上角返回按钮按实际进入路径从挂载、单成员 Skill 和设置返回", async () => {
+  it("返回入口按实际页面从挂载、单成员 Skill 和设置返回", async () => {
     const user = userEvent.setup();
     const client = createClient(inventoryOutcome([createManagedEntry()]));
 
@@ -4339,9 +4174,12 @@ describe("本机清单", () => {
 
     await user.click(screen.getByRole("button", { name: "设置" }));
     expect(
-      within(screen.getByRole("main")).getAllByRole("button")[0],
-    ).toHaveAccessibleName("返回上一页");
-    await user.click(screen.getByRole("button", { name: "返回上一页" }));
+      screen.queryByRole("button", { name: "返回上一页" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "技能库" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "技能库" }));
     expect(
       screen.getByRole("heading", { name: "Bundle 清单" }),
     ).toBeInTheDocument();

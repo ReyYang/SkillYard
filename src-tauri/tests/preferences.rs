@@ -45,12 +45,12 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
     assert_eq!(
         application
             .handle(UiIntent::SetThemePreset {
-                theme: ThemePreset::Archive,
+                theme: ThemePreset::Layers,
             })
             .expect("保存主题偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::ZhCn,
-            theme: ThemePreset::Archive,
+            theme: ThemePreset::Layers,
             ai: default_ai_preferences(),
         }
     );
@@ -63,7 +63,7 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
             .expect("保存英文偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::En,
-            theme: ThemePreset::Archive,
+            theme: ThemePreset::Layers,
             ai: default_ai_preferences(),
         }
     );
@@ -80,7 +80,7 @@ fn interface_language_is_saved_through_the_application_seam_and_restored() {
             .expect("重启后读取偏好应成功"),
         UiOutcome::Preferences {
             language: InterfaceLanguage::En,
-            theme: ThemePreset::Archive,
+            theme: ThemePreset::Layers,
             ai: default_ai_preferences(),
         }
     );

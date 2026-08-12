@@ -13,6 +13,8 @@
   --sy-shadow: 0 22px 58px rgb(32 41 33 / 9%);
   --sy-radius-large: 20px;
   --sy-radius-small: 12px;
+  --sy-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --sy-ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --sy-display-font:
     "New York", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
   --sy-display-ui-font:
@@ -182,7 +184,7 @@ h1 {
   line-height: 1.55;
 }
 
-.primary-action {
+.application-theme[data-theme-preset] .primary-action {
   min-width: 148px;
   padding: 0.95rem 1.35rem;
   border: 0;
@@ -193,10 +195,6 @@ h1 {
   cursor: pointer;
   font-weight: 700;
   transition: transform 140ms ease, opacity 140ms ease;
-}
-
-.primary-action:hover:not(:disabled) {
-  transform: translateY(-1px);
 }
 
 .primary-action:disabled {
@@ -2461,6 +2459,315 @@ code {
   margin: 0;
 }
 
+/* 设置页复用 Library 顶栏，并按交互稿组织两套主题、Provider 与维护入口。 */
+.inventory-settings-page {
+  display: grid;
+  grid-template:
+    "heading heading" auto
+    "theme provider" auto
+    "maintenance ." auto
+    "language language" auto
+    "central reset" auto
+    "feedback feedback" auto
+    / minmax(0, 1.18fr) minmax(0, 0.86fr);
+  gap: 24px;
+  min-width: 0;
+  min-height: 0;
+  padding: 30px 64px 54px;
+  overflow: auto;
+  background: var(--sy-canvas);
+  animation: settings-route-enter 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.settings-page-heading {
+  grid-area: heading;
+  padding-bottom: 12px;
+}
+
+.settings-page-heading .section-eyebrow {
+  margin: 0 0 16px;
+  color: #81827b;
+  font-size: 10px;
+  font-weight: 520;
+  letter-spacing: 0;
+}
+
+.settings-page-heading h1 {
+  margin: 0;
+  color: #292b26;
+  font-family: var(--sy-display-font);
+  font-size: 44px;
+  font-weight: 520;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+
+.settings-page-heading .settings-page-lead {
+  max-width: 650px;
+  margin: 17px 0 0;
+  color: #777972;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.inventory-settings-page .settings-card {
+  min-width: 0;
+  margin: 0;
+  padding: 24px 26px;
+  border: 1px solid rgb(55 54 48 / 15%);
+  border-radius: 2px;
+  color: var(--sy-text);
+  background: rgb(250 249 246 / 88%);
+  box-shadow: none;
+}
+
+.inventory-settings-page .settings-card h2 {
+  color: #2b2d28;
+  font-family: var(--sy-display-font);
+  font-size: 24px;
+  font-weight: 560;
+  letter-spacing: -0.025em;
+}
+
+.inventory-settings-page
+  :is(.settings-theme-card, .settings-provider-card, .settings-maintenance-card)
+  > div
+  > .section-eyebrow {
+  display: none;
+}
+
+.inventory-settings-page .settings-card-stack {
+  gap: 0;
+  justify-content: flex-start;
+}
+
+.inventory-settings-page .settings-card .section-eyebrow {
+  margin: 0 0 9px;
+  color: #83857e;
+  font-size: 9px;
+  font-weight: 560;
+  letter-spacing: 0.08em;
+}
+
+.inventory-settings-page .settings-card p:not(.section-eyebrow) {
+  color: #777972;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.settings-theme-card {
+  grid-area: theme;
+}
+
+.settings-provider-card {
+  grid-area: provider;
+}
+
+.settings-maintenance-card {
+  grid-area: maintenance;
+}
+
+.settings-language-card {
+  grid-area: language;
+}
+
+.settings-central-store-card {
+  grid-area: central;
+}
+
+.settings-reset-card {
+  grid-area: reset;
+}
+
+.inventory-settings-page > .inline-error {
+  grid-area: feedback;
+}
+
+.inventory-settings-page .theme-preset-options {
+  margin-top: 16px;
+  gap: 12px;
+}
+
+.inventory-settings-page .theme-preset-option {
+  min-height: 92px;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 15px 16px;
+  border-radius: 10px;
+  background: #f8f6f2;
+}
+
+.inventory-settings-page .theme-preset-option:has(input:checked) {
+  border-color: #809f3e;
+  background: #d8ee72;
+  box-shadow: inset 0 0 0 1px rgb(128 159 62 / 22%);
+}
+
+.inventory-settings-page .theme-preset-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.inventory-settings-page .theme-preset-option strong {
+  font-size: 13px;
+}
+
+.inventory-settings-page .theme-preset-option small {
+  color: #70736b;
+  font-size: 11px;
+}
+
+.inventory-settings-page :is(.settings-select, .settings-key-field) {
+  color: #757870;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.inventory-settings-page :is(.settings-select select, .settings-key-field input) {
+  min-height: 40px;
+  padding: 0 38px 0 12px;
+  border: 1px solid rgb(55 54 48 / 17%);
+  border-radius: 10px;
+  color: #30332d;
+  background-color: #fbfaf7;
+  font-size: 12px;
+  font-weight: 520;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.inventory-settings-page .settings-select select {
+  appearance: none;
+  background-image: url("./assets/ui/chevron-down.png");
+  background-position: right 11px center;
+  background-repeat: no-repeat;
+  background-size: 15px 15px;
+}
+
+.inventory-settings-page .settings-ai-controls {
+  gap: 13px;
+}
+
+.inventory-settings-page .settings-provider-card .settings-ai-controls {
+  margin-top: 10px;
+}
+
+.inventory-settings-page .settings-check {
+  color: #4f534c;
+  font-size: 11px;
+  font-weight: 560;
+}
+
+.inventory-settings-page .settings-ai-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.inventory-settings-page .settings-ai-grid .settings-select,
+.inventory-settings-page .settings-ai-grid select {
+  width: 100%;
+  min-width: 0;
+}
+
+.settings-provider-advanced {
+  border-top: 1px solid rgb(55 54 48 / 15%);
+}
+
+.settings-provider-advanced > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  gap: 8px;
+  align-items: center;
+  min-height: 36px;
+  color: #73766f;
+  cursor: pointer;
+  font-size: 10px;
+  list-style: none;
+}
+
+.settings-provider-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-provider-advanced > summary::after {
+  width: 16px;
+  height: 16px;
+  background: url("./assets/ui/chevron-down.png") center / contain no-repeat;
+  content: "";
+  transition: transform 150ms cubic-bezier(0.22, 0.72, 0.24, 1);
+}
+
+.settings-provider-advanced[open] > summary::after {
+  transform: rotate(180deg);
+}
+
+.settings-provider-advanced-content {
+  display: grid;
+  gap: 13px;
+  padding-top: 12px;
+  border-top: 1px solid rgb(55 54 48 / 10%);
+}
+
+.inventory-settings-page .settings-key-row {
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.inventory-settings-page .settings-key-field {
+  flex-basis: 100%;
+}
+
+.inventory-settings-page .settings-key-input button,
+.inventory-settings-page .settings-key-row > button {
+  min-height: 34px;
+  font-size: 10px;
+}
+
+.inventory-settings-page .settings-ai-status {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 10px;
+  color: #74776f;
+  font-size: 10px;
+}
+
+.inventory-settings-page .settings-ai-status span:first-child {
+  grid-column: 1 / -1;
+}
+
+.inventory-settings-page .settings-ai-status button {
+  min-width: 92px;
+  min-height: 34px;
+}
+
+.settings-maintenance-card {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.settings-maintenance-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.settings-maintenance-actions .secondary-action {
+  min-width: 92px;
+  min-height: 38px;
+  box-shadow: none;
+}
+
+@keyframes settings-route-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
 .skill-member-list {
   display: grid;
   gap: 0.75rem;
@@ -2809,7 +3116,7 @@ code {
   pointer-events: auto;
 }
 
-.agent-launcher {
+.application-theme[data-theme-preset] .agent-launcher {
   display: grid;
   width: 64px;
   height: 64px;
@@ -3128,9 +3435,252 @@ code {
 }
 
 .agent-composer button:disabled,
-.agent-composer textarea:disabled {
+.agent-composer textarea:disabled,
+.agent-composer input:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+/* 交互稿中的 Agent 是右侧抽屉；关闭只收起，结束会话才清空。 */
+.agent-overlay {
+  right: 28px;
+  bottom: 22px;
+  gap: 0;
+}
+
+.agent-launcher {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  width: 122px;
+  height: 58px;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 8px 5px 3px;
+  border: 0;
+  border-radius: 14px;
+  color: #2d3129;
+  background: transparent;
+  box-shadow: none;
+  transition:
+    background-color 150ms cubic-bezier(0.22, 0.72, 0.24, 1),
+    transform 150ms cubic-bezier(0.22, 0.72, 0.24, 1);
+}
+
+.agent-launcher-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 0;
+  object-fit: contain;
+  background: transparent;
+  transition: transform 160ms var(--sy-ease-out);
+}
+
+.agent-launcher-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  text-align: left;
+}
+
+.agent-launcher-copy strong {
+  color: #30332d;
+  font-family: var(--sy-display-ui-font);
+  font-size: 13px;
+  font-weight: 670;
+}
+
+.agent-launcher-copy small {
+  color: #85877f;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.agent-overlay:has(.agent-window) .agent-launcher {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.agent-window {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  bottom: 14px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  width: 388px;
+  height: auto;
+  overflow: hidden;
+  border: 1px solid rgb(55 54 48 / 18%);
+  border-radius: 18px;
+  color: #282a25;
+  background: rgb(250 249 246 / 98%);
+  box-shadow: -24px 24px 72px rgb(28 30 25 / 18%);
+  animation: agent-drawer-enter 250ms var(--sy-ease-drawer) both;
+}
+
+.agent-window-header {
+  display: flex;
+  min-height: 98px;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 15px 20px;
+  border-bottom: 1px solid rgb(55 54 48 / 14%);
+  border-radius: 18px 18px 0 0;
+  background: #f6f5f1;
+}
+
+.agent-window-title {
+  min-width: 0;
+}
+
+.agent-window-header h2 {
+  margin: 0;
+  color: #292b26;
+  font-family: var(--sy-display-font);
+  font-size: 24px;
+  font-weight: 560;
+  letter-spacing: -0.025em;
+}
+
+.agent-window-header .section-eyebrow {
+  margin: 0 0 7px;
+  color: #82847d;
+  font-size: 9px;
+  font-weight: 540;
+  letter-spacing: 0.04em;
+}
+
+.agent-window-actions {
+  display: flex;
+  flex: none;
+  gap: 5px;
+  align-items: center;
+}
+
+.agent-session-action,
+.agent-close {
+  width: auto;
+  height: 32px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 8px;
+  color: #6e7069;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 32px;
+  white-space: nowrap;
+}
+
+.agent-session-action:hover,
+.agent-close:hover {
+  color: #30322d;
+  background: #ecebe6;
+}
+
+.agent-messages {
+  gap: 12px;
+  padding: 18px 20px;
+}
+
+.agent-empty {
+  margin: 0;
+  padding: 14px 15px;
+  border: 1px solid rgb(55 54 48 / 13%);
+  border-radius: 0;
+  color: #4e514b;
+  background: #fbfaf7;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-empty strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.agent-message {
+  max-width: 92%;
+}
+
+.agent-message > p,
+.agent-markdown {
+  border-radius: 12px;
+}
+
+.agent-configuration-note {
+  margin: 0 20px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.agent-window > .inline-error {
+  margin: 0 20px 10px;
+}
+
+.agent-composer {
+  grid-template-columns: minmax(0, 1fr) 56px;
+  gap: 8px;
+  padding: 12px 18px 16px 20px;
+  border-top: 1px solid rgb(55 54 48 / 14%);
+  border-radius: 0 0 18px 18px;
+  background: #f7f6f2;
+}
+
+.agent-composer input {
+  width: 100%;
+  height: 44px;
+  padding: 0 13px;
+  border: 1px solid rgb(55 54 48 / 18%);
+  border-radius: 11px;
+  outline: 0;
+  color: inherit;
+  background: #fbfaf7;
+  font: inherit;
+  font-size: 12px;
+}
+
+.agent-composer input:focus-visible {
+  border-color: #829c48;
+  outline: 2px solid rgb(130 156 72 / 18%);
+}
+
+.agent-composer button {
+  align-self: stretch;
+  padding: 0 12px;
+  border-radius: 11px;
+  color: #27311b;
+  background: #d5ed72;
+  font-size: 12px;
+}
+
+@keyframes agent-drawer-enter {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}
+
+@keyframes reduced-motion-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .primary-action:hover:not(:disabled) {
+    transform: translateY(-1px);
+  }
+
+  .agent-launcher:hover {
+    background: rgb(250 248 244 / 72%);
+    transform: translateY(-2px);
+  }
+
+  .agent-launcher:hover .agent-launcher-mark {
+    transform: rotate(-1deg) scale(1.035);
+  }
 }
 
 .visually-hidden {
@@ -3160,8 +3710,33 @@ code {
   *::before,
   *::after {
     scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+  }
+
+  .inventory-settings-page,
+  .agent-window {
+    animation: reduced-motion-fade 160ms var(--sy-ease-out) both;
+  }
+
+  .spinner {
+    animation: none;
+  }
+
+  .application-theme[data-theme-preset] .primary-action,
+  .application-theme[data-theme-preset] .agent-launcher,
+  .agent-launcher-mark {
+    transition-property: opacity, color, background-color, border-color;
+    transition-duration: 160ms;
+    transition-timing-function: var(--sy-ease-out);
+  }
+
+  .primary-action:hover:not(:disabled),
+  .agent-launcher:hover,
+  .agent-launcher:hover .agent-launcher-mark,
+  .settings-provider-advanced[open] > summary::after {
+    transform: none;
+  }
+
+  .settings-provider-advanced > summary::after {
+    transition: none;
   }
 }
