@@ -1,4 +1,9 @@
-import { type KeyboardEvent, type ReactNode } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 
 import type { ThemePreset } from "../../domain";
 import { useI18n } from "../../i18n";
@@ -8,8 +13,6 @@ export interface BundleLibraryItem {
   title: string;
   eyebrow: string;
   skillCount: number;
-  summary: string | null;
-  category: string | null;
   status: string;
   statusTone: "accent" | "warning" | "muted";
 }
@@ -112,7 +115,9 @@ function LedgerLibrary({
             key={item.id}
             data-library-select
             aria-label={item.title}
+            aria-describedby={`ledger-library-item-${index}-count ledger-library-item-${index}-status`}
             aria-pressed={item.id === activeId}
+            tabIndex={item.id === activeId ? 0 : -1}
             onClick={() => onSelect(item.id)}
           >
             <span className="ledger-library-index">
@@ -120,8 +125,15 @@ function LedgerLibrary({
             </span>
             <span className="ledger-library-item-copy">
               <strong>{item.title}</strong>
-              <small>{item.skillCount} Skill</small>
-              <em data-tone={item.statusTone}>{item.status}</em>
+              <small id={`ledger-library-item-${index}-count`}>
+                {t("{count} 个 Skill", { count: item.skillCount })}
+              </small>
+              <em
+                id={`ledger-library-item-${index}-status`}
+                data-tone={item.statusTone}
+              >
+                {item.status}
+              </em>
             </span>
             <span className="ledger-library-disclosure" aria-hidden="true">
               {t("打开")}
@@ -134,10 +146,6 @@ function LedgerLibrary({
           {bundleInitial(activeItem.title)}.
         </span>
         {renderDetails(activeId)}
-        <span className="ledger-library-subline">
-          <span>{t("{count} 个 Skill", { count: activeItem.skillCount })}</span>
-          <em data-tone={activeItem.statusTone}>· {activeItem.status}</em>
-        </span>
       </article>
     </section>
   );
@@ -154,7 +162,24 @@ function LayersLibrary({
   onSelect(id: string): void;
   renderDetails(id: string): ReactNode;
 }) {
+  const { t } = useI18n();
   const activeItem = items.find((item) => item.id === activeId) ?? items[0]!;
+  const sheetRef = useRef<HTMLElement>(null);
+  const focusSheetAfterSelection = useRef(false);
+  useLayoutEffect(() => {
+    if (!focusSheetAfterSelection.current) return;
+    focusSheetAfterSelection.current = false;
+    sheetRef.current?.focus();
+  }, [activeId]);
+  const selectAndFocusSheet = (id: string) => {
+    if (id === activeId) {
+      focusSheetAfterSelection.current = false;
+      sheetRef.current?.focus();
+      return;
+    }
+    focusSheetAfterSelection.current = true;
+    onSelect(id);
+  };
   // 当前 Bundle 已展开成纸张；书脊只保留其余 Bundle，避免同一项重复出现。
   const inactiveItems = items.filter((item) => item.id !== activeId);
   return (
@@ -170,31 +195,67 @@ function LayersLibrary({
           className="layers-library-stack"
           aria-label="Bundle"
           onKeyDown={(event) =>
-            moveLayerKeyboardSelection(event, inactiveItems, onSelect)
+            moveLayerKeyboardSelection(
+              event,
+              items,
+              activeId,
+              selectAndFocusSheet,
+            )
           }
         >
-          {inactiveItems.map((item, index) => (
-            <button
-              className="layers-library-card"
-              type="button"
-              key={item.id}
-              data-library-select
-              data-bundle-id={item.id}
-              data-layer-tone={String(index % 4)}
-              aria-label={item.title}
-              onClick={() => onSelect(item.id)}
-            >
-              <span className="layers-library-card-index">
-                {bundleInitial(item.title)}.
-              </span>
-              <span className="layers-library-card-copy">
-                <strong>{item.title}</strong>
-              </span>
-            </button>
-          ))}
+          {inactiveItems.map((item) => {
+            const itemIndex = items.findIndex((entry) => entry.id === item.id);
+            return (
+              <button
+                className="layers-library-card"
+                type="button"
+                key={item.id}
+                data-library-select
+                data-bundle-id={item.id}
+                data-layer-tone={String(itemIndex % 4)}
+                tabIndex={-1}
+                aria-label={item.title}
+                aria-describedby={`layers-library-card-${itemIndex}-count layers-library-card-${itemIndex}-status`}
+                onClick={() => selectAndFocusSheet(item.id)}
+              >
+                <span className="layers-library-card-index">
+                  {bundleInitial(item.title)}.
+                </span>
+                <span className="layers-library-card-copy">
+                  <strong>{item.title}</strong>
+                  <span className="layers-library-card-meta">
+                    <small id={`layers-library-card-${itemIndex}-count`}>
+                      {t("{count} 个 Skill", { count: item.skillCount })}
+                    </small>
+                    <em
+                      id={`layers-library-card-${itemIndex}-status`}
+                      data-tone={item.statusTone}
+                    >
+                      {item.status}
+                    </em>
+                  </span>
+                </span>
+              </button>
+            );
+          })}
         </nav>
       </div>
-      <article className="layers-library-sheet" tabIndex={-1}>
+      <article
+        ref={sheetRef}
+        className="layers-library-sheet"
+        aria-label={activeItem.title}
+        data-bundle-id={activeId}
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          moveLayerKeyboardSelection(
+            event,
+            items,
+            activeId,
+            selectAndFocusSheet,
+          );
+        }}
+      >
         <span className="layers-library-monogram" aria-hidden="true">
           {bundleInitial(activeItem.title)}.
         </span>
@@ -207,6 +268,7 @@ function LayersLibrary({
 function moveLayerKeyboardSelection(
   event: KeyboardEvent<HTMLElement>,
   items: BundleLibraryItem[],
+  activeId: string,
   onSelect: (id: string) => void,
 ) {
   const keys = ["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End"];
@@ -219,7 +281,7 @@ function moveLayerKeyboardSelection(
       : undefined;
   const currentIndex = Math.max(
     0,
-    items.findIndex((item) => item.id === focusedId),
+    items.findIndex((item) => item.id === (focusedId ?? activeId)),
   );
   const nextIndex =
     event.key === "Home"
@@ -229,14 +291,7 @@ function moveLayerKeyboardSelection(
         : event.key === "ArrowDown" || event.key === "ArrowRight"
           ? (currentIndex + 1) % items.length
           : (currentIndex - 1 + items.length) % items.length;
-  const library = event.currentTarget.closest(".layers-library");
   onSelect(items[nextIndex]!.id);
-  // 选中的书脊会转成纸张，下一帧把焦点交给新详情，避免焦点落到页面根节点。
-  requestAnimationFrame(() => {
-    library
-      ?.querySelector<HTMLElement>(".layers-library-sheet")
-      ?.focus();
-  });
 }
 
 function moveKeyboardSelection(

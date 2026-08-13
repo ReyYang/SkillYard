@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+# 在私有临时位置验证可选维护工具，不把测试二进制写入 Blueprint 或项目状态。
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)
+RUSTC=$(command -v rustc || true)
+if [ -z "$RUSTC" ]; then
+  printf '%s\n' '缺少 rustc，无法运行测试。' >&2
+  exit 3
+fi
+UNIT_TEMP="${TMPDIR:-/tmp}/agent-fabric-unit-tests-$$"
+ACCEPTANCE_TEMP="${TMPDIR:-/tmp}/agent-fabric-acceptance-tests-$$"
+trap 'rm -f -- "$UNIT_TEMP" "$ACCEPTANCE_TEMP"' EXIT HUP INT TERM
+"$RUSTC" --edition=2021 --test -C debuginfo=0 -o "$UNIT_TEMP" "$PROJECT_ROOT/.agent-fabric/src/main.rs"
+"$UNIT_TEMP" --test-threads=1 "$@"
+"$RUSTC" --edition=2021 --test -C debuginfo=0 -o "$ACCEPTANCE_TEMP" "$PROJECT_ROOT/.agent-fabric/tests/portable_acceptance.rs"
+AGENT_FABRIC_TEST_PROJECT_ROOT="$PROJECT_ROOT" "$ACCEPTANCE_TEMP" --test-threads=1 "$@"

@@ -217,9 +217,7 @@ export function DiscoverPage({
               <button
                 className="compact-action"
                 type="button"
-                aria-label={t("管理 {source}", {
-                  source: source.displayName,
-                })}
+                aria-label={`${t("前往 Source 管理")}：${source.displayName}`}
                 onClick={() => onOpenSourceManagement(source.id, null)}
               >
                 {t("前往 Source 管理")}
@@ -353,9 +351,15 @@ function DiscoverGroupCard({
             className="compact-action"
             type="button"
             disabled={previewingUrl !== null}
-            aria-label={t("查看 {title} 的安装预览", {
-              title: installable.title,
-            })}
+            aria-label={
+              previewingUrl === installable.url
+                ? t("正在准备…：{title}", {
+                    title: installable.title,
+                  })
+                : t("查看安装预览：{title}", {
+                    title: installable.title,
+                  })
+            }
             onClick={() => onPreviewInstall(installable)}
           >
             {previewingUrl === installable.url

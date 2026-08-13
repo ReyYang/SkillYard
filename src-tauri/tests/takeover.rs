@@ -516,6 +516,19 @@ fn verified_lock_v3_bundle_can_plan_all_installed_members_together() {
             .iter()
             .all(|entry| entry.bundle_display_name.as_deref() == Some("owner/repository"))
     );
+    assert_eq!(
+        managed
+            .iter()
+            .map(|entry| (
+                entry.skill_name.as_str(),
+                entry
+                    .description
+                    .as_deref()
+                    .expect("受管 Skill 应保留原始 description"),
+            ))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([("alpha", "Bundle 成员 alpha"), ("beta", "Bundle 成员 beta"),])
+    );
     for member in &plan.members {
         assert!(
             !shared_root.join(&member.skill_name).exists(),
@@ -540,12 +553,16 @@ fn verified_lock_v3_bundle_can_plan_all_installed_members_together() {
         UiOutcome::Inventory { entries, .. } => entries,
         _ => panic!("重启后应返回 Inventory"),
     };
-    assert_eq!(
-        restarted_entries
+    let restarted_managed = restarted_entries
+        .iter()
+        .filter(|entry| entry.bundle_id.as_deref() == Some(plan.bundle_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(restarted_managed.len(), 2);
+    assert!(
+        restarted_managed
             .iter()
-            .filter(|entry| entry.bundle_id.as_deref() == Some(plan.bundle_id.as_str()))
-            .count(),
-        2
+            .all(|entry| entry.description.as_deref().is_some()),
+        "重启后仍应从受管 Member 读取原始 description"
     );
 }
 

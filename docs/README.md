@@ -5,7 +5,7 @@
 ## 权威顺序
 
 1. [1.0 产品契约](1.0-product-contract.md)定义已经发布的 Skill 生命周期承诺，1.1.0 不改变这些边界。
-2. [1.1.0 产品规格](prd/0002-skillyard-1.1.0-agent.md)定义下一版本新增的可选 Agent、AI 整理、全网发现、语言能力和三套主题。
+2. [1.1.0 产品规格](prd/0002-skillyard-1.1.0-agent.md)定义下一版本新增的可选 Agent、AI 整理、全网发现、语言能力和两套主题。
 3. [1.0 PRD](prd/0001-skillyard-1.0.md)把 1.0 边界整理为完整用户故事、实施决策、测试决策和非目标。
 4. [1.0 实施计划](plans/0001-skillyard-1.0-implementation.md)定义 1.0 已经采用的纵向实施顺序、阶段范围和验收门槛。
 5. [1.0 接管与管理权设计](1.0-management-authority.md)定义生命周期承诺如何落到本地数据、文件、事务和界面行为。
@@ -21,7 +21,7 @@
 
 可重复的自动化、macOS 应用契约和人工流程验收仍记录在 [1.0 User Story 验收证据](acceptance/1.0-user-story-evidence.md)，这些证据只验证现有产品承诺，不增加新的产品能力。
 
-下一版本为 1.1.0。它在不改变现有 Skill 生命周期的前提下增加可选 Agent、AI 整理、全网 Skill 发现、简体中文／English 切换，以及 `Archive`、`Layers`、`Ledger` 三套主题；详细边界以 [1.1.0 产品规格](prd/0002-skillyard-1.1.0-agent.md)为准。
+下一版本为 1.1.0。它在不改变现有 Skill 生命周期的前提下增加可选 Agent、AI 整理、全网 Skill 发现、简体中文／English 切换，以及 `Layers`、`Ledger` 两套主题；详细边界以 [1.1.0 产品规格](prd/0002-skillyard-1.1.0-agent.md)为准。这里的主题范围不改变从 ZIP / `.skill` 归档文件安装的能力。
 
 ## 研究资料
 

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+# 只用于初始化、重新配置或验收时的命令兼容性探测，不转发日常 Agent 任务。
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CORE="$SCRIPT_DIR/agent-fabric-core"
+if [ ! -x "$CORE" ]; then
+  printf '%s\n' '{"error":"runtime_missing","message":"维护 Core 尚未构建；无需它也能使用 Agent Fabric Skill。","ok":false}'
+  exit 3
+fi
+exec "$CORE" agent-run "$@"

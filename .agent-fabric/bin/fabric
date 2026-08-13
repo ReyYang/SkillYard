@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+# 该入口只运行可选的项目内维护 Core，不参与日常 Agent 协作。
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CORE="$SCRIPT_DIR/agent-fabric-core"
+if [ ! -x "$CORE" ]; then
+  printf '%s\n' '{"error":"runtime_missing","message":"维护 Core 尚未构建；框架日常 Skill 仍可使用。安装 Rust 后可运行 .agent-fabric/bin/build-runtime。","ok":false}'
+  exit 3
+fi
+exec "$CORE" fabric "$@"

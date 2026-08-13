@@ -61,4 +61,25 @@ describe("AgentMarkdown", () => {
     );
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
+
+  it("宽表格保留显式横向滚动容器", () => {
+    const { container } = render(
+      <AgentMarkdown streaming={false} onOpenExternalUrl={vi.fn()}>
+        {
+          "| 名称 | 很长的来源路径 |\n| --- | --- |\n| Demo | /Users/demo/.agents/skills/a-very-long-skill-name/SKILL.md |"
+        }
+      </AgentMarkdown>,
+    );
+
+    const table = container.querySelector("table");
+    const tableWrapper = container.querySelector(
+      '[data-streamdown="table-wrapper"]',
+    );
+
+    expect(table).toBeInTheDocument();
+    expect(tableWrapper).toBeInTheDocument();
+    expect(table?.parentElement).toBe(
+      tableWrapper?.querySelector(":scope > div:last-child"),
+    );
+  });
 });

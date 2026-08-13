@@ -1,5 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
-import { GearIcon } from "@phosphor-icons/react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  DotsThreeIcon,
+  FunnelIcon,
+  GearIcon,
+  LinkSimpleIcon,
+  PlugsIcon,
+  PlugsConnectedIcon,
+} from "@phosphor-icons/react";
 
 import type {
   AiConfigurationInput,
@@ -23,8 +30,9 @@ import {
 import { PageBackButton } from "./PageBackButton";
 
 type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
-type ManagementFilter = "all" | "managed" | "takeover" | "other";
+export type ManagementFilter = "all" | "managed" | "takeover" | "other";
 type CategoryFilter = "all" | SkillCategory;
+type BundleSortMode = "management" | "nameAsc";
 
 const AI_MODELS: Record<AiPreferences["provider"], readonly string[]> = {
   openAi: [
@@ -54,6 +62,8 @@ interface InventoryPageProps {
   outcome: InventoryOutcome;
   screen: InventoryScreen;
   onScreenChange(screen: InventoryScreen): void;
+  pendingManagementFilter?: ManagementFilter | null;
+  onPendingManagementFilterHandled?(): void;
   language: InterfaceLanguage;
   theme: ThemePreset;
   aiPreferences: AiPreferences;
@@ -136,6 +146,14 @@ const FILTERS: Array<{ id: ManagementFilter; label: TranslationKey }> = [
   { id: "other", label: "其他管理方" },
 ];
 
+const BUNDLE_SORT_MODES: Array<{
+  id: BundleSortMode;
+  label: TranslationKey;
+}> = [
+  { id: "management", label: "管理状态优先" },
+  { id: "nameAsc", label: "名称 A–Z" },
+];
+
 // 固定顺序属于 SkillYard 自己的 Taxonomy；界面只取当前清单实际出现的项。
 const SKILL_CATEGORIES: Array<{
   id: SkillCategory;
@@ -178,6 +196,8 @@ export function InventoryPage({
   outcome,
   screen,
   onScreenChange,
+  pendingManagementFilter = null,
+  onPendingManagementFilterHandled,
   language,
   theme,
   aiPreferences,
@@ -252,6 +272,13 @@ export function InventoryPage({
   const [filter, setFilter] = useState<ManagementFilter>("all");
   const [categoryFilter, setCategoryFilter] =
     useState<CategoryFilter>("all");
+  const [sortMode, setSortMode] =
+    useState<BundleSortMode>("management");
+  const projectMenuRef = useRef<HTMLDetailsElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [openProjectMenuAfterReturn, setOpenProjectMenuAfterReturn] =
+    useState(false);
+  const [focusSearchAfterReturn, setFocusSearchAfterReturn] = useState(false);
   // 选择状态属于 InventoryPage；renderer 切换时只改变构图，不重建领域状态。
   const [selectedLibraryGroupId, setSelectedLibraryGroupId] = useState<
     string | null
@@ -277,12 +304,34 @@ export function InventoryPage({
       setCategoryFilter("all");
     }
   }, [availableCategories, categoryFilter]);
+  useLayoutEffect(() => {
+    if (screen.type !== "list" || !openProjectMenuAfterReturn) return;
+    const projectMenu = projectMenuRef.current;
+    if (!projectMenu) return;
+    projectMenu.open = true;
+    projectMenu.querySelector<HTMLElement>("summary")?.focus();
+    setOpenProjectMenuAfterReturn(false);
+  }, [openProjectMenuAfterReturn, screen.type]);
+  useLayoutEffect(() => {
+    if (screen.type !== "list" || !focusSearchAfterReturn) return;
+    searchInputRef.current?.focus();
+    setFocusSearchAfterReturn(false);
+  }, [focusSearchAfterReturn, screen.type]);
+  useLayoutEffect(() => {
+    if (screen.type !== "list" || pendingManagementFilter === null) return;
+    setFilter(pendingManagementFilter);
+    onPendingManagementFilterHandled?.();
+  }, [
+    onPendingManagementFilterHandled,
+    pendingManagementFilter,
+    screen.type,
+  ]);
   // 搜索命中成员时只显示其所属分组，主清单仍不展开 Skill。
   const visibleGroups = useMemo(() => {
     const normalizedQuery = query
       .trim()
       .toLocaleLowerCase(language === "zhCn" ? "zh-CN" : "en");
-    return groups.filter((group) =>
+    const filteredGroups = groups.filter((group) =>
       group.entries.some(
         (entry) =>
           matchesFilter(entry, filter) &&
@@ -290,45 +339,95 @@ export function InventoryPage({
           matchesCategory(entry, categoryFilter),
       ),
     );
-  }, [categoryFilter, filter, groups, language, query]);
+    if (sortMode === "management") return filteredGroups;
+    const locale = language === "zhCn" ? "zh-CN" : "en";
+    return filteredGroups.slice().sort(
+      (left, right) =>
+        left.title.localeCompare(right.title, locale) ||
+        left.id.localeCompare(right.id),
+    );
+  }, [categoryFilter, filter, groups, language, query, sortMode]);
+  const managementFilterLabel =
+    filter === "all"
+      ? null
+      : t(FILTERS.find((item) => item.id === filter)!.label);
+  const categoryFilterLabel =
+    categoryFilter === "all"
+      ? null
+      : t(
+          SKILL_CATEGORIES.find((category) => category.id === categoryFilter)!
+            .label,
+        );
+  const filterSummaryLabel =
+    managementFilterLabel && categoryFilterLabel
+      ? `${managementFilterLabel} · ${categoryFilterLabel}`
+      : (managementFilterLabel ?? categoryFilterLabel ?? t("全部 Bundle"));
+  const sortModeLabel = t(
+    BUNDLE_SORT_MODES.find((item) => item.id === sortMode)!.label,
+  );
+  const hasActiveFilter = filter !== "all" || categoryFilter !== "all";
+  const hasCustomizedLibraryView =
+    hasActiveFilter || sortMode !== "management";
+  const libraryControlsVisibleLabel =
+    sortMode === "management"
+      ? filterSummaryLabel
+      : `${filterSummaryLabel} · ${sortModeLabel}`;
+  const libraryControlsCompactLabel =
+    sortMode === "nameAsc" ? "A–Z" : language === "zhCn" ? "筛" : "F";
+  const hasActiveSearchOrFilter = query.trim().length > 0 || hasActiveFilter;
+  const changeSortMode = (nextSortMode: BundleSortMode) => {
+    // 排序时固化当前可见 Bundle；空结果不能清掉暂时被筛选隐藏的稳定选择。
+    setSelectedLibraryGroupId((current) =>
+      current && visibleGroups.some((group) => group.id === current)
+        ? current
+        : (visibleGroups[0]?.id ?? current),
+    );
+    setSortMode(nextSortMode);
+  };
   const libraryItems = useMemo<BundleLibraryItem[]>(
     () =>
       visibleGroups.map((group) => {
-        const singleEntry = group.entries.length === 1 ? group.entries[0]! : null;
-        const summaryEntry = group.entries.find(
-          (entry) => entry.aiExplanation?.summary,
-        );
         const groupMounts = outcome.mounts.filter((mount) =>
           group.entries.some((entry) => entry.memberId === mount.memberId),
         );
-        const hasUpdate =
+        const bundleUpdate =
           group.bundleId !== null &&
-          outcome.bundleUpdates.some(
-            (update) =>
-              update.bundleId === group.bundleId && update.action === "update",
-          );
+          group.kind === "managedBundle"
+            ? outcome.bundleUpdates.find(
+                (update) => update.bundleId === group.bundleId,
+              ) ?? null
+            : null;
+        const abnormalMountCount = groupMounts.filter(
+          (mount) => mount.health !== "healthy",
+        ).length;
+        const mountStatus =
+          abnormalMountCount > 0
+            ? t("挂载异常 {count} 处", { count: abnormalMountCount })
+            : groupMounts.length > 0
+              ? t("已挂载")
+              : t("未挂载");
+        const updateStatus = bundleUpdate
+          ? bundleUpdateStatusLabel(bundleUpdate.status, t)
+          : null;
         const status =
           group.kind === "takeoverBundle"
             ? t("待接管")
             : group.kind === "agentManaged" ||
                 group.kind === "projectManaged"
               ? t("只读")
-              : hasUpdate
-                ? t("可更新")
-                : groupMounts.length > 0
-                  ? t("已挂载")
-                  : t("未挂载");
+              : [mountStatus, updateStatus].filter(Boolean).join(" · ");
+        const hasWarning =
+          abnormalMountCount > 0 ||
+          bundleUpdate?.status === "available" ||
+          bundleUpdate?.status === "unableToCheck" ||
+          bundleUpdate?.status === "sourceUnavailable";
         return {
           id: group.id,
           title: group.title,
           eyebrow: t(groupEyebrow(group.kind)),
           skillCount: group.entries.length,
-          summary: summaryEntry?.aiExplanation?.summary ?? null,
-          category: singleEntry?.aiExplanation
-            ? t(skillCategoryLabel(singleEntry.aiExplanation.category))
-            : null,
           status,
-          statusTone: hasUpdate
+          statusTone: hasWarning
             ? "warning"
             : group.kind === "managedBundle" ||
                 group.kind === "takeoverBundle"
@@ -357,6 +456,66 @@ export function InventoryPage({
     aiPreferences.disclosureAccepted &&
     aiPreferences.hasApiKey &&
     aiPreferences.verified;
+  const maintenanceActions = (
+    <>
+      <button
+        className="secondary-action"
+        type="button"
+        disabled={
+          isWriteBlocked ||
+          isAiOrganizationRunning ||
+          !canOrganizeWithAi ||
+          !hasPendingAiExplanation
+        }
+        onClick={onOrganizeSkillExplanations}
+      >
+        {t("AI 整理")}
+      </button>
+      <button
+        className="secondary-action"
+        type="button"
+        disabled={isWriteBlocked || isCheckingUpdates}
+        onClick={onCheckUpdates}
+      >
+        {isCheckingUpdates ? t("正在检查更新…") : t("检查更新")}
+      </button>
+      {updatableBundleCount >= 2 ? (
+        <button
+          className="secondary-action"
+          type="button"
+          aria-label={t("全部更新")}
+          disabled={isWriteBlocked || isPreparingBundleUpdateBatch}
+          onClick={onUpdateAll}
+        >
+          {isPreparingBundleUpdateBatch
+            ? t("正在准备全部更新…")
+            : t("全部更新")}
+        </button>
+      ) : null}
+      <button
+        className="secondary-action"
+        type="button"
+        disabled={isWriteBlocked || isRefreshing}
+        onClick={onRefresh}
+      >
+        {isRefreshing ? t("正在刷新本机…") : t("刷新本机")}
+      </button>
+      <p className="refresh-summary" aria-label={t("最近刷新结果")}>
+        {outcome.lastLocalRefresh
+          ? t("最近刷新：新增 {added} · 变化 {changed} · 移除 {removed}", {
+              added: outcome.lastLocalRefresh.added,
+              changed: outcome.lastLocalRefresh.changed,
+              removed: outcome.lastLocalRefresh.removed,
+            })
+          : t("尚未执行本机刷新")}
+        {outcome.lastLocalRefresh ? (
+          <span>
+            {formatTimestamp(outcome.lastLocalRefresh.completedAt, language)}
+          </span>
+        ) : null}
+      </p>
+    </>
+  );
   const selectedGroup =
     screen.type === "group" || screen.type === "skill"
       ? groups.find((group) => group.id === screen.groupId) ?? null
@@ -387,7 +546,7 @@ export function InventoryPage({
           </span>
           <nav className="library-primary-navigation" aria-label={t("主要导航")}>
             <button
-              className="library-navigation-action library-navigation-current"
+              className="library-navigation-action"
               type="button"
               onClick={() => onScreenChange({ type: "list" })}
             >
@@ -404,26 +563,29 @@ export function InventoryPage({
             <button
               className="library-navigation-action"
               type="button"
-              onClick={() => onScreenChange({ type: "list" })}
+              onClick={() => {
+                setOpenProjectMenuAfterReturn(true);
+                onScreenChange({ type: "list" });
+              }}
             >
               {t("项目")}
             </button>
           </nav>
-          <label className="library-search-field">
-            <span className="sr-only">{t("搜索 Skill")}</span>
-            <input
-              type="search"
-              value=""
-              readOnly
-              placeholder={t("搜索 Bundle 或 Skill")}
-              aria-label={t("搜索 Skill")}
-              onFocus={() => onScreenChange({ type: "list" })}
-            />
-          </label>
+          <button
+            className="library-search-field library-search-return"
+            type="button"
+            aria-label={t("返回技能库并搜索 Bundle 或 Skill")}
+            onClick={() => {
+              setFocusSearchAfterReturn(true);
+              onScreenChange({ type: "list" });
+            }}
+          >
+            {t("搜索 Bundle 或 Skill")}
+          </button>
           <button
             className="library-install-action"
             type="button"
-            aria-label={t("安装 Skill")}
+            aria-label={t("添加 Bundle")}
             disabled={isWriteBlocked || isOpeningInstaller}
             onClick={onInstall}
           >
@@ -546,20 +708,7 @@ export function InventoryPage({
           >
             {isOpeningDiscover ? t("正在打开…") : t("发现")}
           </button>
-          <button
-            className="library-navigation-action library-takeover-action"
-            type="button"
-            aria-label={t("打开待接管筛选")}
-            aria-pressed={filter === "takeover"}
-            onClick={() =>
-              setFilter((current) =>
-                current === "takeover" ? "all" : "takeover",
-              )
-            }
-          >
-            {t("待接管")}
-          </button>
-          <details className="library-project-menu">
+          <details ref={projectMenuRef} className="library-project-menu">
             <summary>{t("项目")}</summary>
             <div className="library-popover">
               {outcome.projects.length > 0 ? (
@@ -618,18 +767,43 @@ export function InventoryPage({
           </details>
         </nav>
         <label className="library-search-field">
-          <span className="sr-only">{t("搜索 Skill")}</span>
+          <span className="sr-only">{t("搜索 Bundle 或 Skill")}</span>
           <input
+            ref={searchInputRef}
             type="search"
             value={query}
             placeholder={t("搜索 Bundle 或 Skill")}
-            aria-label={t("搜索 Skill")}
+            aria-label={t("搜索 Bundle 或 Skill")}
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-        <details className="library-filter-menu">
-          <summary aria-label={t("筛选")}>
-            {theme === "ledger" ? t("全部 Bundle") : t("筛选")}
+        <details
+          className="library-filter-menu"
+          data-filter-active={hasCustomizedLibraryView ? "true" : "false"}
+        >
+          <summary
+            aria-label={`${t("筛选与排序")}：${filterSummaryLabel} · ${sortModeLabel}`}
+          >
+            {theme === "ledger" ? (
+              <span>{libraryControlsVisibleLabel}</span>
+            ) : (
+              <>
+                <FunnelIcon size={18} weight="regular" aria-hidden />
+                {hasCustomizedLibraryView ? (
+                  <>
+                    <span className="library-filter-active-label">
+                      {libraryControlsVisibleLabel}
+                    </span>
+                    <span
+                      className="library-filter-compact-badge"
+                      aria-hidden="true"
+                    >
+                      {libraryControlsCompactLabel}
+                    </span>
+                  </>
+                ) : null}
+              </>
+            )}
           </summary>
           <div className="library-popover library-filter-panel">
             <label className="category-filter">
@@ -661,12 +835,28 @@ export function InventoryPage({
                 </button>
               ))}
             </div>
+            <label className="sort-filter">
+              <span>{t("排序")}</span>
+              <select
+                aria-label={t("排序")}
+                value={sortMode}
+                onChange={(event) =>
+                  changeSortMode(event.target.value as BundleSortMode)
+                }
+              >
+                {BUNDLE_SORT_MODES.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {t(item.label)}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         </details>
         <button
           className="library-install-action"
           type="button"
-          aria-label={t("安装 Skill")}
+          aria-label={t("添加 Bundle")}
           disabled={isWriteBlocked || isOpeningInstaller}
           onClick={onInstall}
         >
@@ -674,80 +864,17 @@ export function InventoryPage({
         </button>
         <details className="library-maintenance-menu">
           <summary aria-label={t("更多操作")}>
-            <span>{t("更多")}</span>
-            <span className="library-profile-mark" aria-hidden="true" />
+            {theme === "ledger" ? (
+              <>
+                <span>{t("更多")}</span>
+                <span className="library-profile-mark" aria-hidden="true" />
+              </>
+            ) : (
+              <DotsThreeIcon size={20} weight="bold" aria-hidden />
+            )}
           </summary>
           <div className="library-popover library-maintenance-actions">
-          <button
-            className="secondary-action library-menu-install-action"
-            type="button"
-            disabled={isWriteBlocked || isOpeningInstaller}
-            onClick={onInstall}
-          >
-            {isOpeningInstaller ? t("正在打开…") : t("添加 Bundle")}
-          </button>
-          <button
-            className="secondary-action"
-            type="button"
-            disabled={
-              isWriteBlocked ||
-              isAiOrganizationRunning ||
-              !canOrganizeWithAi ||
-              !hasPendingAiExplanation
-            }
-            onClick={onOrganizeSkillExplanations}
-          >
-            {t("AI 整理")}
-          </button>
-          <button
-            className="secondary-action"
-            type="button"
-            disabled={isWriteBlocked || isCheckingUpdates}
-            onClick={onCheckUpdates}
-          >
-            {isCheckingUpdates ? t("正在检查更新…") : t("检查更新")}
-          </button>
-          {updatableBundleCount >= 2 ? (
-            <button
-              className="secondary-action"
-              type="button"
-              aria-label={t("全部更新")}
-              disabled={isWriteBlocked || isPreparingBundleUpdateBatch}
-              onClick={onUpdateAll}
-            >
-              {isPreparingBundleUpdateBatch
-                ? t("正在准备全部更新…")
-                : t("全部更新")}
-            </button>
-          ) : null}
-          <button
-            className="secondary-action"
-            type="button"
-            disabled={isWriteBlocked || isRefreshing}
-            onClick={onRefresh}
-          >
-            {isRefreshing ? t("正在刷新本机…") : t("刷新本机")}
-          </button>
-            <p className="refresh-summary" aria-label={t("最近刷新结果")}>
-              {outcome.lastLocalRefresh
-                ? t(
-                    "最近刷新：新增 {added} · 变化 {changed} · 移除 {removed}",
-                    {
-                      added: outcome.lastLocalRefresh.added,
-                      changed: outcome.lastLocalRefresh.changed,
-                      removed: outcome.lastLocalRefresh.removed,
-                    },
-                  )
-                : t("尚未执行本机刷新")}
-              {outcome.lastLocalRefresh ? (
-                <span>
-                  {formatTimestamp(
-                    outcome.lastLocalRefresh.completedAt,
-                    language,
-                  )}
-                </span>
-              ) : null}
-            </p>
+            {maintenanceActions}
           </div>
         </details>
       </header>
@@ -932,10 +1059,18 @@ export function InventoryPage({
             const groupMounts = outcome.mounts.filter((mount) =>
               group.entries.some((entry) => entry.memberId === mount.memberId),
             );
+            const libraryItem = libraryItems.find(
+              (item) => item.id === group.id,
+            );
+            if (!libraryItem) return null;
             return (
               <InventorySection
+                theme={theme}
+                groupKind={group.kind}
                 title={group.title}
                 eyebrow={t(groupEyebrow(group.kind))}
+                status={libraryItem.status}
+                statusTone={libraryItem.statusTone}
                 entries={group.entries}
                 language={language}
                 actionsDisabled={isWriteBlocked}
@@ -992,6 +1127,14 @@ export function InventoryPage({
                       ? t("查看 Bundle {bundle}", { bundle: group.title })
                       : t("查看分组 {group}", { group: group.title })
                 }
+                openText={
+                  group.entries.length === 1
+                    ? t("查看 Skill")
+                    : group.kind === "managedBundle" ||
+                        group.kind === "takeoverBundle"
+                      ? t("查看 Bundle")
+                      : t("查看分组")
+                }
               />
             );
           }}
@@ -1007,6 +1150,19 @@ export function InventoryPage({
                   ? t("你可以继续使用现有安装方式，再主动刷新本机。")
                   : t("换一个关键词或管理状态看看。")}
               </p>
+              {outcome.entries.length > 0 && hasActiveSearchOrFilter ? (
+                <button
+                  className="secondary-action"
+                  type="button"
+                  onClick={() => {
+                    setQuery("");
+                    setFilter("all");
+                    setCategoryFilter("all");
+                  }}
+                >
+                  {t("清除筛选")}
+                </button>
+              ) : null}
             </section>
           }
         />
@@ -1016,8 +1172,12 @@ export function InventoryPage({
 }
 
 function InventorySection({
+  theme,
+  groupKind,
   title,
   eyebrow,
+  status,
+  statusTone,
   entries,
   language,
   actionsDisabled = false,
@@ -1039,9 +1199,14 @@ function InventorySection({
   onTakeover,
   onOpen,
   openLabel,
+  openText,
 }: {
+  theme: ThemePreset;
+  groupKind: InventoryGroupKind;
   title: string;
   eyebrow: string;
+  status: string;
+  statusTone: BundleLibraryItem["statusTone"];
   entries: InventoryObservation[];
   language: InterfaceLanguage;
   actionsDisabled?: boolean;
@@ -1063,6 +1228,7 @@ function InventorySection({
   onTakeover?(observationId: string): void;
   onOpen(): void;
   openLabel: string;
+  openText: string;
 }) {
   const { t } = useI18n();
   if (entries.length === 0) return null;
@@ -1075,115 +1241,196 @@ function InventorySection({
       }),
     ),
   ];
+  const sourceLabel = sourceNames.join("、") || t("来源未知");
+  const abnormalMountCount = mounts.filter(
+    (mount) => mount.health !== "healthy",
+  ).length;
+  const mountLabel =
+    mounts.length > 0
+      ? `${t("{count} 个 Mount", { count: mounts.length })} · ${[
+          ...new Set(mounts.map((mount) => supportedAppLabel(mount.appId))),
+        ].join("、")}${
+          abnormalMountCount > 0
+            ? ` · ${t("挂载异常 {count} 处", {
+                count: abnormalMountCount,
+              })}`
+            : ""
+        }`
+      : t("未挂载");
+  // 总数已在标题中完整呈现；预览保留五个真实成员，不再用汇总卡挤掉第五个内容。
   const previewEntries = entries.slice(0, 5);
-  const remainingEntryCount = entries.length - previewEntries.length;
+  const previewMountDestinations = representativeMountDestinations(mounts, 2);
   const hasLifecycleActions = Boolean(batchMountBundleId || onTakeover);
-  const groupSummary = entries.find((entry) => entry.aiExplanation?.summary)
-    ?.aiExplanation?.summary;
   return (
     <section className="inventory-section" aria-label={title}>
       <header>
         <div>
           <p className="section-eyebrow">{eyebrow}</p>
-          <h2>{title}</h2>
-        </div>
-        <div className="inventory-section-actions">
-          {entries.some((entry) => entry.stale) ? (
-            <span className="stale-badge">{t("上次结果")}</span>
-          ) : null}
-          {bundleUpdate ? (
-            <BundleUpdateStatusView
-              update={bundleUpdate}
-              bundleDisplayName={title}
-              isPreparing={preparingBundleUpdateId === batchMountBundleId}
-              isChecking={checkingEditableBundleId === batchMountBundleId}
-              actionsDisabled={actionsDisabled}
-              onUpdate={
-                batchMountBundleId
-                  ? () => onUpdateBundle?.(batchMountBundleId)
-                  : undefined
-              }
-              onImportReplacement={
-                batchMountBundleId
-                  ? () => onChooseBundleReplacement?.(batchMountBundleId)
-                  : undefined
-              }
-              onCheckEditableLocal={
-                batchMountBundleId
-                  ? () => onCheckEditableLocalBundle?.(batchMountBundleId)
-                  : undefined
-              }
-            />
-          ) : null}
-          <span>{t("{count} 个 Skill", { count: entries.length })}</span>
+          <h2 title={title}>{title}</h2>
+          <div className="bundle-library-status-line">
+            <span>{t("{count} 个 Skill", { count: entries.length })}</span>
+            <em data-tone={statusTone}>· {status}</em>
+            {entries.some((entry) => entry.stale) ? (
+              <span className="stale-badge">{t("上次结果")}</span>
+            ) : null}
+            {bundleUpdate ? (
+              <BundleUpdateStatusView
+                update={bundleUpdate}
+                bundleDisplayName={title}
+                isPreparing={preparingBundleUpdateId === batchMountBundleId}
+                isChecking={checkingEditableBundleId === batchMountBundleId}
+                actionsDisabled={actionsDisabled}
+                showStatus={false}
+                onUpdate={
+                  batchMountBundleId
+                    ? () => onUpdateBundle?.(batchMountBundleId)
+                    : undefined
+                }
+                onImportReplacement={
+                  batchMountBundleId
+                    ? () => onChooseBundleReplacement?.(batchMountBundleId)
+                    : undefined
+                }
+                onCheckEditableLocal={
+                  batchMountBundleId
+                    ? () => onCheckEditableLocalBundle?.(batchMountBundleId)
+                    : undefined
+                }
+              />
+            ) : null}
+          </div>
         </div>
       </header>
       {entries.length > 1 ? (
         <p className="bundle-library-summary">
-          {groupSummary ??
-            t("集中管理 {count} 个 Skill，并保留各自的来源与挂载状态。", {
-              count: entries.length,
-            })}
+          {t("集中管理 {count} 个 Skill，并保留各自的来源与挂载状态。", {
+            count: entries.length,
+          })}
         </p>
       ) : null}
       <dl className="bundle-library-metadata">
         <div>
-          <dt>
-            <span className="bundle-source-mark" aria-hidden="true" />
-            {t("来源")}
-          </dt>
-          <dd>{sourceNames.join("、") || t("来源未知")}</dd>
-        </div>
-        <div>
-          <dt>
-            <span className="bundle-mount-mark" aria-hidden="true" />
-            {t("当前挂载")}
-          </dt>
+          <dt>{t("来源")}</dt>
           <dd>
-            {mounts.length > 0
-              ? `${t("{count} 个 Mount", { count: mounts.length })} · ${[
-                  ...new Set(mounts.map((mount) => supportedAppLabel(mount.appId))),
-                ].join("、")}`
-              : t("未挂载")}
+            <LinkSimpleIcon
+              className="bundle-source-mark"
+              size={18}
+              weight="regular"
+              aria-hidden
+            />
+            <span className="bundle-metadata-value" title={sourceLabel}>
+              {sourceLabel}
+            </span>
           </dd>
         </div>
+        {groupKind === "managedBundle" ? (
+          <div>
+            <dt>{t("当前挂载")}</dt>
+            <dd>
+              {mounts.length > 0 ? (
+                <PlugsConnectedIcon
+                  className="bundle-mount-mark"
+                  data-mount-state="connected"
+                  size={18}
+                  weight="regular"
+                  aria-hidden
+                />
+              ) : (
+                <PlugsIcon
+                  className="bundle-mount-mark"
+                  data-mount-state="empty"
+                  size={18}
+                  weight="regular"
+                  aria-hidden
+                />
+              )}
+              <span className="bundle-metadata-value" title={mountLabel}>
+                {mountLabel}
+              </span>
+            </dd>
+            {theme === "layers" && mounts.length > 0 ? (
+              <ul className="bundle-mount-destinations" aria-label={t("当前挂载")}>
+                {previewMountDestinations.map((mount) => (
+                  <li key={mount.id}>
+                    <strong>{mountLabelForDisplay(mount, t)}</strong>
+                    <code title={mount.targetPath}>{mount.targetPath}</code>
+                  </li>
+                ))}
+                {mounts.length > previewMountDestinations.length ? (
+                  <li className="bundle-mount-destinations-more">
+                    {t("还有 {count} 处 Mount", {
+                      count: mounts.length - previewMountDestinations.length,
+                    })}
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
       </dl>
       {entries.length > 1 ? (
-        <>
-          <p className="bundle-library-members-label">{t("精选成员")}</p>
-          <ul
-            className="bundle-library-members"
+        theme === "ledger" ? (
+          <table
+            className="bundle-library-member-table"
             aria-label={t("{group} 的 Skill", { group: title })}
           >
-            {previewEntries.map((entry) => (
-              <li key={entry.id}>
-                <span className="bundle-member-initial" aria-hidden="true">
-                  {skillInitials(entry.skillName)}
-                </span>
-                <span className="bundle-member-copy">
-                  <strong>{entry.skillName}</strong>
-                  {entry.aiExplanation?.summary ? (
-                    <small>{entry.aiExplanation.summary}</small>
-                  ) : null}
-                </span>
-              </li>
-            ))}
-            {remainingEntryCount > 0 ? (
-              <li className="bundle-library-members-more">
-                <strong>
-                  {t("还有 {count} 个 Skill", { count: remainingEntryCount })}
-                </strong>
-              </li>
-            ) : null}
-          </ul>
-        </>
+            <caption>{t("精选成员")}</caption>
+            <thead>
+              <tr>
+                <th scope="col">{t("名称")}</th>
+                <th scope="col">{t("类型")}</th>
+                <th scope="col">{t("描述")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {previewEntries.map((entry) => (
+                <tr key={entry.id}>
+                  <th scope="row">{entry.skillName}</th>
+                  <td>Skill</td>
+                  <td>
+                    {entry.aiExplanation?.summary || entry.description || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <>
+            <p className="bundle-library-members-label">{t("精选成员")}</p>
+            <ul
+              className="bundle-library-members"
+              aria-label={t("{group} 的 Skill", { group: title })}
+            >
+              {previewEntries.map((entry) => {
+                const description =
+                  entry.aiExplanation?.summary || entry.description;
+                return (
+                  <li key={entry.id}>
+                    <span className="bundle-member-initial" aria-hidden="true">
+                      {skillInitials(entry.skillName)}
+                    </span>
+                    <span className="bundle-member-copy">
+                      <strong>{entry.skillName}</strong>
+                      {description ? <small>{description}</small> : null}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )
       ) : null}
       {entries.length === 1 ? (
-        <SkillAiPresentation
-          entry={entries[0]!}
-          language={language}
-          detailed={false}
-        />
+        <div className="bundle-library-single-member">
+          <strong className="bundle-library-single-member-name">
+            {entries[0]!.skillName}
+          </strong>
+          <SkillAiPresentation
+            entry={entries[0]!}
+            language={language}
+            detailed={false}
+          />
+        </div>
       ) : null}
       <footer className="inventory-section-footer">
         <button
@@ -1192,12 +1439,12 @@ function InventorySection({
           aria-label={openLabel}
           onClick={onOpen}
         >
-          <span>{t("打开 Bundle")}</span>
+          <span>{openText}</span>
           <span className="bundle-open-arrow" aria-hidden="true" />
         </button>
         {hasLifecycleActions ? (
           <details className="inventory-section-menu">
-            <summary aria-label={t("Bundle 操作")}>{t("更多")}</summary>
+            <summary aria-label={t("更多 Bundle 操作")}>{t("更多")}</summary>
             <div className="inventory-section-actions">
               {batchMountBundleId && canAssociateSource ? (
                 <button
@@ -1223,9 +1470,12 @@ function InventorySection({
                 <button
                   className="compact-action"
                   type="button"
-                  aria-label={t("解除 Bundle {bundle} 的全部挂载", {
-                    bundle: title,
-                  })}
+                  aria-label={t(
+                    unmountingBundleId === batchMountBundleId
+                      ? "正在准备解除…：Bundle {bundle}"
+                      : "解除全部挂载：Bundle {bundle}",
+                    { bundle: title },
+                  )}
                   disabled={actionsDisabled}
                   onClick={() => onUnmountBundle?.(batchMountBundleId)}
                 >
@@ -1348,6 +1598,11 @@ function InventorySettingsPage({
   const [apiKey, setApiKey] = useState("");
   // 只显示用户当前输入的值；已保存的 Key 仍然不会从 Keychain 读回前端。
   const [isApiKeyVisible, setIsApiKeyVisible] = useState(false);
+  const pendingThemeFocusRef = useRef<ThemePreset | null>(null);
+  const themeInputRefs = useRef<Record<ThemePreset, HTMLInputElement | null>>({
+    layers: null,
+    ledger: null,
+  });
   const aiBusy = aiOperation !== null;
   const connectionTestDisabledReason = !aiPreferences.hasApiKey
     ? t("保存 API Key 后可测试连接")
@@ -1360,6 +1615,21 @@ function InventorySettingsPage({
       : aiPreferences.verified
         ? t("连接测试成功")
         : (connectionTestDisabledReason ?? t("连接尚未测试"));
+
+  useLayoutEffect(() => {
+    const pendingTheme = pendingThemeFocusRef.current;
+    if (isSavingTheme || !pendingTheme) return;
+
+    const activeElement = document.activeElement;
+    if (
+      activeElement === document.body ||
+      !activeElement ||
+      !activeElement.isConnected
+    ) {
+      themeInputRefs.current[pendingTheme]?.focus();
+    }
+    pendingThemeFocusRef.current = null;
+  }, [isSavingTheme, theme]);
   const updateAi = (
     changes: Partial<Pick<AiPreferences, "enabled" | "disclosureAccepted" | "provider" | "model">>,
   ) =>
@@ -1418,12 +1688,18 @@ function InventorySettingsPage({
             return (
               <label className="theme-preset-option" key={preset}>
                 <input
+                  ref={(element) => {
+                    themeInputRefs.current[preset] = element;
+                  }}
                   type="radio"
                   name="theme-preset"
                   value={preset}
                   aria-label={label}
                   checked={theme === preset}
-                  onChange={() => onThemeChange(preset)}
+                  onChange={() => {
+                    pendingThemeFocusRef.current = preset;
+                    onThemeChange(preset);
+                  }}
                 />
                 <span>
                   {/* Preset 名称是稳定的产品标识，不跟随界面语言翻译。 */}
@@ -1495,7 +1771,13 @@ function InventorySettingsPage({
           </div>
 
           <details className="settings-provider-advanced">
-            <summary aria-label={t("管理 Agent Provider")}>
+            <summary
+              aria-label={`${
+                aiPreferences.hasApiKey
+                  ? t("API Key 已保存在 macOS Keychain")
+                  : t("尚未保存 API Key")
+              } · ${connectionStatus} · ${t("管理 Agent Provider")}`}
+            >
               <span>
                 {aiPreferences.hasApiKey
                   ? t("API Key 已保存在 macOS Keychain")
@@ -1795,6 +2077,9 @@ function SkillAiPresentation({
   if (!explanation) {
     return (
       <div className="skill-ai-presentation is-empty">
+        {entry.description ? (
+          <p className="skill-source-description">{entry.description}</p>
+        ) : null}
         <span className="skill-ai-state">{t("未整理")}</span>
       </div>
     );
@@ -1890,6 +2175,12 @@ function SkillDetailsPage({
             <dt>{t("来源")}</dt>
             <dd>{sourceName}</dd>
           </div>
+          {entry.description ? (
+            <div>
+              <dt>{t("SKILL.md 描述")}</dt>
+              <dd>{entry.description}</dd>
+            </div>
+          ) : null}
           <div>
             <dt>{t("本地目录")}</dt>
             <dd>
@@ -2073,6 +2364,7 @@ function BundleUpdateStatusView({
   isPreparing,
   isChecking,
   actionsDisabled,
+  showStatus = true,
   onUpdate,
   onImportReplacement,
   onCheckEditableLocal,
@@ -2082,6 +2374,7 @@ function BundleUpdateStatusView({
   isPreparing: boolean;
   isChecking: boolean;
   actionsDisabled: boolean;
+  showStatus?: boolean;
   onUpdate?: () => void;
   onImportReplacement?: () => void;
   onCheckEditableLocal?: () => void;
@@ -2103,8 +2396,18 @@ function BundleUpdateStatusView({
   const actionBusy =
     update.action === "checkEditableLocal" ? isChecking : isPreparing;
   const checkedAt = update.checkedAt
-    ? ` · ${formatTimestamp(update.checkedAt, language)}`
-    : "";
+    ? t("检查于 {time}", {
+        time: formatTimestamp(update.checkedAt, language),
+      })
+    : null;
+  const detail = [
+    checkedAt,
+    update.message
+      ? localize(update.message, "无法读取最新更新状态。")
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <div
       className="bundle-update-summary"
@@ -2112,9 +2415,11 @@ function BundleUpdateStatusView({
         status: bundleUpdateStatusLabel(update.status, t),
       })}
     >
-      <span className={`bundle-update-status is-${update.status}`}>
-        {bundleUpdateStatusLabel(update.status, t)}
-      </span>
+      {showStatus ? (
+        <span className={`bundle-update-status is-${update.status}`}>
+          {bundleUpdateStatusLabel(update.status, t)}
+        </span>
+      ) : null}
       {actionLabel && actionHandler ? (
         <button
           className="bundle-update-action"
@@ -2126,17 +2431,10 @@ function BundleUpdateStatusView({
           {actionBusy ? bundleUpdateBusyLabel(update.action, t) : actionLabel}
         </button>
       ) : actionLabel ? (
-        <span className="bundle-update-action">{actionLabel}</span>
+        <span className="bundle-update-action-label">{actionLabel}</span>
       ) : null}
-      {update.message ? (
-        <small
-          title={`${localize(
-            update.message,
-            "无法读取最新更新状态。",
-          )}${checkedAt}`}
-        >
-          {localize(update.message, "无法读取最新更新状态。")}
-        </small>
+      {detail ? (
+        <small title={detail}>{detail}</small>
       ) : null}
     </div>
   );
@@ -2194,6 +2492,46 @@ function mountLabel(
         app: appName,
         project: mount.projectDisplayName ?? t("已登记项目"),
       });
+}
+
+function mountLabelForDisplay(
+  mount: MountSummary,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const label = mountLabel(mount, t);
+  return mount.health === "healthy"
+    ? label
+    : `${label} · ${mountHealthLabel(mount.health, t)}`;
+}
+
+function representativeMountDestinations(
+  mounts: readonly MountSummary[],
+  limit: number,
+): MountSummary[] {
+  if (limit <= 0) return [];
+  const result: MountSummary[] = [];
+  const selectedIds = new Set<string>();
+  const destinationKinds = new Set<string>();
+
+  for (const mount of mounts) {
+    const destinationKind = [
+      mount.appId,
+      mount.scope,
+      mount.projectId ?? "",
+    ].join("\u0000");
+    if (destinationKinds.has(destinationKind)) continue;
+    destinationKinds.add(destinationKind);
+    selectedIds.add(mount.id);
+    result.push(mount);
+    if (result.length === limit) return result;
+  }
+
+  for (const mount of mounts) {
+    if (selectedIds.has(mount.id)) continue;
+    result.push(mount);
+    if (result.length === limit) break;
+  }
+  return result;
 }
 
 function mountHealthLabel(

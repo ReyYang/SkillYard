@@ -132,6 +132,8 @@ export interface InstallationChain {
 export interface InventoryObservation {
   id: string;
   skillName: string;
+  // 受管 Skill 直接保留已经验证的 frontmatter description；AI summary 只是可选增强。
+  description?: string | null;
   declaredName: string | null;
   skillRoot: string;
   skillFile: string;

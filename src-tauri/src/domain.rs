@@ -922,6 +922,9 @@ pub struct InventoryObservation {
 pub struct InventoryItem {
     pub id: String,
     pub skill_name: String,
+    /// 受管 Member 已验证并持久化的原始说明；AI summary 不能取代这项本地事实。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub declared_name: Option<String>,
     pub skill_root: String,
     pub skill_file: String,

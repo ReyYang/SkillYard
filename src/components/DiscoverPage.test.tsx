@@ -63,7 +63,9 @@ describe("DiscoverPage", () => {
 
     expect(screen.getByText("目录尚未加载")).toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", { name: "管理 vercel-labs/skills" }),
+      screen.getByRole("button", {
+        name: "前往 Source 管理：vercel-labs/skills",
+      }),
     );
     expect(onOpenSourceManagement).toHaveBeenCalledWith(
       "source-unloaded",

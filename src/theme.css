@@ -48,7 +48,7 @@
   --sy-surface-subtle: rgb(241 238 232 / 94%);
   --sy-surface-strong: #fbf9f5;
   --sy-text: #292b26;
-  --sy-muted: #73766f;
+  --sy-muted: #60635c;
   --sy-border: rgb(66 67 61 / 14%);
   --sy-accent: #72883c;
   --sy-accent-strong: #3f5921;
@@ -120,7 +120,7 @@
     .filter-group button[aria-pressed="true"],
     .agent-composer button
   ) {
-  color: #18200f;
+  color: var(--sy-accent-contrast);
   background: var(--sy-accent);
   box-shadow: 0 10px 28px rgb(200 243 106 / 14%);
 }
@@ -160,7 +160,7 @@
 }
 
 .application-theme[data-theme-preset="layers"] .agent-message.user > p {
-  color: #18200f;
+  color: var(--sy-accent-contrast);
   background: var(--sy-accent);
 }
 
@@ -180,8 +180,7 @@
   transition:
     color 140ms ease,
     background-color 140ms ease,
-    border-color 140ms ease,
-    box-shadow 140ms ease;
+    border-color 140ms ease;
 }
 
 @media (max-width: 620px) {

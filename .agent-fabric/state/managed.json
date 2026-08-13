@@ -1,0 +1,135 @@
+{
+  "artifacts": {
+    ".agent-fabric/README.md": {
+      "kind": "file",
+      "sha256": "3230407feeccd6031c82261be2f9e9a9ba8e3efc8f8aa061b55688be8cc82eee"
+    },
+    ".agent-fabric/bin/agent-run": {
+      "kind": "file",
+      "sha256": "11b2b308b74ab5b22e25610af877427bd1c9b95e7791e58ac319fcea1e6ab9d8"
+    },
+    ".agent-fabric/bin/build-runtime": {
+      "kind": "file",
+      "sha256": "0216c28cf8a97683d32314dceb63aa6685a4c3c10648988e3fa60b7d00d0bba6"
+    },
+    ".agent-fabric/bin/fabric": {
+      "kind": "file",
+      "sha256": "1aa5c2784ae871d5f8d281273bf04a217dd7d26437f6e2809e1c89389dbeea42"
+    },
+    ".agent-fabric/bin/test-runtime": {
+      "kind": "file",
+      "sha256": "b9f80517f96472c286295328688850ddc37aa6a50e5df36f28fb9d7230c2ee9d"
+    },
+    ".agent-fabric/contracts/CONTRACTS.md": {
+      "kind": "file",
+      "sha256": "b4e8c363ed93ccebc0b2371539f70f51e99b5f7539a5dadb231e1427a516e12d"
+    },
+    ".agent-fabric/contracts/RESULT.md": {
+      "kind": "file",
+      "sha256": "464a587a603d9fc93c78e694891cee5a564be46df5ff29c8f64349f7141e5274"
+    },
+    ".agent-fabric/contracts/REVIEW.md": {
+      "kind": "file",
+      "sha256": "b7e2fdbdc42f5454fe6a59bf2223dcf3ba81350b32b1d5d05448fa85cf5da182"
+    },
+    ".agent-fabric/contracts/TASK.md": {
+      "kind": "file",
+      "sha256": "6c56b0274a554c9d5e2e8721fe508a8811318016224f4119b3f1fca9e8581485"
+    },
+    ".agent-fabric/discovery/ADAPTERS.md": {
+      "kind": "file",
+      "sha256": "d23a6a87e70cc480e3c1d4db7a2175ba64f6fdc5026cc78d3e2ffc6e7c0e21f3"
+    },
+    ".agent-fabric/local/.gitignore": {
+      "kind": "file",
+      "sha256": "72832c2c9102ff13b4dcac3b31ada5cc7d89c4d38ff2242c065cb7131fe8bde9"
+    },
+    ".agent-fabric/roles/implementer.md": {
+      "kind": "file",
+      "sha256": "0990296bd894bbf202964b0d0c98823717bb96e72c0d1d24054190878eee9bb4"
+    },
+    ".agent-fabric/roles/orchestrator.md": {
+      "kind": "file",
+      "sha256": "ec794b08d33c07da72690cb68b7cad223d2165c17d1df2ad6fc4faa950a92a47"
+    },
+    ".agent-fabric/roles/researcher.md": {
+      "kind": "file",
+      "sha256": "15a2b901ffc818bd78cb2f1b67ce66f5542c79d626c21fa0fbcf00c2bdf0a32f"
+    },
+    ".agent-fabric/roles/reviewer.md": {
+      "kind": "file",
+      "sha256": "84e48c8dc304f337273ce8334e91866107cfbdd3ca82a49d57227c50223bf6d0"
+    },
+    ".agent-fabric/roles/worker.md": {
+      "kind": "file",
+      "sha256": "d5f28576282a7d27ae0917539dfaf92266dab12e90af46a0876db9e3724a2e0b"
+    },
+    ".agent-fabric/skill/SKILL.md": {
+      "kind": "file",
+      "sha256": "e4acf1f8468767c88cbf88a5e9e343f12b90e43961b9fa213e07cb144f772261"
+    },
+    ".agent-fabric/skill/references/collaborate.md": {
+      "kind": "file",
+      "sha256": "5b332a46f4a16de150922779f94d14bf1a5a8487f38faaf41e5b2d776eb6a20d"
+    },
+    ".agent-fabric/skill/references/configure-collaborators.md": {
+      "kind": "file",
+      "sha256": "944250510c50511a5300e894d5438ea930c0bd4d3934b68433c5ad65aa5f8ff6"
+    },
+    ".agent-fabric/src/blueprint.rs": {
+      "kind": "file",
+      "sha256": "415b2079da9e2529c1ad031a8ebcf732f7834b55c912cddc63f1c41bf9aff386"
+    },
+    ".agent-fabric/src/contracts.rs": {
+      "kind": "file",
+      "sha256": "e8c35d6e9cb5cffdf9b0a51f140cf6f493fadc09daeaeccfba5e51f5cea240ea"
+    },
+    ".agent-fabric/src/discovery.rs": {
+      "kind": "file",
+      "sha256": "f54437dc08550a2ee8c562bfb6f70e8f6cdd9205f8d2972394e96cae3365aab9"
+    },
+    ".agent-fabric/src/error.rs": {
+      "kind": "file",
+      "sha256": "f09ff9da4d1416048ab28f4a31d32549fd56d82f06e0e634e6da4146737427bf"
+    },
+    ".agent-fabric/src/execution.rs": {
+      "kind": "file",
+      "sha256": "85ef2ac01b4a29b4495fc3e4a52af6bbdca4a090fead2bbca125babf589c48b9"
+    },
+    ".agent-fabric/src/fabric.rs": {
+      "kind": "file",
+      "sha256": "ec2660840decc5fed8f6678a0459cdc313a9e0e8e74b2f0ae2f7cfc19222e904"
+    },
+    ".agent-fabric/src/fs_guard.rs": {
+      "kind": "file",
+      "sha256": "fd6192239f5b81e1655e31bb424a97fb476a1dcfc6f8e6f1fc9594b6bbd62f18"
+    },
+    ".agent-fabric/src/json.rs": {
+      "kind": "file",
+      "sha256": "e7149ef2d9cef267545112a339f42f986763fdc514d5ab0f68e77d7bdd334465"
+    },
+    ".agent-fabric/src/main.rs": {
+      "kind": "file",
+      "sha256": "2c49506076141ae50b8bb128fa1f03f8ac8aed69b0cb5dbbc37e4bb140326dc6"
+    },
+    ".agent-fabric/src/materialize.rs": {
+      "kind": "file",
+      "sha256": "86c31ce02b212b6e40e6b3e60e0a1e46768d02cdfdf6405dc2ebd37f00a1bf48"
+    },
+    ".agent-fabric/src/process_guard.rs": {
+      "kind": "file",
+      "sha256": "ea535683c5525be08cd22a039b2f235d35bf1cbab97d56666430c0cd09cd2258"
+    },
+    ".agent-fabric/src/runtime_build.rs": {
+      "kind": "file",
+      "sha256": "925c0606b350ddbddc28f293ee4a3ee44ee989407cb79a549aa75a41632074be"
+    },
+    ".agent-fabric/tests/portable_acceptance.rs": {
+      "kind": "file",
+      "sha256": "fbd98fa135d3221bdebfa479be130404922f21c3aacb27639a3274edfa30b5c3"
+    }
+  },
+  "blueprint_revision": "43fec2fe2446850969067fbdad82b0ab1d117666e7cbb811fbe16419474c17b7",
+  "schema": 1,
+  "state_sha256": "b08c46fb7fdf014e9e14580da6ad58de3ba369e0fbcba8907d2ebfa9c84a26b7"
+}

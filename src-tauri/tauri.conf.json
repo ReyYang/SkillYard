@@ -24,7 +24,8 @@
           "x": 18,
           "y": 18
         },
-        "center": true
+        "center": true,
+        "preventOverflow": true
       }
     ],
     "security": {

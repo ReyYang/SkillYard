@@ -39,6 +39,7 @@ interface SourceCatalogPageProps {
     | null;
   error: string | null;
   onBack(): void;
+  onOpenTakeoverCandidates(): void;
   onAddSource(input: string, trackedRef: string | null): void;
   onSearchSkillsSh(query: string): void;
   onChooseFolder(): void;
@@ -58,6 +59,7 @@ export function SourceCatalogPage({
   operation,
   error,
   onBack,
+  onOpenTakeoverCandidates,
   onAddSource,
   onSearchSkillsSh,
   onChooseFolder,
@@ -120,7 +122,7 @@ export function SourceCatalogPage({
             className="secondary-action"
             type="button"
             disabled={isBusy}
-            onClick={onBack}
+            onClick={onOpenTakeoverCandidates}
           >
             {t("接管已有安装")}
           </button>

@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -16,6 +17,7 @@ import { DiscoverPage } from "./components/DiscoverPage";
 import { EditableLocalRelinkPage } from "./components/EditableLocalRelinkPage";
 import {
   InventoryPage,
+  type ManagementFilter,
   type InventoryScreen,
 } from "./components/InventoryPage";
 import { InstallPlanPage } from "./components/InstallPlanPage";
@@ -86,6 +88,7 @@ interface AppCoreProps {
   onDeleteAiApiKey(): Promise<void>;
   onTestAiConnection(): Promise<void>;
   onAgentContextChange(context: AgentPageContext): void;
+  onAgentSuppressionChange(isSuppressed: boolean): void;
   agentInstallPlan: InstallPlan | null;
   onAgentInstallPlanClear(): void;
   onPreviewDiscoverInstall(result: DiscoverWebResult): Promise<void>;
@@ -115,14 +118,53 @@ type InventoryOutcome = Extract<UiOutcome, { type: "inventory" }>;
 const INVENTORY_LIST_SCREEN: InventoryScreen = { type: "list" };
 const LIBRARY_REFERENCE_WIDTH = 1180;
 const LIBRARY_REFERENCE_HEIGHT = 840;
+const LIBRARY_MIN_READABLE_SCALE = 0.9;
 
-function libraryScaleForViewport(): number {
-  if (typeof window === "undefined") return 1;
-  // 三套主题共享同一设计坐标系；窗口变化时只做统一缩放，不能各自重排。
-  return Math.min(
+interface LibraryCanvasMetrics {
+  layout: "reference" | "compact";
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  frameWidth: number;
+  frameHeight: number;
+}
+
+function libraryCanvasMetricsForViewport(): LibraryCanvasMetrics {
+  if (typeof window === "undefined") {
+    return {
+      layout: "reference",
+      scale: 1,
+      offsetX: 0,
+      offsetY: 0,
+      frameWidth: LIBRARY_REFERENCE_WIDTH,
+      frameHeight: LIBRARY_REFERENCE_HEIGHT,
+    };
+  }
+  const referenceScale = Math.min(
     window.innerWidth / LIBRARY_REFERENCE_WIDTH,
     window.innerHeight / LIBRARY_REFERENCE_HEIGHT,
   );
+  // 参考构图只在正文和交互目标仍可读时等比缩放；更窄窗口改用共享紧凑构图。
+  if (referenceScale < LIBRARY_MIN_READABLE_SCALE) {
+    return {
+      layout: "compact",
+      scale: 1,
+      offsetX: 0,
+      offsetY: 0,
+      frameWidth: window.innerWidth,
+      frameHeight: window.innerHeight,
+    };
+  }
+  return {
+    layout: "reference",
+    scale: referenceScale,
+    offsetX:
+      (window.innerWidth - LIBRARY_REFERENCE_WIDTH * referenceScale) / 2,
+    offsetY:
+      (window.innerHeight - LIBRARY_REFERENCE_HEIGHT * referenceScale) / 2,
+    frameWidth: LIBRARY_REFERENCE_WIDTH,
+    frameHeight: LIBRARY_REFERENCE_HEIGHT,
+  };
 }
 
 interface CurrentOperationSummary {
@@ -158,7 +200,9 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [languageError, setLanguageError] = useState<string | null>(null);
   const [isSavingTheme, setIsSavingTheme] = useState(false);
   const [themeError, setThemeError] = useState<string | null>(null);
-  const [libraryScale, setLibraryScale] = useState(libraryScaleForViewport);
+  const [libraryCanvasMetrics, setLibraryCanvasMetrics] = useState(
+    libraryCanvasMetricsForViewport,
+  );
   const [aiOperation, setAiOperation] = useState<AiOperation>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [agentContext, setAgentContext] = useState<AgentPageContext>({
@@ -168,10 +212,11 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
   const [agentInstallPlan, setAgentInstallPlan] = useState<InstallPlan | null>(
     null,
   );
+  const [isAgentSuppressed, setIsAgentSuppressed] = useState(false);
 
   useEffect(() => {
     const updateLibraryScale = () =>
-      setLibraryScale(libraryScaleForViewport());
+      setLibraryCanvasMetrics(libraryCanvasMetricsForViewport());
     window.addEventListener("resize", updateLibraryScale);
     return () => window.removeEventListener("resize", updateLibraryScale);
   }, []);
@@ -315,9 +360,14 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
       <div
         className="application-theme"
         data-theme-preset={theme}
+        data-library-layout={libraryCanvasMetrics.layout}
         style={
           {
-            "--library-scale": String(libraryScale),
+            "--library-scale": String(libraryCanvasMetrics.scale),
+            "--library-offset-x": `${libraryCanvasMetrics.offsetX}px`,
+            "--library-offset-y": `${libraryCanvasMetrics.offsetY}px`,
+            "--library-frame-width": `${libraryCanvasMetrics.frameWidth}px`,
+            "--library-frame-height": `${libraryCanvasMetrics.frameHeight}px`,
           } as CSSProperties
         }
       >
@@ -334,6 +384,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
             aiOperation={aiOperation}
             aiError={aiError}
             onAgentContextChange={setAgentContext}
+            onAgentSuppressionChange={setIsAgentSuppressed}
             agentInstallPlan={agentInstallPlan}
             onAgentInstallPlanClear={() => setAgentInstallPlan(null)}
             onPreviewDiscoverInstall={previewSearchInstall}
@@ -357,6 +408,7 @@ export function App({ client = tauriSkillYardClient }: AppProps) {
           <AgentOverlay
             context={agentContext}
             aiPreferences={aiPreferences}
+            isSuppressed={isAgentSuppressed}
             onAsk={(requestId, context, messages, onEvent) =>
               client.askAgent(requestId, context, messages, onEvent)
             }
@@ -388,6 +440,7 @@ function AppCore({
   onDeleteAiApiKey,
   onTestAiConnection,
   onAgentContextChange,
+  onAgentSuppressionChange,
   agentInstallPlan,
   onAgentInstallPlanClear,
   onPreviewDiscoverInstall,
@@ -406,6 +459,8 @@ function AppCore({
   const [inventoryScreen, setInventoryScreen] = useState<InventoryScreen>(
     INVENTORY_LIST_SCREEN,
   );
+  const [pendingInventoryFilter, setPendingInventoryFilter] =
+    useState<ManagementFilter | null>(null);
   const [readOnlyInventoryScreen, setReadOnlyInventoryScreen] =
     useState<InventoryScreen>(INVENTORY_LIST_SCREEN);
   const [isScanning, setIsScanning] = useState(false);
@@ -528,6 +583,11 @@ function AppCore({
   );
   const aiOrganizationFeedbackTimer = useRef<number | null>(null);
   const [inventoryPresentationKey, setInventoryPresentationKey] = useState(0);
+
+  useLayoutEffect(() => {
+    // 真模态存在时，固定在应用外壳的 Assistant 也必须退出交互与无障碍树。
+    onAgentSuppressionChange(pendingProjectSelection !== null);
+  }, [onAgentSuppressionChange, pendingProjectSelection]);
 
   const activeRemovalPlan =
     pendingRemovalPlan ??
@@ -1258,6 +1318,13 @@ function AppCore({
     setSourceError(null);
     setSkillsShSearch(null);
     setSourceDiscovery(null);
+  };
+
+  const openTakeoverCandidatesFromSource = () => {
+    if (sourceOperation) return;
+    setInventoryScreen(INVENTORY_LIST_SCREEN);
+    setPendingInventoryFilter("takeover");
+    returnToInventory();
   };
 
   const resetApplication = async () => {
@@ -2246,7 +2313,10 @@ function AppCore({
         }}
         onSearchWeb={searchDiscoverWeb}
         onOpenExternalUrl={(url) => {
-          void client.openExternalUrl(url);
+          setDiscoverError(null);
+          void client.openExternalUrl(url).catch((error: unknown) => {
+            setDiscoverError(formatError(error));
+          });
         }}
         onPreviewInstall={previewDiscoverInstall}
         onOpenSourceManagement={openSourceManagementFromDiscover}
@@ -2310,6 +2380,7 @@ function AppCore({
         }
         error={sourceError ?? removalError}
         onBack={returnToInventory}
+        onOpenTakeoverCandidates={openTakeoverCandidatesFromSource}
         onAddSource={addGithubSource}
         onSearchSkillsSh={searchSkillsSh}
         onChooseFolder={chooseFolderInstallPlan}
@@ -2457,6 +2528,8 @@ function AppCore({
       outcome={viewState.outcome}
       screen={inventoryScreen}
       onScreenChange={setInventoryScreen}
+      pendingManagementFilter={pendingInventoryFilter}
+      onPendingManagementFilterHandled={() => setPendingInventoryFilter(null)}
       language={language}
       theme={theme}
       aiPreferences={aiPreferences}

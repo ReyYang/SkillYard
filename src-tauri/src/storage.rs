@@ -12765,6 +12765,7 @@ fn inventory_item_from_observation(
     InventoryItem {
         id: observation.id,
         skill_name: observation.skill_name,
+        description: None,
         declared_name: observation.declared_name,
         skill_root: observation.skill_root,
         skill_file: observation.skill_file,
@@ -12840,7 +12841,7 @@ fn read_managed_entries_from(
         let (
             member_id,
             skill_name,
-            _description,
+            description,
             stable_relative_path,
             content_fingerprint,
             bundle_id,
@@ -12863,6 +12864,7 @@ fn read_managed_entries_from(
             .join(&stable_relative_path);
         entries.push(InventoryItem {
             id: format!("managed:{member_id}"),
+            description: Some(description),
             declared_name: Some(skill_name.clone()),
             skill_name,
             skill_file: skill_root.join("SKILL.md").to_string_lossy().into_owned(),

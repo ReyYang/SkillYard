@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+# 使用固定 rustc argv 离线构建可选维护工具；不会调用包管理器、网络或全局配置写入。
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)
+RUSTC=$(command -v rustc || true)
+if [ -z "$RUSTC" ]; then
+  printf '%s\n' '{"error":"runtime_missing","message":"缺少 rustc；日常 Skill 仍可使用，维护工具需人工安装兼容 Rust 后再构建。","ok":false}'
+  exit 3
+fi
+TEMP="$SCRIPT_DIR/.agent-fabric-core-build-$$"
+trap 'rm -f -- "$TEMP"' EXIT HUP INT TERM
+"$RUSTC" --edition=2021 -C opt-level=2 -C debuginfo=0 -o "$TEMP" "$PROJECT_ROOT/.agent-fabric/src/main.rs"
+chmod 0755 "$TEMP"
+mv -f -- "$TEMP" "$SCRIPT_DIR/agent-fabric-core"
+trap - EXIT HUP INT TERM
+exec "$SCRIPT_DIR/agent-fabric-core" internal-stamp-runtime --project-root "$PROJECT_ROOT"

@@ -18,9 +18,9 @@ SkillYard 1.0 已经能管理本机 Bundle、Skill、Source 和 Mount，但用�
 
 已有的非流式对话会让用户在完整回答返回前一直等待，原始 Markdown 文本也不适合作为正式阅读体验。发现结果如果全部混在聊天文本中，用户难以分辨哪些已经安装、哪些来自已添加 Source、哪些只是互联网参考，更无法安全进入既有安装预览。
 
-现有界面能够承载功能，但 Bundle 较多时缺少清晰、稳定且有辨识度的浏览方式。用户已经选定三种明显不同的视觉方向，希望它们成为真正可切换的产品主题，同时又不希望因此维护三套业务逻辑、三套危险操作流程或三套 Agent。
+现有界面能够承载功能，但 Bundle 较多时缺少清晰、稳定且有辨识度的浏览方式。用户已经选定两种明显不同的视觉方向，希望它们成为真正可切换的产品主题，同时又不希望因此维护两套业务逻辑、两套危险操作流程或两套 Agent。
 
-本地模型会显著增加安装包、硬件要求、模型分发和运行维护成本；完整的本地 Agent Harness 又会让 SkillYard 承担搜索引擎、网页抓取、Tool Loop 和任意 Provider 兼容层。两者都超出 1.1.0 所需范围。1.1.0 需要的是一个足够小、可选、可解释的 Agent 能力层，以及建立在同一产品状态之上的三种界面主题。
+本地模型会显著增加安装包、硬件要求、模型分发和运行维护成本；完整的本地 Agent Harness 又会让 SkillYard 承担搜索引擎、网页抓取、Tool Loop 和任意 Provider 兼容层。两者都超出 1.1.0 所需范围。1.1.0 需要的是一个足够小、可选、可解释的 Agent 能力层，以及建立在同一产品状态之上的两种界面主题。
 
 ## Solution
 
@@ -32,7 +32,7 @@ SkillYard 增加独立的“发现”页面。用户输入时只筛选本机和�
 
 SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固定分类、一句话概要、适用场景和简短使用说明。结果作为可重新生成的派生数据保存在本地 SQLite 中。扫描、安装和更新不会静默调用模型。
 
-界面提供 `Archive`、`Layers` 和 `Ledger` 三个 Theme Preset。每个 Preset 包含一套全局视觉语言和一种 Bundle Library 浏览构图；三者共享路由、领域状态、搜索、筛选、Agent Session 和全部生命周期入口。`Ledger` 是首次使用时的默认主题。
+界面提供 `Layers` 和 `Ledger` 两个 Theme Preset。每个 Preset 包含一套全局视觉语言和一种 Bundle Library 浏览构图；两者共享路由、领域状态、搜索、筛选、Agent Session 和全部生命周期入口。`Ledger` 是首次使用时的默认主题。这里删除的是 Archive 视觉主题，不影响从 ZIP / `.skill` 归档文件安装的产品能力。
 
 界面语言提供“简体中文”和“English”。AI 输出使用当前界面语言；原始 Skill 文件、Skill Name、Bundle Display Name、Source、路径和 Host Presentation Label 不会被翻译或修改。
 
@@ -65,19 +65,19 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 20. 作为 SkillYard 用户，我希望入口使用固定的抽象路径图标，而不是通用“Agent”文字，从而保持产品辨识度。
 21. 作为 SkillYard 用户，我希望对话窗口足以阅读较长回答，同时不完全遮挡当前页面，从而可以边看页面边提问。
 22. 作为 SkillYard 用户，我希望点击窗口外部、鼠标失焦或切换页面都不会关闭对话，从而不会意外丢失 Session。
-23. 作为 SkillYard 用户，我希望只有明确点击关闭按钮才结束对话，从而清楚掌握 Session 生命周期。
+23. 作为 SkillYard 用户，我希望收起抽屉时保留对话，只有明确点击“结束会话”才销毁 Session，从而清楚掌握 Session 生命周期。
 24. 作为 SkillYard 用户，我希望 Agent 默认理解当前页面，从而不必反复说明正在查看哪个 Bundle、Skill、Source 或设置项。
 25. 作为 SkillYard 用户，我希望在对话框保持打开时切换页面后继续同一段对话，从而让后续问题使用最新页面上下文。
 26. 作为 SkillYard 用户，我希望同时只有一个对话 Session，从而不需要管理线程、历史记录或多个聊天窗口。
-27. 作为 SkillYard 用户，我希望关闭对话框就销毁 Session，从而明确知道这段上下文已经被丢弃。
-28. 作为 SkillYard 用户，我希望重新打开对话框时得到空白 Session，从而不会意外带入旧问题。
+27. 作为 SkillYard 用户，我希望点击“结束会话”就销毁 Session，从而明确知道这段上下文已经被丢弃。
+28. 作为 SkillYard 用户，我希望结束会话后再次打开对话框时得到空白 Session，从而不会意外带入旧问题。
 29. 作为 SkillYard 用户，我希望应用重启后不恢复聊天，从而不在本地形成隐含的聊天历史。
 30. 作为 SkillYard 用户，我希望回答在生成过程中逐步显示，从而无需等待完整响应返回。
 31. 作为 SkillYard 用户，我希望流式回答中的标题、列表、引用、表格、链接和代码块得到适合当前主题的排版，从而不看到原始 Markdown。
 32. 作为 SkillYard 用户，我希望未闭合的流式 Markdown 仍能稳定显示，从而不会在回答生成期间频繁出现破碎格式。
 33. 作为 SkillYard 用户，我希望回答生成期间不能再次发送消息，从而避免同一 Session 中出现并发回答和顺序混乱。
 34. 作为 SkillYard 用户，我希望页面导航不会中断当前回答，从而可以在等待时继续浏览。
-35. 作为 SkillYard 用户，我希望关闭对话框会终止当前回答，从而不会继续产生不可见的请求和费用。
+35. 作为 SkillYard 用户，我希望“结束会话”会终止当前回答，而单纯收起抽屉不会打断生成，从而让中断语义明确且费用可预期。
 36. 作为 SkillYard 用户，我希望流式请求失败时保留已经看到的部分并标记“回答未完成”，从而不会突然丢失可用内容。
 37. 作为 SkillYard 用户，我希望未完成回答不进入下一轮上下文，从而不会把残缺内容当成可靠结论。
 38. 作为 SkillYard 用户，我希望 SkillYard 不自动重试或切换 Provider，从而保持费用和行为可预期。
@@ -144,28 +144,28 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 93. 作为 SkillYard 用户，我希望展开多成员 Bundle 后只突出或展示符合当前分类的 Skill，从而理解该 Bundle 为什么出现在结果中。
 94. 作为 SkillYard 用户，我希望分类筛选不改变更新、挂载和删除的生命周期边界，从而不产生第二套管理模型。
 
-### 三套主题与 Bundle Library
+### 两套主题与 Bundle Library
 
-95. 作为 SkillYard 用户，我希望在设置中选择 `Archive`、`Layers` 或 `Ledger`，从而按自己偏好的方式浏览 Bundle。
+95. 作为 SkillYard 用户，我希望在设置中选择 `Layers` 或 `Ledger`，从而按自己偏好的方式浏览 Bundle。
 96. 作为首次使用的用户，我希望默认看到 `Ledger`，从而在大量 Bundle、长名称和多状态下获得最稳定的浏览体验。
 97. 作为 SkillYard 用户，我希望主题选择在重启后保留，从而不必反复设置。
-98. 作为 SkillYard 用户，我希望切换主题立即生效，从而可以直接比较三种体验。
+98. 作为 SkillYard 用户，我希望切换主题立即生效，从而可以直接比较两种体验。
 99. 作为 SkillYard 用户，我希望主题切换保留当前路由、选中 Bundle、搜索、筛选和排序，从而不会打断正在进行的浏览。
 100. 作为 SkillYard 用户，我希望主题切换保留已打开的 Agent Session，从而不会因视觉变化丢失对话。
 101. 作为 SkillYard 用户，我希望主题切换保留未完成表单和操作状态，从而不会意外丢弃输入。
-102. 作为喜欢收藏感的用户，我希望 `Archive` 使用主 Bundle 展台和横向藏书构图，从而获得有品牌感的浏览体验。
+102. 作为 SkillYard 用户，我希望设置只呈现已经定稿的 `Layers` 与 `Ledger`，从而不必在未采用的视觉方向之间选择。
 103. 作为喜欢空间层级的用户，我希望 `Layers` 使用层叠卡片和当前 Bundle 构图，从而快速理解集合与当前选择。
 104. 作为需要高效管理大量 Bundle 的用户，我希望 `Ledger` 使用主从清单和详情面板，从而快速比较名称、状态和内容。
-105. 作为 SkillYard 用户，我希望三种 Library View 都能完成选择、搜索、筛选、打开 Bundle 和进入公共操作，从而不会因主题失去功能。
-106. 作为 SkillYard 用户，我希望三种主题共用同一份 Bundle、Skill、Source 和 Mount 状态，从而不会形成不同步的数据副本。
-107. 作为 SkillYard 用户，我希望安装、接管、Bundle 与 Skill 详情、设置、确认弹窗和 Agent 在三种主题中保持相同的信息层级与操作顺序，从而不必重新学习产品。
+105. 作为 SkillYard 用户，我希望两种 Library View 都能完成选择、搜索、筛选、打开 Bundle 和进入公共操作，从而不会因主题失去功能。
+106. 作为 SkillYard 用户，我希望两种主题共用同一份 Bundle、Skill、Source 和 Mount 状态，从而不会形成不同步的数据副本。
+107. 作为 SkillYard 用户，我希望安装、接管、Bundle 与 Skill 详情、设置、确认弹窗和 Agent 在两种主题中保持相同的信息层级与操作顺序，从而不必重新学习产品。
 108. 作为 SkillYard 用户，我希望公共页面使用当前主题的颜色、字体、边框、阴影、图标和动效，从而不会出现视觉割裂。
 109. 作为 SkillYard 用户，我希望主题只决定视觉和 Bundle Library 构图，从而不会改变生命周期行为或结果。
 110. 作为键盘用户，我希望每种 Library View 都具有清晰焦点和可预测的选择顺序，从而不依赖鼠标操作。
-111. 作为使用较窄窗口的用户，我希望三种 Library View 都保持可读并提供完整主操作，从而不会因为构图被裁切而失去能力。
-112. 作为拥有长 Bundle 名称的用户，我希望三种主题都能清楚显示或合理截断名称，从而不会破坏布局。
-113. 作为拥有很多 Bundle 的用户，我希望三种主题都能稳定浏览大量数据，从而不会因视觉效果造成性能或可访问性问题。
-114. 作为 SkillYard 用户，我希望 Agent Markdown 在三种主题中使用同一语义结构并适配各自 token，从而既保持一致阅读能力又融入当前主题。
+111. 作为使用较窄窗口的用户，我希望两种 Library View 都保持可读并提供完整主操作，从而不会因为构图被裁切而失去能力。
+112. 作为拥有长 Bundle 名称的用户，我希望两种主题都能清楚显示或合理截断名称，从而不会破坏布局。
+113. 作为拥有很多 Bundle 的用户，我希望两种主题都能稳定浏览大量数据，从而不会因视觉效果造成性能或可访问性问题。
+114. 作为 SkillYard 用户，我希望 Agent Markdown 在两种主题中使用同一语义结构并适配各自 token，从而既保持一致阅读能力又融入当前主题。
 
 ### 界面语言与派生数据生命周期
 
@@ -223,7 +223,7 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 
 - 应用同时最多存在一个 Agent Session。
 - Session 只保存在当前应用内存中，不写入 SQLite，不恢复，不形成聊天历史或线程列表。
-- 打开对话入口时创建 Session；只有明确关闭按钮会终止尚未完成的流式请求、结束 Session 并丢弃消息。
+- 打开对话入口时创建 Session；收起抽屉保留 Session，只有明确点击“结束会话”才终止尚未完成的流式请求、结束 Session 并丢弃消息。
 - 点击窗口外、鼠标失焦和页面导航不能关闭对话。
 - 页面导航不会结束已打开的 Session。每次发送消息时使用当时最新的页面类型和稳定领域 ID 作为默认上下文。
 - 前端不能向 Agent 提交任意本机路径。Lifecycle Core 根据稳定 ID 解析 Bundle、Skill、Source、Mount 或只读 Inventory 内容。
@@ -236,13 +236,13 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 - OpenAI、智谱 GLM 和 DeepSeek Adapter 各自解析官方流式协议，并归一为正文增量、完成和失败三类内部事件；Provider 私有事件不能进入 React。
 - Lifecycle Core 通过 typed Tauri Channel 按顺序发送事件。React 不使用无类型全局事件总线，也不直接连接 Provider。
 - 当前 `askAgent` 生产入口原地改为流式合同，不保留并行的非流式聊天入口。
-- 一个回答生成期间不能发送第二条用户消息。页面导航不打断生成；关闭对话框会终止生成并结束 Session。
+- 一个回答生成期间不能发送第二条用户消息。页面导航和收起抽屉不打断生成；“结束会话”会终止生成并销毁 Session。
 - 正文增量使用 Streamdown 渲染未完成 Markdown。SkillYard 只增加一层薄的 `AgentMarkdown` 包装，不引入第二套聊天 Runtime。
 - Streamdown 所需 Tailwind 构建能力只服务于 Markdown renderer；现有页面不迁移到 Tailwind，也不引入 AI Elements、assistant-ui 或 shadcn 应用框架。
 - Raw HTML 保持禁用；链接只允许明确协议并通过 Tauri 受控方式打开；默认不加载远程或 `data:` 图片；代码块只能展示和复制，不能执行。
 - 全网引用、可安装候选和安装预览入口只在完成事件中作为 typed 数据展示，不能由模型通过 Markdown 生成可执行控件。
 - 流式请求失败时保留已经显示的正文并标记“回答未完成”；这部分内容不加入下一轮上下文。SkillYard 不自动重试或切换 Provider。
-- 三套主题共用同一个 Markdown 语义 renderer，只通过主题 token 改变排版材质。
+- 两套主题共用同一个 Markdown 语义 renderer，只通过主题 token 改变排版材质。
 
 ### Skill 文件读取与隐私
 
@@ -298,25 +298,25 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 - 扫描、安装、接管、更新、应用启动和语言切换都不能静默启动 AI 整理。
 - 完成结果保存后自然出现在清单和详情中；未完成内容不能覆盖之前的可用结果。
 
-### Bundle 清单、分类与三套 Theme Preset
+### Bundle 清单、分类与两套 Theme Preset
 
 - Bundle 继续是主清单单位，不把 Skill 平铺为顶层生命周期对象。
 - 单成员 Bundle 直接展示该 Skill 的分类和一句话概要，点击后进入 Skill 详情。
 - 多成员 Bundle 保持成员入口；成员列表和 Skill 详情展示 AI 派生信息。
 - 分类筛选返回包含至少一个匹配 Skill 的 Bundle；展开后展示与当前分类匹配的成员。
 - 分类筛选只改变只读展示，不改变 Bundle Update、Batch Mount、解除挂载或 Cascading Delete 的生命周期边界。
-- 用户界面把 `Archive`、`Layers` 和 `Ledger` 作为三个完整 Theme Preset，不向用户暴露独立组合 `Appearance Theme` 与 `Library View` 的高级设置。
+- 用户界面把 `Layers` 和 `Ledger` 作为两个完整 Theme Preset，不向用户暴露独立组合 `Appearance Theme` 与 `Library View` 的高级设置。
 - 每个 Theme Preset 内部由两层组成：
   - `Appearance Theme` 作用于整个应用的背景、颜色、字体、边框、阴影、控件、弹窗、导航、图标和动效；
   - `Library View` 只负责 Bundle Library 的浏览构图。
 - `Ledger` 是没有已保存偏好时的默认 Theme Preset。
-- `Archive` 使用主 Bundle 展台和横向藏书构图；`Layers` 使用层叠卡片和当前 Bundle 构图；`Ledger` 使用 Bundle 列表和详情面板构图。
-- 三个 Library renderer 消费同一份领域数据、当前路由、选中 Bundle、搜索、筛选、排序和操作入口，不能各自保存 Bundle 状态。
+- `Layers` 使用层叠卡片和当前 Bundle 构图；`Ledger` 使用 Bundle 列表和详情面板构图。
+- 两个 Library renderer 消费同一份领域数据、当前路由、选中 Bundle、搜索、筛选、排序和操作入口，不能各自保存 Bundle 状态。
 - 切换 Theme Preset 时保留当前路由、选中 Bundle、搜索、筛选、排序、已打开 Agent Session，以及尚未确认的表单和操作状态。
-- Library renderer 可以保留纯展示状态，例如 Archive 的横向位置；该状态不能进入 Bundle 领域模型或改变操作结果。
+- Library renderer 可以保留纯展示状态，例如 Layers 的当前纸张焦点；该状态不能进入 Bundle 领域模型或改变操作结果。
 - 安装、接管、Bundle 与 Skill 详情、Source、Mount、设置、恢复、确认弹窗和 Agent 使用同一套信息架构与业务组件，只应用当前主题 token。
-- 1.1.0 不建立全应用 Skin Engine，不复制三套路由、生命周期页面或 Agent。
-- 三套主题必须提供相同主操作能力，并分别满足文字对比度、焦点可见性、键盘导航、窄窗口、长名称和大量 Bundle 的基本可用性。
+- 1.1.0 不建立全应用 Skin Engine，也不因主题复制路由、生命周期页面或 Agent。
+- 两套主题必须提供相同主操作能力，并分别满足文字对比度、焦点可见性、键盘导航、窄窗口、长名称和大量 Bundle 的基本可用性。
 
 ### 界面语言
 
@@ -343,9 +343,9 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 - 验证连接测试只在用户点击后执行，只请求当前模型，并且固定 Schema 与服务端搜索都通过后才启用 AI。
 - 验证测试连接具有稳定、可回读的成功或失败反馈。
 - 验证更换 Provider、模型或 API Key 后 AI 回到未验证状态，但已有 AI 整理结果不失效。
-- 验证聊天 Session 在页面导航中保留，在明确关闭和重启后丢弃。
+- 验证聊天 Session 在页面导航和收起抽屉后保留，在明确结束会话和重启后丢弃。
 - 验证三个 Provider 的正文增量按顺序进入同一回答，完成前即可被用户看到，完成后才把该回答加入下一轮上下文。
-- 验证页面导航不打断流式回答，关闭对话框会终止请求；中途失败保留可见正文但不污染下一轮上下文。
+- 验证页面导航和收起抽屉不打断流式回答，“结束会话”会终止请求；中途失败保留可见正文但不污染下一轮上下文。
 - 验证页面只提交稳定 ID，Lifecycle Core 解析实际上下文，前端不能注入任意路径。
 - 验证受管、待接管、项目维护、Host 内置和官方插件 Skill 在文件可读时都能被分析。
 - 验证 Skill 中的 Prompt Injection 文本不能获得额外文件、网络或生命周期权限。
@@ -359,7 +359,7 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 - 验证内容 fingerprint 或语言变化产生“待重新整理”，而 Provider 或模型变化不会。
 - 验证固定分类只能返回十个允许值之一，概要、场景和使用说明遵守字段边界。
 - 验证分类筛选仍以 Bundle 为主清单，并正确处理单成员与多成员 Bundle。
-- 验证三套 Theme Preset 共用相同领域状态和生命周期入口。
+- 验证两套 Theme Preset 共用相同领域状态和生命周期入口。
 - 验证切换主题保留路由、当前 Bundle、搜索、筛选、Agent Session 和未完成表单。
 - 验证语言切换立即更新 UI、持久化设置、改变后续 AI 输出语言且不修改 Skill 文件。
 
@@ -367,10 +367,11 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 
 - 普通离线 CI 使用 Fake Server 覆盖三个 Adapter 的请求格式、SSE 分块与结束事件、固定 Schema 解析、搜索引用归一、错误映射和模型身份检查，不需要真实 API Key。
 - typed client 测试验证每项新命令只提交完成任务所需的设置、稳定 ID、消息、无历史搜索请求和 typed Channel，不提交任意路径、Key 或前端推断的本机内容。
-- React 行为测试覆盖设置、API Key 显示、连接反馈、一次性披露、全局对话开合、流式 Markdown、页面上下文、三个搜索分区、后台整理反馈、分类筛选、单成员 Bundle 展示、过时标记、三主题切换和中英文切换。
+- React 行为测试覆盖设置、API Key 显示、连接反馈、一次性披露、全局对话开合、流式 Markdown、页面上下文、三个搜索分区、后台整理反馈、分类筛选、单成员 Bundle 展示、过时标记、两主题切换和中英文切换。
 - UI 测试使用假的 typed client 观察用户可见状态；不得通过直接调用私有 Rust 步骤证明产品行为。
 - Streamdown 包装测试覆盖 Raw HTML、危险协议、远程图片、代码块和未闭合 Markdown，不测试第三方库内部解析算法。
-- 三个 Library renderer 分别验证空状态、少量 Bundle、大量 Bundle、长名称、窄窗口、键盘选择和公共操作入口。
+- 两个 Library renderer 分别验证空状态、少量 Bundle、大量 Bundle、长名称、窄窗口、键盘选择和公共操作入口。
+- 窗口行为验证 `1180 × 840` reference 与 `760 × 560` compact 两种状态：前者保持参考坐标系，后者保持可读字号、完整主操作和单一正文滚动区；两种状态都复用同一 renderer 与产品状态。
 - 公共安装、接管、更新、Mount 和 Cascading Delete 流程只需验证使用当前主题 token，不为每个主题重复 Rust 生命周期测试。
 
 ### 用户连接测试与最终应用验收
@@ -379,8 +380,9 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 - 测试必须同时得到符合固定 Schema 的结果和可打开的真实 URL；只支持部分能力、发生可识别的静默 fallback 或缺少来源时，当前配置不能启用 AI。
 - 连接测试不遍历同一 Provider 的其他模型，也不把结果上传给 SkillYard。维护者不需要持有全部候选模型的访问权限。
 - 真实 Key 不进入普通 CI、外部 PR、测试夹具、公开日志或截图。
-- 自动化通过后，在 Apple Silicon macOS VM 中使用生产构建验证 Keychain、设置持久化、用户主动连接测试、真实流式回答、主题化 Markdown、发现页、AI 整理、语言切换和至少一个可用 Provider 的真实主路径。
-- VM 分别检查 `Archive`、`Layers` 和 `Ledger` 的 Library 主路径，以及主题切换时的状态保持；不为每套主题重复完整生命周期验收。
+- 自动化通过后先冻结生产构建与 SHA-256；需要真实 Provider 的独立产品验收继续验证 Keychain、用户主动连接测试、真实流式回答、发现页和 AI 整理，但不得与本轮两主题视觉迭代混成一个反复重建环境的门禁。
+- 两主题视觉先由本地确定性五 Bundle 夹具覆盖 `Layers`、`Ledger`、排序、设置、Agent、`1180 × 840` 与 `760 × 560`；冻结候选后只运行至多一次 Apple Silicon macOS VM 冒烟，确认真实 WebView、原生窗口边界和主题状态保持，不为每套主题重复完整生命周期验收。
+- 本地或 VM 冒烟命中 P0–P2 后，必须回到本地修复并生成新的候选；不能对旧候选连续申请相似 VM 操作来碰运气。
 - VM 验收不得把真实 Key、完整本机路径、用户消息或 Skill 内容写入公开截图和日志。
 - 1.0 的安装、接管、Mount、整 Bundle 解除挂载、Update 和 Cascading Delete 回归测试必须继续通过，证明 Agent、发现和主题没有扩张生命周期权限。
 
@@ -407,7 +409,7 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 - 自动翻译或改写原始 Skill 文件。
 - 简体中文和 English 以外的界面语言。
 - 用户自定义主题、自动跟随系统主题、独立组合 Appearance Theme 与 Library View、第三方 Theme 或 Theme Marketplace。
-- 为三个主题分别实现路由、生命周期页面、Agent、SQLite 领域状态或完整 Skin Engine。
+- 为每个主题分别实现路由、生命周期页面、Agent、SQLite 领域状态或完整 Skin Engine。
 - 改变 macOS 14+ Apple Silicon、Supported Apps、分发方式或 1.0 生命周期承诺。
 
 ## Further Notes

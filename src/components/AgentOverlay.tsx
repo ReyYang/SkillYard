@@ -1,4 +1,9 @@
-import { useRef, useState, type FormEvent } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 
 import type {
   AgentConversationMessage,
@@ -7,13 +12,14 @@ import type {
   AgentStreamEvent,
   AiPreferences,
 } from "../domain";
-import agentMark from "../assets/ui/skillyard-agent-sprout-mark.png";
+import agentMark from "../assets/ui/skillyard-mark.png";
 import { useI18n } from "../i18n";
 import { AgentMarkdown } from "./AgentMarkdown";
 
 interface AgentOverlayProps {
   context: AgentPageContext;
   aiPreferences: AiPreferences;
+  isSuppressed: boolean;
   onAsk(
     requestId: string,
     context: AgentPageContext,
@@ -34,6 +40,7 @@ interface AgentUiMessage extends AgentConversationMessage {
 export function AgentOverlay({
   context,
   aiPreferences,
+  isSuppressed,
   onAsk,
   onCancel,
   onOpenExternalUrl,
@@ -46,6 +53,12 @@ export function AgentOverlay({
   const [isSending, setIsSending] = useState(false);
   const [previewingUrl, setPreviewingUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const windowRef = useRef<HTMLElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const composerInputRef = useRef<HTMLInputElement>(null);
+  const launcherRef = useRef<HTMLButtonElement>(null);
+  const wasOpenRef = useRef(false);
+  const shouldFollowMessagesRef = useRef(true);
   const sessionGeneration = useRef(0);
   const sequence = useRef(0);
   const activeRequestId = useRef<string | null>(null);
@@ -54,9 +67,37 @@ export function AgentOverlay({
     aiPreferences.disclosureAccepted &&
     aiPreferences.hasApiKey &&
     aiPreferences.verified;
+  const hasSessionContent =
+    messages.length > 0 ||
+    draft.length > 0 ||
+    isSending ||
+    error !== null;
 
-  const closeDrawer = () => {
-    // 关闭只收起抽屉，返回后仍能继续当前只读会话。
+  useLayoutEffect(() => {
+    const wasOpen = wasOpenRef.current;
+    wasOpenRef.current = isOpen;
+    if (isOpen && !wasOpen) {
+      const composerInput = composerInputRef.current;
+      if (composerInput && !composerInput.disabled) {
+        composerInput.focus();
+      } else {
+        windowRef.current
+          ?.querySelector<HTMLButtonElement>("button:not(:disabled)")
+          ?.focus();
+      }
+    } else if (!isOpen && wasOpen) {
+      launcherRef.current?.focus();
+    }
+  }, [isOpen, isReady]);
+
+  useLayoutEffect(() => {
+    if (!isOpen || !shouldFollowMessagesRef.current) return;
+    const messageList = messagesRef.current;
+    if (messageList) messageList.scrollTop = messageList.scrollHeight;
+  }, [isOpen, isSending, messages]);
+
+  const collapseDrawer = () => {
+    // 收起只隐藏抽屉，返回后仍能继续当前只读会话。
     setIsOpen(false);
   };
 
@@ -75,6 +116,15 @@ export function AgentOverlay({
     setError(null);
     setIsSending(false);
     setPreviewingUrl(null);
+    shouldFollowMessagesRef.current = true;
+    const composerInput = composerInputRef.current;
+    if (composerInput && !composerInput.disabled) {
+      composerInput.focus();
+    } else {
+      windowRef.current
+        ?.querySelector<HTMLButtonElement>(".agent-close:not(:disabled)")
+        ?.focus();
+    }
   };
 
   const send = async (event: FormEvent) => {
@@ -111,6 +161,7 @@ export function AgentOverlay({
     setDraft("");
     setError(null);
     setIsSending(true);
+    shouldFollowMessagesRef.current = true;
     activeRequestId.current = requestId;
     const activeGeneration = sessionGeneration.current;
     let terminalReceived = false;
@@ -203,48 +254,92 @@ export function AgentOverlay({
       await onPreviewInstall(result);
     } catch (cause) {
       setError(
-        cause instanceof Error
-          ? cause.message
-          : t("无法准备这个来源的安装预览，请稍后重试。"),
+        errorMessage(
+          cause,
+          t("无法准备这个来源的安装预览，请稍后重试。"),
+        ),
       );
     } finally {
       setPreviewingUrl(null);
     }
   };
 
+  const openExternal = async (url: string) => {
+    setError(null);
+    try {
+      await onOpenExternalUrl(url);
+    } catch (cause) {
+      setError(
+        errorMessage(
+          cause,
+          t("无法打开这个外部链接，请稍后重试。"),
+        ),
+      );
+    }
+  };
+
   return (
-    <aside className="agent-overlay">
-      {isOpen ? (
-        <section
-          className="agent-window"
-          role="dialog"
-          aria-label={t("SkillYard 助手")}
-        >
+    <aside
+      className="agent-overlay"
+      data-suppressed={isSuppressed ? "true" : undefined}
+      aria-hidden={isSuppressed ? true : undefined}
+      inert={isSuppressed ? true : undefined}
+    >
+      <section
+        ref={windowRef}
+        id="skillyard-agent-window"
+        className="agent-window"
+        data-state={isOpen ? "open" : "closed"}
+        role="dialog"
+        aria-label={t("SkillYard 助手")}
+        aria-hidden={isOpen ? undefined : true}
+        inert={isOpen ? undefined : true}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          collapseDrawer();
+        }}
+      >
           <header className="agent-window-header">
             <div className="agent-window-title">
               <p className="section-eyebrow">{t("只读解释与搜索")}</p>
-              <h2>SkillYard Agent</h2>
+              <h2>{t("SkillYard 助手")}</h2>
             </div>
             <div className="agent-window-actions">
-              <button
-                className="agent-session-action"
-                type="button"
-                onClick={endSession}
-              >
-                {t("结束会话")}
-              </button>
+              {hasSessionContent ? (
+                <button
+                  className="agent-session-action"
+                  type="button"
+                  onClick={endSession}
+                >
+                  {t("结束会话")}
+                </button>
+              ) : null}
               <button
                 className="agent-close"
                 type="button"
-                aria-label={t("关闭 SkillYard Agent")}
-                onClick={closeDrawer}
+                aria-label={t("收起 SkillYard Assistant")}
+                onClick={collapseDrawer}
               >
-                {t("关闭")}
+                {t("收起")}
               </button>
             </div>
           </header>
 
-          <div className="agent-messages" aria-live="polite">
+          <div
+            ref={messagesRef}
+            className="agent-messages"
+            aria-live="polite"
+            aria-busy={isSending}
+            onScroll={(event) => {
+              const messageList = event.currentTarget;
+              shouldFollowMessagesRef.current =
+                messageList.scrollHeight -
+                  messageList.scrollTop -
+                  messageList.clientHeight <=
+                32;
+            }}
+          >
             {messages.length === 0 ? (
               <div className="agent-empty">
                 <strong>{t("可以从当前页面开始提问")}</strong>
@@ -268,7 +363,7 @@ export function AgentOverlay({
                       <AgentMarkdown
                         streaming={message.status === "streaming"}
                         onOpenExternalUrl={(url) => {
-                          void onOpenExternalUrl(url);
+                          void openExternal(url);
                         }}
                       >
                         {message.content}
@@ -293,7 +388,7 @@ export function AgentOverlay({
                               className="agent-result-link"
                               type="button"
                               onClick={() => {
-                                void onOpenExternalUrl(result.url);
+                                void openExternal(result.url);
                               }}
                             >
                               {result.title}
@@ -307,9 +402,15 @@ export function AgentOverlay({
                           {result.kind !== "reference" ? (
                             <button
                               type="button"
-                              aria-label={t("查看 {title} 的安装预览", {
-                                title: result.title,
-                              })}
+                              aria-label={
+                                previewingUrl === result.url
+                                  ? t("正在准备…：{title}", {
+                                      title: result.title,
+                                    })
+                                  : t("查看安装预览：{title}", {
+                                      title: result.title,
+                                    })
+                              }
                               disabled={previewingUrl !== null}
                               onClick={() => previewInstall(result)}
                             >
@@ -345,6 +446,7 @@ export function AgentOverlay({
             <label>
               <span className="visually-hidden">{t("向 SkillYard 提问")}</span>
               <input
+                ref={composerInputRef}
                 aria-label={t("向 SkillYard 提问")}
                 value={draft}
                 disabled={!isReady || isSending}
@@ -359,22 +461,38 @@ export function AgentOverlay({
               {t("发送")}
             </button>
           </form>
-        </section>
-      ) : null}
+      </section>
 
       <button
+        ref={launcherRef}
         className="agent-launcher"
         type="button"
-        aria-label={t("打开 SkillYard 助手")}
+        aria-label={t("打开 SkillYard Assistant")}
         aria-expanded={isOpen}
+        aria-controls="skillyard-agent-window"
+        aria-hidden={isOpen}
+        tabIndex={isOpen ? -1 : 0}
         onClick={() => setIsOpen(true)}
       >
-        <img className="agent-launcher-mark" src={agentMark} alt="" />
-        <span className="agent-launcher-copy">
-          <strong>Agent</strong>
-          <small>{t("只读 · 搜索")}</small>
+        <span className="agent-launcher-badge" aria-hidden="true">
+          <img className="agent-launcher-mark" src={agentMark} alt="" />
         </span>
+        <span className="agent-launcher-copy">Assistant</span>
       </button>
     </aside>
   );
+}
+
+function errorMessage(cause: unknown, fallback: string): string {
+  if (cause instanceof Error && cause.message) return cause.message;
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "message" in cause &&
+    typeof cause.message === "string" &&
+    cause.message
+  ) {
+    return cause.message;
+  }
+  return fallback;
 }
