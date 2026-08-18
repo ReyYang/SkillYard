@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{CStr, CString, OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     mem::MaybeUninit,
     os::{
         fd::{AsRawFd, FromRawFd},
@@ -44,6 +44,7 @@ use crate::{
         NewSourceCatalogMember, Storage, StorageError, StoredInstallCandidate, StoredInstallPlan,
         StoredLifecycleTransaction, StoredSourceInstallCatalogMember, StoredSourceInstallSource,
     },
+    transaction::{self, JournalIoError, journal_file_name},
 };
 
 const PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
@@ -3197,19 +3198,15 @@ fn remove_journal(
     managed_root: &File,
     journal: &InstallJournal,
 ) -> Result<(), LifecycleError> {
-    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
-    let name = OsString::from(format!("{}.json", journal.transaction_id));
-    match unlink_at(&journals, &name, false) {
-        Ok(()) => journals
-            .sync_all()
-            .map_err(|source| io_error("同步 Journal 目录", &paths.journals_root(), source)),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(io_error(
-            "清理事务 Journal",
-            &journal_path(paths, journal),
-            source,
-        )),
-    }
+    let name = journal_file_name("", &journal.transaction_id);
+    transaction::remove_journal(
+        paths,
+        managed_root,
+        &name,
+        "清理事务 Journal",
+        "同步 Journal 目录",
+    )
+    .map_err(journal_write_error)
 }
 
 fn cleanup_staging_before_activation(
@@ -3421,16 +3418,34 @@ fn render_notice(
     notice
 }
 
+fn journal_write_error(error: JournalIoError) -> LifecycleError {
+    match error {
+        JournalIoError::TooLarge { actual, limit } => {
+            LifecycleError::JournalTooLarge { actual, limit }
+        }
+        JournalIoError::InvalidJson(source) => LifecycleError::InvalidJournal(source),
+        JournalIoError::Lifecycle(error) => error,
+    }
+}
+
+fn journal_read_error(error: JournalIoError) -> LifecycleError {
+    match error {
+        JournalIoError::TooLarge { .. } => {
+            LifecycleError::RecoveryBlocked("事务 Journal 超过安全大小限制".to_owned())
+        }
+        JournalIoError::InvalidJson(source) => LifecycleError::InvalidJournal(source),
+        JournalIoError::Lifecycle(error) => error,
+    }
+}
+
 fn write_journal(
     paths: &ApplicationPaths,
     managed_root: &File,
     journal: &InstallJournal,
 ) -> Result<(), LifecycleError> {
-    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
-    let name = OsString::from(format!("{}.json", journal.transaction_id));
-    let bytes = serde_json::to_vec_pretty(journal)?;
-    ensure_serialized_journal_fits(bytes.len())?;
-    write_atomic_at(&journals, &name, &journal_path(paths, journal), &bytes)
+    let name = journal_file_name("", &journal.transaction_id);
+    transaction::write_journal(paths, managed_root, &name, journal, MAX_JOURNAL_BYTES, true)
+        .map_err(journal_write_error)
 }
 
 fn ensure_journal_fits(journal: &InstallJournal) -> Result<(), LifecycleError> {
@@ -3443,21 +3458,10 @@ fn ensure_journal_fits(journal: &InstallJournal) -> Result<(), LifecycleError> {
     ] {
         let mut candidate = journal.clone();
         candidate.phase = phase;
-        let bytes = serde_json::to_vec_pretty(&candidate)?;
-        ensure_serialized_journal_fits(bytes.len())?;
+        transaction::serialize_journal(&candidate, MAX_JOURNAL_BYTES, true)
+            .map_err(journal_write_error)?;
     }
     Ok(())
-}
-
-fn ensure_serialized_journal_fits(actual: usize) -> Result<(), LifecycleError> {
-    if actual > MAX_JOURNAL_BYTES {
-        Err(LifecycleError::JournalTooLarge {
-            actual,
-            limit: MAX_JOURNAL_BYTES,
-        })
-    } else {
-        Ok(())
-    }
 }
 
 fn read_journal_at(
@@ -3465,32 +3469,15 @@ fn read_journal_at(
     name: &OsStr,
     path: &Path,
 ) -> Result<InstallJournal, LifecycleError> {
-    let mut file = open_regular_file_at(journals, name, path, false)?;
-    let metadata = file
-        .metadata()
-        .map_err(|source| io_error("检查 Journal", path, source))?;
-    if metadata.len() > MAX_JOURNAL_BYTES as u64 {
-        return Err(LifecycleError::RecoveryBlocked(
-            "事务 Journal 超过安全大小限制".to_owned(),
-        ));
-    }
-    let mut bytes = Vec::with_capacity((metadata.len() + 1) as usize);
-    Read::by_ref(&mut file)
-        .take(MAX_JOURNAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| io_error("读取 Journal", path, source))?;
-    if bytes.len() > MAX_JOURNAL_BYTES {
-        return Err(LifecycleError::RecoveryBlocked(
-            "事务 Journal 超过安全大小限制".to_owned(),
-        ));
-    }
-    serde_json::from_slice(&bytes).map_err(Into::into)
-}
-
-fn journal_path(paths: &ApplicationPaths, journal: &InstallJournal) -> PathBuf {
-    paths
-        .journals_root()
-        .join(format!("{}.json", journal.transaction_id))
+    transaction::read_journal(
+        journals,
+        name,
+        path,
+        MAX_JOURNAL_BYTES,
+        "检查 Journal",
+        "读取 Journal",
+    )
+    .map_err(journal_read_error)
 }
 
 fn ensure_real_directory(path: &Path) -> Result<(), LifecycleError> {

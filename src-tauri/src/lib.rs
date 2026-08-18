@@ -20,6 +20,7 @@ mod source_association;
 mod source_input;
 mod storage;
 mod takeover;
+mod transaction;
 
 pub use agent::{AgentProviderEndpoints, SecretStore, SecretStoreError, SharedSecretStore};
 pub use application::SkillYardApplication;
