@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::{ErrorKind, Read},
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -28,11 +28,11 @@ use crate::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, OwnedTreeCleanupManifest,
         acquire_lifecycle_lock, capture_owned_tree_cleanup_manifest, ensure_entry_absent_at,
         ensure_open_directory_matches_managed_path, entry_metadata_at, mkdir_at, open_directory_at,
-        open_expected_directory_at, open_managed_directory_from_root, open_regular_file_at,
-        read_entry_names_from_handle, read_link_at, remove_empty_directory_at,
-        remove_owned_tree_at_with_manifest_and_hook, rename_at_no_replace, rename_at_replace,
-        symlink_at, unlink_at, validate_owned_tree_cleanup_manifest, write_atomic_at,
-        write_atomic_at_with_after_temp_sync, write_notice_from_storage,
+        open_expected_directory_at, open_managed_directory_from_root, read_entry_names_from_handle,
+        read_link_at, remove_empty_directory_at, remove_owned_tree_at_with_manifest_and_hook,
+        rename_at_no_replace, rename_at_replace, symlink_at, unlink_at,
+        validate_owned_tree_cleanup_manifest, write_atomic_at_with_after_temp_sync,
+        write_notice_from_storage,
     },
     mount_lifecycle::{
         MountLifecycleError, OpenMountParent, ParentLookup, TargetKind, TargetSnapshot,
@@ -44,6 +44,7 @@ use crate::{
         Storage, StorageError, StoredProject, StoredTakeoverBundleSnapshot, StoredTakeoverPlanRow,
         StoredTakeoverTransaction, takeover_reserved_paths,
     },
+    transaction::{self, JournalIoError},
 };
 
 const TAKEOVER_PLAN_TTL_MILLIS: i64 = 15 * 60 * 1_000;
@@ -1311,21 +1312,15 @@ fn read_takeover_journal_file(
     name: &OsStr,
     path: &Path,
 ) -> Result<TakeoverJournal, TakeoverError> {
-    let file = open_regular_file_at(journals, name, path, false)?;
-    let metadata = file
-        .metadata()
-        .map_err(|source| takeover_io("读取 Takeover Journal 元数据", path, source))?;
-    if metadata.len() > MAX_TAKEOVER_JOURNAL_BYTES as u64 {
-        return Err(TakeoverError::JournalTooLarge);
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_TAKEOVER_JOURNAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| takeover_io("读取 Takeover Journal", path, source))?;
-    if bytes.len() > MAX_TAKEOVER_JOURNAL_BYTES {
-        return Err(TakeoverError::JournalTooLarge);
-    }
-    Ok(serde_json::from_slice(&bytes)?)
+    transaction::read_journal(
+        journals,
+        name,
+        path,
+        MAX_TAKEOVER_JOURNAL_BYTES,
+        "读取 Takeover Journal 元数据",
+        "读取 Takeover Journal",
+    )
+    .map_err(journal_io_error)
 }
 
 fn reconcile_takeover_journal_temp(
@@ -3225,11 +3220,16 @@ fn write_journal(
     managed_root: &File,
     journal: &TakeoverJournal,
 ) -> Result<(), TakeoverError> {
-    let bytes = takeover_journal_bytes(journal)?;
-    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
     let name = journal_file_name(&journal.transaction_id);
-    write_atomic_at(&journals, &name, &paths.journals_root().join(&name), &bytes)?;
-    Ok(())
+    transaction::write_journal(
+        paths,
+        managed_root,
+        &name,
+        journal,
+        MAX_TAKEOVER_JOURNAL_BYTES,
+        false,
+    )
+    .map_err(journal_io_error)
 }
 
 fn write_initial_journal(
@@ -3258,19 +3258,22 @@ fn write_initial_journal(
 }
 
 fn takeover_journal_bytes(journal: &TakeoverJournal) -> Result<Vec<u8>, TakeoverError> {
-    let bytes = serde_json::to_vec(journal)?;
-    if bytes.len() > MAX_TAKEOVER_JOURNAL_BYTES {
-        return Err(TakeoverError::JournalTooLarge);
+    transaction::serialize_journal(journal, MAX_TAKEOVER_JOURNAL_BYTES, false)
+        .map_err(journal_io_error)
+}
+
+fn journal_io_error(error: JournalIoError) -> TakeoverError {
+    match error {
+        JournalIoError::TooLarge { .. } => TakeoverError::JournalTooLarge,
+        JournalIoError::InvalidJson(source) => TakeoverError::InvalidJournal(source),
+        JournalIoError::Lifecycle(error) => error.into(),
     }
-    Ok(bytes)
 }
 
 fn ensure_journal_fits(journal: &TakeoverJournal) -> Result<(), TakeoverError> {
-    if serde_json::to_vec(journal)?.len() > MAX_TAKEOVER_JOURNAL_BYTES {
-        Err(TakeoverError::JournalTooLarge)
-    } else {
-        Ok(())
-    }
+    transaction::serialize_journal(journal, MAX_TAKEOVER_JOURNAL_BYTES, false)
+        .map_err(journal_io_error)?;
+    Ok(())
 }
 
 fn remove_journal_if_present(
@@ -3278,22 +3281,19 @@ fn remove_journal_if_present(
     managed_root: &File,
     transaction_id: &str,
 ) -> Result<(), TakeoverError> {
-    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
     let name = journal_file_name(transaction_id);
-    if entry_metadata_at(&journals, &name)
-        .map_err(|source| takeover_io("检查 Takeover Journal", &paths.journals_root(), source))?
-        .is_some()
-    {
-        unlink_at(&journals, &name, false).map_err(|source| {
-            takeover_io("清理 Takeover Journal", &paths.journals_root(), source)
-        })?;
-        sync(&journals, "同步 Journal 目录", &paths.journals_root())?;
-    }
-    Ok(())
+    transaction::remove_journal(
+        paths,
+        managed_root,
+        &name,
+        "清理 Takeover Journal",
+        "同步 Journal 目录",
+    )
+    .map_err(journal_io_error)
 }
 
 fn journal_file_name(transaction_id: &str) -> OsString {
-    OsString::from(format!("takeover-{transaction_id}.json"))
+    transaction::journal_file_name("takeover-", transaction_id)
 }
 
 fn prepare_uncommitted_cleanup(
