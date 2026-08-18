@@ -122,12 +122,15 @@ pub(crate) fn read_journal<T: DeserializeOwned>(
 }
 
 /// 幂等清理：journal 缺失不算失败，删除后同步 journals 目录。
+/// `sync_when_missing` 保留各引擎的历史语义：Removal 与 SourceAssociation
+/// 在重构前即使文件缺失也会同步目录，Install/Mount/Takeover 则不会。
 pub(crate) fn remove_journal(
     paths: &ApplicationPaths,
     managed_root: &File,
     name: &OsStr,
     remove_action: &'static str,
     sync_action: &'static str,
+    sync_when_missing: bool,
 ) -> Result<(), JournalIoError> {
     let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())
         .map_err(JournalIoError::Lifecycle)?;
@@ -135,7 +138,15 @@ pub(crate) fn remove_journal(
         Ok(()) => journals
             .sync_all()
             .map_err(|source| JournalIoError::io(sync_action, &paths.journals_root(), source)),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            if sync_when_missing {
+                journals.sync_all().map_err(|source| {
+                    JournalIoError::io(sync_action, &paths.journals_root(), source)
+                })
+            } else {
+                Ok(())
+            }
+        }
         Err(source) => Err(JournalIoError::io(
             remove_action,
             &journal_path(paths, name),
@@ -281,6 +292,7 @@ mod tests {
             &name,
             "清理事务 Journal",
             "同步 journals 目录",
+            false,
         )
         .expect("缺失的 journal 应视为已清理");
 
@@ -299,10 +311,28 @@ mod tests {
             &name,
             "清理事务 Journal",
             "同步 journals 目录",
+            false,
         )
         .expect("应清理已存在的 journal");
 
         assert!(!journal_path(&paths, &name).exists(), "journal 应被删除");
+    }
+
+    #[test]
+    fn remove_with_sync_when_missing_also_accepts_absent_journal() {
+        let temp = tempdir().expect("应创建临时目录");
+        let (paths, root) = test_paths(&temp);
+        let name = journal_file_name("", "txn-1");
+
+        remove_journal(
+            &paths,
+            &root,
+            &name,
+            "清理事务 Journal",
+            "同步 journals 目录",
+            true,
+        )
+        .expect("缺失的 journal 在目录同步语义下也应视为已清理");
     }
 
     #[test]

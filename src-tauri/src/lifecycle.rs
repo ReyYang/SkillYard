@@ -3205,6 +3205,7 @@ fn remove_journal(
         &name,
         "清理事务 Journal",
         "同步 Journal 目录",
+        false,
     )
     .map_err(journal_write_error)
 }

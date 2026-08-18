@@ -3904,6 +3904,7 @@ fn remove_batch_journal(
         &name,
         "清理 Batch Mount Journal",
         "同步 Batch Mount Journal 清理",
+        false,
     )
     .map_err(journal_io_error)
 }
@@ -3995,6 +3996,7 @@ fn remove_journal(
         &name,
         "清理 Mount Journal",
         "同步 Mount Journal 清理",
+        false,
     )
     .map_err(journal_io_error)
 }

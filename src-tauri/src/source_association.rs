@@ -2383,6 +2383,7 @@ fn remove_merge_journal(
         &name,
         "清理来源关联 Journal",
         "同步来源关联 Journal 清理",
+        true,
     )
     .map_err(journal_write_error)
 }

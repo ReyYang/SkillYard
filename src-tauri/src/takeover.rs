@@ -3288,6 +3288,7 @@ fn remove_journal_if_present(
         &name,
         "清理 Takeover Journal",
         "同步 Journal 目录",
+        false,
     )
     .map_err(journal_io_error)
 }

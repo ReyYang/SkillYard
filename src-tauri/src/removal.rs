@@ -1260,6 +1260,7 @@ fn remove_journal(
         &name,
         "删除 Removal Journal",
         "同步 journals 目录",
+        true,
     )
     .map_err(journal_io_error)
 }
