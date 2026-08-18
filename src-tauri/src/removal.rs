@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs::File,
-    io::{self, Read},
+    io,
     path::Path,
 };
 
@@ -20,9 +20,8 @@ use crate::{
     lifecycle::{
         LifecycleError, LifecycleFailpoint, SealedTreeCleanupManifest, acquire_lifecycle_lock,
         capture_sealed_tree_cleanup_manifest, discard_pending_install_plans, entry_metadata_at,
-        open_managed_directory_from_root, open_regular_file_at,
-        remove_sealed_tree_at_with_manifest, rename_at_no_replace, unlink_at, write_atomic_at,
-        write_notice_from_storage,
+        open_managed_directory_from_root, remove_sealed_tree_at_with_manifest,
+        rename_at_no_replace, write_notice_from_storage,
     },
     mount_lifecycle::{
         ManagedMountRemovalSnapshot, ManagedMountRemovalState, MountLifecycleError,
@@ -35,6 +34,7 @@ use crate::{
         StoredRemovalTransaction, StoredSourceAssociationBundle,
     },
     takeover::{TakeoverError, blocked_takeover_references_project},
+    transaction::{self, JournalIoError, journal_file_name},
 };
 
 const REMOVAL_PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
@@ -1205,21 +1205,31 @@ fn read_sealed_plan(stored: &StoredRemovalPlan) -> Result<SealedRemovalPlan, Rem
     Ok(sealed)
 }
 
+fn journal_io_error(error: JournalIoError) -> RemovalError {
+    match error {
+        JournalIoError::TooLarge { .. } => {
+            RemovalError::RecoveryBlocked("Removal Journal 超过安全大小限制".to_owned())
+        }
+        JournalIoError::InvalidJson(source) => RemovalError::InvalidJournalJson(source),
+        JournalIoError::Lifecycle(error) => error.into(),
+    }
+}
+
 fn write_journal(
     paths: &ApplicationPaths,
     managed_root: &File,
     journal: &RemovalJournal,
 ) -> Result<(), RemovalError> {
-    let bytes = serde_json::to_vec(journal).map_err(RemovalError::InvalidJournalJson)?;
-    if bytes.len() > MAX_REMOVAL_JOURNAL_BYTES {
-        return Err(RemovalError::RecoveryBlocked(
-            "Removal Journal 超过安全大小限制".to_owned(),
-        ));
-    }
-    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
-    let name = OsString::from(format!("{}.json", journal.transaction_id));
-    write_atomic_at(&journals, &name, &paths.journals_root().join(&name), &bytes)?;
-    Ok(())
+    let name = journal_file_name("", &journal.transaction_id);
+    transaction::write_journal(
+        paths,
+        managed_root,
+        &name,
+        journal,
+        MAX_REMOVAL_JOURNAL_BYTES,
+        false,
+    )
+    .map_err(journal_io_error)
 }
 
 fn read_journal_at(
@@ -1227,26 +1237,15 @@ fn read_journal_at(
     name: &OsStr,
     path: &Path,
 ) -> Result<RemovalJournal, RemovalError> {
-    let mut file = open_regular_file_at(journals, name, path, false)?;
-    let metadata = file
-        .metadata()
-        .map_err(|source| removal_io("检查 Removal Journal", path, source))?;
-    if metadata.len() > MAX_REMOVAL_JOURNAL_BYTES as u64 {
-        return Err(RemovalError::RecoveryBlocked(
-            "Removal Journal 超过安全大小限制".to_owned(),
-        ));
-    }
-    let mut bytes = Vec::with_capacity((metadata.len() + 1) as usize);
-    Read::by_ref(&mut file)
-        .take(MAX_REMOVAL_JOURNAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| removal_io("读取 Removal Journal", path, source))?;
-    if bytes.len() > MAX_REMOVAL_JOURNAL_BYTES {
-        return Err(RemovalError::RecoveryBlocked(
-            "Removal Journal 超过安全大小限制".to_owned(),
-        ));
-    }
-    serde_json::from_slice(&bytes).map_err(RemovalError::InvalidJournalJson)
+    transaction::read_journal(
+        journals,
+        name,
+        path,
+        MAX_REMOVAL_JOURNAL_BYTES,
+        "检查 Removal Journal",
+        "读取 Removal Journal",
+    )
+    .map_err(journal_io_error)
 }
 
 fn remove_journal(
@@ -1254,19 +1253,15 @@ fn remove_journal(
     managed_root: &File,
     journal: &RemovalJournal,
 ) -> Result<(), RemovalError> {
-    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
-    let name = OsString::from(format!("{}.json", journal.transaction_id));
-    let path = paths.journals_root().join(&name);
-    if entry_metadata_at(&journals, &name)
-        .map_err(|source| removal_io("检查 Removal Journal", &path, source))?
-        .is_some()
-    {
-        unlink_at(&journals, &name, false)
-            .map_err(|source| removal_io("删除 Removal Journal", &path, source))?;
-    }
-    journals
-        .sync_all()
-        .map_err(|source| removal_io("同步 journals 目录", &paths.journals_root(), source))
+    let name = journal_file_name("", &journal.transaction_id);
+    transaction::remove_journal(
+        paths,
+        managed_root,
+        &name,
+        "删除 Removal Journal",
+        "同步 journals 目录",
+    )
+    .map_err(journal_io_error)
 }
 
 fn seal_mounts(
