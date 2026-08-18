@@ -25,8 +25,7 @@ use crate::{
         capture_owned_tree_cleanup_manifest, ensure_entry_absent_at, entry_metadata_at, mkdir_at,
         open_directory_at, open_managed_directory_from_root, read_link_at,
         remove_empty_directory_at, remove_owned_tree_at_with_manifest_and_hook,
-        rename_at_no_replace, rename_at_replace, symlink_at, unlink_at, write_atomic_at,
-        write_notice_from_storage,
+        rename_at_no_replace, rename_at_replace, symlink_at, unlink_at, write_notice_from_storage,
     },
     mount_lifecycle::{
         MountLifecycleError, ParentLookup, TargetKind, open_mount_parent, recheck_open_parent,
@@ -42,6 +41,7 @@ use crate::{
         StoredSourceAssociationPlanRow, StoredSourceAssociationTransaction,
         StoredSourceInstallSource,
     },
+    transaction::{self, JournalIoError, journal_file_name},
 };
 
 const PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
@@ -2305,14 +2305,27 @@ fn association_mount_private_name(
     Ok(name)
 }
 
-fn ensure_journal_fits(journal: &AssociationJournal) -> Result<(), SourceAssociationError> {
-    let bytes =
-        serde_json::to_vec(journal).map_err(|_| SourceAssociationError::InvalidJournalContract)?;
-    if bytes.len() > MAX_ASSOCIATION_JOURNAL_BYTES {
-        Err(SourceAssociationError::JournalTooLarge)
-    } else {
-        Ok(())
+fn journal_write_error(error: JournalIoError) -> SourceAssociationError {
+    match error {
+        JournalIoError::TooLarge { .. } => SourceAssociationError::JournalTooLarge,
+        JournalIoError::InvalidJson(_) => SourceAssociationError::InvalidJournalContract,
+        JournalIoError::Lifecycle(error) => error.into(),
     }
+}
+
+fn journal_read_error(error: JournalIoError) -> SourceAssociationError {
+    match error {
+        JournalIoError::TooLarge { .. } | JournalIoError::InvalidJson(_) => {
+            SourceAssociationError::InvalidJournalContract
+        }
+        JournalIoError::Lifecycle(error) => error.into(),
+    }
+}
+
+fn ensure_journal_fits(journal: &AssociationJournal) -> Result<(), SourceAssociationError> {
+    transaction::serialize_journal(journal, MAX_ASSOCIATION_JOURNAL_BYTES, false)
+        .map_err(journal_write_error)?;
+    Ok(())
 }
 
 fn write_merge_journal(
@@ -2320,19 +2333,16 @@ fn write_merge_journal(
     managed_root: &File,
     journal: &AssociationJournal,
 ) -> Result<(), SourceAssociationError> {
-    ensure_journal_fits(journal)?;
-    let bytes =
-        serde_json::to_vec(journal).map_err(|_| SourceAssociationError::InvalidJournalContract)?;
-    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
-    write_atomic_at(
-        &journals,
-        OsStr::new(&format!("{}.json", journal.transaction_id)),
-        &paths
-            .journals_root()
-            .join(format!("{}.json", journal.transaction_id)),
-        &bytes,
-    )?;
-    Ok(())
+    let name = journal_file_name("", &journal.transaction_id);
+    transaction::write_journal(
+        paths,
+        managed_root,
+        &name,
+        journal,
+        MAX_ASSOCIATION_JOURNAL_BYTES,
+        false,
+    )
+    .map_err(journal_write_error)
 }
 
 fn read_merge_journal(
@@ -2340,21 +2350,23 @@ fn read_merge_journal(
     managed_root: &File,
     transaction_id: &str,
 ) -> Result<AssociationJournal, SourceAssociationError> {
-    let path = paths.journals_root().join(format!("{transaction_id}.json"));
+    let name = journal_file_name("", transaction_id);
+    let path = transaction::journal_path(paths, &name);
     let metadata = fs::symlink_metadata(&path)
         .map_err(|source| association_io("检查来源关联 Journal", &path, source))?;
     if !metadata.is_file() || metadata.len() as usize > MAX_ASSOCIATION_JOURNAL_BYTES {
         return Err(SourceAssociationError::InvalidJournalContract);
     }
     let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
-    let file = crate::lifecycle::open_regular_file_at(
+    let journal: AssociationJournal = transaction::read_journal(
         &journals,
-        OsStr::new(&format!("{transaction_id}.json")),
+        &name,
         &path,
-        false,
-    )?;
-    let journal = serde_json::from_reader::<_, AssociationJournal>(file)
-        .map_err(|_| SourceAssociationError::InvalidJournalContract)?;
+        MAX_ASSOCIATION_JOURNAL_BYTES,
+        "读取来源关联 Journal 元数据",
+        "读取来源关联 Journal",
+    )
+    .map_err(journal_read_error)?;
     ensure_journal_fits(&journal)?;
     Ok(journal)
 }
@@ -2364,27 +2376,15 @@ fn remove_merge_journal(
     managed_root: &File,
     transaction_id: &str,
 ) -> Result<(), SourceAssociationError> {
-    let journals = open_managed_directory_from_root(paths, managed_root, &paths.journals_root())?;
-    let name = OsString::from(format!("{transaction_id}.json"));
-    match entry_metadata_at(&journals, &name)
-        .map_err(|source| association_io("检查来源关联 Journal", &paths.journals_root(), source))?
-    {
-        None => sync(
-            &journals,
-            "同步来源关联 Journal 清理",
-            &paths.journals_root(),
-        ),
-        Some(_) => {
-            unlink_at(&journals, &name, false).map_err(|source| {
-                association_io("清理来源关联 Journal", &paths.journals_root(), source)
-            })?;
-            sync(
-                &journals,
-                "同步来源关联 Journal 清理",
-                &paths.journals_root(),
-            )
-        }
-    }
+    let name = journal_file_name("", transaction_id);
+    transaction::remove_journal(
+        paths,
+        managed_root,
+        &name,
+        "清理来源关联 Journal",
+        "同步来源关联 Journal 清理",
+    )
+    .map_err(journal_write_error)
 }
 
 fn persist_merge_phase(
