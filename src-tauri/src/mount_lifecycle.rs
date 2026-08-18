@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{CStr, OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::{self, Read},
+    io::{self},
     os::{
         fd::AsRawFd,
         unix::{
@@ -27,8 +27,7 @@ use crate::{
     lifecycle::{
         LifecycleError, LifecycleFailpoint, LifecycleLock, acquire_lifecycle_lock,
         entry_metadata_at, mkdir_at, open_directory_at, open_managed_directory_from_root,
-        open_regular_file_at, read_link_at, rename_at_no_replace, symlink_at, unlink_at,
-        write_atomic_at, write_notice_from_storage,
+        read_link_at, rename_at_no_replace, symlink_at, unlink_at, write_notice_from_storage,
     },
     paths::ApplicationPaths,
     storage::{
@@ -36,6 +35,7 @@ use crate::{
         StoredBatchMountPlan, StoredBatchMountPlanItem, StoredBatchMountTransaction,
         StoredManagedMember, StoredMount, StoredMountPlan, StoredMountTransaction, StoredProject,
     },
+    transaction::{self, JournalIoError, journal_file_name},
 };
 
 const MOUNT_PLAN_TTL_MILLIS: i64 = 30 * 60 * 1_000;
@@ -3853,9 +3853,8 @@ fn ensure_batch_journal_fits(
                 hex_bytes(plan_item.expected_target.as_bytes())
             ));
         }
-        if serde_json::to_vec_pretty(&candidate)?.len() > MAX_BATCH_MOUNT_JOURNAL_BYTES {
-            return Err(MountLifecycleError::JournalTooLarge);
-        }
+        transaction::serialize_journal(&candidate, MAX_BATCH_MOUNT_JOURNAL_BYTES, true)
+            .map_err(journal_io_error)?;
     }
     Ok(())
 }
@@ -3865,15 +3864,16 @@ fn write_batch_journal(
     lifecycle_lock: &LifecycleLock,
     journal: &BatchMountJournal,
 ) -> Result<(), MountLifecycleError> {
-    let journals =
-        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
-    let name = OsString::from(format!("mount-batch-{}.json", journal.transaction_id));
-    let bytes = serde_json::to_vec_pretty(journal)?;
-    if bytes.len() > MAX_BATCH_MOUNT_JOURNAL_BYTES {
-        return Err(MountLifecycleError::JournalTooLarge);
-    }
-    write_atomic_at(&journals, &name, &paths.journals_root().join(&name), &bytes)?;
-    Ok(())
+    let name = journal_file_name("mount-batch-", &journal.transaction_id);
+    transaction::write_journal(
+        paths,
+        lifecycle_lock.root(),
+        &name,
+        journal,
+        MAX_BATCH_MOUNT_JOURNAL_BYTES,
+        true,
+    )
+    .map_err(journal_io_error)
 }
 
 fn read_batch_journal(
@@ -3881,22 +3881,15 @@ fn read_batch_journal(
     name: &OsStr,
     path: &Path,
 ) -> Result<BatchMountJournal, MountLifecycleError> {
-    let mut file = open_regular_file_at(journals, name, path, false)?;
-    let metadata = file
-        .metadata()
-        .map_err(|source| mount_io("检查 Batch Mount Journal", path, source))?;
-    if metadata.len() > MAX_BATCH_MOUNT_JOURNAL_BYTES as u64 {
-        return Err(MountLifecycleError::JournalTooLarge);
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-    Read::by_ref(&mut file)
-        .take(MAX_BATCH_MOUNT_JOURNAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| mount_io("读取 Batch Mount Journal", path, source))?;
-    if bytes.len() > MAX_BATCH_MOUNT_JOURNAL_BYTES {
-        return Err(MountLifecycleError::JournalTooLarge);
-    }
-    Ok(serde_json::from_slice(&bytes)?)
+    transaction::read_journal(
+        journals,
+        name,
+        path,
+        MAX_BATCH_MOUNT_JOURNAL_BYTES,
+        "检查 Batch Mount Journal",
+        "读取 Batch Mount Journal",
+    )
+    .map_err(journal_io_error)
 }
 
 fn remove_batch_journal(
@@ -3904,24 +3897,15 @@ fn remove_batch_journal(
     lifecycle_lock: &LifecycleLock,
     journal: &BatchMountJournal,
 ) -> Result<(), MountLifecycleError> {
-    let journals =
-        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
-    let name = OsString::from(format!("mount-batch-{}.json", journal.transaction_id));
-    match unlink_at(&journals, &name, false) {
-        Ok(()) => journals.sync_all().map_err(|source| {
-            mount_io(
-                "同步 Batch Mount Journal 清理",
-                &paths.journals_root(),
-                source,
-            )
-        }),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(mount_io(
-            "清理 Batch Mount Journal",
-            &paths.journals_root().join(name),
-            source,
-        )),
-    }
+    let name = journal_file_name("mount-batch-", &journal.transaction_id);
+    transaction::remove_journal(
+        paths,
+        lifecycle_lock.root(),
+        &name,
+        "清理 Batch Mount Journal",
+        "同步 Batch Mount Journal 清理",
+    )
+    .map_err(journal_io_error)
 }
 
 fn validate_journal(
@@ -3952,11 +3936,18 @@ fn ensure_journal_fits(journal: &MountJournal) -> Result<(), MountLifecycleError
     ] {
         let mut candidate = journal.clone();
         candidate.phase = phase;
-        if serde_json::to_vec_pretty(&candidate)?.len() > MAX_MOUNT_JOURNAL_BYTES {
-            return Err(MountLifecycleError::JournalTooLarge);
-        }
+        transaction::serialize_journal(&candidate, MAX_MOUNT_JOURNAL_BYTES, true)
+            .map_err(journal_io_error)?;
     }
     Ok(())
+}
+
+fn journal_io_error(error: JournalIoError) -> MountLifecycleError {
+    match error {
+        JournalIoError::TooLarge { .. } => MountLifecycleError::JournalTooLarge,
+        JournalIoError::InvalidJson(source) => MountLifecycleError::InvalidJournal(source),
+        JournalIoError::Lifecycle(error) => error.into(),
+    }
 }
 
 fn write_journal(
@@ -3964,15 +3955,16 @@ fn write_journal(
     lifecycle_lock: &LifecycleLock,
     journal: &MountJournal,
 ) -> Result<(), MountLifecycleError> {
-    let journals =
-        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
-    let name = OsString::from(format!("mount-{}.json", journal.transaction_id));
-    let bytes = serde_json::to_vec_pretty(journal)?;
-    if bytes.len() > MAX_MOUNT_JOURNAL_BYTES {
-        return Err(MountLifecycleError::JournalTooLarge);
-    }
-    write_atomic_at(&journals, &name, &paths.journals_root().join(&name), &bytes)?;
-    Ok(())
+    let name = journal_file_name("mount-", &journal.transaction_id);
+    transaction::write_journal(
+        paths,
+        lifecycle_lock.root(),
+        &name,
+        journal,
+        MAX_MOUNT_JOURNAL_BYTES,
+        true,
+    )
+    .map_err(journal_io_error)
 }
 
 fn read_journal(
@@ -3980,22 +3972,15 @@ fn read_journal(
     name: &OsStr,
     path: &Path,
 ) -> Result<MountJournal, MountLifecycleError> {
-    let mut file = open_regular_file_at(journals, name, path, false)?;
-    let metadata = file
-        .metadata()
-        .map_err(|source| mount_io("检查 Mount Journal", path, source))?;
-    if metadata.len() > MAX_MOUNT_JOURNAL_BYTES as u64 {
-        return Err(MountLifecycleError::JournalTooLarge);
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-    Read::by_ref(&mut file)
-        .take(MAX_MOUNT_JOURNAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| mount_io("读取 Mount Journal", path, source))?;
-    if bytes.len() > MAX_MOUNT_JOURNAL_BYTES {
-        return Err(MountLifecycleError::JournalTooLarge);
-    }
-    Ok(serde_json::from_slice(&bytes)?)
+    transaction::read_journal(
+        journals,
+        name,
+        path,
+        MAX_MOUNT_JOURNAL_BYTES,
+        "检查 Mount Journal",
+        "读取 Mount Journal",
+    )
+    .map_err(journal_io_error)
 }
 
 fn remove_journal(
@@ -4003,20 +3988,15 @@ fn remove_journal(
     lifecycle_lock: &LifecycleLock,
     journal: &MountJournal,
 ) -> Result<(), MountLifecycleError> {
-    let journals =
-        open_managed_directory_from_root(paths, lifecycle_lock.root(), &paths.journals_root())?;
-    let name = OsString::from(format!("mount-{}.json", journal.transaction_id));
-    match unlink_at(&journals, &name, false) {
-        Ok(()) => journals
-            .sync_all()
-            .map_err(|source| mount_io("同步 Mount Journal 清理", &paths.journals_root(), source)),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(mount_io(
-            "清理 Mount Journal",
-            &paths.journals_root().join(name),
-            source,
-        )),
-    }
+    let name = journal_file_name("mount-", &journal.transaction_id);
+    transaction::remove_journal(
+        paths,
+        lifecycle_lock.root(),
+        &name,
+        "清理 Mount Journal",
+        "同步 Mount Journal 清理",
+    )
+    .map_err(journal_io_error)
 }
 
 fn stored_plan_to_ui(
