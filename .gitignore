@@ -30,6 +30,7 @@ src-tauri/gen/
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+!src-tauri/tests/fixtures/v1.0.1/skillyard.sqlite3
 *.log
 logs/
 

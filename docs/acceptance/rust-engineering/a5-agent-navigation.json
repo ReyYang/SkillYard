@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-rust-engineering-a5-agent-navigation-v1",
+  "ticket": "A5 / Issue #78",
+  "captured_at_utc": "2026-08-24T05:08:55Z",
+  "source_identity": {
+    "git_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "shared_worktree_dirty_before_a5": true,
+    "path_tokens": {
+      "$REPO": "repository root"
+    },
+    "sources": {
+      "$REPO/AGENTS.md": "aa03e8ee7cf791a9d0dd36f9a52e39bc4230449ca00bf3926a67197faca9cc42",
+      "$REPO/docs/1.0-product-contract.md": "47a7e3cdc996195a2a8f558ce017540ad0b98dd92fcbc43e869cc0b624c11008",
+      "$REPO/docs/design/0002-rust-engineering-spec.md": "c56868f007192140d72bcdb000aa9271bdefa3b9c480d2841fe59818f51b8e5d",
+      "$REPO/justfile": "5065caac349776bc6a655b30065290f9181e3ba90321bc86bd69287089d895e2",
+      "$REPO/.codex/ticket-batches/rust-engineering-g36.json": "a2082cb4ffa68abd77521172f3c0b76a20370500ee2ec8c1cd926621d2bf7755"
+    }
+  },
+  "tdd": {
+    "contract": "Ephemeral Node navigation contract; no permanent verification script was added.",
+    "predicates": [
+      "$REPO/src-tauri/AGENTS.md exists",
+      "the document contains ../AGENTS.md",
+      "the document contains ../docs/1.0-product-contract.md",
+      "the document contains ../docs/design/0002-rust-engineering-spec.md",
+      "the document contains ../justfile"
+    ],
+    "red": {
+      "command": "cd $REPO && node --input-type=module - <<'NODE' <ephemeral navigation contract> NODE",
+      "exit_code": 1,
+      "observed_failure": "navigation_contract: src-tauri/AGENTS.md missing"
+    },
+    "green": {
+      "command": "cd $REPO && node --input-type=module - <<'NODE' <ephemeral navigation, link, pruning, and required-text contract> NODE",
+      "exit_code": 0,
+      "result": {
+        "status": "passed",
+        "links": 4,
+        "raw_build_commands": 0,
+        "directory_trees": 0,
+        "lines": 49
+      }
+    }
+  },
+  "information_ownership": [
+    {
+      "owner": "$REPO/AGENTS.md",
+      "trigger": "Every Rust task inherits repository safety, stage boundaries, single-implementation rules, and architecture gates.",
+      "owns": "Global and project governance.",
+      "not_duplicated_in_nested_document": true
+    },
+    {
+      "owner": "$REPO/docs/1.0-product-contract.md",
+      "trigger": "A change or dispute affects user-visible behavior or a product boundary.",
+      "owns": "Product promises and exclusions.",
+      "not_duplicated_in_nested_document": true
+    },
+    {
+      "owner": "$REPO/docs/design/0002-rust-engineering-spec.md",
+      "trigger": "Work concerns Rust module ownership, dependency direction, test topology, Cargo governance, or a Train B ticket.",
+      "owns": "Target Rust architecture and tranche decisions.",
+      "not_duplicated_in_nested_document": true
+    },
+    {
+      "owner": "$REPO/justfile",
+      "trigger": "An agent must choose or run verification.",
+      "owns": "Executable recipe internals and current command semantics.",
+      "not_duplicated_in_nested_document": true
+    },
+    {
+      "owner": "$REPO/src-tauri/AGENTS.md",
+      "trigger": "Work enters the Rust scope.",
+      "owns": "Stable routing, canonical application seam, dependency goals, growth review signals, validation triggers, stop gates, and completion criteria.",
+      "does_not_cache": [
+        "current module directory layout",
+        "recipe internals",
+        "current test counts",
+        "environment-derived Cargo facts",
+        "unexecuted Train B structure"
+      ]
+    },
+    {
+      "owner": "repository environment",
+      "trigger": "A task needs current files, call sites, module layout, tests, or tool output.",
+      "owns": "Cheaply inspectable checkout facts that may drift.",
+      "not_cached_in_agent_document": true
+    }
+  ],
+  "document_contract": {
+    "path": "$REPO/src-tauri/AGENTS.md",
+    "line_count": 49,
+    "canonical_application_seam": "SkillYardApplication",
+    "main_acceptance_observation": [
+      "SkillYardApplication or typed Tauri client",
+      "real temporary filesystem",
+      "real temporary SQLite",
+      "persisted state after restart"
+    ],
+    "private_helper_scope": "algorithm boundaries only",
+    "dependency_direction_is_target_not_current_fact": true,
+    "train_b_moves_only_in_corresponding_ticket": true,
+    "module_growth": {
+      "approximately_500_lines": "readability direction",
+      "approximately_800_lines": "responsibility review trigger",
+      "automatic_split_or_failure_line": false,
+      "new_module_requires": [
+        "independent invariant",
+        "shared knowledge",
+        "multiple real callers"
+      ],
+      "thin_forwarder_preferred": false
+    },
+    "dangerous_owners": {
+      "sqlite_connection_and_migration": "one concrete Storage canonical owner",
+      "released_prefix_guard": "migration public recipe",
+      "filesystem_or_lifecycle_mutation": "the canonical owner named by the current ticket",
+      "owner_not_yet_moved": "preserve the current owner"
+    },
+    "public_recipe_triggers": {
+      "wire_or_cross_language": [
+        "wire",
+        "slice"
+      ],
+      "migration": [
+        "migration"
+      ],
+      "lifecycle_or_unsafe_filesystem": [
+        "rust-test",
+        "slice",
+        "stage at phase completion"
+      ],
+      "packaging": [
+        "stage"
+      ],
+      "authorized_environment_only": [
+        "mac-contract",
+        "real Provider gate",
+        "release"
+      ]
+    },
+    "stop_gates": [
+      "a second Plan, Journal, or recovery protocol",
+      "a version-suffixed Domain type",
+      "retaining an old production entry or adding a public seam",
+      "a behavior testable only through a private step",
+      "crossing the next stage boundary"
+    ],
+    "completion": [
+      "owner and dependency direction are explainable",
+      "the public seam went Red then Green",
+      "relevant public recipes passed",
+      "diff scope is checked",
+      "no second implementation exists",
+      "a phase ticket also passes stage and independent review"
+    ]
+  },
+  "fresh_agent_walkthroughs": [
+    {
+      "scenario": "application behavior change",
+      "steps": [
+        {
+          "pointer": "$REPO/src-tauri/AGENTS.md",
+          "trigger": "Rust behavior work begins",
+          "result": "Use SkillYardApplication as the highest application behavior seam and observe real persisted behavior."
+        },
+        {
+          "pointer": "$REPO/docs/1.0-product-contract.md",
+          "trigger": "The proposed outcome is user-visible",
+          "result": "Confirm the promised behavior and product boundary before implementation."
+        },
+        {
+          "pointer": "$REPO/justfile",
+          "trigger": "Choose focused and slice verification",
+          "result": "Use public recipe semantics without copying their internals."
+        }
+      ],
+      "completion": "Public-seam Red to Green, relevant recipe result, and scoped diff."
+    },
+    {
+      "scenario": "migration change",
+      "steps": [
+        {
+          "pointer": "$REPO/src-tauri/AGENTS.md",
+          "trigger": "SQLite or migration work begins",
+          "result": "Keep one concrete Storage canonical owner and select the migration guard."
+        },
+        {
+          "pointer": "$REPO/docs/design/0002-rust-engineering-spec.md",
+          "trigger": "Ownership or migration architecture must be evaluated",
+          "result": "Confirm the single connection and migration-runner direction and the applicable ticket."
+        },
+        {
+          "pointer": "$REPO/justfile",
+          "trigger": "Run migration verification",
+          "result": "Execute the current migration public recipe."
+        }
+      ],
+      "completion": "Released prefix remains guarded and no second runner or schema path is introduced."
+    },
+    {
+      "scenario": "module growth review",
+      "steps": [
+        {
+          "pointer": "$REPO/src-tauri/AGENTS.md",
+          "trigger": "A production module approaches the growth signals",
+          "result": "Treat 500 as direction and 800 as a responsibility review, not an automatic split."
+        },
+        {
+          "pointer": "$REPO/docs/design/0002-rust-engineering-spec.md",
+          "trigger": "A new owner or Train B move is proposed",
+          "result": "Find the owning responsibility, dependency direction, and corresponding ticket."
+        }
+      ],
+      "completion": "A module is created only for independent invariant, shared knowledge, or multiple real callers; otherwise the current owner remains."
+    },
+    {
+      "scenario": "architecture gate reached",
+      "steps": [
+        {
+          "pointer": "$REPO/src-tauri/AGENTS.md",
+          "trigger": "The implementation needs a second protocol, versioned Domain type, parallel entry, private-only test, or next-stage scope",
+          "result": "Stop the change."
+        },
+        {
+          "pointer": "$REPO/AGENTS.md",
+          "trigger": "The nested stop gate fires",
+          "result": "Apply the stronger repository architecture gate and request confirmation."
+        },
+        {
+          "pointer": "$REPO/docs/1.0-product-contract.md or $REPO/docs/design/0002-rust-engineering-spec.md",
+          "trigger": "The decision depends on product commitment or target architecture",
+          "result": "Present the conflict from the appropriate single source of truth without implementing a fallback."
+        }
+      ],
+      "completion": "No architecture-expanding write occurs before explicit confirmation."
+    }
+  ],
+  "link_and_pruning_audit": {
+    "markdown_link_parser": "Relative Markdown targets captured from [label](target) and resolved from $REPO/src-tauri.",
+    "links": [
+      {
+        "target": "../AGENTS.md",
+        "exists": true
+      },
+      {
+        "target": "../docs/1.0-product-contract.md",
+        "exists": true
+      },
+      {
+        "target": "../docs/design/0002-rust-engineering-spec.md",
+        "exists": true
+      },
+      {
+        "target": "../justfile",
+        "exists": true
+      }
+    ],
+    "broken_links": [],
+    "raw_lowercase_cargo_pnpm_rustc_commands": 0,
+    "fenced_command_blocks": 0,
+    "directory_trees": 0,
+    "recipe_internals_copied": false,
+    "target_directory_architecture_copied": false,
+    "current_environment_facts_cached": false,
+    "root_rules_duplicated": false
+  },
+  "docs_index_preservation": {
+    "path": "$REPO/docs/README.md",
+    "pre_sha256": "320d525aaf337f1780b9cfc7246a92af65f465786d30173add112955fc622b7b",
+    "post_sha256": "320d525aaf337f1780b9cfc7246a92af65f465786d30173add112955fc622b7b",
+    "pre_existing_diff_sha256": "f1c9bfd4302ba890360353ba39bf80de02d83018dbf40296523bf12c1d5974c3",
+    "post_diff_sha256": "f1c9bfd4302ba890360353ba39bf80de02d83018dbf40296523bf12c1d5974c3",
+    "modified_by_a5": false
+  },
+  "scope_and_privacy": {
+    "owned_file_sha256": {
+      "$REPO/src-tauri/AGENTS.md": "4b062ec3ace7dfb3bac30bb2a06fe88b077cfe43040733f9272ae9fa57cbcdf6"
+    },
+    "artifact_self_hash": {
+      "recorded_in_this_artifact": false,
+      "external_binding_owner": "A-FINAL/source-identity artifact",
+      "reason": "A content hash cannot be stably self-recorded inside the bytes it hashes."
+    },
+    "new_files": [
+      "$REPO/src-tauri/AGENTS.md",
+      "$REPO/docs/acceptance/rust-engineering/a5-agent-navigation.json"
+    ],
+    "other_files_modified_by_a5": false,
+    "pre_existing_work_preserved": true,
+    "machine_absolute_paths_present": false,
+    "credentials_present": false,
+    "permanent_verification_script_added": false,
+    "worktree_created": false,
+    "commit_push_or_issue_operation_performed": false
+  },
+  "not_run": [
+    "application tests",
+    "Rust build",
+    "frontend build or tests",
+    "slice",
+    "stage",
+    "MAC-CONTRACT",
+    "Provider or release gates"
+  ],
+  "reason_not_run": "A5 changes only agent navigation documents; repository-defined code and build validation were outside this document slice."
+}

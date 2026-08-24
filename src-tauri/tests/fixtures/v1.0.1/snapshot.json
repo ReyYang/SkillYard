@@ -1,0 +1,335 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-v1.0.1-release-sql-snapshot-v1",
+  "source_identity": "deterministic_release_sql_materialization",
+  "release": {
+    "version": "1.0.1",
+    "tag": "v1.0.1",
+    "tag_object_oid": "2871263930d3dd94c42ab1af5782778471104e80",
+    "tag_object_signature": "unsigned",
+    "peeled_commit_oid": "edc296411dcf38f33a7c4024e8761c61189d428e",
+    "release_url": "https://github.com/ReyYang/SkillYard/releases/tag/v1.0.1"
+  },
+  "released_sql": {
+    "manifest_path": "src-tauri/migrations/released-prefix.json",
+    "manifest_sha256": "be918484b3843edf40ebdf9ab404c5f8e37f52eca2efd7ab6330a3b3de946d7d",
+    "migration_count": 26,
+    "versions": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26
+    ],
+    "aggregate_rule": "For each manifest entry in LC_ALL=C ascending repo-relative path order: lowercase SHA-256, two ASCII spaces, repo-relative path, LF.",
+    "aggregate_sha256": "c7ca23bcfe64a21a38dbf2be0ed073e202251fd417bfb09af43d001888a48df1"
+  },
+  "sqlite_materialization": {
+    "binary": "sqlite3",
+    "version": "3.51.0 2025-06-12 13:14:41 f0ca7bba1c5e232e5d279fad6338121ab55af0c8c68c84cdfb18ba5114dcaapl (64-bit)",
+    "migration_transaction_rule": "BEGIN IMMEDIATE; exact peeled-release SQL bytes; INSERT schema_migrations with fixed applied_at; COMMIT",
+    "fixed_applied_at": 1700000000000,
+    "seed_transaction": "BEGIN IMMEDIATE; exact seed.sql bytes; COMMIT",
+    "vacuum_after_seed": true,
+    "generation_connection_pragmas": {
+      "page_size": 4096,
+      "journal_mode": "delete",
+      "auto_vacuum": 0,
+      "foreign_keys": 1,
+      "synchronous": 2,
+      "fullfsync": 1
+    },
+    "reopened_persistent_pragmas": {
+      "page_size": 4096,
+      "journal_mode": "delete",
+      "auto_vacuum": 0
+    }
+  },
+  "seed": {
+    "path": "src-tauri/tests/fixtures/v1.0.1/seed.sql",
+    "sha256": "a3cd9c26252a6640a96f72d4e04fcb7fb5f7fcc4b8518a142c522b3810637510",
+    "fixed_timestamp": 1700000000000,
+    "purpose": "Synthetic core Inventory, Source, Bundle, Member selection, and Mount state; release-default unlinked recommendations are removed before the one fixture Source is inserted."
+  },
+  "determinism": {
+    "fresh_initially_empty_runs": 2,
+    "retained_run_roots": [
+      "$A4_SNAPSHOT_RUN_1",
+      "$A4_SNAPSHOT_RUN_2"
+    ],
+    "byte_identical": true,
+    "first_sha256": "7d67529810956f8031764c52715de0bf0a716e7901b40b02e174a2971a04e47e",
+    "second_sha256": "7d67529810956f8031764c52715de0bf0a716e7901b40b02e174a2971a04e47e"
+  },
+  "fixture": {
+    "path": "src-tauri/tests/fixtures/v1.0.1/skillyard.sqlite3",
+    "size_bytes": 561152,
+    "sha256": "7d67529810956f8031764c52715de0bf0a716e7901b40b02e174a2971a04e47e",
+    "schema_migrations": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26
+    ],
+    "integrity_check": "ok",
+    "foreign_key_check": [],
+    "wal_or_shm_files": []
+  },
+  "schema_fingerprint": {
+    "algorithm": "sha256",
+    "object_count": 81,
+    "canonical_query": "SELECT quote(type)||'|'||quote(name)||'|'||quote(tbl_name)||'|'||quote(sql) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name,sql;",
+    "row_encoding": "Each UTF-8 TEXT result row followed by one LF, including after the final row.",
+    "sha256": "5b966f41550777cb196b3fff8312f7cb2895089b47a829c24136137806a0b759"
+  },
+  "seed_data_fingerprint": {
+    "algorithm": "sha256",
+    "canonical_encoding": {
+      "query_template": "SELECT <quote(\"column\") joined by \" || '|' || \"> FROM \"<table>\" ORDER BY <\"column\" joined by \", \">;",
+      "row_encoding": "For each table in listed order, emit <table>|<query TEXT row><LF>, including after the final row.",
+      "tables": [
+        {
+          "table": "app_state",
+          "columns": [
+            "singleton",
+            "initial_scan_completed_at",
+            "last_local_refresh_at",
+            "last_local_refresh_added",
+            "last_local_refresh_changed",
+            "last_local_refresh_removed"
+          ],
+          "order_by": [
+            "singleton"
+          ]
+        },
+        {
+          "table": "supported_app_status",
+          "columns": [
+            "app_id",
+            "display_name",
+            "detected",
+            "sort_order"
+          ],
+          "order_by": [
+            "app_id"
+          ]
+        },
+        {
+          "table": "bundles",
+          "columns": [
+            "id",
+            "display_name",
+            "managed_directory",
+            "current_target",
+            "created_at"
+          ],
+          "order_by": [
+            "id"
+          ]
+        },
+        {
+          "table": "skill_members",
+          "columns": [
+            "id",
+            "bundle_id",
+            "skill_name",
+            "description",
+            "stable_relative_path",
+            "content_fingerprint",
+            "created_at"
+          ],
+          "order_by": [
+            "id"
+          ]
+        },
+        {
+          "table": "member_selections",
+          "columns": [
+            "bundle_id",
+            "member_id",
+            "selected_at"
+          ],
+          "order_by": [
+            "bundle_id",
+            "member_id"
+          ]
+        },
+        {
+          "table": "sources",
+          "columns": [
+            "id",
+            "kind",
+            "canonical_identity",
+            "owner",
+            "repository",
+            "display_name",
+            "locator",
+            "tracked_ref",
+            "member_path_hint",
+            "filesystem_device",
+            "filesystem_inode",
+            "catalog_status",
+            "catalog_generation",
+            "catalog_marker",
+            "catalog_fetched_at",
+            "last_reload_at",
+            "last_reload_error",
+            "sort_order",
+            "created_at",
+            "updated_at"
+          ],
+          "order_by": [
+            "id"
+          ]
+        },
+        {
+          "table": "source_catalog_members",
+          "columns": [
+            "id",
+            "source_id",
+            "catalog_generation",
+            "relative_path",
+            "skill_name",
+            "description",
+            "content_fingerprint",
+            "selectable",
+            "validation_errors_json",
+            "warnings_json",
+            "sort_order"
+          ],
+          "order_by": [
+            "id"
+          ]
+        },
+        {
+          "table": "source_bundle_links",
+          "columns": [
+            "source_id",
+            "bundle_id",
+            "adopted_marker",
+            "linked_at",
+            "update_check_status",
+            "update_checked_marker",
+            "update_checked_at",
+            "update_check_error"
+          ],
+          "order_by": [
+            "source_id"
+          ]
+        },
+        {
+          "table": "source_member_links",
+          "columns": [
+            "source_id",
+            "source_relative_path",
+            "member_id",
+            "linked_at"
+          ],
+          "order_by": [
+            "source_id",
+            "source_relative_path"
+          ]
+        },
+        {
+          "table": "mounts",
+          "columns": [
+            "id",
+            "member_id",
+            "app_id",
+            "scope",
+            "project_id",
+            "target_path",
+            "expected_target",
+            "health",
+            "created_at",
+            "updated_at"
+          ],
+          "order_by": [
+            "id"
+          ]
+        }
+      ]
+    },
+    "row_counts": {
+      "app_state": 1,
+      "supported_app_status": 3,
+      "bundles": 1,
+      "skill_members": 1,
+      "member_selections": 1,
+      "sources": 1,
+      "source_catalog_members": 1,
+      "source_bundle_links": 1,
+      "source_member_links": 1,
+      "mounts": 1
+    },
+    "sha256": "1be5fcca1f5beac8512e178eabf03cfca3dc424bc14cb1dd7a1136229c121715"
+  },
+  "path_sentinels": [
+    {
+      "table": "mounts",
+      "column": "target_path",
+      "value": "/__skillyard_fixture__/home/.codex/skills/release-fixture",
+      "logical_row_count": 1
+    },
+    {
+      "table": "mounts",
+      "column": "expected_target",
+      "value": "/__skillyard_fixture__/data/bundles/bundle-v101/current/members/release-fixture",
+      "logical_row_count": 1
+    }
+  ],
+  "privacy": {
+    "machine_absolute_paths": false,
+    "users_path_present": false,
+    "credentials_present": false,
+    "only_filesystem_absolute_values_are_the_two_recorded_sentinels": true
+  },
+  "disclaimers": {
+    "not_captured_from_user_database": true,
+    "not_claimed_byte_equal_to_release_app_database": true,
+    "not_a_production_migration_runner": true
+  }
+}

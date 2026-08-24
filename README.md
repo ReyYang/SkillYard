@@ -98,17 +98,12 @@ Bundle Directory
 
 ## 从源码构建
 
-需要 Apple Silicon Mac（macOS 14+）、Xcode Command Line Tools、Rust stable、Node.js 20.19+ 或 22.12+，以及 Corepack。仓库固定使用 `pnpm@10.33.2`。
+需要 Apple Silicon Mac（macOS 14+）、Xcode Command Line Tools、Rust stable、Node.js 20.19+ 或 22.12+、Corepack，以及 `just 1.58.0`。仓库固定使用 `pnpm@10.33.2`。
+
+准备好仓库依赖后，在根目录运行 canonical stage recipe `just stage`；它完成离线自动化、静态检查和 production App 构建：
 
 ```bash
-xcode-select --install
-corepack enable
-pnpm install --frozen-lockfile
-pnpm typecheck && pnpm test
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-pnpm tauri build --bundles app
+just stage
 ```
 
 应用生成在 `target/release/bundle/macos/SkillYard.app`。本地构建沿用 ad-hoc signing，不会被 Apple notarize。

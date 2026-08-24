@@ -1,0 +1,4027 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-rust-engineering-baseline-v1",
+  "ticket": "A0",
+  "source_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+  "mapping_contract": {
+    "ordinary_integration": "original_target/original_name maps to future target all and name original_target::original_name",
+    "library_unit": "library unit tests keep their existing libtest name",
+    "mac_contract": "codex_mount_contract remains an independent ignored integration target",
+    "additive_engineering_guards": "tests introduced by A2 or A4 are additions and must not be used to hide a missing A0 test"
+  },
+  "totals": {
+    "all_tests": 442,
+    "library_unit_tests": 141,
+    "integration_tests": 301,
+    "ignored_tests": 1,
+    "integration_targets": 24,
+    "ordinary_integration_targets": 23,
+    "hard_exit_workers": 6
+  },
+  "integration_target_test_counts": {
+    "agent_chat": 6,
+    "agent_streaming": 4,
+    "ai_configuration": 4,
+    "archive_install": 9,
+    "bundle_batch_mount": 29,
+    "bundle_update_batch": 8,
+    "bundle_update_check": 5,
+    "capability_contract": 3,
+    "codex_mount": 34,
+    "codex_mount_contract": 1,
+    "discover": 1,
+    "discover_web": 2,
+    "editable_local_update": 5,
+    "folder_install": 36,
+    "github_install": 22,
+    "github_source": 9,
+    "manual_bundle_update": 3,
+    "preferences": 1,
+    "removal": 19,
+    "skill_ai_explanation": 3,
+    "skills_sh_source": 3,
+    "source_association": 18,
+    "startup_state": 40,
+    "takeover": 36
+  },
+  "tests": [
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "application::tests::a_second_write_intent_is_rejected_while_the_operation_gate_is_held",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "application::tests::a_second_write_intent_is_rejected_while_the_operation_gate_is_held",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "application::tests::an_external_lifecycle_lock_rejects_a_scan_before_it_writes_inventory",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "application::tests::an_external_lifecycle_lock_rejects_a_scan_before_it_writes_inventory",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "application::tests::finder_entry_is_fixed_to_the_application_data_root",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "application::tests::finder_entry_is_fixed_to_the_application_data_root",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "application::tests::lifecycle_lock_detects_its_lock_file_being_replaced",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "application::tests::lifecycle_lock_detects_its_lock_file_being_replaced",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "application::tests::lifecycle_lock_detects_the_visible_central_store_being_replaced",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "application::tests::lifecycle_lock_detects_the_visible_central_store_being_replaced",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "commands::tests::discard_maps_consumed_plan_to_a_stable_ui_state_code",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "commands::tests::discard_maps_consumed_plan_to_a_stable_ui_state_code",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "commands::tests::ipc_dispatch_keeps_lifecycle_errors_typed",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "commands::tests::ipc_dispatch_keeps_lifecycle_errors_typed",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "commands::tests::ipc_dispatch_keeps_the_typed_application_error",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "commands::tests::ipc_dispatch_keeps_the_typed_application_error",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "commands::tests::ipc_dispatch_maps_refresh_before_onboarding_to_invalid_state",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "commands::tests::ipc_dispatch_maps_refresh_before_onboarding_to_invalid_state",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "commands::tests::ipc_dispatch_returns_the_same_outcome_as_the_application_seam",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "commands::tests::ipc_dispatch_returns_the_same_outcome_as_the_application_seam",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "commands::tests::ipc_dispatch_runs_the_takeover_plan_and_confirmation_against_real_state",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "commands::tests::ipc_dispatch_runs_the_takeover_plan_and_confirmation_against_real_state",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::bundle_copy_budget_is_shared_across_members",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::bundle_copy_budget_is_shared_across_members",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::complete_bundle_copy_rejects_a_symlink_and_leaves_no_destination",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::complete_bundle_copy_rejects_a_symlink_and_leaves_no_destination",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::copies_a_complete_safe_bundle_without_dropping_repository_files",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::copies_a_complete_safe_bundle_without_dropping_repository_files",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::duplicate_name_also_invalidates_a_safe_sibling_when_the_other_copy_is_unsafe",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::duplicate_name_also_invalidates_a_safe_sibling_when_the_other_copy_is_unsafe",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::enforces_entry_single_file_and_total_size_limits",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::enforces_entry_single_file_and_total_size_limits",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::nested_skill_is_reported_as_an_unsupported_single_skill_input",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::nested_skill_is_reported_as_an_unsupported_single_skill_input",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::parent_symlink_swap_cannot_redirect_destination_writes",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::parent_symlink_swap_cannot_redirect_destination_writes",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::refuses_to_overwrite_an_existing_copy_destination",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::refuses_to_overwrite_an_existing_copy_destination",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::rejects_a_unix_socket_as_special_content",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::rejects_a_unix_socket_as_special_content",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::rejects_hard_linked_regular_files",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::rejects_hard_linked_regular_files",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::rejects_invalid_or_mismatched_metadata",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::rejects_invalid_or_mismatched_metadata",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::rejects_oversized_raw_description_and_non_line_frontmatter_delimiter",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::rejects_oversized_raw_description_and_non_line_frontmatter_delimiter",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::rejects_root_and_child_symlinks",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::rejects_root_and_child_symlinks",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::source_change_after_copy_removes_the_partial_destination",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::source_change_after_copy_removes_the_partial_destination",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::unsafe_entry_only_disables_the_member_that_contains_it",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::unsafe_entry_only_disables_the_member_that_contains_it",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::unsafe_repository_entries_outside_members_do_not_block_valid_candidates",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::unsafe_repository_entries_outside_members_do_not_block_valid_candidates",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::validates_and_copies_a_safe_skill_without_executing_it",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::validates_and_copies_a_safe_skill_without_executing_it",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "content::tests::warns_for_each_deterministic_script_signal_but_not_plain_content",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "content::tests::warns_for_each_deterministic_script_signal_but_not_plain_content",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "domain::tests::bundle_update_batch_uses_the_exact_frontend_contract",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "domain::tests::bundle_update_batch_uses_the_exact_frontend_contract",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "domain::tests::install_plan_and_discard_use_the_canonical_frontend_contract",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "domain::tests::install_plan_and_discard_use_the_canonical_frontend_contract",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "domain::tests::inventory_outcome_uses_the_frontend_camel_case_contract",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "domain::tests::inventory_outcome_uses_the_frontend_camel_case_contract",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "domain::tests::skills_sh_search_outcome_uses_the_frontend_camel_case_contract",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "domain::tests::skills_sh_search_outcome_uses_the_frontend_camel_case_contract",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "domain::tests::source_association_intents_use_one_camel_case_contract",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "domain::tests::source_association_intents_use_one_camel_case_contract",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "domain::tests::takeover_confirmation_contract_contains_only_the_camel_case_plan_id",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "domain::tests::takeover_confirmation_contract_contains_only_the_camel_case_plan_id",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "domain::tests::takeover_plan_request_uses_the_frontend_camel_case_contract",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "domain::tests::takeover_plan_request_uses_the_frontend_camel_case_contract",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "domain::tests::theme_preset_rejects_removed_archive_value",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "domain::tests::theme_preset_rejects_removed_archive_value",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::encodes_commit_ref_as_one_api_path_segment",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::encodes_commit_ref_as_one_api_path_segment",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::explicit_slash_ref_separates_member_hint",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::explicit_slash_ref_separates_member_hint",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::fetches_sha_archive_preserves_candidate_errors_and_cleans_staging",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::fetches_sha_archive_preserves_candidate_errors_and_cleans_staging",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::parses_supported_repository_forms",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::parses_supported_repository_forms",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::persisted_install_snapshot_keeps_only_repository_tree",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::persisted_install_snapshot_keeps_only_repository_tree",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::prepares_install_snapshot_from_exact_sha_with_one_archive_request",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::prepares_install_snapshot_from_exact_sha_with_one_archive_request",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::receive_budget_is_shared_across_one_source_operation",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::receive_budget_is_shared_across_one_source_operation",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::receive_limit_accepts_exact_bytes_and_rejects_the_next_byte",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::receive_limit_accepts_exact_bytes_and_rejects_the_next_byte",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::redirect_policy_allows_only_the_fixed_github_https_hosts",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::redirect_policy_allows_only_the_fixed_github_https_hosts",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::redirect_policy_keeps_generic_downloads_on_the_original_https_origin",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::redirect_policy_keeps_generic_downloads_on_the_original_https_origin",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::rejects_conflicting_and_unsupported_inputs",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::rejects_conflicting_and_unsupported_inputs",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::rejects_invalid_install_snapshot_inputs_without_leaving_staging",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::rejects_invalid_install_snapshot_inputs_without_leaving_staging",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::removes_fixed_install_snapshot_after_archive_error",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::removes_fixed_install_snapshot_after_archive_error",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::removes_install_snapshot_when_guard_drops_without_persist",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::removes_install_snapshot_when_guard_drops_without_persist",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::resolves_metadata_and_commit_through_transport_boundary",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::resolves_metadata_and_commit_through_transport_boundary",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "github_source::tests::valid_archive_without_skill_metadata_is_an_empty_catalog",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "github_source::tests::valid_archive_without_skill_metadata_is_an_empty_catalog",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "lifecycle::tests::changed_candidate_is_rejected_before_current_can_be_created",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "lifecycle::tests::changed_candidate_is_rejected_before_current_can_be_created",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "lifecycle::tests::journal_preflight_uses_the_largest_lifecycle_phase",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "lifecycle::tests::journal_preflight_uses_the_largest_lifecycle_phase",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "lifecycle::tests::oversized_journal_is_rejected_before_it_can_be_persisted",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "lifecycle::tests::oversized_journal_is_rejected_before_it_can_be_persisted",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "mount_lifecycle::tests::relative_parent_walker_opens_real_components_for_snapshot_and_recheck",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "mount_lifecycle::tests::relative_parent_walker_opens_real_components_for_snapshot_and_recheck",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "mount_lifecycle::tests::relative_parent_walker_rejects_an_intermediate_symlink",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "mount_lifecycle::tests::relative_parent_walker_rejects_an_intermediate_symlink",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "mount_lifecycle::tests::remove_leaf_swap_restores_unknown_content_instead_of_deleting_it",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "mount_lifecycle::tests::remove_leaf_swap_restores_unknown_content_instead_of_deleting_it",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "removal::tests::maximum_supported_tree_manifest_fits_the_removal_journal_limit",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "removal::tests::maximum_supported_tree_manifest_fits_the_removal_journal_limit",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "scanner::tests::file_content_is_framed_separately_from_following_tree_entries",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "scanner::tests::file_content_is_framed_separately_from_following_tree_entries",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::archive_entry_limit_accepts_exact_count_and_rejects_the_next_entry",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::archive_entry_limit_accepts_exact_count_and_rejects_the_next_entry",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::expanded_total_limit_accepts_exact_bytes_and_rejects_the_next_declared_byte",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::expanded_total_limit_accepts_exact_bytes_and_rejects_the_next_declared_byte",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::expanded_total_limit_rechecks_actual_written_bytes",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::expanded_total_limit_rechecks_actual_written_bytes",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::extraction_failure_removes_partial_destination",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::extraction_failure_removes_partial_destination",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::optional_wrapper_preserves_and_validates_multiple_top_level_skills",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::optional_wrapper_preserves_and_validates_multiple_top_level_skills",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::optional_wrapper_preserves_and_validates_root_skill",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::optional_wrapper_preserves_and_validates_root_skill",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::optional_wrapper_strips_one_common_directory",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::optional_wrapper_strips_one_common_directory",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::preflight_rejects_normalized_duplicates_encryption_and_special_types",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::preflight_rejects_normalized_duplicates_encryption_and_special_types",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::required_wrapper_rejects_multiple_top_levels_without_writing",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::required_wrapper_rejects_multiple_top_levels_without_writing",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::single_file_limit_accepts_exact_bytes_and_rejects_the_next_declared_byte",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::single_file_limit_accepts_exact_bytes_and_rejects_the_next_declared_byte",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::single_file_limit_rechecks_actual_written_bytes",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::single_file_limit_rechecks_actual_written_bytes",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_archive::tests::strict_archive_paths_reject_every_forbidden_component_form",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_archive::tests::strict_archive_paths_reject_every_forbidden_component_form",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_input::tests::direct_url_rejects_invalid_input_and_cross_host_final_url_without_leaving_staging",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_input::tests::direct_url_rejects_invalid_input_and_cross_host_final_url_without_leaving_staging",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_input::tests::direct_url_uses_the_same_archive_snapshot_and_preserves_query_identity",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_input::tests::direct_url_uses_the_same_archive_snapshot_and_preserves_query_identity",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_input::tests::editable_local_source_copies_the_complete_bundle_but_keeps_the_original_owned_by_user",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_input::tests::editable_local_source_copies_the_complete_bundle_but_keeps_the_original_owned_by_user",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_input::tests::editable_local_source_rejects_internal_symlinks_without_a_partial_snapshot",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_input::tests::editable_local_source_rejects_internal_symlinks_without_a_partial_snapshot",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_input::tests::local_archive_input_rejects_a_symlink_before_creating_staging",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_input::tests::local_archive_input_rejects_a_symlink_before_creating_staging",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_input::tests::local_skill_archive_prepares_a_deterministic_snapshot_and_cleans_on_drop",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_input::tests::local_skill_archive_prepares_a_deterministic_snapshot_and_cleans_on_drop",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "source_input::tests::streaming_digest_reports_the_first_byte_over_the_limit_and_read_failures",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "source_input::tests::streaming_digest_reports_the_first_byte_over_the_limit_and_read_failures",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::a_completed_transaction_can_be_blocked_when_recovery_finds_damage",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::a_completed_transaction_can_be_blocked_when_recovery_finds_damage",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::aborted_and_completed_transactions_remain_recoverable_until_cleanup",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::aborted_and_completed_transactions_remain_recoverable_until_cleanup",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::all_not_corresponding_members_allow_multiple_null_preserved_candidates",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::all_not_corresponding_members_allow_multiple_null_preserved_candidates",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::an_aborted_transaction_can_be_blocked_when_cleanup_finds_damage",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::an_aborted_transaction_can_be_blocked_when_cleanup_finds_damage",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::batch_mount_plan_round_trips_multiple_members_and_app_targets",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::batch_mount_plan_round_trips_multiple_members_and_app_targets",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::blocked_manual_source_rejects_refresh_without_changing_metadata",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::blocked_manual_source_rejects_refresh_without_changing_metadata",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::blocked_source_association_merge_is_visible_and_isolates_all_objects",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::blocked_source_association_merge_is_visible_and_isolates_all_objects",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::blocked_source_association_rejects_github_catalog_and_ref_writes",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::blocked_source_association_rejects_github_catalog_and_ref_writes",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::blocked_transaction_remains_visible_when_its_plan_row_is_missing",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::blocked_transaction_remains_visible_when_its_plan_row_is_missing",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::blocked_transactions_are_visible_in_startup_and_refresh_inventory",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::blocked_transactions_are_visible_in_startup_and_refresh_inventory",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::bundle_display_name_migration_repairs_verified_lock_source_state",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::bundle_display_name_migration_repairs_verified_lock_source_state",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::bundle_mount_removal_migration_preserves_existing_removal_state",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::bundle_mount_removal_migration_preserves_existing_removal_state",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::bundle_update_migration_preserves_pending_and_blocked_install_state",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::bundle_update_migration_preserves_pending_and_blocked_install_state",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::cleanup_rejects_an_existing_non_terminal_transaction_but_is_idempotent_when_missing",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::cleanup_rejects_an_existing_non_terminal_transaction_but_is_idempotent_when_missing",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::completed_takeover_replay_never_recreates_missing_domain_rows",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::completed_takeover_replay_never_recreates_missing_domain_rows",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::concurrent_open_applies_each_migration_only_once",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::concurrent_open_applies_each_migration_only_once",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::direct_source_association_keeps_partial_mapping_and_mount_state",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::direct_source_association_keeps_partial_mapping_and_mount_state",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::direct_source_association_race_rolls_back_relationship_and_plan_consumption",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::direct_source_association_race_rolls_back_relationship_and_plan_consumption",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::finalize_rejects_a_missing_transaction_and_rolls_back_managed_rows",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::finalize_rejects_a_missing_transaction_and_rolls_back_managed_rows",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::finalize_rejects_paths_outside_the_fixed_bundle_layout",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::finalize_rejects_paths_outside_the_fixed_bundle_layout",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::finalize_requires_the_matching_plan_and_a_publishable_phase",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::finalize_requires_the_matching_plan_and_a_publishable_phase",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::general_source_migration_keeps_one_install_protocol",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::general_source_migration_keeps_one_install_protocol",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::general_source_migration_preserves_pending_plans_and_lifecycle_rows",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::general_source_migration_preserves_pending_plans_and_lifecycle_rows",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::github_begin_rolls_back_when_source_catalog_or_current_changes",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::github_begin_rolls_back_when_source_catalog_or_current_changes",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::github_create_finalize_persists_one_source_backed_bundle",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::github_create_finalize_persists_one_source_backed_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::github_supplement_keeps_existing_member_mount_and_adopted_commit",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::github_supplement_keeps_existing_member_mount_and_adopted_commit",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::install_and_mount_transactions_share_one_active_writer_boundary",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::install_and_mount_transactions_share_one_active_writer_boundary",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::install_bundle_migration_rejects_an_existing_lifecycle_transaction",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::install_bundle_migration_rejects_an_existing_lifecycle_transaction",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::install_bundle_schema_rejects_mixed_plan_and_preserved_candidate_shapes",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::install_bundle_schema_rejects_mixed_plan_and_preserved_candidate_shapes",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::lifecycle_state_changes_reject_unknown_or_invalid_transactions",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::lifecycle_state_changes_reject_unknown_or_invalid_transactions",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::managed_inventory_rejects_paths_tampered_in_sqlite",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::managed_inventory_rejects_paths_tampered_in_sqlite",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::manual_source_reuses_identity_and_installs_through_source_snapshot",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::manual_source_reuses_identity_and_installs_through_source_snapshot",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::mount_create_finalization_is_atomic_idempotent_and_visible_in_inventory",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::mount_create_finalization_is_atomic_idempotent_and_visible_in_inventory",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::mount_migration_creates_normalized_tables_and_constraints",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::mount_migration_creates_normalized_tables_and_constraints",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::mount_plan_confirmation_rejects_sqlite_tampering_without_consuming_it",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::mount_plan_confirmation_rejects_sqlite_tampering_without_consuming_it",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::mount_remove_finalization_only_removes_the_selected_mount",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::mount_remove_finalization_only_removes_the_selected_mount",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::mount_scope_is_mutually_exclusive_per_member_and_app",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::mount_scope_is_mutually_exclusive_per_member_and_app",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::mount_transaction_rejects_invalid_phases_and_exposes_blocked_recovery",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::mount_transaction_rejects_invalid_phases_and_exposes_blocked_recovery",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::only_the_single_writer_index_is_reported_as_an_active_transaction",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::only_the_single_writer_index_is_reported_as_an_active_transaction",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::open_rejects_a_data_root_symlink_or_file",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::open_rejects_a_data_root_symlink_or_file",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::open_rejects_a_database_outside_the_data_root",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::open_rejects_a_database_outside_the_data_root",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::open_rejects_a_database_symlink_or_directory",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::open_rejects_a_database_symlink_or_directory",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::open_rejects_a_hard_linked_database",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::open_rejects_a_hard_linked_database",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::project_registration_is_idempotent_but_rejects_identity_conflicts",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::project_registration_is_idempotent_but_rejects_identity_conflicts",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::scan_issue_migration_preserves_old_rows_and_allows_multiple_paths_per_root",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::scan_issue_migration_preserves_old_rows_and_allows_multiple_paths_per_root",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_merge_begin_rechecks_snapshots_before_invalidating_pending_plans",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_merge_begin_rechecks_snapshots_before_invalidating_pending_plans",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_merge_finalize_race_rolls_back_all_domain_changes",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_merge_finalize_race_rolls_back_all_domain_changes",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_merge_finalize_supports_root_mapping_and_replay",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_merge_finalize_supports_root_mapping_and_replay",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_merge_moves_loser_mount_to_winner_fingerprint",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_merge_moves_loser_mount_to_winner_fingerprint",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_merge_single_writer_is_bidirectional_and_begin_is_atomic",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_merge_single_writer_is_bidirectional_and_begin_is_atomic",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_merge_validates_final_member_and_current_contract",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_merge_validates_final_member_and_current_contract",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_merge_validates_mount_assignment_keys_and_target_basename",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_merge_validates_mount_assignment_keys_and_target_basename",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_migration_preserves_pending_plan_and_active_lifecycle",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_migration_preserves_pending_plan_and_active_lifecycle",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_plan_storage_enforces_pending_and_hash_contract",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_plan_storage_enforces_pending_and_hash_contract",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::source_association_transaction_migration_seals_final_mappings",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::source_association_transaction_migration_seals_final_mappings",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::sqlite_constraints_reject_scope_target_and_project_tampering",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::sqlite_constraints_reject_scope_target_and_project_tampering",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::takeover_first_commit_rolls_back_when_any_domain_identity_exists",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::takeover_first_commit_rolls_back_when_any_domain_identity_exists",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::takeover_migration_rejects_inconsistent_phase_and_status",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::takeover_migration_rejects_inconsistent_phase_and_status",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::takeover_phase_api_stops_before_domain_commit",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::takeover_phase_api_stops_before_domain_commit",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::takeover_transaction_persists_and_validates_its_affected_object_and_paths",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::takeover_transaction_persists_and_validates_its_affected_object_and_paths",
+      "ignored": false
+    },
+    {
+      "kind": "library_unit",
+      "original_target": "lib",
+      "original_name": "storage::tests::unrelated_unique_constraint_is_not_reported_as_an_active_transaction",
+      "expected_module": null,
+      "future_target": "lib",
+      "future_name": "storage::tests::unrelated_unique_constraint_is_not_reported_as_an_active_transaction",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_chat",
+      "original_name": "every_provider_uses_native_web_search_after_no_local_match",
+      "expected_module": "agent_chat",
+      "future_target": "all",
+      "future_name": "agent_chat::every_provider_uses_native_web_search_after_no_local_match",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_chat",
+      "original_name": "explicit_online_request_searches_even_when_a_local_skill_matches",
+      "expected_module": "agent_chat",
+      "future_target": "all",
+      "future_name": "agent_chat::explicit_online_request_searches_even_when_a_local_skill_matches",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_chat",
+      "original_name": "glm_and_deepseek_use_the_same_read_only_conversation_contract",
+      "expected_module": "agent_chat",
+      "future_target": "all",
+      "future_name": "agent_chat::glm_and_deepseek_use_the_same_read_only_conversation_contract",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_chat",
+      "original_name": "local_search_reads_every_known_skill_kind_without_enabling_web_search",
+      "expected_module": "agent_chat",
+      "future_target": "all",
+      "future_name": "agent_chat::local_search_reads_every_known_skill_kind_without_enabling_web_search",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_chat",
+      "original_name": "public_search_failure_does_not_mutate_local_state",
+      "expected_module": "agent_chat",
+      "future_target": "all",
+      "future_name": "agent_chat::public_search_failure_does_not_mutate_local_state",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_chat",
+      "original_name": "skill_detail_agent_resolves_stable_id_and_filters_local_sensitive_content",
+      "expected_module": "agent_chat",
+      "future_target": "all",
+      "future_name": "agent_chat::skill_detail_agent_resolves_stable_id_and_filters_local_sensitive_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_streaming",
+      "original_name": "closed_channel_stops_the_active_stream_without_a_failure_or_completion",
+      "expected_module": "agent_streaming",
+      "future_target": "all",
+      "future_name": "agent_streaming::closed_channel_stops_the_active_stream_without_a_failure_or_completion",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_streaming",
+      "original_name": "glm_and_deepseek_stream_the_same_normalized_contract",
+      "expected_module": "agent_streaming",
+      "future_target": "all",
+      "future_name": "agent_streaming::glm_and_deepseek_stream_the_same_normalized_contract",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_streaming",
+      "original_name": "midstream_failure_preserves_delta_and_emits_failed_without_completion",
+      "expected_module": "agent_streaming",
+      "future_target": "all",
+      "future_name": "agent_streaming::midstream_failure_preserves_delta_and_emits_failed_without_completion",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "agent_streaming",
+      "original_name": "openai_agent_streams_normalized_text_before_completion",
+      "expected_module": "agent_streaming",
+      "future_target": "all",
+      "future_name": "agent_streaming::openai_agent_streams_normalized_text_before_completion",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "ai_configuration",
+      "original_name": "deepseek_configuration_uses_anthropic_schema_tool_and_web_search_result",
+      "expected_module": "ai_configuration",
+      "future_target": "all",
+      "future_name": "ai_configuration::deepseek_configuration_uses_anthropic_schema_tool_and_web_search_result",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "ai_configuration",
+      "original_name": "deepseek_provider_error_is_normalized_without_exposing_response_content",
+      "expected_module": "ai_configuration",
+      "future_target": "all",
+      "future_name": "ai_configuration::deepseek_provider_error_is_normalized_without_exposing_response_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "ai_configuration",
+      "original_name": "glm_configuration_uses_chat_completions_json_mode_and_native_web_search",
+      "expected_module": "ai_configuration",
+      "future_target": "all",
+      "future_name": "ai_configuration::glm_configuration_uses_chat_completions_json_mode_and_native_web_search",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "ai_configuration",
+      "original_name": "openai_configuration_uses_keychain_boundary_and_only_verifies_on_request",
+      "expected_module": "ai_configuration",
+      "future_target": "all",
+      "future_name": "ai_configuration::openai_configuration_uses_keychain_boundary_and_only_verifies_on_request",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "direct_archive_url_uses_the_same_plan_and_source_lifecycle",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::direct_archive_url_uses_the_same_plan_and_source_lifecycle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "discarding_archive_plan_removes_snapshot_but_keeps_the_source",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::discarding_archive_plan_removes_snapshot_but_keeps_the_source",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "editable_local_relink_rejects_a_similar_but_different_directory",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::editable_local_relink_rejects_a_similar_but_different_directory",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "editable_local_source_keeps_the_author_directory_outside_current_content",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::editable_local_source_keeps_the_author_directory_outside_current_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "editable_local_source_rename_is_explicitly_relinked_without_adopting_content",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::editable_local_source_rename_is_explicitly_relinked_without_adopting_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "interrupted_archive_confirmation_recovers_through_the_existing_journal",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::interrupted_archive_confirmation_recovers_through_the_existing_journal",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "local_skill_archive_installs_through_the_canonical_unmounted_bundle_flow",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::local_skill_archive_installs_through_the_canonical_unmounted_bundle_flow",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "repeated_archive_identity_reuses_one_source_and_supersedes_the_old_plan",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::repeated_archive_identity_reuses_one_source_and_supersedes_the_old_plan",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "archive_install",
+      "original_name": "unsafe_archive_fails_before_source_or_managed_content_is_created",
+      "expected_module": "archive_install",
+      "future_target": "all",
+      "future_name": "archive_install::unsafe_archive_fails_before_source_or_managed_content_is_created",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "a_late_target_write_failure_rolls_back_every_link_created_by_the_batch",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::a_late_target_write_failure_rolls_back_every_link_created_by_the_batch",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "an_already_registered_drifted_mount_remains_a_nonselectable_preview_item",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::an_already_registered_drifted_mount_remains_a_nonselectable_preview_item",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "batch_plan_does_not_create_mount_state_and_confirmation_applies_only_selected_ready_items",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::batch_plan_does_not_create_mount_state_and_confirmation_applies_only_selected_ready_items",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "blocked_batch_reserves_related_members_and_targets_but_allows_unrelated_mounts",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::blocked_batch_reserves_related_members_and_targets_but_allows_unrelated_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "committed_blocked_takeover_reserves_its_bundle_but_allows_unrelated_bundles",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::committed_blocked_takeover_reserves_its_bundle_but_allows_unrelated_bundles",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "coordinated_target_rewrite_cannot_change_the_app_after_preview",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::coordinated_target_rewrite_cannot_change_the_app_after_preview",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "cross_bundle_members_and_foreign_plan_items_are_rejected",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::cross_bundle_members_and_foreign_plan_items_are_rejected",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "double_block_during_recovery_is_idempotent_and_preserves_unknown_host_content",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::double_block_during_recovery_is_idempotent_and_preserves_unknown_host_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "duplicate_requests_selections_and_plan_replay_are_rejected_without_duplicate_mounts",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::duplicate_requests_selections_and_plan_replay_are_rejected_without_duplicate_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "existing_correct_symlink_is_ready_and_confirmation_only_records_it",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::existing_correct_symlink_is_ready_and_confirmation_only_records_it",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "global_and_project_requests_for_the_same_member_and_app_are_scope_conflicts",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::global_and_project_requests_for_the_same_member_and_app_are_scope_conflicts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "hard_exit_after_all_targets_recovers_forward_as_one_complete_batch",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::hard_exit_after_all_targets_recovers_forward_as_one_complete_batch",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "hard_exit_after_database_commit_keeps_the_complete_batch_and_finishes_cleanup",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::hard_exit_after_database_commit_keeps_the_complete_batch_and_finishes_cleanup",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "hard_exit_after_first_target_recovers_forward_as_one_complete_batch",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::hard_exit_after_first_target_recovers_forward_as_one_complete_batch",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "hard_exit_after_stage_evidence_recovers_by_publishing_the_owned_link",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::hard_exit_after_stage_evidence_recovers_by_publishing_the_owned_link",
+      "ignored": false
+    },
+    {
+      "kind": "hard_exit_worker",
+      "original_target": "bundle_batch_mount",
+      "original_name": "hard_exit_batch_mount_worker",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::hard_exit_batch_mount_worker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "hard_exit_during_rollback_resumes_to_zero_links_and_zero_mounts",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::hard_exit_during_rollback_resumes_to_zero_links_and_zero_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "hard_exit_with_owned_link_in_managed_discard_finishes_cleanup",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::hard_exit_with_owned_link_in_managed_discard_finishes_cleanup",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "hard_exit_with_owned_link_in_rollback_quarantine_finishes_cleanup",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::hard_exit_with_owned_link_in_rollback_quarantine_finishes_cleanup",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "normal_commit_failure_rolls_back_new_links_preserves_existing_links_and_commits_no_mounts",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::normal_commit_failure_rolls_back_new_links_preserves_existing_links_and_commits_no_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "one_bundle_mounts_multiple_members_across_all_supported_apps_in_one_batch",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::one_bundle_mounts_multiple_members_across_all_supported_apps_in_one_batch",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "path_conflicts_are_previewed_rejected_when_selected_and_can_be_excluded",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::path_conflicts_are_previewed_rejected_when_selected_and_can_be_excluded",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "precommit_blocked_takeover_reserves_its_path_from_other_members",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::precommit_blocked_takeover_reserves_its_path_from_other_members",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "quarantine_replacement_race_restores_and_preserves_unknown_host_content",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::quarantine_replacement_race_restores_and_preserves_unknown_host_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "recovery_finalize_failure_rolls_back_all_targets_instead_of_staying_blocked",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::recovery_finalize_failure_rolls_back_all_targets_instead_of_staying_blocked",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "takeover_blocked_after_mount_plans_are_created_rejects_both_confirmations",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::takeover_blocked_after_mount_plans_are_created_rejects_both_confirmations",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "tampered_persisted_plan_is_rejected_before_any_filesystem_or_mount_change",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::tampered_persisted_plan_is_rejected_before_any_filesystem_or_mount_change",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "the_same_member_can_batch_mount_into_multiple_projects_for_one_app",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::the_same_member_can_batch_mount_into_multiple_projects_for_one_app",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_batch_mount",
+      "original_name": "unknown_content_in_managed_discard_is_blocked_and_preserved",
+      "expected_module": "bundle_batch_mount",
+      "future_target": "all",
+      "future_name": "bundle_batch_mount::unknown_content_in_managed_discard_is_blocked_and_preserved",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_batch",
+      "original_name": "batch_child_plan_cannot_be_confirmed_or_discarded_outside_the_coordinator",
+      "expected_module": "bundle_update_batch",
+      "future_target": "all",
+      "future_name": "bundle_update_batch::batch_child_plan_cannot_be_confirmed_or_discarded_outside_the_coordinator",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_batch",
+      "original_name": "batch_plan_includes_only_explicitly_available_bundles_and_preview_is_read_only",
+      "expected_module": "bundle_update_batch",
+      "future_target": "all",
+      "future_name": "bundle_update_batch::batch_plan_includes_only_explicitly_available_bundles_and_preview_is_read_only",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_batch",
+      "original_name": "blocked_child_stops_batch_and_marks_remaining_selected_item_not_executed",
+      "expected_module": "bundle_update_batch",
+      "future_target": "all",
+      "future_name": "bundle_update_batch::blocked_child_stops_batch_and_marks_remaining_selected_item_not_executed",
+      "ignored": false
+    },
+    {
+      "kind": "hard_exit_worker",
+      "original_target": "bundle_update_batch",
+      "original_name": "bundle_update_batch_hard_exit_worker",
+      "expected_module": "bundle_update_batch",
+      "future_target": "all",
+      "future_name": "bundle_update_batch::bundle_update_batch_hard_exit_worker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_batch",
+      "original_name": "github_available_without_an_adopted_baseline_uses_the_catalog_marker",
+      "expected_module": "bundle_update_batch",
+      "future_target": "all",
+      "future_name": "bundle_update_batch::github_available_without_an_adopted_baseline_uses_the_catalog_marker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_batch",
+      "original_name": "hard_exit_after_child_current_switch_recovers_child_and_continues_batch",
+      "expected_module": "bundle_update_batch",
+      "future_target": "all",
+      "future_name": "bundle_update_batch::hard_exit_after_child_current_switch_recovers_child_and_continues_batch",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_batch",
+      "original_name": "one_preparation_failure_does_not_prevent_later_bundle_plan_creation",
+      "expected_module": "bundle_update_batch",
+      "future_target": "all",
+      "future_name": "bundle_update_batch::one_preparation_failure_does_not_prevent_later_bundle_plan_creation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_batch",
+      "original_name": "selected_item_order_executes_complete_children_and_continues_after_ordinary_failure",
+      "expected_module": "bundle_update_batch",
+      "future_target": "all",
+      "future_name": "bundle_update_batch::selected_item_order_executes_complete_children_and_continues_after_ordinary_failure",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_check",
+      "original_name": "blocked_bundle_update_check_preserves_state_without_network_access",
+      "expected_module": "bundle_update_check",
+      "future_target": "all",
+      "future_name": "bundle_update_check::blocked_bundle_update_check_preserves_state_without_network_access",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_check",
+      "original_name": "confirmed_tracked_ref_change_uses_the_resolved_candidate_marker",
+      "expected_module": "bundle_update_check",
+      "future_target": "all",
+      "future_name": "bundle_update_check::confirmed_tracked_ref_change_uses_the_resolved_candidate_marker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_check",
+      "original_name": "failed_check_is_visible_when_a_direct_association_has_no_adopted_marker",
+      "expected_module": "bundle_update_check",
+      "future_target": "all",
+      "future_name": "bundle_update_check::failed_check_is_visible_when_a_direct_association_has_no_adopted_marker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_check",
+      "original_name": "failed_check_keeps_last_successful_marker_and_current_content",
+      "expected_module": "bundle_update_check",
+      "future_target": "all",
+      "future_name": "bundle_update_check::failed_check_keeps_last_successful_marker_and_current_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "bundle_update_check",
+      "original_name": "github_update_check_reads_only_marker_and_survives_restart",
+      "expected_module": "bundle_update_check",
+      "future_target": "all",
+      "future_name": "bundle_update_check::github_update_check_reads_only_marker_and_survives_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "capability_contract",
+      "original_name": "application_does_not_depend_on_generic_fs_sql_or_shell_plugins",
+      "expected_module": "capability_contract",
+      "future_target": "all",
+      "future_name": "capability_contract::application_does_not_depend_on_generic_fs_sql_or_shell_plugins",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "capability_contract",
+      "original_name": "application_manifests_publish_one_1_1_0_version",
+      "expected_module": "capability_contract",
+      "future_target": "all",
+      "future_name": "capability_contract::application_manifests_publish_one_1_1_0_version",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "capability_contract",
+      "original_name": "frontend_has_only_the_minimum_tauri_capability",
+      "expected_module": "capability_contract",
+      "future_target": "all",
+      "future_name": "capability_contract::frontend_has_only_the_minimum_tauri_capability",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_missing_mount_can_be_repaired_after_a_separate_confirmation",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_missing_mount_can_be_repaired_after_a_separate_confirmation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_mount_with_a_replaced_project_root_can_forget_its_relation_without_touching_either_tree",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_mount_with_a_replaced_project_root_can_forget_its_relation_without_touching_either_tree",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_real_process_exit_after_mount_effect_recovers_to_mounted",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_real_process_exit_after_mount_effect_recovers_to_mounted",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_real_process_exit_after_mount_journal_cleanup_only_forgets_terminal_record",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_real_process_exit_after_mount_journal_cleanup_only_forgets_terminal_record",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_real_process_exit_after_mount_journal_recovers_to_not_mounted",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_real_process_exit_after_mount_journal_recovers_to_not_mounted",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_real_process_exit_after_mount_state_commit_finishes_cleanup",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_real_process_exit_after_mount_state_commit_finishes_cleanup",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_real_process_exit_after_remove_effect_recovers_to_unmounted",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_real_process_exit_after_remove_effect_recovers_to_unmounted",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_real_process_exit_before_mount_journal_recovers_to_not_mounted",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_real_process_exit_before_mount_journal_recovers_to_not_mounted",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "a_tampered_create_observation_cannot_register_an_external_file_as_a_mount",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::a_tampered_create_observation_cannot_register_an_external_file_as_a_mount",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "an_existing_correct_link_is_adopted_and_a_missing_mount_can_be_forgotten",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::an_existing_correct_link_is_adopted_and_a_missing_mount_can_be_forgotten",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "an_old_repair_plan_cannot_recreate_a_mount_that_was_formally_removed",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::an_old_repair_plan_cannot_recreate_a_mount_that_was_formally_removed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "codex_global_mount_is_planned_created_and_removed_without_touching_bundle_content",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::codex_global_mount_is_planned_created_and_removed_without_touching_bundle_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "coordinated_project_row_tampering_cannot_retarget_an_existing_plan",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::coordinated_project_row_tampering_cannot_retarget_an_existing_plan",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "every_supported_app_uses_its_fixed_global_and_project_mount_paths",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::every_supported_app_uses_its_fixed_global_and_project_mount_paths",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "failed_local_refresh_rolls_back_mount_health_with_the_inventory_snapshot",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::failed_local_refresh_rolls_back_mount_health_with_the_inventory_snapshot",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "global_and_project_scope_are_mutually_exclusive_for_the_same_app",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::global_and_project_scope_are_mutually_exclusive_for_the_same_app",
+      "ignored": false
+    },
+    {
+      "kind": "hard_exit_worker",
+      "original_target": "codex_mount",
+      "original_name": "hard_exit_mount_worker",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::hard_exit_mount_worker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "interrupted_mount_creation_and_removal_recover_to_the_confirmed_state",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::interrupted_mount_creation_and_removal_recover_to_the_confirmed_state",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "interrupted_repair_recovers_the_existing_mount_relation_to_healthy",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::interrupted_repair_recovers_the_existing_mount_relation_to_healthy",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "journal_pending_does_not_adopt_a_preexisting_correct_link",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::journal_pending_does_not_adopt_a_preexisting_correct_link",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "journal_pending_does_not_remove_an_already_missing_mount_relation",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::journal_pending_does_not_remove_an_already_missing_mount_relation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "local_refresh_does_not_duplicate_a_managed_mount_as_takeover_candidate",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::local_refresh_does_not_duplicate_a_managed_mount_as_takeover_candidate",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "local_refresh_does_not_duplicate_a_managed_project_mount_as_inventory",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::local_refresh_does_not_duplicate_a_managed_project_mount_as_inventory",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "mount_conflict_and_plan_race_never_overwrite_existing_content",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::mount_conflict_and_plan_race_never_overwrite_existing_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "mount_parent_symlink_is_rejected_without_writing_outside_home",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::mount_parent_symlink_is_rejected_without_writing_outside_home",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "parent_symlink_introduced_after_plan_cannot_redirect_mount_creation",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::parent_symlink_introduced_after_plan_cannot_redirect_mount_creation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "project_identity_change_after_plan_is_rejected_without_writing_to_replacement",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::project_identity_change_after_plan_is_rejected_without_writing_to_replacement",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "registered_project_is_read_only_until_project_mount_is_confirmed",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::registered_project_is_read_only_until_project_mount_is_confirmed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "removing_a_conflicted_mount_only_forgets_the_relation",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::removing_a_conflicted_mount_only_forgets_the_relation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "removing_a_missing_mount_does_not_recreate_its_parent_directories",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::removing_a_missing_mount_does_not_recreate_its_parent_directories",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "removing_a_mount_with_an_unsafe_parent_preserves_the_external_parent",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::removing_a_mount_with_an_unsafe_parent_preserves_the_external_parent",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "repair_plan_never_overwrites_content_that_appears_after_preview",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::repair_plan_never_overwrites_content_that_appears_after_preview",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "startup_and_refresh_report_mount_drift_without_repairing_or_overwriting_it",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::startup_and_refresh_report_mount_drift_without_repairing_or_overwriting_it",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "codex_mount",
+      "original_name": "the_same_skill_can_mount_into_multiple_registered_projects",
+      "expected_module": "codex_mount",
+      "future_target": "all",
+      "future_name": "codex_mount::the_same_skill_can_mount_into_multiple_registered_projects",
+      "ignored": false
+    },
+    {
+      "kind": "mac_contract",
+      "original_target": "codex_mount_contract",
+      "original_name": "current_codex_discovers_global_and_project_directory_symlinks",
+      "expected_module": null,
+      "future_target": "codex_mount_contract",
+      "future_name": "current_codex_discovers_global_and_project_directory_symlinks",
+      "ignored": true
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "discover",
+      "original_name": "discover_reads_local_inventory_and_saved_source_catalog_without_network_or_writes",
+      "expected_module": "discover",
+      "future_target": "all",
+      "future_name": "discover::discover_reads_local_inventory_and_saved_source_catalog_without_network_or_writes",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "discover_web",
+      "original_name": "discover_submit_searches_openai_even_when_a_local_skill_matches_without_writing_state",
+      "expected_module": "discover_web",
+      "future_target": "all",
+      "future_name": "discover_web::discover_submit_searches_openai_even_when_a_local_skill_matches_without_writing_state",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "discover_web",
+      "original_name": "glm_and_deepseek_return_the_same_stateless_discover_contract",
+      "expected_module": "discover_web",
+      "future_target": "all",
+      "future_name": "discover_web::glm_and_deepseek_return_the_same_stateless_discover_contract",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "editable_local_update",
+      "original_name": "a_different_directory_at_the_same_locator_is_source_unavailable_not_a_relink",
+      "expected_module": "editable_local_update",
+      "future_target": "all",
+      "future_name": "editable_local_update::a_different_directory_at_the_same_locator_is_source_unavailable_not_a_relink",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "editable_local_update",
+      "original_name": "changed_editable_local_is_checked_then_adopted_as_one_complete_bundle",
+      "expected_module": "editable_local_update",
+      "future_target": "all",
+      "future_name": "editable_local_update::changed_editable_local_is_checked_then_adopted_as_one_complete_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "editable_local_update",
+      "original_name": "editable_adoption_recovers_after_current_switch_with_the_checked_catalog_marker",
+      "expected_module": "editable_local_update",
+      "future_target": "all",
+      "future_name": "editable_local_update::editable_adoption_recovers_after_current_switch_with_the_checked_catalog_marker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "editable_local_update",
+      "original_name": "unavailable_editable_local_keeps_current_and_can_be_checked_again",
+      "expected_module": "editable_local_update",
+      "future_target": "all",
+      "future_name": "editable_local_update::unavailable_editable_local_keeps_current_and_can_be_checked_again",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "editable_local_update",
+      "original_name": "unchanged_editable_local_stays_up_to_date_and_does_not_create_an_update_plan",
+      "expected_module": "editable_local_update",
+      "future_target": "all",
+      "future_name": "editable_local_update::unchanged_editable_local_stays_up_to_date_and_does_not_create_an_update_plan",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "a_declared_name_that_differs_from_the_skill_directory_is_rejected",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::a_declared_name_that_differs_from_the_skill_directory_is_rejected",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "a_fifo_journal_is_rejected_without_blocking_startup",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::a_fifo_journal_is_rejected_without_blocking_startup",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "a_journal_with_unknown_fields_is_rejected_as_an_incompatible_contract",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::a_journal_with_unknown_fields_is_rejected_as_an_incompatible_contract",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "a_real_process_exit_after_current_recovers_to_installed",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::a_real_process_exit_after_current_recovers_to_installed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "a_real_process_exit_after_domain_commit_recovers_to_installed",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::a_real_process_exit_after_domain_commit_recovers_to_installed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "a_real_process_exit_before_current_recovers_to_not_installed",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::a_real_process_exit_before_current_recovers_to_not_installed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "a_real_process_exit_before_journal_recovers_to_not_installed",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::a_real_process_exit_before_journal_recovers_to_not_installed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "a_tampered_journal_is_blocked_without_touching_other_managed_content",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::a_tampered_journal_is_blocked_without_touching_other_managed_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "adding_a_member_after_plan_creation_invalidates_the_old_plan",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::adding_a_member_after_plan_creation_invalidates_the_old_plan",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "an_oversized_journal_is_bounded_and_shown_as_blocked_recovery",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::an_oversized_journal_is_bounded_and_shown_as_blocked_recovery",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "confirmation_rejects_empty_duplicate_and_unknown_member_selections",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::confirmation_rejects_empty_duplicate_and_unknown_member_selections",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "confirmation_rejects_unknown_expired_and_changed_plans",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::confirmation_rejects_unknown_expired_and_changed_plans",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "confirming_a_partial_selection_installs_one_bundle_with_only_selected_members",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::confirming_a_partial_selection_installs_one_bundle_with_only_selected_members",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "confirming_a_plan_installs_one_unmounted_managed_bundle",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::confirming_a_plan_installs_one_unmounted_managed_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "confirming_default_selection_installs_all_members_in_one_unmounted_bundle",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::confirming_default_selection_installs_all_members_in_one_unmounted_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "creating_a_folder_install_plan_does_not_write_managed_content",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::creating_a_folder_install_plan_does_not_write_managed_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "discard_cannot_cancel_a_plan_after_confirmation_has_started",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::discard_cannot_cancel_a_plan_after_confirmation_has_started",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "duplicate_skill_names_in_different_paths_are_rejected",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::duplicate_skill_names_in_different_paths_are_rejected",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "fifo_skill_content_is_rejected_without_blocking_discovery",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::fifo_skill_content_is_rejected_without_blocking_discovery",
+      "ignored": false
+    },
+    {
+      "kind": "hard_exit_worker",
+      "original_target": "folder_install",
+      "original_name": "hard_exit_install_worker",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::hard_exit_install_worker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "hard_linked_skill_content_is_visible_but_cannot_be_selected",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::hard_linked_skill_content_is_visible_but_cannot_be_selected",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "interruption_after_current_activation_recovers_to_installed_idempotently",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::interruption_after_current_activation_recovers_to_installed_idempotently",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "interruption_after_temporary_current_creation_is_cleaned_automatically",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::interruption_after_temporary_current_creation_is_cleaned_automatically",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "interruption_before_current_activation_recovers_to_not_installed",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::interruption_before_current_activation_recovers_to_not_installed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "interruption_cleans_a_candidate_that_preserves_read_only_directories",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::interruption_cleans_a_candidate_that_preserves_read_only_directories",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "interruption_during_candidate_cleanup_retries_the_owned_discard_directory",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::interruption_during_candidate_cleanup_retries_the_owned_discard_directory",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "invalid_yaml_is_disabled_while_a_valid_sibling_remains_installable",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::invalid_yaml_is_disabled_while_a_valid_sibling_remains_installable",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "journals_without_a_non_empty_members_contract_are_blocked_in_isolation",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::journals_without_a_non_empty_members_contract_are_blocked_in_isolation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "multi_member_interruption_after_current_recovers_the_complete_selection",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::multi_member_interruption_after_current_recovers_the_complete_selection",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "multi_member_interruption_before_current_recovers_to_zero_members",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::multi_member_interruption_before_current_recovers_to_zero_members",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "multi_skill_folder_plan_discovers_every_member_selected_by_default",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::multi_skill_folder_plan_discovers_every_member_selected_by_default",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "nested_skill_roots_are_rejected_as_an_ambiguous_bundle",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::nested_skill_roots_are_rejected_as_an_ambiguous_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "permission_failure_is_rejected_before_a_lifecycle_transaction_starts",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::permission_failure_is_rejected_before_a_lifecycle_transaction_starts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "recovery_rejects_a_bundle_ancestor_replaced_by_a_symlink",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::recovery_rejects_a_bundle_ancestor_replaced_by_a_symlink",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "startup_rebuilds_a_missing_central_store_notice_from_sqlite",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::startup_rebuilds_a_missing_central_store_notice_from_sqlite",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "folder_install",
+      "original_name": "unsafe_links_are_visible_but_cannot_be_selected",
+      "expected_module": "folder_install",
+      "future_target": "all",
+      "future_name": "folder_install::unsafe_links_are_visible_but_cannot_be_selected",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "a_source_with_every_valid_member_installed_rejects_an_empty_supplement_without_network",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::a_source_with_every_valid_member_installed_rejects_an_empty_supplement_without_network",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "an_expired_github_plan_discards_its_snapshot_before_returning",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::an_expired_github_plan_discards_its_snapshot_before_returning",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "blocked_github_supplement_isolates_its_source_and_bundle_but_not_independent_bundles",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::blocked_github_supplement_isolates_its_source_and_bundle_but_not_independent_bundles",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "bundle_update_rejects_partial_member_selection_without_changing_current_or_marker",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::bundle_update_rejects_partial_member_selection_without_changing_current_or_marker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "bundle_update_replaces_all_current_source_members_and_preserves_removed_members",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::bundle_update_replaces_all_current_source_members_and_preserves_removed_members",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "catalog_failures_keep_the_old_catalog_and_installed_bundle_unchanged",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::catalog_failures_keep_the_old_catalog_and_installed_bundle_unchanged",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "changing_the_catalog_after_plan_creation_rejects_confirmation_before_a_transaction",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::changing_the_catalog_after_plan_creation_rejects_confirmation_before_a_transaction",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "confirmed_tracked_ref_change_keeps_installed_content_and_mount_unchanged",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::confirmed_tracked_ref_change_keeps_installed_content_and_mount_unchanged",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "creating_a_new_plan_for_the_same_source_replaces_the_old_pending_snapshot",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::creating_a_new_plan_for_the_same_source_replaces_the_old_pending_snapshot",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "fresh_github_catalog_installs_one_unmounted_source_backed_bundle",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::fresh_github_catalog_installs_one_unmounted_source_backed_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "github_create_hard_exit_after_current_recovers_the_complete_bundle",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_create_hard_exit_after_current_recovers_the_complete_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "github_create_hard_exit_before_journal_recovers_to_not_installed",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_create_hard_exit_before_journal_recovers_to_not_installed",
+      "ignored": false
+    },
+    {
+      "kind": "hard_exit_worker",
+      "original_target": "github_install",
+      "original_name": "github_hard_exit_worker",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_hard_exit_worker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "github_supplement_hard_exit_after_current_finishes_the_new_bundle",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_supplement_hard_exit_after_current_finishes_the_new_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "github_supplement_hard_exit_before_journal_preserves_the_old_bundle",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_supplement_hard_exit_before_journal_preserves_the_old_bundle",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "github_supplement_retries_an_interrupted_old_content_cleanup",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_supplement_retries_an_interrupted_old_content_cleanup",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "github_update_hard_exit_after_current_finishes_whole_bundle_and_marker",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_update_hard_exit_after_current_finishes_whole_bundle_and_marker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "github_update_hard_exit_before_current_preserves_old_content_and_marker",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_update_hard_exit_before_current_preserves_old_content_and_marker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "github_update_hard_exit_before_journal_preserves_old_content_and_marker",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::github_update_hard_exit_before_journal_preserves_old_content_and_marker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "startup_discards_an_expired_github_plan_without_reopening_its_confirmation",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::startup_discards_an_expired_github_plan_without_reopening_its_confirmation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "supplement_keeps_existing_content_mount_and_adopted_marker_while_adding_selected_members",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::supplement_keeps_existing_content_mount_and_adopted_marker_while_adding_selected_members",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_install",
+      "original_name": "user_can_discard_a_pending_github_plan_and_its_snapshot",
+      "expected_module": "github_install",
+      "future_target": "all",
+      "future_name": "github_install::user_can_discard_a_pending_github_plan_and_its_snapshot",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "a_different_tracked_ref_requires_confirmation_before_source_changes",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::a_different_tracked_ref_requires_confirmation_before_source_changes",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "catalog_database_failure_rolls_back_the_complete_previous_snapshot",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::catalog_database_failure_rolls_back_the_complete_previous_snapshot",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "catalog_network_fetch_holds_the_cross_process_lifecycle_lock",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::catalog_network_fetch_holds_the_cross_process_lifecycle_lock",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "catalogs_reload_only_after_explicit_requests_and_failures_preserve_previous_members",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::catalogs_reload_only_after_explicit_requests_and_failures_preserve_previous_members",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "common_inputs_reuse_one_canonical_source_and_default_branch_comes_from_github",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::common_inputs_reuse_one_canonical_source_and_default_branch_comes_from_github",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "dangerous_reload_keeps_the_old_catalog_and_valid_empty_archive_replaces_it",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::dangerous_reload_keeps_the_old_catalog_and_valid_empty_archive_replaces_it",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "deleting_a_recommended_source_does_not_seed_it_again_on_restart",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::deleting_a_recommended_source_does_not_seed_it_again_on_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "invalid_or_private_repository_does_not_create_a_source",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::invalid_or_private_repository_does_not_create_a_source",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "github_source",
+      "original_name": "recommended_github_sources_exist_without_creating_bundles_and_survive_restart",
+      "expected_module": "github_source",
+      "future_target": "all",
+      "future_name": "github_source::recommended_github_sources_exist_without_creating_bundles_and_survive_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "manual_bundle_update",
+      "original_name": "archive_replacement_updates_the_whole_bundle_without_changing_source_identity_or_mounts",
+      "expected_module": "manual_bundle_update",
+      "future_target": "all",
+      "future_name": "manual_bundle_update::archive_replacement_updates_the_whole_bundle_without_changing_source_identity_or_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "manual_bundle_update",
+      "original_name": "direct_url_replacement_uses_only_the_selected_local_archive",
+      "expected_module": "manual_bundle_update",
+      "future_target": "all",
+      "future_name": "manual_bundle_update::direct_url_replacement_uses_only_the_selected_local_archive",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "manual_bundle_update",
+      "original_name": "invalid_replacement_archive_fails_before_plan_and_preserves_current_state",
+      "expected_module": "manual_bundle_update",
+      "future_target": "all",
+      "future_name": "manual_bundle_update::invalid_replacement_archive_fails_before_plan_and_preserves_current_state",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "preferences",
+      "original_name": "interface_language_is_saved_through_the_application_seam_and_restored",
+      "expected_module": "preferences",
+      "future_target": "all",
+      "future_name": "preferences::interface_language_is_saved_through_the_application_seam_and_restored",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "blocked_bundle_removal_prevents_related_writes_but_not_unrelated_bundles",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::blocked_bundle_removal_prevents_related_writes_but_not_unrelated_bundles",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "blocked_removals_reject_overlapping_bundle_and_project_deletions",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::blocked_removals_reject_overlapping_bundle_and_project_deletions",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "bundle_mount_removal_finishes_after_all_mounts_are_isolated",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::bundle_mount_removal_finishes_after_all_mounts_are_isolated",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "bundle_mount_removal_unmounts_every_host_but_preserves_the_bundle_and_source",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::bundle_mount_removal_unmounts_every_host_but_preserves_the_bundle_and_source",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "bundle_recovery_preserves_unknown_content_added_after_the_trash_rename",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::bundle_recovery_preserves_unknown_content_added_after_the_trash_rename",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "bundle_removal_finishes_when_interrupted_after_the_destructive_boundary",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::bundle_removal_finishes_when_interrupted_after_the_destructive_boundary",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "bundle_removal_has_read_only_preview_and_preserves_its_source_and_editable_directory",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::bundle_removal_has_read_only_preview_and_preserves_its_source_and_editable_directory",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "bundle_removal_rejects_a_stale_preview_before_changing_new_mounts",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::bundle_removal_rejects_a_stale_preview_before_changing_new_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "bundle_removal_rolls_back_when_interrupted_before_the_destructive_boundary",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::bundle_removal_rolls_back_when_interrupted_before_the_destructive_boundary",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "cascading_removal_rejects_an_unavailable_project_mount_parent",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::cascading_removal_rejects_an_unavailable_project_mount_parent",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "changed_trash_identity_after_commit_is_blocked_without_deleting_unknown_content",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::changed_trash_identity_after_commit_is_blocked_without_deleting_unknown_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "deep_bundle_removal_journal_recovers_after_the_destructive_boundary",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::deep_bundle_removal_journal_recovers_after_the_destructive_boundary",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "missing_journal_before_any_filesystem_change_aborts_without_deleting_the_project",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::missing_journal_before_any_filesystem_change_aborts_without_deleting_the_project",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "project_removal_continues_after_all_project_mounts_are_isolated",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::project_removal_continues_after_all_project_mounts_are_isolated",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "project_removal_continues_when_journal_is_ahead_of_sqlite_phase",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::project_removal_continues_when_journal_is_ahead_of_sqlite_phase",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "project_removal_removes_all_project_mounts_but_preserves_other_mounts_and_bundles",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::project_removal_removes_all_project_mounts_but_preserves_other_mounts_and_bundles",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "project_without_mounts_can_be_removed_without_touching_its_directory",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::project_without_mounts_can_be_removed_without_touching_its_directory",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "recommended_source_uses_the_same_delete_flow_and_stays_deleted_after_restart",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::recommended_source_uses_the_same_delete_flow_and_stays_deleted_after_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "removal",
+      "original_name": "source_removal_discards_pending_plan_and_preserves_all_local_content",
+      "expected_module": "removal",
+      "future_target": "all",
+      "future_name": "removal::source_removal_discards_pending_plan_and_preserves_all_local_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "skill_ai_explanation",
+      "original_name": "glm_and_deepseek_generate_the_same_fixed_explanation_without_web_search",
+      "expected_module": "skill_ai_explanation",
+      "future_target": "all",
+      "future_name": "skill_ai_explanation::glm_and_deepseek_generate_the_same_fixed_explanation_without_web_search",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "skill_ai_explanation",
+      "original_name": "user_generated_skill_explanation_replaces_one_persisted_result_without_web_search",
+      "expected_module": "skill_ai_explanation",
+      "future_target": "all",
+      "future_name": "skill_ai_explanation::user_generated_skill_explanation_replaces_one_persisted_result_without_web_search",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "skill_ai_explanation",
+      "original_name": "user_started_organization_updates_only_missing_or_stale_skills_and_isolates_failures",
+      "expected_module": "skill_ai_explanation",
+      "future_target": "all",
+      "future_name": "skill_ai_explanation::user_started_organization_updates_only_missing_or_stale_skills_and_isolates_failures",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "skills_sh_source",
+      "original_name": "skills_sh_response_failures_do_not_mutate_persistent_state",
+      "expected_module": "skills_sh_source",
+      "future_target": "all",
+      "future_name": "skills_sh_source::skills_sh_response_failures_do_not_mutate_persistent_state",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "skills_sh_source",
+      "original_name": "skills_sh_search_groups_github_members_without_creating_a_second_source_kind",
+      "expected_module": "skills_sh_source",
+      "future_target": "all",
+      "future_name": "skills_sh_source::skills_sh_search_groups_github_members_without_creating_a_second_source_kind",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "skills_sh_source",
+      "original_name": "skills_sh_zero_results_is_a_success_without_persistent_changes",
+      "expected_module": "skills_sh_source",
+      "future_target": "all",
+      "future_name": "skills_sh_source::skills_sh_zero_results_is_a_success_without_persistent_changes",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "aborted_merge_without_journal_is_forgotten_on_second_restart",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::aborted_merge_without_journal_is_forgotten_on_second_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "all_not_corresponding_is_a_valid_source_association",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::all_not_corresponding_is_a_valid_source_association",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "direct_association_preserves_current_content_and_mount_while_saving_partial_mapping",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::direct_association_preserves_current_content_and_mount_while_saving_partial_mapping",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "github_direct_association_keeps_adopted_marker_empty_until_a_real_update",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::github_direct_association_keeps_adopted_marker_empty_until_a_real_update",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "invalid_duplicate_mapping_and_changed_member_snapshot_leave_association_unchanged",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::invalid_duplicate_mapping_and_changed_member_snapshot_leave_association_unchanged",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_begin_preflight_rejects_stale_source_bundle_and_mapping_before_filesystem_writes",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_begin_preflight_rejects_stale_source_bundle_and_mapping_before_filesystem_writes",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_candidate_create_intent_recovers_directory_created_before_manifest",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_candidate_create_intent_recovers_directory_created_before_manifest",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_cleanup_blocks_if_target_current_changes_after_domain_commit",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_cleanup_blocks_if_target_current_changes_after_domain_commit",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_interruption_after_current_switch_completes_forward_on_restart",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_interruption_after_current_switch_completes_forward_on_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_interruption_after_mounts_applied_completes_domain_commit_on_restart",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_interruption_after_mounts_applied_completes_domain_commit_on_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_interruption_before_current_switch_rolls_back_on_restart",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_interruption_before_current_switch_rolls_back_on_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_invalid_content_choices_have_no_domain_or_filesystem_side_effects",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_invalid_content_choices_have_no_domain_or_filesystem_side_effects",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_plan_blocks_mixed_global_and_project_mounts_within_one_conflict_group",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_plan_blocks_mixed_global_and_project_mounts_within_one_conflict_group",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_plan_blocks_one_final_skill_from_corresponding_to_two_source_members",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_plan_blocks_one_final_skill_from_corresponding_to_two_source_members",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_plan_tells_user_to_remove_and_recreate_mount_for_different_names",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_plan_tells_user_to_remove_and_recreate_mount_for_different_names",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_recovery_blocks_tampered_static_journal_contract_but_inventory_remains_readable",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_recovery_blocks_tampered_static_journal_contract_but_inventory_remains_readable",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_recovery_blocks_when_retiring_mount_is_replaced_after_activation",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_recovery_blocks_when_retiring_mount_is_replaced_after_activation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "source_association",
+      "original_name": "merge_uses_only_two_local_currents_migrates_retiring_mount_and_survives_restart",
+      "expected_module": "source_association",
+      "future_target": "all",
+      "future_name": "source_association::merge_uses_only_two_local_currents_migrates_retiring_mount_and_survives_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "broken_git_evidence_keeps_the_last_project_snapshot_stale",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::broken_git_evidence_keeps_the_last_project_snapshot_stale",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "broken_head_object_is_indeterminate_instead_of_an_unborn_repository",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::broken_head_object_is_indeterminate_instead_of_an_unborn_repository",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "committed_project_skill_is_project_managed_and_evidence_survives_restart",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::committed_project_skill_is_project_managed_and_evidence_survives_restart",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "dirty_tracked_skill_stays_project_managed_because_only_head_is_authoritative",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::dirty_tracked_skill_stays_project_managed_because_only_head_is_authoritative",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "empty_scan_is_persisted_and_reopened_without_creating_host_directories",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::empty_scan_is_persisted_and_reopened_without_creating_host_directories",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "global_skill_in_a_git_clone_is_not_classified_as_project_managed",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::global_skill_in_a_git_clone_is_not_classified_as_project_managed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "initial_scan_isolates_dangling_skill_links_and_recovers_each_entry_independently",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::initial_scan_isolates_dangling_skill_links_and_recovers_each_entry_independently",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "inventory_and_completion_marker_commit_atomically",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::inventory_and_completion_marker_commit_atomically",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_database_failure_keeps_the_previous_snapshot",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_database_failure_keeps_the_previous_snapshot",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_is_rejected_before_initial_scan_without_reading_roots",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_is_rejected_before_initial_scan_without_reading_roots",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_isolates_a_failed_root_to_the_correct_registered_project",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_isolates_a_failed_root_to_the_correct_registered_project",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_preserves_a_mounted_skill_when_its_target_disappears",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_preserves_a_mounted_skill_when_its_target_disappears",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_preserves_a_root_when_its_detection_directory_is_dangling",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_preserves_a_root_when_its_detection_directory_is_dangling",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_preserves_a_skill_when_its_metadata_becomes_unreadable",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_preserves_a_skill_when_its_metadata_becomes_unreadable",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_preserves_the_existing_management_authority",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_preserves_the_existing_management_authority",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_preserves_the_last_snapshot_for_a_failed_root",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_preserves_the_last_snapshot_for_a_failed_root",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_reconciles_added_removed_and_changed_skills",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_reconciles_added_removed_and_changed_skills",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "local_refresh_treats_a_dangling_root_symlink_as_a_scan_failure",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::local_refresh_treats_a_dangling_root_symlink_as_a_scan_failure",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "new_database_starts_on_onboarding_without_reading_skill_roots",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::new_database_starts_on_onboarding_without_reading_skill_roots",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "partial_clone_missing_tree_does_not_lazy_fetch_during_local_refresh",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::partial_clone_missing_tree_does_not_lazy_fetch_during_local_refresh",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "project_inside_monorepo_and_git_file_worktree_use_their_actual_authority_root",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::project_inside_monorepo_and_git_file_worktree_use_their_actual_authority_root",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "project_management_follows_head_when_skill_is_committed_or_removed",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::project_management_follows_head_when_skill_is_committed_or_removed",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "project_registration_rolls_back_when_its_initial_inventory_cannot_be_saved",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::project_registration_rolls_back_when_its_initial_inventory_cannot_be_saved",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "registering_a_project_immediately_scans_every_existing_supported_project_root",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::registering_a_project_immediately_scans_every_existing_supported_project_root",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "replacement_refs_cannot_substitute_a_different_tree_for_head_evidence",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::replacement_refs_cannot_substitute_a_different_tree_for_head_evidence",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "returning_user_reads_persisted_inventory_without_rescanning",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::returning_user_reads_persisted_inventory_without_rescanning",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "returning_user_reads_saved_project_inventory_until_refresh_is_requested",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::returning_user_reads_saved_project_inventory_until_refresh_is_requested",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "root_scan_issue_is_persisted_without_blocking_onboarding",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::root_scan_issue_is_persisted_without_blocking_onboarding",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "same_name_in_different_roots_does_not_create_a_false_identity",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::same_name_in_different_roots_does_not_create_a_false_identity",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "scan_discovers_official_codex_plugin_skills_as_read_only_inventory",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::scan_discovers_official_codex_plugin_skills_as_read_only_inventory",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "scan_discovers_only_fixed_global_and_shared_roots_without_modifying_content",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::scan_discovers_only_fixed_global_and_shared_roots_without_modifying_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "scan_issues_for_the_same_root_are_preserved_for_each_project",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::scan_issues_for_the_same_root_are_preserved_for_each_project",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "scan_marks_invalid_frontmatter_without_trusting_the_declared_name",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::scan_marks_invalid_frontmatter_without_trusting_the_declared_name",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "storage_initialization_failure_is_returned_through_the_application_seam",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::storage_initialization_failure_is_returned_through_the_application_seam",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "symlink_git_marker_is_indeterminate_and_does_not_create_management_evidence",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::symlink_git_marker_is_indeterminate_and_does_not_create_management_evidence",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "tracked_submodule_skill_is_not_project_management_evidence",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::tracked_submodule_skill_is_not_project_management_evidence",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "tracked_symlink_skill_file_is_not_project_management_evidence",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::tracked_symlink_skill_file_is_not_project_management_evidence",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "unsupported_platform_returns_a_typed_state_before_scanning",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::unsupported_platform_returns_a_typed_state_before_scanning",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "untracked_and_staged_only_project_skills_remain_takeover_candidates",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::untracked_and_staged_only_project_skills_remain_takeover_candidates",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "startup_state",
+      "original_name": "version_one_database_migrates_without_losing_inventory",
+      "expected_module": "startup_state",
+      "future_target": "all",
+      "future_name": "startup_state::version_one_database_migrates_without_losing_inventory",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "blocked_takeover_prevents_removing_its_registered_project",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::blocked_takeover_prevents_removing_its_registered_project",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "blocked_takeover_reserves_only_its_original_skill_for_plan_and_confirmation",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::blocked_takeover_reserves_only_its_original_skill_for_plan_and_confirmation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "bundle_evidence_is_independent_from_the_selected_member_content",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::bundle_evidence_is_independent_from_the_selected_member_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "committed_recovery_tree_cleanup_resumes_after_a_mid_tree_process_exit",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::committed_recovery_tree_cleanup_resumes_after_a_mid_tree_process_exit",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "confirmation_rejects_a_host_ancestor_replaced_by_a_symlink",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::confirmation_rejects_a_host_ancestor_replaced_by_a_symlink",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "confirming_multiple_origins_uses_one_selected_content_everywhere",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::confirming_multiple_origins_uses_one_selected_content_everywhere",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "confirming_one_origin_can_remove_its_existing_mount",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::confirming_one_origin_can_remove_its_existing_mount",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "confirming_one_origin_installs_one_bundle_and_preserves_its_mount",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::confirming_one_origin_installs_one_bundle_and_preserves_its_mount",
+      "ignored": false
+    },
+    {
+      "kind": "hard_exit_worker",
+      "original_target": "takeover",
+      "original_name": "hard_exit_takeover_worker",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::hard_exit_takeover_worker",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "interruption_after_first_origin_restores_every_origin_as_one_atomic_takeover",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::interruption_after_first_origin_restores_every_origin_as_one_atomic_takeover",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "journal_temp_synced_before_rename_is_discarded_and_takeover_rolls_back",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::journal_temp_synced_before_rename_is_discarded_and_takeover_rolls_back",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "later_valid_member_reuses_the_managed_bundle_for_the_same_installation_group",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::later_valid_member_reuses_the_managed_bundle_for_the_same_installation_group",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "lock_source_name_is_used_as_the_takeover_bundle_name",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::lock_source_name_is_used_as_the_takeover_bundle_name",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "malformed_journal_temp_is_blocked_and_preserved",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::malformed_journal_temp_is_blocked_and_preserved",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "multi_member_bundle_recovers_atomically_across_the_commit_point",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::multi_member_bundle_recovers_atomically_across_the_commit_point",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "precommit_blocked_takeover_reserves_its_host_path_from_other_members",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::precommit_blocked_takeover_reserves_its_host_path_from_other_members",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "preprogress_interruptions_restore_the_original_and_remove_hidden_artifacts",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::preprogress_interruptions_restore_the_original_and_remove_hidden_artifacts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "project_root_key_owns_the_app_and_project_replacement_invalidates_the_plan",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::project_root_key_owns_the_app_and_project_replacement_invalidates_the_plan",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "real_process_exit_after_shared_origin_move_restores_shared_entry_and_new_mounts",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::real_process_exit_after_shared_origin_move_restores_shared_entry_and_new_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "real_process_exit_after_takeover_journal_removal_only_forgets_terminal_record",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::real_process_exit_after_takeover_journal_removal_only_forgets_terminal_record",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "real_process_exit_after_takeover_state_commit_finishes_forward_cleanup",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::real_process_exit_after_takeover_state_commit_finishes_forward_cleanup",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "real_process_exit_during_committed_cleanup_continues_remaining_recoveries",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::real_process_exit_during_committed_cleanup_continues_remaining_recoveries",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "real_process_exits_before_takeover_commit_restore_each_original_state",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::real_process_exits_before_takeover_commit_restore_each_original_state",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "shared_global_takeover_creates_only_selected_compatible_app_mounts",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::shared_global_takeover_creates_only_selected_compatible_app_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "shared_project_takeover_derives_target_from_the_registered_project",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::shared_project_takeover_derives_target_from_the_registered_project",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "shared_target_failure_keeps_the_shared_entry_and_removes_new_mounts",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::shared_target_failure_keeps_the_shared_entry_and_removes_new_mounts",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "single_existing_skill_produces_a_read_only_takeover_plan",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::single_existing_skill_produces_a_read_only_takeover_plan",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "supplementing_existing_bundle_recovers_across_the_commit_point",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::supplementing_existing_bundle_recovers_across_the_commit_point",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "takeover_candidate_cleanup_resumes_after_a_mid_tree_process_exit",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::takeover_candidate_cleanup_resumes_after_a_mid_tree_process_exit",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "takeover_resolves_global_project_scope_conflicts_before_one_atomic_confirmation",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::takeover_resolves_global_project_scope_conflicts_before_one_atomic_confirmation",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "takeover_reuses_an_unlinked_source_without_silently_changing_its_tracked_ref",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::takeover_reuses_an_unlinked_source_without_silently_changing_its_tracked_ref",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "takeover_rollback_remains_replayable_across_two_recovery_process_exits",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::takeover_rollback_remains_replayable_across_two_recovery_process_exits",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "unknown_replacement_in_precommit_recovery_is_blocked_and_preserved",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::unknown_replacement_in_precommit_recovery_is_blocked_and_preserved",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "user_selected_origins_form_one_identity_with_one_selected_content",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::user_selected_origins_form_one_identity_with_one_selected_content",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "verified_lock_v3_bundle_can_plan_all_installed_members_together",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::verified_lock_v3_bundle_can_plan_all_installed_members_together",
+      "ignored": false
+    },
+    {
+      "kind": "integration_behavior",
+      "original_target": "takeover",
+      "original_name": "verified_lock_v3_installation_chain_survives_takeover_and_restart",
+      "expected_module": "takeover",
+      "future_target": "all",
+      "future_name": "takeover::verified_lock_v3_installation_chain_survives_takeover_and_restart",
+      "ignored": false
+    }
+  ]
+}

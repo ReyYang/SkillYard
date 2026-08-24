@@ -1,0 +1,782 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-rust-engineering-a-final-stage-acceptance-v1",
+  "ticket": {
+    "issue": 79,
+    "train": "A-FINAL",
+    "result": "passed"
+  },
+  "captured_at_utc": "2026-08-24T06:24:20Z",
+  "path_tokens": {
+    "$REPO": "repository root",
+    "$FINAL_RAW_EVIDENCE": "retained fresh external temporary directory containing third-attempt raw logs, manifests, and helper outputs",
+    "$FINAL_TARGET": "retained fresh external Cargo target used for no-run, limited-debug validation, the single stage invocation, and the production app",
+    "$FINAL_WARM_TARGET": "retained independent fresh external Cargo target used only for warmup and five warm samples",
+    "$JUST_BIN_DIR": "retained A3 directory containing the verified release archive and extracted just binary",
+    "$JUST_BIN": "$JUST_BIN_DIR/just",
+    "$A_FINAL_ATTEMPT_1_EVIDENCE": "retained first A-FINAL preflight evidence directory",
+    "$A_FINAL_ATTEMPT_2_EVIDENCE": "retained second A-FINAL evidence directory",
+    "$STORAGE_REPAIR_EVIDENCE": "retained external diagnosis, timeout-probe, and permanent-repair evidence family"
+  },
+  "acceptance_source": {
+    "ticket_batch": "$REPO/.codex/ticket-batches/rust-engineering-g36.json",
+    "engineering_spec": "$REPO/docs/design/0002-rust-engineering-spec.md",
+    "a0_allocated_baseline_bytes": 4219478016,
+    "maximum_final_allocated_bytes": 2953634611,
+    "minimum_size_reduction_percent": 30,
+    "a0_warm_median_seconds": 1.91,
+    "maximum_final_warm_median_seconds": 2.292,
+    "maximum_warm_regression_percent": 20,
+    "required_final_test_arithmetic": {
+      "a0_identities": 442,
+      "a2_additive": 3,
+      "a4_additive": 1,
+      "total": 446,
+      "library": 141,
+      "all": 304,
+      "codex_mount_contract": 1,
+      "ignored": 1
+    }
+  },
+  "source_identity": {
+    "git_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "git_head_tree": "47a0b9bc5c2d458e8dc73bac466db351d23e5030",
+    "shared_worktree_was_dirty_and_preserved": true,
+    "canonical_manifest": {
+      "path_collection": [
+        "git ls-files --cached -z",
+        "git ls-files --others --exclude-standard -z"
+      ],
+      "ordering": "bytewise ascending repository-relative path",
+      "regular_row": "type, mode, SHA-256, and repository-relative path",
+      "symlink_row": "type, mode, link-target bytes SHA-256 and base64, and repository-relative path",
+      "deleted_tracked_row": "repository-relative path plus deleted_tracked marker",
+      "row_encoding": "one compact JSON object followed by LF",
+      "excluded": [
+        "docs/acceptance/rust-engineering/a-final-stage-acceptance.json"
+      ],
+      "git_directory_is_not_a_source_input": true,
+      "tracked_paths": 547,
+      "untracked_paths_after_self_exclusion": 46,
+      "manifest_entries": 593,
+      "manifest_sha256": "7ed3576c465bc729de0320d57473bf9fc00ab49cd2799d7b29799f96b4da972f",
+      "status_sha256_after_nul_safe_self_exclusion": "0e6450e01fd5af25b4e5243a71200f3cf8495f1f3a211b1836390a5db13eaa09",
+      "pre_and_post_before_artifact_byte_identical": true,
+      "external_helper_sha256": "32d45e6649f2ca854485fa30925e44007e59e40f0c5669b0d4234d1dde1ec92f",
+      "raw_evidence": [
+        "$FINAL_RAW_EVIDENCE/source-pre-v3.json",
+        "$FINAL_RAW_EVIDENCE/source-pre-v3.manifest.jsonl",
+        "$FINAL_RAW_EVIDENCE/source-pre-v3.status.nul",
+        "$FINAL_RAW_EVIDENCE/source-post-before-artifact.json",
+        "$FINAL_RAW_EVIDENCE/source-seal.mjs"
+      ]
+    },
+    "post_write_self_excluded_verification": {
+      "verified": true,
+      "expected_manifest_sha256": "7ed3576c465bc729de0320d57473bf9fc00ab49cd2799d7b29799f96b4da972f",
+      "expected_status_sha256": "0e6450e01fd5af25b4e5243a71200f3cf8495f1f3a211b1836390a5db13eaa09",
+      "artifact_self_hash_recorded_inside_artifact": false
+    }
+  },
+  "prior_artifacts": {
+    "$REPO/docs/acceptance/rust-engineering/a0-baseline.json": "500f8646b4be20b90909d3c8e4e0a6a031f182692513e39b16b4e2b647fe765b",
+    "$REPO/docs/acceptance/rust-engineering/a0-tests.json": "c2bed4c81b5eaa7ee1d3f981beadaf8b1fd3f6244e820b2ed6c56e745d7575ba",
+    "$REPO/docs/acceptance/rust-engineering/a1-aggregation.json": "a8336c8bb445805f765bad4d3166427764435a4b083ed9fb22ab291acf70a990",
+    "$REPO/docs/acceptance/rust-engineering/a2-limited-debug.json": "cc4bd932cd6a46544061a74f21aaa4fb728c3fc5a7773519869a7317de6c9747",
+    "$REPO/docs/acceptance/rust-engineering/a3-command-governance.json": "cf3d383c3c1710c0d2c934e0e0dce5cf0a182580bd66f3670bfcb76a23ed9b51",
+    "$REPO/docs/acceptance/rust-engineering/a4-migration-lock.json": "c7e84ab79450341e3b0cee89f3e2cc97b45b0cdae19b86a60c5bddbb6da4e562",
+    "$REPO/docs/acceptance/rust-engineering/a5-agent-navigation.json": "f39dcc6bbe1a7399584c7e1c1361da0efe433b956f14e38f56f06c1b81d36e08",
+    "history_notes": {
+      "a0_through_a3_internal_topology_or_source_hashes_are_historical_after_later_train_increments": true,
+      "a0_identity_mapping_was_revalidated_live": true,
+      "a3_current_hash_includes_the_post_attempt-1_identity_correction": true,
+      "a4_historical_a3_sha256": "90513e204798a940cd12cff5a897b16e50026735ef3a61d65ff8ea908f7ea309",
+      "a4_historical_storage_sha256": "274ce46cee8f86438a98f387baccbd1e53f96236c36a6dc72739db2463eb6e96",
+      "a4_production_storage_modified_false_was_true_at_a4_capture_time": true,
+      "a4_owned_input_hashes_checked_now": 12,
+      "a4_owned_input_hash_mismatches_now": 0
+    }
+  },
+  "historical_attempts_not_mixed_into_candidate_metrics": [
+    {
+      "attempt": 1,
+      "evidence": "$A_FINAL_ATTEMPT_1_EVIDENCE",
+      "result": "stopped_in_preflight",
+      "build_started": false,
+      "reason": "The archive asset SHA-256 was incorrectly compared directly with the extracted executable SHA-256 even though they identify different byte sequences.",
+      "observed_archive_expected_sha256": "50ae3e996c974a0bf32ea7d10f495070df33f1b43e0616b2769e3d4821ed8f48",
+      "observed_binary_sha256": "0070dcf46e51756f7b0dd8d2a105c4345231b4201f438f56076a2436b3881107",
+      "source_pre_and_stop_manifest_sha256": "c062ceafd23e265d970c58776b10755475eacad7beb412cbff1c73fe68801e33",
+      "a3_evidence_corrected_and_independently_reviewed": true
+    },
+    {
+      "attempt": 2,
+      "evidence": "$A_FINAL_ATTEMPT_2_EVIDENCE",
+      "result": "stopped_at_single_stage",
+      "prechecks_passed": true,
+      "stage_invocations": 1,
+      "stage_exit_code": 101,
+      "stage_real_seconds": 43.43,
+      "first_failure": "storage::tests::concurrent_open_applies_each_migration_only_once",
+      "failure_error": "DatabaseBusy: database is locked",
+      "library_result_before_stop": {
+        "passed": 140,
+        "failed": 1,
+        "ignored": 0
+      },
+      "stage_rerun_performed": false,
+      "source_pre_and_stop_manifest_sha256": "875aab16cf3683a696a9f084dbfa427fdf3d616b138faec586b039f9aa2ea5c8"
+    }
+  ],
+  "storage_concurrent_open_repair_history": {
+    "evidence": "$STORAGE_REPAIR_EVIDENCE",
+    "pre_fix_existing_test_stress": {
+      "runs": 72,
+      "failures": 72,
+      "common_error": "DatabaseBusy: database is locked"
+    },
+    "temporary_boundary_instrumentation": {
+      "runs": 24,
+      "failures": 24,
+      "database_busy_failures": 24,
+      "error_label_counts": {
+        "prelude_execute_batch": 134,
+        "begin_immediate": 31,
+        "commit": 6,
+        "version_query": 0,
+        "migration_execute_batch": 0,
+        "version_insert": 0
+      },
+      "instrumentation_removed_and_source_restored": true
+    },
+    "temporary_30_second_timeout_probe": {
+      "batches": 2,
+      "runs": 48,
+      "passed": 48,
+      "database_busy": 0,
+      "source_restored_after_probe": true
+    },
+    "permanent_repair_verification": {
+      "batches": 2,
+      "runs": 48,
+      "passed": 48,
+      "database_busy": 0,
+      "batch_elapsed_seconds": [
+        7.415197,
+        7.086321
+      ],
+      "batch_longest_test_seconds": [
+        7.36,
+        7.05
+      ],
+      "exact_existing_test_exit_code": 0,
+      "format_exit_code": 0,
+      "git_diff_check_exit_code": 0,
+      "independent_review_findings": 0
+    }
+  },
+  "allowed_post_a4_production_repair": {
+    "path": "$REPO/src-tauri/src/storage.rs",
+    "source_sha256": "5f1aae196abebf3e22454fac260b17f5a8f9ea17a9f5b9c50facfcfd78fcc0be",
+    "diff_sha256": "f565246f9cf71e4a6fad412977da6f69c0ded2124137a642f01a2222d1498b9e",
+    "additions": 8,
+    "deletions": 0,
+    "constant": "SQLITE_BUSY_TIMEOUT",
+    "duration_seconds": 30,
+    "constant_current_line": 32,
+    "application_current_line": 1296,
+    "placement": "after Connection::open_with_flags succeeds and before Storage construction and migrate",
+    "error_mapping": "StorageError::OpenDatabase",
+    "sole_current_src_tauri_src_diff": true,
+    "migration_sql_changed": false,
+    "migration_tuple_order_changed": false,
+    "migration_transaction_or_durability_changed": false,
+    "schema_or_protocol_changed": false
+  },
+  "official_just_identity": {
+    "a3_artifact_sha256": "cf3d383c3c1710c0d2c934e0e0dce5cf0a182580bd66f3670bfcb76a23ed9b51",
+    "release_api": "https://api.github.com/repos/casey/just/releases/tags/1.58.0",
+    "asset": {
+      "subject": "$JUST_BIN_DIR/just-1.58.0-aarch64-apple-darwin.tar.gz",
+      "size_bytes": 2146038,
+      "local_sha256": "50ae3e996c974a0bf32ea7d10f495070df33f1b43e0616b2769e3d4821ed8f48",
+      "github_api_digest": "sha256:50ae3e996c974a0bf32ea7d10f495070df33f1b43e0616b2769e3d4821ed8f48",
+      "matches_github_api": true
+    },
+    "archive_member": {
+      "name": "just",
+      "size_bytes": 5089392,
+      "sha256": "0070dcf46e51756f7b0dd8d2a105c4345231b4201f438f56076a2436b3881107"
+    },
+    "extracted_binary": {
+      "subject": "$JUST_BIN",
+      "size_bytes": 5089392,
+      "sha256": "0070dcf46e51756f7b0dd8d2a105c4345231b4201f438f56076a2436b3881107",
+      "byte_equal_to_archive_member": true,
+      "file_identity": "Mach-O 64-bit executable arm64",
+      "version_output": "just 1.58.0"
+    },
+    "layered_gate_passed": true,
+    "archive_digest_was_not_compared_to_binary_digest": true
+  },
+  "environment": {
+    "rustc": "1.94.1 (e408947bf 2026-03-25)",
+    "cargo": "1.94.1 (29ea6fb6a 2026-03-24)",
+    "host": "aarch64-apple-darwin",
+    "kernel": "Darwin 25.5.0 arm64",
+    "os": "macOS 26.5.2 build 25F84",
+    "features": [],
+    "cargo_lock_sha256": "47311a278c2bca94af19d45cebbe619e023299cee9e8b9afa443c2f24917d25b",
+    "cargo_locked": true,
+    "cargo_network_offline": true,
+    "workspace_packages": [
+      "skillyard 1.1.0"
+    ]
+  },
+  "fresh_no_run": {
+    "target": "$FINAL_TARGET",
+    "initial_entry_count": 0,
+    "command": "CARGO_TARGET_DIR=$FINAL_TARGET CARGO_NET_OFFLINE=true cargo test --workspace --locked --no-run",
+    "cargo_outcome": "success",
+    "proof": [
+      "Cargo emitted Finished test profile after 1m 03s.",
+      "Cargo emitted the lib, main, all, and codex_mount_contract executable paths.",
+      "The immediate canonical target report found both expected executable candidates and no missing target."
+    ],
+    "timing_seconds": {
+      "real": 63.39,
+      "user": 135.56,
+      "system": 27.78
+    },
+    "wrapper_bookkeeping_note": {
+      "cargo_exit_code_was_not_written_to_a_separate_file": true,
+      "outer_wrapper_exit_code": 1,
+      "outer_wrapper_error_after_cargo_completed": "zsh rejected assignment to its read-only status variable",
+      "cargo_was_not_rerun": true
+    },
+    "raw_log": "$FINAL_RAW_EVIDENCE/no-run.log",
+    "target_retained": true
+  },
+  "pre_stage_target_report": {
+    "command": "PATH=$JUST_BIN_DIR:$PATH CARGO_TARGET_DIR=$FINAL_TARGET CARGO_NET_OFFLINE=true $JUST_BIN target-report --json",
+    "exit_code": 0,
+    "target": {
+      "raw_file_entries": 6597,
+      "unique_files": 5609,
+      "apparent_bytes": 2525395906,
+      "allocated_bytes": 2560897024
+    },
+    "partitions_overlap_and_must_not_be_summed": true,
+    "partitions": {
+      "debug": {
+        "exists": true,
+        "unique_files": 5608,
+        "apparent_bytes": 2525394220,
+        "allocated_bytes": 2560892928
+      },
+      "debug_deps": {
+        "exists": true,
+        "unique_files": 2744,
+        "apparent_bytes": 1776957839,
+        "allocated_bytes": 1782722560
+      },
+      "debug_incremental": {
+        "exists": true,
+        "unique_files": 1026,
+        "apparent_bytes": 545977655,
+        "allocated_bytes": 568078336
+      },
+      "release": {
+        "exists": false,
+        "unique_files": 0,
+        "apparent_bytes": 0,
+        "allocated_bytes": 0
+      }
+    },
+    "size_gate": {
+      "a0_allocated_bytes": 4219478016,
+      "candidate_allocated_bytes": 2560897024,
+      "saved_bytes": 1658580992,
+      "reduction_percent": 39.30772919566741,
+      "minimum_reduction_percent": 30,
+      "maximum_candidate_bytes": 2953634611,
+      "headroom_bytes": 392737587,
+      "passed": true
+    },
+    "integration_test_executables": {
+      "expected_targets": [
+        "all",
+        "codex_mount_contract"
+      ],
+      "ordinary_integration_executables": 1,
+      "explicit_targets": 2,
+      "missing_targets": [],
+      "candidates": [
+        {
+          "target": "all",
+          "path": "$FINAL_TARGET/debug/deps/all-216202b24dcb49a8",
+          "apparent_bytes": 42565992,
+          "allocated_bytes": 42569728
+        },
+        {
+          "target": "codex_mount_contract",
+          "path": "$FINAL_TARGET/debug/deps/codex_mount_contract-1478600808db85d3",
+          "apparent_bytes": 1850104,
+          "allocated_bytes": 1851392
+        }
+      ],
+      "passed": true
+    },
+    "report_mutation": {
+      "entries_before_and_after": 7249,
+      "fingerprint_before_and_after": "1f9204caedafe5c46b2a53d6dcbf75c33b2e64f17bf57b1a48b6562fab04b175",
+      "changed": false
+    }
+  },
+  "test_identity_gate": {
+    "source": "direct --list output from the fresh lib, all, and codex_mount_contract executables",
+    "counts": {
+      "library": 141,
+      "all": 304,
+      "codex_mount_contract": 1,
+      "total": 446,
+      "ignored": 1
+    },
+    "ignored_identity": "codex_mount_contract::current_codex_discovers_global_and_project_directory_symlinks",
+    "a0_mapping": {
+      "expected": 442,
+      "observed": 442,
+      "missing": 0
+    },
+    "additive_only": [
+      {
+        "owner": "A2",
+        "identity": "engineering_contract::limited_debug_backtrace_reports_fixture_function_file_and_line"
+      },
+      {
+        "owner": "A2",
+        "identity": "engineering_contract::limited_debug_backtrace_worker"
+      },
+      {
+        "owner": "A2",
+        "identity": "engineering_contract::workspace_profiles_use_limited_debug_without_disabling_incremental"
+      },
+      {
+        "owner": "A4",
+        "identity": "migration_contract::v1_0_1_snapshot_upgrades_restarts_and_reads_core_state_through_application"
+      }
+    ],
+    "unexpected": [],
+    "passed": true
+  },
+  "warm_takeover_gate": {
+    "target": "$FINAL_WARM_TARGET",
+    "initial_entry_count": 0,
+    "selector": "takeover::multi_member_bundle_recovers_atomically_across_the_commit_point",
+    "command": "CARGO_TARGET_DIR=$FINAL_WARM_TARGET CARGO_NET_OFFLINE=true cargo test --test all --locked takeover::multi_member_bundle_recovers_atomically_across_the_commit_point -- --exact",
+    "warmup_exit_code": 0,
+    "samples": [
+      {
+        "real": 5.41,
+        "user": 3.43,
+        "system": 3.61,
+        "test": 2.0,
+        "exit_code": 0
+      },
+      {
+        "real": 2.08,
+        "user": 0.3,
+        "system": 0.29,
+        "test": 1.89,
+        "exit_code": 0
+      },
+      {
+        "real": 2.1,
+        "user": 0.31,
+        "system": 0.29,
+        "test": 1.87,
+        "exit_code": 0
+      },
+      {
+        "real": 2.04,
+        "user": 0.27,
+        "system": 0.27,
+        "test": 1.85,
+        "exit_code": 0
+      },
+      {
+        "real": 2.13,
+        "user": 0.31,
+        "system": 0.3,
+        "test": 1.94,
+        "exit_code": 0
+      }
+    ],
+    "median_real_seconds": 2.1,
+    "baseline_median_seconds": 1.91,
+    "regression_percent": 9.9476439790576,
+    "maximum_real_seconds": 2.292,
+    "passed": true,
+    "target_retained": true
+  },
+  "limited_debug_backtrace": {
+    "parent": {
+      "command": "CARGO_TARGET_DIR=$FINAL_TARGET CARGO_NET_OFFLINE=true $JUST_BIN rust-test engineering_contract::limited_debug_backtrace_reports_fixture_function_file_and_line",
+      "exit_code": 0
+    },
+    "worker": {
+      "command": "env -u RUST_LIB_BACKTRACE SKILLYARD_LIMITED_DEBUG_BACKTRACE_WORKER=1 RUST_BACKTRACE=1 $FINAL_TARGET/debug/deps/all-216202b24dcb49a8 engineering_contract::limited_debug_backtrace_worker --exact --nocapture",
+      "exit_code": 101,
+      "sentinel": "SKILLYARD_LIMITED_DEBUG_BACKTRACE_SENTINEL",
+      "fixture_function": "all::engineering_contract::limited_debug_backtrace_fixture",
+      "source_location": "tests/all/engineering_contract.rs:65",
+      "source_line_is_positive": true
+    },
+    "passed": true
+  },
+  "single_stage": {
+    "command": "PATH=$JUST_BIN_DIR:$PATH CARGO_TARGET_DIR=$FINAL_TARGET CARGO_NET_OFFLINE=true $JUST_BIN stage",
+    "invocation_count": 1,
+    "exit_code": 0,
+    "timing_seconds": {
+      "real": 315.48,
+      "user": 505.59,
+      "system": 200.63
+    },
+    "layers": {
+      "format": "passed",
+      "frontend_typecheck": "passed",
+      "vitest": {
+        "files_passed": 10,
+        "tests_passed": 272,
+        "tests_failed": 0
+      },
+      "engineering_node_tests": {
+        "passed": 14,
+        "failed": 0
+      },
+      "workspace_rust": {
+        "library_passed": 141,
+        "main_passed": 0,
+        "all_passed": 304,
+        "codex_mount_contract_ignored": 1,
+        "failed": 0,
+        "all_elapsed_seconds": 168.86
+      },
+      "clippy_all_targets_deny_warnings": {
+        "passed": true,
+        "elapsed_seconds": 20.61
+      },
+      "wire": {
+        "typed_client_tests_passed": 47,
+        "rust_domain_serde_characterization_passed": 8,
+        "generated_wire_drift_guard": {
+          "status": "not_attached",
+          "owner": "Train B"
+        },
+        "passed_for_train_a": true
+      },
+      "migration": {
+        "checker_node_suite_passed": true,
+        "public_seam_test_passed": true,
+        "guard_status": "passed",
+        "owner": "A4"
+      },
+      "tauri_app_build": {
+        "release_profile_completed": true,
+        "release_compile_elapsed": "1m 11s",
+        "bundles": 1,
+        "app": "$FINAL_TARGET/release/bundle/macos/SkillYard.app"
+      }
+    },
+    "selective_continuation_or_rerun": false,
+    "passed": true
+  },
+  "migration_and_snapshot_gate": {
+    "release": {
+      "tag": "v1.0.1",
+      "annotated_tag_object": "2871263930d3dd94c42ab1af5782778471104e80",
+      "peeled_commit": "edc296411dcf38f33a7c4024e8761c61189d428e",
+      "tag_object_signature": "unsigned",
+      "commit_verification_was_not_treated_as_a_tag_signature": true,
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-07-28T06:31:16Z"
+    },
+    "released_prefix": {
+      "versions": "1 through 26",
+      "current_only_unreleased_versions": [
+        27,
+        28,
+        29,
+        30
+      ],
+      "manifest_sha256": "6653371752876fd22bde0036dff69dd0ae562359021a222521dfa5f791b711fa",
+      "aggregate_sha256": "c7ca23bcfe64a21a38dbf2be0ed073e202251fd417bfb09af43d001888a48df1"
+    },
+    "snapshot": {
+      "metadata_sha256": "5be82c07c3718027acb07730a3acfed12a72e291bc18168a556487df9cd655d2",
+      "seed_sha256": "a3cd9c26252a6640a96f72d4e04fcb7fb5f7fcc4b8518a142c522b3810637510",
+      "fixture_size_bytes": 561152,
+      "fixture_sha256": "7d67529810956f8031764c52715de0bf0a716e7901b40b02e174a2971a04e47e",
+      "schema_sha256": "5b966f41550777cb196b3fff8312f7cb2895089b47a829c24136137806a0b759",
+      "seed_data_sha256": "1be5fcca1f5beac8512e178eabf03cfca3dc424bc14cb1dd7a1136229c121715"
+    },
+    "canonical_production_owner": "Storage::open -> Storage::migrate -> MIGRATIONS",
+    "stage_checker_confirmed_current_runner_versions_1_through_30": true,
+    "stage_checker_confirmed_no_migration_include_outside_storage": true,
+    "stage_public_seam": "migration_contract::v1_0_1_snapshot_upgrades_restarts_and_reads_core_state_through_application",
+    "stage_public_seam_passed": true,
+    "a4_owned_inputs_all_match": true,
+    "passed": true
+  },
+  "post_stage_target_report": {
+    "exit_code": 0,
+    "target": {
+      "raw_file_entries": 15806,
+      "unique_files": 12840,
+      "apparent_bytes": 4961921259,
+      "allocated_bytes": 5026111488
+    },
+    "partitions_overlap_and_must_not_be_summed": true,
+    "partitions": {
+      "debug": {
+        "exists": true,
+        "unique_files": 8651,
+        "apparent_bytes": 3672041884,
+        "allocated_bytes": 3721887744
+      },
+      "debug_deps": {
+        "exists": true,
+        "unique_files": 3552,
+        "apparent_bytes": 2227776470,
+        "allocated_bytes": 2235273216
+      },
+      "debug_incremental": {
+        "exists": true,
+        "unique_files": 1092,
+        "apparent_bytes": 1100146264,
+        "allocated_bytes": 1127395328
+      },
+      "release": {
+        "exists": true,
+        "unique_files": 4188,
+        "apparent_bytes": 1289877689,
+        "allocated_bytes": 1304219648
+      }
+    },
+    "integration_candidates": [
+      "all",
+      "codex_mount_contract"
+    ],
+    "candidate_count": 2,
+    "missing_targets": [],
+    "report_mutation": {
+      "entries_before_and_after": 17630,
+      "fingerprint_before_and_after": "f545c6517306bc4c517d41478ca5cb5bcaa8dde84f20468f76564f9a9036eff2",
+      "changed": false
+    },
+    "passed": true
+  },
+  "production_app": {
+    "path": "$FINAL_TARGET/release/bundle/macos/SkillYard.app",
+    "directories": 5,
+    "regular_files": 4,
+    "unique_regular_files_by_inode": 4,
+    "symlinks": 0,
+    "apparent_bytes": 25084059,
+    "allocated_bytes": 25096192,
+    "files": [
+      {
+        "path": "Contents/_CodeSignature/CodeResources",
+        "apparent_bytes": 2440,
+        "allocated_bytes": 4096
+      },
+      {
+        "path": "Contents/Info.plist",
+        "apparent_bytes": 969,
+        "allocated_bytes": 4096
+      },
+      {
+        "path": "Contents/MacOS/skillyard",
+        "apparent_bytes": 22851968,
+        "allocated_bytes": 22855680
+      },
+      {
+        "path": "Contents/Resources/icon.icns",
+        "apparent_bytes": 2228682,
+        "allocated_bytes": 2232320
+      }
+    ],
+    "binary": {
+      "path": "Contents/MacOS/skillyard",
+      "sha256": "ac3abbcddf9c841e26efa93759c69ae4c33592b5e76609ca9325e6742f95434c",
+      "file_identity": "Mach-O 64-bit executable arm64",
+      "architectures": [
+        "arm64"
+      ]
+    },
+    "bundle": {
+      "identifier": "com.reyyang.skillyard",
+      "short_version": "1.1.0",
+      "bundle_version": "1.1.0",
+      "minimum_macos": "14.0"
+    },
+    "signature": {
+      "verify_deep_strict_exit_code": 0,
+      "display_exit_code": 0,
+      "kind": "adhoc",
+      "team_identifier": "not set",
+      "runtime_flag_present": true,
+      "cdhash": "36d7526b98b9176b4dacb1e4c1749400258aa97f"
+    },
+    "notarization_performed": false,
+    "passed": true
+  },
+  "hard_exit_gate": {
+    "support": {
+      "path": "$REPO/src-tauri/tests/all/support.rs",
+      "sha256": "dd6eacd9aa93d5920ae1517b2b7c0780574aa68c666b3c76c535dc6aefe6746b",
+      "current_executable_list_suffix_resolution": true,
+      "zero_or_multiple_matches_fail_closed": true,
+      "child_selector_is_resolved_fqn_plus_exact": true,
+      "per_invocation_temp_marker": true,
+      "marker_create_new_write_all_sync_all": true,
+      "parent_checks_marker_content_before_exact_exit_code": true
+    },
+    "stage_full_all_result": {
+      "passed": 304,
+      "failed": 0,
+      "ignored": 0
+    },
+    "workers": [
+      {
+        "fqn": "folder_install::hard_exit_install_worker",
+        "exit_code": 91,
+        "marker_and_runner_binding": true,
+        "representative_parent": "folder_install::a_real_process_exit_before_current_recovers_to_not_installed",
+        "representative_parent_passed_in_stage": true
+      },
+      {
+        "fqn": "github_install::github_hard_exit_worker",
+        "exit_code": 91,
+        "marker_and_runner_binding": true,
+        "representative_parent": "github_install::github_create_hard_exit_before_journal_recovers_to_not_installed",
+        "representative_parent_passed_in_stage": true
+      },
+      {
+        "fqn": "bundle_update_batch::bundle_update_batch_hard_exit_worker",
+        "exit_code": 91,
+        "marker_and_runner_binding": true,
+        "representative_parent": "bundle_update_batch::hard_exit_after_child_current_switch_recovers_child_and_continues_batch",
+        "representative_parent_passed_in_stage": true
+      },
+      {
+        "fqn": "codex_mount::hard_exit_mount_worker",
+        "exit_code": 92,
+        "marker_and_runner_binding": true,
+        "representative_parent": "codex_mount::a_real_process_exit_before_mount_journal_recovers_to_not_mounted",
+        "representative_parent_passed_in_stage": true
+      },
+      {
+        "fqn": "bundle_batch_mount::hard_exit_batch_mount_worker",
+        "exit_code": 92,
+        "marker_and_runner_binding": true,
+        "representative_parent": "bundle_batch_mount::hard_exit_after_database_commit_keeps_the_complete_batch_and_finishes_cleanup",
+        "representative_parent_passed_in_stage": true
+      },
+      {
+        "fqn": "takeover::hard_exit_takeover_worker",
+        "exit_code": 93,
+        "marker_and_runner_binding": true,
+        "representative_parent": "takeover::real_process_exits_before_takeover_commit_restore_each_original_state",
+        "representative_parent_passed_in_stage": true
+      }
+    ],
+    "passed": true
+  },
+  "profile_and_incremental_gate": {
+    "root_cargo_manifest": {
+      "profile_dev_debug": "limited",
+      "profile_test_debug": "limited",
+      "profile_release_added_or_modified": false,
+      "persistent_incremental_false": false,
+      "only_diff": "profile.dev and profile.test debug = limited"
+    },
+    "a2_profile_contract_passed_in_stage": true,
+    "local_justfile_contains_cargo_incremental": false,
+    "local_debug_incremental_partition_nonempty": true,
+    "ci_native_job_cargo_incremental": "0",
+    "ci_native_sequence": [
+      "cargo fetch --locked",
+      "just stage"
+    ],
+    "ci_just_action": "extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3",
+    "ci_just_version": "1.58.0",
+    "passed": true
+  },
+  "diff_scope": {
+    "candidate_before_final_artifact": {
+      "status_lines": 78,
+      "tracked_diff_paths": 32,
+      "untracked_paths": 46
+    },
+    "src_tauri_src_changes": [
+      "src-tauri/src/storage.rs"
+    ],
+    "migration_sql_changes": [],
+    "cargo_lock_changes": [],
+    "production_typescript_or_wire_changes": [],
+    "tauri_packaging_changes": [],
+    "release_or_publish_workflow_changes": [],
+    "schema_or_lifecycle_protocol_changes": [],
+    "root_cargo_only_dev_and_test_limited_debug": true,
+    "storage_only_allowed_repair_matches_expected_source_and_diff_sha256": true,
+    "git_diff_check_bytes": 0,
+    "docs_readme": {
+      "sha256": "320d525aaf337f1780b9cfc7246a92af65f465786d30173add112955fc622b7b",
+      "diff_sha256": "f1c9bfd4302ba890360353ba39bf80de02d83018dbf40296523bf12c1d5974c3",
+      "preserved": true
+    },
+    "source_manifest_and_status_preserved_across_all_acceptance_commands": true,
+    "passed": true
+  },
+  "retention_privacy_and_external_boundaries": {
+    "fresh_attempt_directories_were_initially_empty": true,
+    "final_raw_evidence_retained": true,
+    "final_target_retained": true,
+    "final_warm_target_retained": true,
+    "historical_evidence_retained": true,
+    "clean_or_delete_performed": false,
+    "worktree_created": false,
+    "commit_push_or_issue_operation_performed": false,
+    "release_recipe_run": false,
+    "mac_contract_run": false,
+    "tart_run": false,
+    "manual_path_run": false,
+    "real_provider_called": false,
+    "keychain_accessed": false,
+    "payment_performed": false,
+    "publish_or_deploy_performed": false,
+    "machine_absolute_paths_present_in_this_artifact": false,
+    "credentials_present_in_this_artifact": false
+  },
+  "final_result": {
+    "all_required_a_final_gates_passed": true,
+    "ordinary_integration_executable_count": 1,
+    "explicit_integration_target_count": 2,
+    "test_identity_count": 446,
+    "ignored_test_count": 1,
+    "allocated_reduction_percent": 39.30772919566741,
+    "warm_median_seconds": 2.1,
+    "warm_regression_percent": 9.9476439790576,
+    "limited_debug_backtrace_preserved_function_file_and_line": true,
+    "local_incremental_enabled_and_ci_incremental_disabled": true,
+    "migration_and_snapshot_guard_passed": true,
+    "target_report_nonmutating": true,
+    "single_stage_exit_code": 0,
+    "production_app_verified": true,
+    "source_scope_preserved": true,
+    "artifact_sha256_is_intentionally_external": true
+  }
+}

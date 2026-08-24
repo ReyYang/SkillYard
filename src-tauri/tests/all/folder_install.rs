@@ -1,5 +1,6 @@
-use std::{env, fs, path::Path, process::Command};
+use std::{env, fs, path::Path};
 
+use crate::support::{mark_hard_exit_worker_entered, run_hard_exit_child};
 use rusqlite::Connection;
 use skillyard_lib::{
     ApplicationPaths, InstallPlan, LifecycleFailpoint, ManagementKind, PlatformInfo,
@@ -1038,6 +1039,7 @@ fn hard_exit_install_worker() {
     if env::var_os(HARD_EXIT_WORKER).is_none() {
         return;
     }
+    mark_hard_exit_worker_entered("hard_exit_install_worker");
     let data_root = env::var_os(HARD_EXIT_DATA_ROOT).expect("子进程必须收到数据目录");
     let home = env::var_os(HARD_EXIT_HOME).expect("子进程必须收到 home");
     let plan_id = env::var(HARD_EXIT_PLAN_ID).expect("子进程必须收到 Plan ID");
@@ -1468,17 +1470,15 @@ fn run_hard_exit_worker(
     candidate_id: &str,
     point: &str,
 ) {
-    let status = Command::new(env::current_exe().expect("应找到当前测试二进制"))
-        .args(["--exact", "hard_exit_install_worker", "--nocapture"])
-        .env(HARD_EXIT_WORKER, "1")
-        .env(HARD_EXIT_DATA_ROOT, data_root)
-        .env(HARD_EXIT_HOME, home)
-        .env(HARD_EXIT_PLAN_ID, plan_id)
-        .env(HARD_EXIT_CANDIDATE_ID, candidate_id)
-        .env(HARD_EXIT_POINT, point)
-        .status()
-        .expect("应启动 hard-exit 子进程");
-    assert_eq!(status.code(), Some(91), "子进程必须在 failpoint 直接退出");
+    run_hard_exit_child("hard_exit_install_worker", 91, |child| {
+        child
+            .env(HARD_EXIT_WORKER, "1")
+            .env(HARD_EXIT_DATA_ROOT, data_root)
+            .env(HARD_EXIT_HOME, home)
+            .env(HARD_EXIT_PLAN_ID, plan_id)
+            .env(HARD_EXIT_CANDIDATE_ID, candidate_id)
+            .env(HARD_EXIT_POINT, point);
+    });
 }
 
 fn create_plan(application: &SkillYardApplication, input: &Path) -> InstallPlan {

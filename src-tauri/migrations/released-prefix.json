@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-released-migration-prefix-v1",
+  "repository": "ReyYang/SkillYard",
+  "release": {
+    "version": "1.0.1",
+    "tag": "v1.0.1",
+    "tag_object_oid": "2871263930d3dd94c42ab1af5782778471104e80",
+    "tag_object_type": "tag",
+    "tag_object_signature": {
+      "status": "unsigned",
+      "evidence": "The annotated tag object contains no embedded signature; GitHub commit verification is not a tag signature."
+    },
+    "peeled_commit_oid": "edc296411dcf38f33a7c4024e8761c61189d428e",
+    "github_release": {
+      "name": "SkillYard 1.0.1",
+      "url": "https://github.com/ReyYang/SkillYard/releases/tag/v1.0.1",
+      "api_url": "https://api.github.com/repos/ReyYang/SkillYard/releases/tags/v1.0.1",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-07-28T06:31:16Z"
+    },
+    "migration_count": 26
+  },
+  "canonical_bytes": {
+    "order": "LC_ALL=C ascending repo-relative path",
+    "line_rule": "<lowercase SHA-256><two ASCII spaces><repo-relative path><LF>",
+    "sha256": "c7ca23bcfe64a21a38dbf2be0ed073e202251fd417bfb09af43d001888a48df1"
+  },
+  "migrations": [
+    {
+      "order": 1,
+      "version": 1,
+      "path": "src-tauri/migrations/0001_initial.sql",
+      "released_in": "1.0.1",
+      "sha256": "04d6854fd07e7089f4712eedc0719e9c1b38c2407c3f2e7cdceaf809aedfb010"
+    },
+    {
+      "order": 2,
+      "version": 2,
+      "path": "src-tauri/migrations/0002_local_inventory.sql",
+      "released_in": "1.0.1",
+      "sha256": "a8b3b15f31736bbcac52bd1ba380c9d63b55fe50ac358d5a9d8858513b7cd8f3"
+    },
+    {
+      "order": 3,
+      "version": 3,
+      "path": "src-tauri/migrations/0003_folder_install.sql",
+      "released_in": "1.0.1",
+      "sha256": "c7ce3e15a1c568df9450723a61f21537531a3e00665f1abd6b09a91430f53fee"
+    },
+    {
+      "order": 4,
+      "version": 4,
+      "path": "src-tauri/migrations/0004_bundle_install_candidates.sql",
+      "released_in": "1.0.1",
+      "sha256": "3dda47e27b072258115f60fd8b2e7b7e59261bd62146797e0d223edf8fc0c9c7"
+    },
+    {
+      "order": 5,
+      "version": 5,
+      "path": "src-tauri/migrations/0005_codex_mounts.sql",
+      "released_in": "1.0.1",
+      "sha256": "3e9cd074f0c0f4cadee6086b2d9689d37769d8af0f08f25e6974658ab4c510ea"
+    },
+    {
+      "order": 6,
+      "version": 6,
+      "path": "src-tauri/migrations/0006_mount_plan_purpose.sql",
+      "released_in": "1.0.1",
+      "sha256": "382d1d08989b34d3c88c900bb045fd9cdd9507bbd4d75b54b1c2f2937ca2eeb3"
+    },
+    {
+      "order": 7,
+      "version": 7,
+      "path": "src-tauri/migrations/0007_project_inventory.sql",
+      "released_in": "1.0.1",
+      "sha256": "e775556b55f21e2014cb5b8acd322963634d4d146bd3cee290557c6d0ddfb2f6"
+    },
+    {
+      "order": 8,
+      "version": 8,
+      "path": "src-tauri/migrations/0008_mount_batches.sql",
+      "released_in": "1.0.1",
+      "sha256": "9eb3976a5ef5f85cdac723dc0c596c86b1b82c08328f284cb2854d469d9583d8"
+    },
+    {
+      "order": 9,
+      "version": 9,
+      "path": "src-tauri/migrations/0009_management_evidence.sql",
+      "released_in": "1.0.1",
+      "sha256": "5cdbb409418282fecfbcc4a11e6bcf729b9999263092c98f176db0cdfceecd93"
+    },
+    {
+      "order": 10,
+      "version": 10,
+      "path": "src-tauri/migrations/0010_takeover.sql",
+      "released_in": "1.0.1",
+      "sha256": "835a35df670846a3dea764c5f2083f37dc15744b420d59fab05f2fc060e12db4"
+    },
+    {
+      "order": 11,
+      "version": 11,
+      "path": "src-tauri/migrations/0011_takeover_transactions.sql",
+      "released_in": "1.0.1",
+      "sha256": "fa28bf0c974fb4587d40fb2d8a2d75dce3b9af5219a3e15e1faf6c1a9376d62c"
+    },
+    {
+      "order": 12,
+      "version": 12,
+      "path": "src-tauri/migrations/0012_github_sources.sql",
+      "released_in": "1.0.1",
+      "sha256": "af1b053e45695483059a018c5cd38d0252a4cfa7fa86681b1130cf2dd9a40e58"
+    },
+    {
+      "order": 13,
+      "version": 13,
+      "path": "src-tauri/migrations/0013_install_bundle_protocol.sql",
+      "released_in": "1.0.1",
+      "sha256": "08762c2535e5e4257bdc5a88324b166f74ad2961ec7858ccd4d5db5d1631b076"
+    },
+    {
+      "order": 14,
+      "version": 14,
+      "path": "src-tauri/migrations/0014_general_source_install.sql",
+      "released_in": "1.0.1",
+      "sha256": "a20e1580ace1a12d45cc857d4fd56af5c2cdbc492c08f7a1195f7046d2dee069"
+    },
+    {
+      "order": 15,
+      "version": 15,
+      "path": "src-tauri/migrations/0015_source_association_plans.sql",
+      "released_in": "1.0.1",
+      "sha256": "2c6b0ce691ffa587ac2458fc48208a276ac6067f8b40f525ff76161751686f61"
+    },
+    {
+      "order": 16,
+      "version": 16,
+      "path": "src-tauri/migrations/0016_source_association_transactions.sql",
+      "released_in": "1.0.1",
+      "sha256": "a4e28cde33bcf7857617150f908348f557f03b4f41119573ee1933dc55d4d0df"
+    },
+    {
+      "order": 17,
+      "version": 17,
+      "path": "src-tauri/migrations/0017_bundle_update_checks.sql",
+      "released_in": "1.0.1",
+      "sha256": "b5152ebc5dab9a666819ad802c497e2ee2835ab66174f34489fe1109219ac07a"
+    },
+    {
+      "order": 18,
+      "version": 18,
+      "path": "src-tauri/migrations/0018_bundle_update.sql",
+      "released_in": "1.0.1",
+      "sha256": "ccc2f2b395c69b2e5f54f32100c7a7db806037d63418c170a8b823d94a652c1a"
+    },
+    {
+      "order": 19,
+      "version": 19,
+      "path": "src-tauri/migrations/0019_bundle_update_batches.sql",
+      "released_in": "1.0.1",
+      "sha256": "0686f8b6070c0cba2500210ab04719041bf2d4a40bf572a99f6554a6a1293f2d"
+    },
+    {
+      "order": 20,
+      "version": 20,
+      "path": "src-tauri/migrations/0020_removals.sql",
+      "released_in": "1.0.1",
+      "sha256": "c734a7196c81391891348930f5d6ebad9784f724e65d60523065d02afb895d0f"
+    },
+    {
+      "order": 21,
+      "version": 21,
+      "path": "src-tauri/migrations/0021_editable_local_relink.sql",
+      "released_in": "1.0.1",
+      "sha256": "980e37078b03112814fb4c0a0208b8322034d845ee707bcf9d83632638759920"
+    },
+    {
+      "order": 22,
+      "version": 22,
+      "path": "src-tauri/migrations/0022_installation_chain.sql",
+      "released_in": "1.0.1",
+      "sha256": "1c993c2a5c6e34b949bc46e916293e65d3be7ef70b02da3a07ad0fbd4f19ab8d"
+    },
+    {
+      "order": 23,
+      "version": 23,
+      "path": "src-tauri/migrations/0023_bundle_display_name_from_lock_source.sql",
+      "released_in": "1.0.1",
+      "sha256": "7bdf3a183e1c86fdf741693e4425c83e77829b7840e57ad3fa46d1f3d1af79e4"
+    },
+    {
+      "order": 24,
+      "version": 24,
+      "path": "src-tauri/migrations/0024_takeover_source_from_lock.sql",
+      "released_in": "1.0.1",
+      "sha256": "66b6ca874b479d04641b14133a759c308bf6ebf0a8c36c3906283660de0a4155"
+    },
+    {
+      "order": 25,
+      "version": 25,
+      "path": "src-tauri/migrations/0025_bundle_mount_removal.sql",
+      "released_in": "1.0.1",
+      "sha256": "9a2374080319d94b4e934ebd7fdee0ad72a4fd0d892dcdeb22753b876b1a476a"
+    },
+    {
+      "order": 26,
+      "version": 26,
+      "path": "src-tauri/migrations/0026_scan_issue_paths.sql",
+      "released_in": "1.0.1",
+      "sha256": "b57037c4ccd00cdfde8d7942a0f2cf2b0a0e9a27c5c893ced227c3ab9417fc80"
+    }
+  ],
+  "current_only_unreleased": [
+    {
+      "version": 27,
+      "path": "src-tauri/migrations/0027_interface_language.sql",
+      "status": "current-only/unreleased-at-v1.0.1"
+    },
+    {
+      "version": 28,
+      "path": "src-tauri/migrations/0028_ai_preferences.sql",
+      "status": "current-only/unreleased-at-v1.0.1"
+    },
+    {
+      "version": 29,
+      "path": "src-tauri/migrations/0029_skill_ai_explanations.sql",
+      "status": "current-only/unreleased-at-v1.0.1"
+    },
+    {
+      "version": 30,
+      "path": "src-tauri/migrations/0030_theme_preset.sql",
+      "status": "current-only/unreleased-at-v1.0.1"
+    },
+    {
+      "version": 31,
+      "path": "src-tauri/migrations/0031_normalize_archive_theme.sql",
+      "status": "current-only/unreleased-at-v1.0.1"
+    }
+  ]
+}

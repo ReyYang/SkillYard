@@ -1,0 +1,498 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-rust-engineering-a4-migration-lock-v1",
+  "ticket": "A4 / Issue #77",
+  "captured_at_utc": "2026-08-24T05:02:53Z",
+  "source_identity": {
+    "git_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "shared_worktree_dirty_before_a4": true,
+    "engineering_spec": "$REPO/docs/design/0002-rust-engineering-spec.md",
+    "engineering_spec_sha256": "c56868f007192140d72bcdb000aa9271bdefa3b9c480d2841fe59818f51b8e5d",
+    "ticket_batch": "$REPO/.codex/ticket-batches/rust-engineering-g36.json",
+    "ticket_batch_sha256": "a2082cb4ffa68abd77521172f3c0b76a20370500ee2ec8c1cd926621d2bf7755",
+    "path_tokens": {
+      "$REPO": "repository root",
+      "$JUST_BIN": "retained temporary official just 1.58.0 binary established by A3",
+      "$JUST_BIN_DIR": "directory containing $JUST_BIN, added only to the verification process PATH for nested just calls",
+      "$SQLITE3_BIN": "sqlite3 executable used for deterministic materialization",
+      "$A4_CHECKER_FIXTURES": "retained operating-system temporary worktree copies used by checker negatives",
+      "$A4_NO_TAG_REPOS": "retained operating-system temporary bare Git repositories without refs/tags/v1.0.1",
+      "$A4_FAILED_SNAPSHOT_RUN": "retained first materialization attempt that stopped at the seed constraint",
+      "$A4_SNAPSHOT_RUN_1": "retained first successful fresh materialization root",
+      "$A4_SNAPSHOT_RUN_2": "retained second successful fresh materialization root"
+    },
+    "prior_artifacts": {
+      "$REPO/docs/acceptance/rust-engineering/a0-baseline.json": "500f8646b4be20b90909d3c8e4e0a6a031f182692513e39b16b4e2b647fe765b",
+      "$REPO/docs/acceptance/rust-engineering/a0-tests.json": "c2bed4c81b5eaa7ee1d3f981beadaf8b1fd3f6244e820b2ed6c56e745d7575ba",
+      "$REPO/docs/acceptance/rust-engineering/a1-aggregation.json": "a8336c8bb445805f765bad4d3166427764435a4b083ed9fb22ab291acf70a990",
+      "$REPO/docs/acceptance/rust-engineering/a2-limited-debug.json": "cc4bd932cd6a46544061a74f21aaa4fb728c3fc5a7773519869a7317de6c9747",
+      "$REPO/docs/acceptance/rust-engineering/a3-command-governance.json": "90513e204798a940cd12cff5a897b16e50026735ef3a61d65ff8ea908f7ea309"
+    }
+  },
+  "release_evidence": {
+    "repository": "ReyYang/SkillYard",
+    "version": "1.0.1",
+    "tag": "v1.0.1",
+    "tag_object_oid": "2871263930d3dd94c42ab1af5782778471104e80",
+    "tag_object_type": "tag",
+    "peeled_commit_oid": "edc296411dcf38f33a7c4024e8761c61189d428e",
+    "tag_object_signature": {
+      "status": "unsigned",
+      "git_tag_verify_exit_code": 1,
+      "git_tag_verify_stderr": "error: no signature found",
+      "distinction": "GitHub's Verified indication for the peeled commit is not a signature on the annotated tag object."
+    },
+    "github_release": {
+      "page": "https://github.com/ReyYang/SkillYard/releases/tag/v1.0.1",
+      "api": "https://api.github.com/repos/ReyYang/SkillYard/releases/tags/v1.0.1",
+      "name": "SkillYard 1.0.1",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-07-28T06:31:16Z",
+      "public_api_read_performed": true,
+      "credentials_used": false
+    },
+    "local_proof_commands": [
+      "git rev-parse --verify refs/tags/v1.0.1",
+      "git cat-file -t refs/tags/v1.0.1",
+      "git rev-parse v1.0.1^{commit}",
+      "git cat-file tag refs/tags/v1.0.1",
+      "git tag -v v1.0.1"
+    ]
+  },
+  "tdd": {
+    "checker_red": {
+      "command": "cd $REPO && node --test scripts/check-released-migrations.test.mjs",
+      "implementation_present": false,
+      "exit_code": 1,
+      "observed_failure": "ERR_MODULE_NOT_FOUND for $REPO/scripts/check-released-migrations.mjs"
+    },
+    "rust_public_seam_red": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all migration_contract::v1_0_1_snapshot_upgrades_restarts_and_reads_core_state_through_application -- --exact",
+      "fixture_present": false,
+      "exit_code": 101,
+      "observed_failures": [
+        "include_bytes could not read tests/fixtures/v1.0.1/skillyard.sqlite3",
+        "include_str could not read tests/fixtures/v1.0.1/snapshot.json"
+      ]
+    },
+    "command_wiring_red": {
+      "command": "cd $REPO && node --test scripts/engineering-commands.test.mjs",
+      "exit_code": 1,
+      "tests": "2 passed; 2 failed",
+      "observed_failures": [
+        "migration recipe still emitted status not_attached and did not run the A4 checker/public seam",
+        "native checkout did not fetch the recorded release tag"
+      ]
+    },
+    "materialization_stop_and_correction": {
+      "failed_run": "$A4_FAILED_SNAPSHOT_RUN",
+      "observed_failure": "UNIQUE constraint failed: sources.sort_order",
+      "repository_fixture_written_on_failure": false,
+      "cause": "Released SQL materializes four unlinked recommendation Sources before the synthetic seed inserts its one Source at sort_order 0.",
+      "minimal_seed_correction": "The deterministic seed removes those unlinked release-default recommendations before inserting its one synthetic Source; released SQL and production code were not changed."
+    },
+    "independent_review_fixture_binding_red": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all migration_contract::v1_0_1_snapshot_upgrades_restarts_and_reads_core_state_through_application -- --exact --nocapture",
+      "exit_code": 101,
+      "result": "0 passed; 1 failed; 303 filtered out",
+      "observed_failure": "seed drift 必须 fail closed",
+      "meaning": "The previous contract ignored seed bytes, so synchronized seed and metadata SHA drift passed silently."
+    },
+    "independent_review_canonical_owner_red": {
+      "command": "cd $REPO && node --test scripts/check-released-migrations.test.mjs",
+      "exit_code": 1,
+      "result": "8 passed; 1 failed",
+      "observed_failure": "Missing expected rejection for a migration include_str! added outside storage.rs",
+      "meaning": "The previous checker counted only the named MIGRATIONS constant and did not bind every production migration include."
+    },
+    "strict_binding_green_correction": {
+      "first_green_attempt_exit_code": 101,
+      "observed_failure": "The machine-path scan matched /home/ inside the explicitly allowed HOME sentinel.",
+      "correction": "Remove the two metadata-bound, exact-count sentinels from the scan input before checking every remaining machine-path and credential marker; sentinel count and value assertions remain strict."
+    }
+  },
+  "released_prefix_contract": {
+    "manifest": "$REPO/src-tauri/migrations/released-prefix.json",
+    "manifest_sha256": "6653371752876fd22bde0036dff69dd0ae562359021a222521dfa5f791b711fa",
+    "released_versions": {
+      "first": 1,
+      "last": 26,
+      "count": 26,
+      "paths_and_hashes": "recorded individually in the manifest and checked against both the current worktree and tag tree"
+    },
+    "current_only_unreleased_at_v1_0_1": [
+      27,
+      28,
+      29,
+      30
+    ],
+    "canonical_aggregate": {
+      "order": "LC_ALL=C ascending repo-relative path",
+      "line_rule": "<lowercase SHA-256><two ASCII spaces><repo-relative path><LF>",
+      "sha256": "c7ca23bcfe64a21a38dbf2be0ed073e202251fd417bfb09af43d001888a48df1"
+    },
+    "checker": {
+      "path": "$REPO/scripts/check-released-migrations.mjs",
+      "read_only": true,
+      "supported_cli_arguments": [],
+      "update_fix_or_rewrite_mode": false,
+      "tag_missing_fails_closed": true,
+      "validates": [
+        "annotated tag object identity and unsigned object bytes",
+        "peeled commit identity",
+        "tag-tree released migration paths and exact bytes",
+        "manifest schema, order, path, individual SHA-256, and aggregate SHA-256",
+        "current worktree migration paths 0001 through 0030",
+        "production MIGRATIONS runner exact order 1 through 30",
+        "released runner prefix exact order 1 through 26",
+        "canonical production owner source src-tauri/src/storage.rs and chain Storage::open -> Storage::migrate -> MIGRATIONS",
+        "all 30 production Rust migration include_str! references belong to that canonical source and exactly match runner tuple order"
+      ],
+      "proof_scope": "Static proof covers current production Rust migration include_str! references, the canonical MIGRATIONS tuple sequence, and the Storage::open/migrate call chain; it does not claim a formal parser proof that arbitrary differently encoded runners are impossible.",
+      "does_not_execute_production_migrations": true,
+      "does_not_replace_production_owner": true
+    },
+    "negative_matrix": [
+      {
+        "mutation": "modify released migration bytes",
+        "expected_error_code": "checksum_mismatch",
+        "passed": true
+      },
+      {
+        "mutation": "delete released migration",
+        "expected_error_code": "released_path_missing",
+        "passed": true
+      },
+      {
+        "mutation": "rename released migration",
+        "expected_error_code": "released_path_mismatch",
+        "passed": true
+      },
+      {
+        "mutation": "reorder production runner",
+        "expected_error_code": "runner_order_mismatch",
+        "passed": true
+      },
+      {
+        "mutation": "add a production migration include_str! outside canonical storage.rs",
+        "expected_error_code": "production_owner_mismatch",
+        "passed": true
+      },
+      {
+        "mutation": "insert duplicate version inside released prefix",
+        "expected_error_code": "released_prefix_insertion",
+        "passed": true
+      },
+      {
+        "mutation": "run against bare Git repository without refs/tags/v1.0.1",
+        "expected_error_code": "tag_missing",
+        "passed": true
+      }
+    ],
+    "negative_fixture_roots": [
+      "$A4_CHECKER_FIXTURES",
+      "$A4_NO_TAG_REPOS"
+    ],
+    "real_repository_input_fingerprint_unchanged_across_each_negative": true
+  },
+  "snapshot_materialization": {
+    "metadata": "$REPO/src-tauri/tests/fixtures/v1.0.1/snapshot.json",
+    "metadata_sha256": "5be82c07c3718027acb07730a3acfed12a72e291bc18168a556487df9cd655d2",
+    "seed": "$REPO/src-tauri/tests/fixtures/v1.0.1/seed.sql",
+    "seed_sha256": "a3cd9c26252a6640a96f72d4e04fcb7fb5f7fcc4b8518a142c522b3810637510",
+    "sqlite": {
+      "binary": "$SQLITE3_BIN",
+      "version": "3.51.0 2025-06-12 13:14:41 f0ca7bba1c5e232e5d279fad6338121ab55af0c8c68c84cdfb18ba5114dcaapl (64-bit)",
+      "migration_rule": "For versions 1 through 26 in manifest order: BEGIN IMMEDIATE, execute exact peeled-release SQL bytes, insert schema_migrations with fixed applied_at 1700000000000, COMMIT.",
+      "seed_rule": "BEGIN IMMEDIATE, execute exact seed.sql bytes, COMMIT, then VACUUM.",
+      "generation_pragmas": {
+        "page_size": 4096,
+        "journal_mode": "delete",
+        "auto_vacuum": 0,
+        "foreign_keys": 1,
+        "synchronous": 2,
+        "fullfsync": 1
+      },
+      "persistent_reopened_pragmas": {
+        "page_size": 4096,
+        "journal_mode": "delete",
+        "auto_vacuum": 0
+      }
+    },
+    "determinism": {
+      "fresh_initially_empty_runs": 2,
+      "retained_roots": [
+        "$A4_SNAPSHOT_RUN_1",
+        "$A4_SNAPSHOT_RUN_2"
+      ],
+      "byte_identical": true,
+      "first_sha256": "7d67529810956f8031764c52715de0bf0a716e7901b40b02e174a2971a04e47e",
+      "second_sha256": "7d67529810956f8031764c52715de0bf0a716e7901b40b02e174a2971a04e47e"
+    },
+    "fixture": {
+      "path": "$REPO/src-tauri/tests/fixtures/v1.0.1/skillyard.sqlite3",
+      "size_bytes": 561152,
+      "sha256": "7d67529810956f8031764c52715de0bf0a716e7901b40b02e174a2971a04e47e",
+      "schema_migrations": "exact integers 1 through 26",
+      "integrity_check": "ok",
+      "foreign_key_check_rows": 0,
+      "wal_or_shm_files": []
+    },
+    "fingerprints": {
+      "schema_object_count": 81,
+      "schema_sha256": "5b966f41550777cb196b3fff8312f7cb2895089b47a829c24136137806a0b759",
+      "seed_data_row_count": 12,
+      "seed_data_sha256": "1be5fcca1f5beac8512e178eabf03cfca3dc424bc14cb1dd7a1136229c121715",
+      "schema_canonical_query": "recorded exactly in snapshot.json and hardcoded in the Rust contract",
+      "seed_data_canonical_encoding": "recorded exactly as ordered table, column, order_by, SQLite quote(), separator, and final-LF rules in snapshot.json and hardcoded in the Rust contract"
+    },
+    "only_machine_independent_path_sentinels": [
+      {
+        "value": "/__skillyard_fixture__/home/.codex/skills/release-fixture",
+        "count": 1
+      },
+      {
+        "value": "/__skillyard_fixture__/data/bundles/bundle-v101/current/members/release-fixture",
+        "count": 1
+      }
+    ],
+    "privacy": {
+      "machine_absolute_paths_present": false,
+      "credentials_present": false,
+      "only_filesystem_absolute_values_are_recorded_sentinels": true
+    },
+    "disclaimer": "This is a deterministic materialization of the peeled release's SQL plus a fixed synthetic seed. It is not a captured historical user database, is not claimed byte-identical to an application-created release database, and is not a production migration runner."
+  },
+  "rust_public_seam": {
+    "module": "$REPO/src-tauri/tests/all/migration_contract.rs",
+    "test": "migration_contract::v1_0_1_snapshot_upgrades_restarts_and_reads_core_state_through_application",
+    "fixture_copy_uses_real_temp_filesystem": true,
+    "strict_input_binding": {
+      "included_inputs": [
+        "actual released-prefix manifest bytes",
+        "actual seed.sql bytes",
+        "actual snapshot.json bytes",
+        "actual SQLite binary bytes"
+      ],
+      "independent_hardcoded_constants": [
+        "manifest SHA-256",
+        "seed SHA-256",
+        "snapshot SHA-256",
+        "fixture size and SHA-256",
+        "tag object and peeled commit",
+        "released aggregate SHA-256",
+        "schema and seed-data fingerprint SHA-256"
+      ],
+      "strict_snapshot_schema": "serde deny_unknown_fields with required key types and fixed release, manifest, seed, fixture, PRAGMA, fingerprint, sentinel, privacy, and disclaimer values",
+      "fail_closed_mutations": [
+        "seed bytes plus synchronized metadata seed SHA",
+        "snapshot manifest SHA",
+        "snapshot schema fingerprint SHA",
+        "snapshot seed-data fingerprint SHA",
+        "binary bytes plus synchronized fixture and determinism SHA metadata"
+      ]
+    },
+    "read_only_pre_relocation_recalculation": [
+      "schema_migrations exact integers 1 through 26",
+      "integrity_check ok and foreign_key_check empty",
+      "persistent page_size, journal_mode, and auto_vacuum PRAGMAs",
+      "schema object count and canonical schema SHA-256",
+      "ten table row counts and canonical seed-data SHA-256",
+      "both sentinel values and exact logical count one",
+      "no committed WAL or SHM sidecar and none before or after temp read-only inspection",
+      "no machine path or credential markers outside the two recorded sentinels"
+    ],
+    "raw_connection_before_application": {
+      "asserts_versions": "1 through 26",
+      "only_mutation": "Relocate the two recorded sentinels to the test temp root in one transaction.",
+      "executes_migrations": false
+    },
+    "filesystem_preparation": [
+      "real Central Content SKILL.md",
+      "real bundle current symlink",
+      "real Mount symlink"
+    ],
+    "canonical_entry": "SkillYardApplication::new(...).handle(UiIntent::GetStartupState)",
+    "assertions": [
+      "Inventory, Source, Bundle, Member selection, and Mount core state survives upgrade",
+      "Mount health is Healthy and current/Mount symlinks resolve to real fixture content",
+      "recovery issues are empty and no interrupted operation is reported",
+      "UiIntent::OpenSourceDiscovery reads the upgraded Source association",
+      "drop and rebuild Application preserves the same observable state",
+      "final raw read-only query sees schema_migrations exact integers 1 through 30 and no duplicated core rows"
+    ],
+    "private_migration_step_called": false,
+    "production_code_changed": false
+  },
+  "command_and_ci_wiring": {
+    "just_migration": {
+      "steps": [
+        "node scripts/check-released-migrations.mjs",
+        "just rust-test migration_contract::v1_0_1_snapshot_upgrades_restarts_and_reads_core_state_through_application",
+        "emit {\"guard\":\"released-migration-prefix\",\"status\":\"passed\",\"owner\":\"A4\"}"
+      ],
+      "checker_precedes_public_seam": true
+    },
+    "engineering_guards_include_checker_negatives": true,
+    "a3_public_recipe_topology_unchanged": true,
+    "ci": {
+      "workflow": "$REPO/.github/workflows/ci.yml",
+      "only_a4_change": "native checkout sets fetch-tags: true so refs/tags/v1.0.1 is available before cargo fetch and just stage",
+      "frontend_job_changed_by_a4": false,
+      "secrets_job_changed_by_a4": false,
+      "secrets_job_section_sha256": "77040d0c82d62559927b25cd61b641c9681d41e76f8df3a1acb0d2256c8ed5e5",
+      "ordinary_ci_still_runs_only_cargo_fetch_then_just_stage_for_native_validation": true
+    },
+    "a3_to_a4_hash_evolution": {
+      "$REPO/justfile": {
+        "a3_sha256": "e2521791b9eb7ea8e7b03832c346f32d6b20fb7a35f76741fed32b845bc12616",
+        "a4_sha256": "5065caac349776bc6a655b30065290f9181e3ba90321bc86bd69287089d895e2"
+      },
+      "$REPO/scripts/engineering-commands.test.mjs": {
+        "a3_sha256": "d8b1505a637fc0fde9edf645abc726e25817d42893b77c177a256ff0f4b8b4ea",
+        "a4_sha256": "ac4e0613587cd5de0e2b9f943932a6f5057dbca4dc60f0b7280542713e15e052"
+      },
+      "$REPO/.github/workflows/ci.yml": {
+        "a3_sha256": "adee7582bd01af2c90122e153fdcf8facc8efe58925b3cf6bd266b1f529952fe",
+        "a4_sha256": "7461e0899d8eed6ccce628166f0c2ecd7019c04ca883ebb45bee59ecae81cab0"
+      },
+      "$REPO/src-tauri/tests/all.rs": {
+        "a2_and_a3_sha256": "3e903f567abb3b8884f152e1f9081dbd2eb55d2a4fba273c9d5ba7d6799add04",
+        "a4_sha256": "087e204c064d5f3674599f85ead27e756ef9fece35778b6706d4e6d789a47c56"
+      }
+    }
+  },
+  "test_inventory": {
+    "a0_expected_identities": 442,
+    "a2_additive_engineering_guards": 3,
+    "a4_additive_public_seam_guards": 1,
+    "current_identity_arithmetic": 446,
+    "library_tests_carried_forward": 141,
+    "integration_tests": 305,
+    "all_target_tests_observed_by_list": 304,
+    "codex_mount_contract_tests_carried_forward": 1,
+    "ignored_tests_carried_forward": 1,
+    "integration_targets": [
+      "all",
+      "codex_mount_contract"
+    ],
+    "integration_target_count": 2,
+    "a0_identity_mapping_modified": false,
+    "full_inventory_suite_run_in_a4": false
+  },
+  "verification": [
+    {
+      "command": "cd $REPO && node --test scripts/check-released-migrations.test.mjs",
+      "exit_code": 0,
+      "result": "9 passed; 0 failed; includes five prefix mutations, tag-missing, and noncanonical migration-include fail-closed"
+    },
+    {
+      "command": "cd $REPO && node scripts/check-released-migrations.mjs",
+      "exit_code": 0,
+      "result": "released prefix, tag tree, current runner, and canonical production owner scope passed"
+    },
+    {
+      "command": "cd $REPO && node --test scripts/engineering-commands.test.mjs",
+      "exit_code": 0,
+      "result": "4 passed; 0 failed"
+    },
+    {
+      "command": "cd $REPO && $JUST_BIN _engineering-guards",
+      "exit_code": 0,
+      "result": "14 passed; 0 failed"
+    },
+    {
+      "command": "cd $REPO && pnpm exec vitest run scripts/check-released-migrations.test.mjs scripts/engineering-commands.test.mjs",
+      "exit_code": 0,
+      "result": "2 files passed; 13 tests passed"
+    },
+    {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all migration_contract::v1_0_1_snapshot_upgrades_restarts_and_reads_core_state_through_application -- --exact",
+      "exit_code": 0,
+      "result": "1 passed; 0 failed; 303 filtered out"
+    },
+    {
+      "command": "cd $REPO && $JUST_BIN migration",
+      "exit_code": 127,
+      "result": "Checker passed, then the nested bare just invocation was unavailable because $JUST_BIN_DIR was not on the process PATH; the Rust selector was not reached."
+    },
+    {
+      "command": "cd $REPO && PATH=\"$JUST_BIN_DIR:$PATH\" $JUST_BIN migration",
+      "exit_code": 0,
+      "result": "checker passed, selector matched exactly once, public seam passed, A4 guard status passed"
+    },
+    {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cd $REPO && $JUST_BIN --fmt --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cd $REPO && ruby -e 'require \"yaml\"; Psych.parse_file(\".github/workflows/ci.yml\")'",
+      "exit_code": 0
+    },
+    {
+      "command": "cd $REPO && git diff --check",
+      "exit_code": 0
+    }
+  ],
+  "scope_and_privacy": {
+    "owned_file_sha256": {
+      "$REPO/.gitignore": "d868213875c90c914de3f21f4d08df70497301797fb1d9e162cbd04da7858225",
+      "$REPO/.github/workflows/ci.yml": "7461e0899d8eed6ccce628166f0c2ecd7019c04ca883ebb45bee59ecae81cab0",
+      "$REPO/justfile": "5065caac349776bc6a655b30065290f9181e3ba90321bc86bd69287089d895e2",
+      "$REPO/scripts/check-released-migrations.mjs": "1ea032cbe64a72c83019f9f5868d1410b68f1728c918960cf5fdff44f47a1112",
+      "$REPO/scripts/check-released-migrations.test.mjs": "62e1ae2372b7adfa39eed0ef7648084a7725dd139d4115ab1880fa68626ff476",
+      "$REPO/scripts/engineering-commands.test.mjs": "ac4e0613587cd5de0e2b9f943932a6f5057dbca4dc60f0b7280542713e15e052",
+      "$REPO/src-tauri/migrations/released-prefix.json": "6653371752876fd22bde0036dff69dd0ae562359021a222521dfa5f791b711fa",
+      "$REPO/src-tauri/tests/all.rs": "087e204c064d5f3674599f85ead27e756ef9fece35778b6706d4e6d789a47c56",
+      "$REPO/src-tauri/tests/all/migration_contract.rs": "14df346fd1b6a063722ecd13556327403c52894e100e448833a72c2d99df9dd9",
+      "$REPO/src-tauri/tests/fixtures/v1.0.1/seed.sql": "a3cd9c26252a6640a96f72d4e04fcb7fb5f7fcc4b8518a142c522b3810637510",
+      "$REPO/src-tauri/tests/fixtures/v1.0.1/snapshot.json": "5be82c07c3718027acb07730a3acfed12a72e291bc18168a556487df9cd655d2",
+      "$REPO/src-tauri/tests/fixtures/v1.0.1/skillyard.sqlite3": "7d67529810956f8031764c52715de0bf0a716e7901b40b02e174a2971a04e47e"
+    },
+    "exact_gitignore_exception": "!src-tauri/tests/fixtures/v1.0.1/skillyard.sqlite3",
+    "unchanged_production_inputs": {
+      "$REPO/src-tauri/src/storage.rs": "274ce46cee8f86438a98f387baccbd1e53f96236c36a6dc72739db2463eb6e96",
+      "$REPO/Cargo.lock": "47311a278c2bca94af19d45cebbe619e023299cee9e8b9afa443c2f24917d25b",
+      "$REPO/package.json": "0ce47debefb0584aa22e2480dc5bbda1dbc141c820ecf80960c8581e788845a9",
+      "$REPO/.github/workflows/release-candidate.yml": "f9bfdc5c3b01aef06a0d94dab6b31391ba8ab9e52c3560cc98ce47f70fd24373",
+      "$REPO/.github/workflows/publish-release.yml": "e5341b2f9df1ade39916d6810c07b80e5017765fc40d112b5ba3c3663626d84a"
+    },
+    "storage_migration_sql_lock_and_release_workflow_git_diff_bytes": 0,
+    "root_cargo_manifest": {
+      "sha256": "0ccb45d11710a7267d0d37059ae87c53874f49e341decfa17b566f1c2370257e",
+      "matches_a2_post_hash": true,
+      "a4_modified": false
+    },
+    "docs_readme_sha256": "320d525aaf337f1780b9cfc7246a92af65f465786d30173add112955fc622b7b",
+    "docs_readme_a4_modified": false,
+    "production_migration_sql_modified": false,
+    "production_storage_modified": false,
+    "production_schema_modified": false,
+    "second_migration_runner_added": false,
+    "release_or_publish_workflow_modified": false,
+    "clean_delete_or_cache_rewrite_performed": false,
+    "temporary_roots_retained": true,
+    "worktree_created": false,
+    "commit_push_or_issue_operation_performed": false,
+    "real_provider_called": false,
+    "credentials_read_or_written": false,
+    "release_deploy_or_publish_performed": false,
+    "machine_absolute_paths_present": false
+  },
+  "not_run_in_a4": [
+    "full just stage",
+    "full workspace test suite",
+    "full clippy -D warnings",
+    "production application build",
+    "tart",
+    "MAC-CONTRACT",
+    "real Provider paths",
+    "release or publish workflows"
+  ],
+  "deferred_verification_owner": "A-FINAL"
+}

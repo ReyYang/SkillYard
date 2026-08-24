@@ -3,9 +3,9 @@ use std::{
     io::Write,
     os::unix::fs::symlink,
     path::{Path, PathBuf},
-    process::Command,
 };
 
+use crate::support::{mark_hard_exit_worker_entered, run_hard_exit_child};
 use rusqlite::Connection;
 use skillyard_lib::{
     ApplicationPaths, BundleUpdateBatchPlan, BundleUpdateBatchPlanItemDisposition,
@@ -386,20 +386,14 @@ fn hard_exit_after_child_current_switch_recovers_child_and_continues_batch() {
     ];
     drop(application);
 
-    let status = Command::new(env::current_exe().expect("应找到当前测试二进制"))
-        .args([
-            "--exact",
-            "bundle_update_batch_hard_exit_worker",
-            "--nocapture",
-        ])
-        .env(HARD_EXIT_WORKER, "1")
-        .env(HARD_EXIT_DATA_ROOT, &data_root)
-        .env(HARD_EXIT_HOME, &home)
-        .env(HARD_EXIT_PLAN_ID, &plan.id)
-        .env(HARD_EXIT_ITEM_IDS, selected_item_ids.join(","))
-        .status()
-        .expect("应启动 hard-exit 子进程");
-    assert_eq!(status.code(), Some(91));
+    run_hard_exit_child("bundle_update_batch_hard_exit_worker", 91, |child| {
+        child
+            .env(HARD_EXIT_WORKER, "1")
+            .env(HARD_EXIT_DATA_ROOT, &data_root)
+            .env(HARD_EXIT_HOME, &home)
+            .env(HARD_EXIT_PLAN_ID, &plan.id)
+            .env(HARD_EXIT_ITEM_IDS, selected_item_ids.join(","));
+    });
 
     let restarted = SkillYardApplication::new(
         ApplicationPaths::for_home(data_root.clone(), home),
@@ -496,6 +490,7 @@ fn bundle_update_batch_hard_exit_worker() {
     if env::var_os(HARD_EXIT_WORKER).is_none() {
         return;
     }
+    mark_hard_exit_worker_entered("bundle_update_batch_hard_exit_worker");
     let data_root = env::var_os(HARD_EXIT_DATA_ROOT).expect("子进程必须收到数据目录");
     let home = env::var_os(HARD_EXIT_HOME).expect("子进程必须收到 home");
     let plan_id = env::var(HARD_EXIT_PLAN_ID).expect("子进程必须收到 Batch Plan ID");

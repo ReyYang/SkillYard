@@ -1,0 +1,434 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-rust-engineering-baseline-v1",
+  "ticket": {
+    "code": "A0",
+    "github_issue": 69
+  },
+  "captured_at_utc": "2026-08-24T02:06:41Z",
+  "source_identity": {
+    "git_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "git_commit_time": "2026-08-13T17:40:05+08:00",
+    "rust_frontend_ci_input_sha256": "d7f398d6e96082a82af23ba3dcd890c470a308b7a778598569a1ceaa4b1edafb",
+    "input_hash_method": "SHA-256 over the sorted git-tracked Cargo, Rust, frontend, lockfile and ordinary CI inputs, including each path in the inner shasum record",
+    "source_spec_sha256": "c56868f007192140d72bcdb000aa9271bdefa3b9c480d2841fe59818f51b8e5d",
+    "worktree": {
+      "clean": false,
+      "pre_existing_tracked_changes": [
+        "docs/README.md"
+      ],
+      "pre_existing_untracked_files": [
+        "docs/design/0002-rust-engineering-spec.md"
+      ],
+      "rust_frontend_ci_inputs_clean_against_head": true,
+      "policy": "The two pre-existing documentation changes are preserved and are not silently folded into the A0 source fingerprint."
+    }
+  },
+  "environment": {
+    "rustc": {
+      "version": "1.94.1",
+      "commit_hash": "e408947bfd200af42db322daf0fadfe7e26d3bd1",
+      "commit_date": "2026-03-25",
+      "host": "aarch64-apple-darwin",
+      "llvm": "21.1.8"
+    },
+    "cargo": {
+      "version": "1.94.1",
+      "commit": "29ea6fb6a",
+      "commit_date": "2026-03-24"
+    },
+    "operating_system": {
+      "kernel": "Darwin 25.5.0",
+      "architecture": "arm64"
+    },
+    "workspace_resolver": "2",
+    "workspace_packages": [
+      "skillyard 1.1.0"
+    ],
+    "enabled_features": [],
+    "dependency_mode": {
+      "locked": true,
+      "cargo_offline": true
+    }
+  },
+  "isolation": {
+    "target_dir_token": "$A0_TARGET",
+    "concrete_path_not_committed": true,
+    "initially_empty": true,
+    "retained_after_measurement": true,
+    "clean_or_delete_command_executed": false,
+    "developer_target_used_for_clean_no_run": false
+  },
+  "test_inventory": {
+    "artifact": "$REPO/docs/acceptance/rust-engineering/a0-tests.json",
+    "sha256": "c2bed4c81b5eaa7ee1d3f981beadaf8b1fd3f6244e820b2ed6c56e745d7575ba",
+    "totals": {
+      "all_tests": 442,
+      "library_unit_tests": 141,
+      "integration_tests": 301,
+      "ignored_tests": 1,
+      "integration_targets": 24,
+      "ordinary_integration_targets": 23,
+      "hard_exit_workers": 6
+    },
+    "ignored_identity": {
+      "target": "codex_mount_contract",
+      "name": "current_codex_discovers_global_and_project_directory_symlinks"
+    }
+  },
+  "hard_exit_workers": [
+    {
+      "family": "folder_install",
+      "original_target": "folder_install",
+      "native_name": "hard_exit_install_worker",
+      "future_fully_qualified_name": "folder_install::hard_exit_install_worker",
+      "environment_gate": "SKILLYARD_HARD_EXIT_WORKER",
+      "expected_exit_code": 91,
+      "baseline_parent_selector": {
+        "mode": "exact_short_name",
+        "value": "hard_exit_install_worker"
+      },
+      "a1_required_proof": "resolve the fully qualified name from the running test executable, sync a worker-entered marker before the production failpoint, assert the exact exit code, then read back Journal/SQLite/filesystem/restart business truth"
+    },
+    {
+      "family": "github_install_and_update",
+      "original_target": "github_install",
+      "native_name": "github_hard_exit_worker",
+      "future_fully_qualified_name": "github_install::github_hard_exit_worker",
+      "environment_gate": "SKILLYARD_GITHUB_HARD_EXIT_WORKER",
+      "expected_exit_code": 91,
+      "baseline_parent_selector": {
+        "mode": "exact_short_name",
+        "value": "github_hard_exit_worker"
+      },
+      "a1_required_proof": "resolve the fully qualified name from the running test executable, sync a worker-entered marker before the production failpoint, assert the exact exit code, then read back Journal/SQLite/filesystem/restart business truth"
+    },
+    {
+      "family": "bundle_update_batch",
+      "original_target": "bundle_update_batch",
+      "native_name": "bundle_update_batch_hard_exit_worker",
+      "future_fully_qualified_name": "bundle_update_batch::bundle_update_batch_hard_exit_worker",
+      "environment_gate": "SKILLYARD_BATCH_UPDATE_HARD_EXIT_WORKER",
+      "expected_exit_code": 91,
+      "baseline_parent_selector": {
+        "mode": "exact_short_name",
+        "value": "bundle_update_batch_hard_exit_worker"
+      },
+      "a1_required_proof": "resolve the fully qualified name from the running test executable, sync a worker-entered marker before the production failpoint, assert the exact exit code, then read back Journal/SQLite/filesystem/restart business truth"
+    },
+    {
+      "family": "mount",
+      "original_target": "codex_mount",
+      "native_name": "hard_exit_mount_worker",
+      "future_fully_qualified_name": "codex_mount::hard_exit_mount_worker",
+      "environment_gate": "SKILLYARD_MOUNT_HARD_EXIT_WORKER",
+      "expected_exit_code": 92,
+      "baseline_parent_selector": {
+        "mode": "exact_short_name",
+        "value": "hard_exit_mount_worker"
+      },
+      "a1_required_proof": "resolve the fully qualified name from the running test executable, sync a worker-entered marker before the production failpoint, assert the exact exit code, then read back Journal/SQLite/filesystem/restart business truth"
+    },
+    {
+      "family": "bundle_batch_mount",
+      "original_target": "bundle_batch_mount",
+      "native_name": "hard_exit_batch_mount_worker",
+      "future_fully_qualified_name": "bundle_batch_mount::hard_exit_batch_mount_worker",
+      "environment_gate": "SKILLYARD_BATCH_MOUNT_HARD_EXIT_WORKER",
+      "expected_exit_code": 92,
+      "baseline_parent_selector": {
+        "mode": "exact_short_name",
+        "value": "hard_exit_batch_mount_worker"
+      },
+      "a1_required_proof": "resolve the fully qualified name from the running test executable, sync a worker-entered marker before the production failpoint, assert the exact exit code, then read back Journal/SQLite/filesystem/restart business truth"
+    },
+    {
+      "family": "takeover",
+      "original_target": "takeover",
+      "native_name": "hard_exit_takeover_worker",
+      "future_fully_qualified_name": "takeover::hard_exit_takeover_worker",
+      "environment_gate": "SKILLYARD_TAKEOVER_HARD_EXIT_WORKER",
+      "expected_exit_code": 93,
+      "baseline_parent_selector": {
+        "mode": "exact_short_name",
+        "value": "hard_exit_takeover_worker"
+      },
+      "a1_required_proof": "resolve the fully qualified name from the running test executable, sync a worker-entered marker before the production failpoint, assert the exact exit code, then read back Journal/SQLite/filesystem/restart business truth"
+    }
+  ],
+  "clean_no_run": {
+    "command": "CARGO_TARGET_DIR=$A0_TARGET CARGO_NET_OFFLINE=true cargo test --workspace --locked --no-run",
+    "exit_code": 0,
+    "duration_seconds": {
+      "real": 45.64,
+      "user": 190.88,
+      "system": 39.01
+    },
+    "integration_executables_emitted": 24,
+    "tests_executed": 0
+  },
+  "cargo_artifacts": {
+    "accounting": {
+      "apparent_bytes": "sum st_size once per unique (st_dev, st_ino)",
+      "allocated_bytes": "sum st_blocks * 512 once per unique (st_dev, st_ino)",
+      "snapshot": "settled post-build snapshot",
+      "partitions_overlap": true,
+      "warning": "Partition values are independently deduplicated and must not be summed as if they were disjoint."
+    },
+    "target": {
+      "unique_files": 7823,
+      "apparent_bytes": 4196107853,
+      "allocated_bytes": 4219478016
+    },
+    "partitions": {
+      "debug": {
+        "exists": true,
+        "unique_files": 7822,
+        "apparent_bytes": 4196106167,
+        "allocated_bytes": 4219473920
+      },
+      "debug_deps": {
+        "exists": true,
+        "unique_files": 4782,
+        "apparent_bytes": 3280058606,
+        "allocated_bytes": 3289858048
+      },
+      "debug_incremental": {
+        "exists": true,
+        "unique_files": 3108,
+        "apparent_bytes": 899830985,
+        "allocated_bytes": 909492224
+      },
+      "release": {
+        "exists": false,
+        "unique_files": 0,
+        "apparent_bytes": 0,
+        "allocated_bytes": 0,
+        "reason": "The A0 clean command builds only the Cargo test profile."
+      }
+    },
+    "integration_test_executables": {
+      "count": 24,
+      "total_apparent_bytes": 833954488,
+      "entries": [
+        {
+          "target": "agent_chat",
+          "apparent_bytes": 37880824
+        },
+        {
+          "target": "agent_streaming",
+          "apparent_bytes": 37742240
+        },
+        {
+          "target": "ai_configuration",
+          "apparent_bytes": 37657664
+        },
+        {
+          "target": "archive_install",
+          "apparent_bytes": 38173712
+        },
+        {
+          "target": "bundle_batch_mount",
+          "apparent_bytes": 37764480
+        },
+        {
+          "target": "bundle_update_batch",
+          "apparent_bytes": 37993976
+        },
+        {
+          "target": "bundle_update_check",
+          "apparent_bytes": 37764136
+        },
+        {
+          "target": "capability_contract",
+          "apparent_bytes": 1422760
+        },
+        {
+          "target": "codex_mount",
+          "apparent_bytes": 37543392
+        },
+        {
+          "target": "codex_mount_contract",
+          "apparent_bytes": 1893096
+        },
+        {
+          "target": "discover",
+          "apparent_bytes": 37130824
+        },
+        {
+          "target": "discover_web",
+          "apparent_bytes": 37620432
+        },
+        {
+          "target": "editable_local_update",
+          "apparent_bytes": 37379672
+        },
+        {
+          "target": "folder_install",
+          "apparent_bytes": 37731824
+        },
+        {
+          "target": "github_install",
+          "apparent_bytes": 38454896
+        },
+        {
+          "target": "github_source",
+          "apparent_bytes": 38069104
+        },
+        {
+          "target": "manual_bundle_update",
+          "apparent_bytes": 37948184
+        },
+        {
+          "target": "preferences",
+          "apparent_bytes": 37322240
+        },
+        {
+          "target": "removal",
+          "apparent_bytes": 37447576
+        },
+        {
+          "target": "skill_ai_explanation",
+          "apparent_bytes": 37543912
+        },
+        {
+          "target": "skills_sh_source",
+          "apparent_bytes": 37430512
+        },
+        {
+          "target": "source_association",
+          "apparent_bytes": 38191984
+        },
+        {
+          "target": "startup_state",
+          "apparent_bytes": 37729232
+        },
+        {
+          "target": "takeover",
+          "apparent_bytes": 38117816
+        }
+      ]
+    },
+    "largest_unique_files": [
+      {
+        "relative_path": "debug/deps/libskillyard_lib.a",
+        "apparent_bytes": 478947312
+      },
+      {
+        "relative_path": "debug/deps/libskillyard_lib.rlib",
+        "apparent_bytes": 188575872
+      },
+      {
+        "relative_path": "debug/incremental/skillyard_lib-*/dep-graph.bin",
+        "apparent_bytes": 114566221
+      },
+      {
+        "relative_path": "debug/deps/libobjc2_foundation-*.rlib",
+        "apparent_bytes": 85655552
+      },
+      {
+        "relative_path": "debug/incremental/skillyard_lib-*/query-cache.bin",
+        "apparent_bytes": 71818343
+      },
+      {
+        "relative_path": "debug/skillyard",
+        "apparent_bytes": 62803704
+      }
+    ]
+  },
+  "warm_targeted": {
+    "command": "CARGO_TARGET_DIR=$A0_WARM_TARGET CARGO_NET_OFFLINE=true cargo test --test takeover --locked multi_member_bundle_recovers_atomically_across_the_commit_point -- --exact",
+    "target": "takeover",
+    "original_name": "multi_member_bundle_recovers_atomically_across_the_commit_point",
+    "future_name": "takeover::multi_member_bundle_recovers_atomically_across_the_commit_point",
+    "warmup_build_completed_before_samples": true,
+    "samples_real_seconds": [
+      1.91,
+      1.9,
+      1.94,
+      1.88,
+      1.95
+    ],
+    "median_real_seconds": 1.91,
+    "successful_samples": 5
+  },
+  "production_app": {
+    "optimization_target": false,
+    "constructed_in_this_run": true,
+    "command": "CARGO_NET_OFFLINE=true pnpm tauri build --bundles app",
+    "exit_code": 0,
+    "duration_seconds": {
+      "real": 26.42,
+      "user": 119.87,
+      "system": 3.24
+    },
+    "path": "$REPO/target/release/bundle/macos/SkillYard.app",
+    "files": 4,
+    "apparent_bytes": 25083835,
+    "allocated_bytes": 25096192,
+    "architecture": "arm64",
+    "version": "1.1.0",
+    "minimum_macos": "14.0",
+    "signing": {
+      "valid": true,
+      "kind": "adhoc",
+      "identifier": "com.reyyang.skillyard"
+    },
+    "generated_ignored_paths": [
+      "$REPO/dist",
+      "$REPO/target/release"
+    ],
+    "git_source_diff_added_by_build": false
+  },
+  "developer_target_noninterference": {
+    "no_clean_or_delete_command_executed": true,
+    "isolated_test_build_wrote_only_to_a_new_external_target": true,
+    "production_build_intentionally_updated_derived_release_artifacts": true,
+    "byte_equality_claimed": false,
+    "pre_measurement_rounded_observation": {
+      "target": "about 12 GiB",
+      "debug": "about 11 GiB",
+      "release": "about 1.3 GiB",
+      "debug_deps": "about 7.2 GiB",
+      "debug_incremental": "about 3.3 GiB"
+    },
+    "post_production_build_du_kib": {
+      "target": 12944188,
+      "debug": 11571164,
+      "release": 1372612,
+      "debug_deps": 7503464,
+      "debug_incremental": 3425532
+    },
+    "git_source_status_before_and_after": [
+      " M docs/README.md",
+      "?? docs/design/0002-rust-engineering-spec.md"
+    ]
+  },
+  "comparison_contract": {
+    "required_equal_conditions": [
+      "rustc and cargo toolchain",
+      "host architecture and operating system family",
+      "locked dependency graph",
+      "enabled Cargo features",
+      "offline mode",
+      "fresh initially empty target",
+      "the clean no-run command",
+      "the warm targeted selector and sample-count policy"
+    ],
+    "source_identity_must_be_recorded_for_every_run": true,
+    "test_equivalence": "Compare every A0 original target/name to the declared future target/name; separately report additive engineering guards.",
+    "artifact_reduction_formula": "(A0 allocated bytes - candidate allocated bytes) / A0 allocated bytes",
+    "required_artifact_reduction": 0.3,
+    "warm_regression_formula": "(candidate median - A0 median) / A0 median",
+    "maximum_warm_regression": 0.2,
+    "production_app_is_not_an_optimization_target": true
+  },
+  "raw_evidence": {
+    "retained_target_tokens": [
+      "$A0_TARGET",
+      "$A0_WARM_TARGET"
+    ],
+    "deletion_deferred": true,
+    "note": "The targets remain outside the repository. No cleanup is part of A0."
+  }
+}

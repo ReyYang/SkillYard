@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-rust-engineering-a1-aggregation-v1",
+  "ticket": "A1.5 / Issue #74",
+  "a0_baseline": {
+    "source_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "baseline_sha256": "500f8646b4be20b90909d3c8e4e0a6a031f182692513e39b16b4e2b647fe765b",
+    "tests_sha256": "c2bed4c81b5eaa7ee1d3f981beadaf8b1fd3f6244e820b2ed6c56e745d7575ba",
+    "ordinary_identity_contract": "Every non-ignored A0 test whose future_target is all must be present under its A0 future_name.",
+    "mac_contract": "codex_mount_contract remains an independent ignored integration target."
+  },
+  "source_identity": {
+    "git_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "test_topology_file_count": 26,
+    "test_topology_content_sha256": "682cff9e704ee5ba50960bbf2d312868acf9c363c68daab05ebe1dc9ec75a2db",
+    "test_topology_hash_method": "SHA-256 of newline-terminated rows <file_sha256><two spaces><repo-relative_path>; inputs are top-level src-tauri/tests/*.rs and src-tauri/tests/all/*.rs, sorted lexicographically by repo-relative path before rows are emitted."
+  },
+  "environment": {
+    "rustc": {
+      "version": "1.94.1",
+      "commit_hash": "e408947bfd200af42db322daf0fadfe7e26d3bd1",
+      "commit_date": "2026-03-25",
+      "host": "aarch64-apple-darwin",
+      "llvm_version": "21.1.8"
+    },
+    "cargo_version": "1.94.1 (29ea6fb6a 2026-03-24)",
+    "operating_system": "Darwin 25.5.0 arm64",
+    "features": [],
+    "offline": true,
+    "locked": true
+  },
+  "aggregation_migrations": {
+    "startup_state": {
+      "from": "src-tauri/tests/startup_state.rs",
+      "to": "src-tauri/tests/all/startup_state.rs",
+      "module_declaration": "#[path = \"all/startup_state.rs\"] mod startup_state;",
+      "compile_red": {
+        "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all --no-run",
+        "exit_code": 101,
+        "error": "couldn't read src-tauri/tests/all/../migrations/0001_initial.sql: No such file or directory (os error 2)"
+      },
+      "minimal_green_change": "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/migrations/0001_initial.sql\"))",
+      "preserved": {
+        "cfg_unix_occurrences": 10,
+        "usr_bin_git_fixture_occurrences": 4,
+        "tests": 40
+      },
+      "green": {
+        "targeted_command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all startup_state::version_one_database_migrates_without_losing_inventory -- --exact",
+        "targeted_passed": 1,
+        "module_command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all startup_state::",
+        "module_passed": 40,
+        "module_ignored": 0
+      }
+    },
+    "removal": {
+      "from": "src-tauri/tests/removal.rs",
+      "to": "src-tauri/tests/all/removal.rs",
+      "module_declaration": "#[path = \"all/removal.rs\"] mod removal;",
+      "migration": "byte-identical pure move",
+      "sha256_before_and_after": "5d3e74ae0f90dd0a4a84d0dc587a0de62228f61849beda6c220ba5131606a869",
+      "old_entry_removed": true,
+      "green": {
+        "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all removal::",
+        "passed": 19,
+        "ignored": 0
+      }
+    }
+  },
+  "test_inventory": {
+    "collection": {
+      "ordinary_list_command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked -- --list",
+      "ignored_list_command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked -- --list --ignored",
+      "metadata_command": "cd $REPO && CARGO_NET_OFFLINE=true cargo metadata --no-deps --format-version 1"
+    },
+    "counts": {
+      "all_tests": 442,
+      "library_unit_tests": 141,
+      "integration_tests": 301,
+      "ignored_tests": 1,
+      "all_target_tests": 300,
+      "all_target_ignored": 0,
+      "codex_mount_contract_tests": 1,
+      "codex_mount_contract_ignored": 1
+    },
+    "cargo_metadata_integration_targets": [
+      "all",
+      "codex_mount_contract"
+    ],
+    "cargo_metadata_integration_target_count": 2
+  },
+  "mapping": {
+    "a0_ordinary_identities": {
+      "selection": "A0 tests where future_target is all and ignored is false; includes integration_behavior and hard_exit_worker identities.",
+      "expected": 300,
+      "observed": 300,
+      "missing": [],
+      "unexpected": []
+    },
+    "a1_5_identities": {
+      "original_targets": [
+        "startup_state",
+        "removal"
+      ],
+      "expected": 59,
+      "observed": 59,
+      "missing": [],
+      "unexpected": []
+    },
+    "class_counts": {
+      "integration_behavior": 294,
+      "hard_exit_worker": 6
+    }
+  },
+  "hard_exit_workers": {
+    "parent_protocol": "support::run_hard_exit_child resolves one fully-qualified worker name from the current binary list, invokes it with --exact and --nocapture, then asserts the persisted marker and exact exit status.",
+    "worker_protocol": "support::mark_hard_exit_worker_entered validates the leaf against the fully-qualified name and persists the marker before worker business environment reads and Application/failpoint execution.",
+    "workers": [
+      {
+        "fqn": "folder_install::hard_exit_install_worker",
+        "expected_exit_code": 91,
+        "in_all": true
+      },
+      {
+        "fqn": "github_install::github_hard_exit_worker",
+        "expected_exit_code": 91,
+        "in_all": true
+      },
+      {
+        "fqn": "bundle_update_batch::bundle_update_batch_hard_exit_worker",
+        "expected_exit_code": 91,
+        "in_all": true
+      },
+      {
+        "fqn": "codex_mount::hard_exit_mount_worker",
+        "expected_exit_code": 92,
+        "in_all": true
+      },
+      {
+        "fqn": "bundle_batch_mount::hard_exit_batch_mount_worker",
+        "expected_exit_code": 92,
+        "in_all": true
+      },
+      {
+        "fqn": "takeover::hard_exit_takeover_worker",
+        "expected_exit_code": 93,
+        "in_all": true
+      }
+    ],
+    "parent_recovery_regression": {
+      "aggregation_command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all",
+      "result": "300 passed; 0 failed; 0 ignored",
+      "duration_seconds": 169.48
+    }
+  },
+  "verification": {
+    "full_workspace": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked",
+      "exit_code": 0,
+      "library": "141 passed; 0 failed; 0 ignored",
+      "all": "300 passed; 0 failed; 0 ignored",
+      "all_duration_seconds": 171.71,
+      "codex_mount_contract": "0 passed; 0 failed; 1 ignored"
+    },
+    "format": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    "clippy": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "exit_code": 0
+    },
+    "diff_check": {
+      "command": "cd $REPO && git diff --check",
+      "exit_code": 0
+    }
+  },
+  "warm_targeted": {
+    "selector": "takeover::multi_member_bundle_recovers_atomically_across_the_commit_point",
+    "target_token": "$A1_WARM_TARGET",
+    "target_initially_empty": true,
+    "warmup": {
+      "timed": false,
+      "command": "cd $REPO && env CARGO_TARGET_DIR=$A1_WARM_TARGET CARGO_NET_OFFLINE=true cargo test --test all --locked takeover::multi_member_bundle_recovers_atomically_across_the_commit_point -- --exact",
+      "result": "1 passed; 0 failed; 0 ignored",
+      "test_duration_seconds": 1.83
+    },
+    "measurement_command": "cd $REPO && /usr/bin/time -p env CARGO_TARGET_DIR=$A1_WARM_TARGET CARGO_NET_OFFLINE=true cargo test --test all --locked takeover::multi_member_bundle_recovers_atomically_across_the_commit_point -- --exact",
+    "samples_real_seconds": [
+      5.21,
+      1.99,
+      1.91,
+      1.92,
+      2.02
+    ],
+    "sample_observations": [
+      {
+        "sample_index": 1,
+        "result": "1 passed; 0 failed; 0 ignored",
+        "cargo_recompiled_package": "skillyard",
+        "cargo_build_elapsed_seconds": 2.46
+      },
+      {
+        "sample_index": 2,
+        "result": "1 passed; 0 failed; 0 ignored",
+        "cargo_build_elapsed_seconds": 0.13
+      },
+      {
+        "sample_index": 3,
+        "result": "1 passed; 0 failed; 0 ignored",
+        "cargo_build_elapsed_seconds": 0.14
+      },
+      {
+        "sample_index": 4,
+        "result": "1 passed; 0 failed; 0 ignored",
+        "cargo_build_elapsed_seconds": 0.13
+      },
+      {
+        "sample_index": 5,
+        "result": "1 passed; 0 failed; 0 ignored",
+        "cargo_build_elapsed_seconds": 0.15
+      }
+    ],
+    "baseline_median_seconds": 1.91,
+    "median_seconds": 1.99,
+    "regression_fraction": 0.0418848168,
+    "regression_percent": 4.18848168,
+    "threshold_fraction": 0.2,
+    "threshold_median_max_seconds": 2.292,
+    "pass": true,
+    "all_samples_retained": true,
+    "single_binary_relink_proven_stable_bottleneck": false
+  },
+  "developer_target_noninterference": {
+    "warm_measurement_used_external_target_only": true,
+    "developer_target_cleaned": false,
+    "developer_target_deleted": false,
+    "external_target_retained": true,
+    "external_target_final_size_kib": 3018420,
+    "no_clean_or_delete_command_executed": true
+  },
+  "privacy": {
+    "machine_absolute_paths_present": false,
+    "machine_paths_tokenized_as": [
+      "$REPO",
+      "$A1_WARM_TARGET"
+    ],
+    "credentials_or_provider_payloads_present": false
+  },
+  "scope": {
+    "a0_artifacts_modified": false,
+    "production_rust_modified": false,
+    "cargo_profile_or_manifest_modified": false,
+    "ci_modified": false,
+    "migration_sql_or_runner_modified": false,
+    "contract_target_modified": false,
+    "commit_push_or_issue_operation_performed": false
+  }
+}

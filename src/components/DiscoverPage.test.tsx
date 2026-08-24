@@ -15,6 +15,7 @@ type DiscoverWebSearchOutcome = Extract<
 describe("DiscoverPage", () => {
   it("输入只筛选本机与已保存 Source 目录，并始终保留三个结果分区", async () => {
     const user = userEvent.setup();
+    const onSearchWeb = vi.fn();
     const onOpenSourceManagement = vi.fn();
     render(
       <I18nProvider language="zhCn">
@@ -24,7 +25,7 @@ describe("DiscoverPage", () => {
           isSearchingWeb={false}
           webSearchError={null}
           onBack={vi.fn()}
-          onSearchWeb={vi.fn()}
+          onSearchWeb={onSearchWeb}
           onOpenExternalUrl={vi.fn()}
           onPreviewInstall={vi.fn()}
           onOpenSourceManagement={onOpenSourceManagement}
@@ -49,6 +50,8 @@ describe("DiscoverPage", () => {
     expect(
       screen.queryByRole("article", { name: "research" }),
     ).not.toBeInTheDocument();
+    expect(onSearchWeb).not.toHaveBeenCalled();
+    expect(onOpenSourceManagement).not.toHaveBeenCalled();
 
     await user.clear(input);
     await user.type(input, "公开资料");
@@ -71,6 +74,77 @@ describe("DiscoverPage", () => {
       "source-unloaded",
       null,
     );
+  });
+
+  it("把所有本机管理归属作为只读结果呈现，并清楚显示本地空结果", async () => {
+    const user = userEvent.setup();
+    const onSearchWeb = vi.fn();
+    const outcome = discoverOutcome();
+    outcome.localSkills = [
+      {
+        ...outcome.localSkills[0],
+        inventoryId: "inventory-managed",
+        skillName: "managed",
+        description: "本机只读管理测试",
+        managementKind: "skillYardManaged",
+      },
+      {
+        ...outcome.localSkills[0],
+        inventoryId: "inventory-takeover",
+        skillName: "takeover",
+        description: "本机只读管理测试",
+        managementKind: "takeoverCandidate",
+      },
+      {
+        ...outcome.localSkills[0],
+        inventoryId: "inventory-agent",
+        skillName: "agent-owned",
+        description: "本机只读管理测试",
+        managementKind: "agentManaged",
+      },
+      {
+        ...outcome.localSkills[0],
+        inventoryId: "inventory-project",
+        skillName: "project-owned",
+        description: "本机只读管理测试",
+        managementKind: "projectManaged",
+      },
+    ];
+    outcome.sources = [outcome.sources[0]];
+
+    render(
+      <I18nProvider language="zhCn">
+        <DiscoverPage
+          outcome={outcome}
+          webSearch={null}
+          isSearchingWeb={false}
+          webSearchError={null}
+          onBack={vi.fn()}
+          onSearchWeb={onSearchWeb}
+          onOpenExternalUrl={vi.fn()}
+          onPreviewInstall={vi.fn()}
+          onOpenSourceManagement={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    const input = screen.getByRole("searchbox", { name: "搜索 Skill" });
+    await user.type(input, "只读管理");
+    const localRegion = screen.getByRole("region", { name: "本机已有" });
+    expect(localRegion).toHaveTextContent("由 SkillYard 管理");
+    expect(localRegion).toHaveTextContent("待接管");
+    expect(localRegion).toHaveTextContent("其他管理方");
+    expect(localRegion).toHaveTextContent("项目仓库管理");
+    expect(onSearchWeb).not.toHaveBeenCalled();
+
+    await user.clear(input);
+    await user.type(input, "没有匹配");
+    expect(screen.getByText("本机没有匹配的 Skill")).toBeInTheDocument();
+    expect(
+      screen.getByText("已加载的 Source 中没有匹配成员"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("尚未提交全网搜索")).toBeInTheDocument();
+    expect(onSearchWeb).not.toHaveBeenCalled();
   });
 
   it("主动提交始终搜索全网，并把同一 canonical Source 的本机、Source 与线上事实合并为一张卡片", async () => {

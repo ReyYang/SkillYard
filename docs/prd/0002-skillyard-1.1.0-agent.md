@@ -310,6 +310,7 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
   - `Appearance Theme` 作用于整个应用的背景、颜色、字体、边框、阴影、控件、弹窗、导航、图标和动效；
   - `Library View` 只负责 Bundle Library 的浏览构图。
 - `Ledger` 是没有已保存偏好时的默认 Theme Preset。
+- 预发布开发版本若已保存 `archive` 主题偏好，升级时一次性归一化为 `Ledger`；产品不保留 `Archive` 主题入口或运行时兼容分支，这不影响 ZIP / `.skill` 归档安装能力。
 - `Layers` 使用层叠卡片和当前 Bundle 构图；`Ledger` 使用 Bundle 列表和详情面板构图。
 - 两个 Library renderer 消费同一份领域数据、当前路由、选中 Bundle、搜索、筛选、排序和操作入口，不能各自保存 Bundle 状态。
 - 切换 Theme Preset 时保留当前路由、选中 Bundle、搜索、筛选、排序、已打开 Agent Session，以及尚未确认的表单和操作状态。
@@ -361,6 +362,7 @@ SkillYard 同时提供用户主动触发的“AI 整理”，为 Skill 生成固
 - 验证分类筛选仍以 Bundle 为主清单，并正确处理单成员与多成员 Bundle。
 - 验证两套 Theme Preset 共用相同领域状态和生命周期入口。
 - 验证切换主题保留路由、当前 Bundle、搜索、筛选、Agent Session 和未完成表单。
+- 验证 schema 30 开发数据库中的 `archive` 偏好经正式 application 启动升级为 `Ledger`，持久值归一化且再次重启后稳定。
 - 验证语言切换立即更新 UI、持久化设置、改变后续 AI 输出语言且不修改 Skill 文件。
 
 ### Provider 合同、typed IPC 与 UI

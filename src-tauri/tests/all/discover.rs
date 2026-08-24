@@ -1,5 +1,6 @@
 use std::{
     fs,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -71,6 +72,7 @@ fn discover_reads_local_inventory_and_saved_source_catalog_without_network_or_wr
         )
         .expect("应保存未安装 Source Member fixture");
     drop(connection);
+    let before_database = database_snapshot(&data_root);
 
     let UiOutcome::Discover {
         local_skills,
@@ -107,6 +109,22 @@ fn discover_reads_local_inventory_and_saved_source_catalog_without_network_or_wr
         0,
         "打开与读取发现页不能访问 Source 网络"
     );
+    assert_eq!(
+        database_snapshot(&data_root),
+        before_database,
+        "打开 Discover 只能读取本机快照，不能改写 Source、Inventory 或生命周期领域状态"
+    );
+}
+
+fn database_snapshot(data_root: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+    [
+        "skillyard.sqlite3",
+        "skillyard.sqlite3-wal",
+        "skillyard.sqlite3-shm",
+    ]
+    .into_iter()
+    .map(|name| (name.to_owned(), fs::read(data_root.join(name)).ok()))
+    .collect()
 }
 
 #[derive(Default)]

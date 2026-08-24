@@ -3,10 +3,10 @@ use std::{
     env, fs,
     io::{self, Cursor, Read, Write},
     path::Path,
-    process::Command,
     sync::{Arc, Mutex},
 };
 
+use crate::support::{mark_hard_exit_worker_entered, run_hard_exit_child};
 use rusqlite::Connection;
 use skillyard_lib::{
     ApplicationPaths, InstallMode, LifecycleFailpoint, ManagementKind, MountScope, PlatformInfo,
@@ -1413,6 +1413,7 @@ fn github_hard_exit_worker() {
     if env::var_os(HARD_EXIT_WORKER).is_none() {
         return;
     }
+    mark_hard_exit_worker_entered("github_hard_exit_worker");
     let data_root = env::var_os(HARD_EXIT_DATA_ROOT).expect("子进程必须收到数据目录");
     let home = env::var_os(HARD_EXIT_HOME).expect("子进程必须收到 home");
     let plan_id = env::var(HARD_EXIT_PLAN_ID).expect("子进程必须收到 Plan ID");
@@ -1607,17 +1608,15 @@ fn prepare_github_update_hard_exit(base: &Path) -> (PreparedHardExit, String, St
 }
 
 fn run_github_hard_exit_worker(prepared: &PreparedHardExit, point: &str) {
-    let status = Command::new(env::current_exe().expect("应找到当前测试二进制"))
-        .args(["--exact", "github_hard_exit_worker", "--nocapture"])
-        .env(HARD_EXIT_WORKER, "1")
-        .env(HARD_EXIT_DATA_ROOT, &prepared.data_root)
-        .env(HARD_EXIT_HOME, &prepared.home)
-        .env(HARD_EXIT_PLAN_ID, &prepared.plan_id)
-        .env(HARD_EXIT_CANDIDATE_ID, prepared.candidate_ids.join(","))
-        .env(HARD_EXIT_POINT, point)
-        .status()
-        .expect("应启动 hard-exit 子进程");
-    assert_eq!(status.code(), Some(91), "子进程必须在 failpoint 直接退出");
+    run_hard_exit_child("github_hard_exit_worker", 91, |child| {
+        child
+            .env(HARD_EXIT_WORKER, "1")
+            .env(HARD_EXIT_DATA_ROOT, &prepared.data_root)
+            .env(HARD_EXIT_HOME, &prepared.home)
+            .env(HARD_EXIT_PLAN_ID, &prepared.plan_id)
+            .env(HARD_EXIT_CANDIDATE_ID, prepared.candidate_ids.join(","))
+            .env(HARD_EXIT_POINT, point);
+    });
 }
 
 fn reopen_after_hard_exit(prepared: &PreparedHardExit) -> UiOutcome {

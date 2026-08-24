@@ -98,17 +98,12 @@ Download `SkillYard-1.0.0-macos-aarch64.zip`, unzip it, and move `SkillYard.app`
 
 ## Build from source
 
-Requires an Apple Silicon Mac (macOS 14+), Xcode Command Line Tools, stable Rust, Node.js 20.19+ or 22.12+, and Corepack. The repository pins `pnpm@10.33.2`.
+Requires an Apple Silicon Mac (macOS 14+), Xcode Command Line Tools, stable Rust, Node.js 20.19+ or 22.12+, Corepack, and `just 1.58.0`. The repository pins `pnpm@10.33.2`.
+
+After preparing the repository dependencies, run the canonical stage recipe `just stage` from the repository root. It performs offline automation, static checks, and the production App build:
 
 ```bash
-xcode-select --install
-corepack enable
-pnpm install --frozen-lockfile
-pnpm typecheck && pnpm test
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-pnpm tauri build --bundles app
+just stage
 ```
 
 The application is generated at `target/release/bundle/macos/SkillYard.app`. Local builds keep the ad-hoc signing configuration and are not notarized by Apple.

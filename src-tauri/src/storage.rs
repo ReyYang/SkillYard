@@ -4,6 +4,7 @@ use std::{
     io::ErrorKind,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use rusqlite::{
@@ -25,6 +26,10 @@ use crate::domain::{
 };
 use crate::github_source::parse_github_source;
 use crate::installation_chain::takeover_group_evidence;
+
+// rusqlite 0.39 的新连接默认仅等待 5 秒，且该默认值可能变化；migration 增长或 I/O 压力可能超过这个窗口。
+// 并发启动应在进入 canonical migration runner 前有界等待当前 writer。
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
@@ -105,6 +110,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0029_skill_ai_explanations.sql"),
     ),
     (30, include_str!("../migrations/0030_theme_preset.sql")),
+    (
+        31,
+        include_str!("../migrations/0031_normalize_archive_theme.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
@@ -1287,6 +1296,9 @@ impl Storage {
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(StorageError::OpenDatabase)?;
+        connection
+            .busy_timeout(SQLITE_BUSY_TIMEOUT)
+            .map_err(StorageError::OpenDatabase)?;
         let mut storage = Self {
             connection,
             data_root: data_root.to_owned(),
@@ -14682,7 +14694,13 @@ mod tests {
             .expect("应查询 migration")
             .collect::<Result<Vec<_>, _>>()
             .expect("应收集 migration");
-        assert_eq!(versions, (1..=30).collect::<Vec<_>>());
+        assert_eq!(
+            versions,
+            MIGRATIONS
+                .iter()
+                .map(|(version, _)| *version)
+                .collect::<Vec<_>>()
+        );
         for table in [
             "projects",
             "mount_plans",

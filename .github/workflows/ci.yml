@@ -24,6 +24,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+
+      - name: Confirm just version
+        run: test "$(just --version)" = "just 1.58.0"
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -38,22 +46,31 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Test frontend
-        run: pnpm test
+      - name: Run frontend verification
+        run: just frontend
 
   native:
     name: Rust and production build
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - name: Confirm Apple Silicon runner
         run: test "$(uname -m)" = "arm64"
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: true
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+
+      - name: Confirm just version
+        run: test "$(just --version)" = "just 1.58.0"
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -75,18 +92,13 @@ jobs:
           rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
           rustup default 1.94.1
 
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
+      # 只在共享 recipe 前准备依赖网络；stage 内的 Cargo 验证保持 locked + offline。
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
 
-      - name: Lint Rust
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Test Rust
-        run: cargo test --workspace --locked
-
-      # 这里只验证生产构建，不上传普通 CI 产物。
-      - name: Build Tauri application
-        run: pnpm tauri build --bundles app
+      # 这里只验证完整 stage，不上传普通 CI 产物。
+      - name: Run native stage
+        run: just stage
 
   secrets:
     name: Secret scan

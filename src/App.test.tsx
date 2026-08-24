@@ -644,10 +644,11 @@ describe("本机清单", () => {
     ).toBeInTheDocument();
   });
 
-  it("结束会话后取消请求并忽略仍在返回的旧回答", async () => {
+  it("Agent 流式会话跨页面、焦点与抽屉外点击保留，只有结束会话才取消", async () => {
     const user = userEvent.setup();
     let finishReply: (() => void) | undefined;
     let emitEvent: ((event: AgentStreamEvent) => void) | undefined;
+    let activeRequestId: string | undefined;
     const client = createClient(inventoryOutcome([createManagedEntry()]));
     vi.mocked(client.getPreferences).mockResolvedValue({
       language: "zhCn",
@@ -662,8 +663,9 @@ describe("本机清单", () => {
       },
     });
     vi.mocked(client.askAgent).mockImplementation(
-      (_requestId, _context, _messages, onEvent) =>
+      (requestId, _context, _messages, onEvent) =>
         new Promise((resolve) => {
+          activeRequestId = requestId;
           emitEvent = onEvent;
           finishReply = () => resolve();
         }),
@@ -678,8 +680,52 @@ describe("本机清单", () => {
       "等待中的问题",
     );
     await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await act(async () => {
+      emitEvent?.({ type: "delta", text: "已看到的回答" });
+    });
+    expect(await screen.findByText("已看到的回答")).toBeInTheDocument();
+    expect(document.querySelector(".agent-messages")).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    expect(
+      screen.getByRole("heading", { name: "设置", level: 1 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "SkillYard 助手" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("已看到的回答")).toBeInTheDocument();
+    expect(client.cancelAgent).not.toHaveBeenCalled();
+
+    act(() => {
+      window.dispatchEvent(new FocusEvent("blur"));
+      window.dispatchEvent(new FocusEvent("focus"));
+    });
+    await user.click(
+      screen.getByRole("heading", { name: "设置", level: 1 }),
+    );
+    await act(async () => {
+      emitEvent?.({ type: "delta", text: "，仍在继续" });
+    });
+
+    expect(screen.getByText("已看到的回答，仍在继续")).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "SkillYard 助手" }),
+    ).toBeInTheDocument();
+    expect(document.querySelector(".agent-messages")).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    expect(client.askAgent).toHaveBeenCalledTimes(1);
+    expect(client.cancelAgent).not.toHaveBeenCalled();
+
     await user.click(screen.getByRole("button", { name: "结束会话" }));
-    expect(client.cancelAgent).toHaveBeenCalledWith(expect.any(String));
+    expect(activeRequestId).toBeDefined();
+    expect(client.cancelAgent).toHaveBeenCalledWith(activeRequestId);
+    expect(screen.queryByText("已看到的回答，仍在继续")).not.toBeInTheDocument();
     await act(async () => {
       emitEvent?.({
         type: "delta",
@@ -1387,10 +1433,13 @@ describe("本机清单", () => {
     expect(screen.queryByRole("option", { name: "Simplified Chinese" })).toBeNull();
   });
 
-  it("设置切换 Layers 时保留当前 Bundle、搜索与 Agent Session", async () => {
+  it("主题保存期间保留设置路由、Library 视图、表单草稿与进行中操作", async () => {
     const user = userEvent.setup();
     let finishThemeSave:
       | ((preferences: Awaited<ReturnType<SkillYardClient["setThemePreset"]>>) => void)
+      | undefined;
+    let finishRefresh:
+      | ((outcome: Extract<UiOutcome, { type: "inventory" }>) => void)
       | undefined;
     const client = createClient(
       inventoryOutcome([
@@ -1400,6 +1449,15 @@ describe("本机清单", () => {
           bundleId: "layers-bundle-alpha",
           bundleDisplayName: "Layers Alpha",
           skillName: "layers-alpha",
+          aiExplanation: {
+            category: "developmentEngineering",
+            summary: "开发说明。",
+            useCases: ["实现功能"],
+            instructions: "提供工程上下文。",
+            language: "zhCn",
+            contentFingerprint: "layers-alpha-fingerprint",
+            stale: false,
+          },
         }),
         createManagedEntry({
           id: "managed:layers-beta",
@@ -1407,6 +1465,15 @@ describe("本机清单", () => {
           bundleId: "layers-bundle-beta",
           bundleDisplayName: "Layers Beta",
           skillName: "layers-beta",
+          aiExplanation: {
+            category: "writingCommunication",
+            summary: "写作说明。",
+            useCases: ["起草文档"],
+            instructions: "提供写作目标。",
+            language: "zhCn",
+            contentFingerprint: "layers-beta-fingerprint",
+            stale: false,
+          },
         }),
       ]),
     );
@@ -1428,6 +1495,12 @@ describe("本机清单", () => {
           finishThemeSave = resolve;
         }),
     );
+    vi.mocked(client.refreshLocalInventory).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishRefresh = resolve;
+        }),
+    );
     mockAgentStream(client, {
       reply: "Layers 中仍保留。",
       localMatchFound: true,
@@ -1447,11 +1520,20 @@ describe("本机清单", () => {
       { selector: "summary" },
     );
     await user.click(libraryControls);
+    const libraryFilterPanel = libraryControls.closest(
+      "details",
+    ) as HTMLElement;
+    await user.click(
+      within(libraryFilterPanel).getByRole("button", {
+        name: "由 SkillYard 管理",
+      }),
+    );
     await user.selectOptions(
-      within(libraryControls.closest("details") as HTMLElement).getByRole(
-        "combobox",
-        { name: "排序" },
-      ),
+      within(libraryFilterPanel).getByRole("combobox", { name: "分类" }),
+      "writingCommunication",
+    );
+    await user.selectOptions(
+      within(libraryFilterPanel).getByRole("combobox", { name: "排序" }),
       "nameAsc",
     );
     await user.click(libraryControls);
@@ -1471,15 +1553,36 @@ describe("本机清单", () => {
 
     await user.click(screen.getByRole("button", { name: "设置" }));
     expect(
+      screen.getByRole("heading", { name: "设置", level: 1 }),
+    ).toBeInTheDocument();
+    expect(
       within(screen.getByRole("group", { name: "主题" }))
         .getAllByRole("radio")
         .map((radio) => radio.getAttribute("aria-label")),
     ).toEqual(["Layers", "Ledger"]);
     expect(screen.queryByRole("radio", { name: "Archive" })).toBeNull();
+    await user.click(screen.getByLabelText(/管理 Agent Provider/));
+    const apiKeyInput = screen.getByLabelText("API Key");
+    await user.type(apiKeyInput, "sk-test-draft");
+    await user.click(screen.getByRole("button", { name: "刷新本机" }));
+    expect(
+      screen.getByRole("button", { name: "正在刷新本机…" }),
+    ).toBeDisabled();
     const layersRadio = screen.getByRole("radio", { name: "Layers" });
     await user.click(layersRadio);
 
     expect(client.setThemePreset).toHaveBeenCalledWith("layers");
+    expect(
+      screen.getByRole("heading", { name: "设置", level: 1 }),
+    ).toBeInTheDocument();
+    expect(apiKeyInput).toHaveValue("sk-test-draft");
+    expect(
+      screen.getByRole("button", { name: "正在刷新本机…" }),
+    ).toBeDisabled();
+    expect(document.querySelector(".application-theme")).toHaveAttribute(
+      "data-theme-preset",
+      "ledger",
+    );
     document.body.tabIndex = -1;
     document.body.focus();
     expect(layersRadio).not.toHaveFocus();
@@ -1495,6 +1598,13 @@ describe("本机清单", () => {
       "data-theme-preset",
       "layers",
     );
+    expect(
+      screen.getByRole("heading", { name: "设置", level: 1 }),
+    ).toBeInTheDocument();
+    expect(apiKeyInput).toHaveValue("sk-test-draft");
+    expect(
+      screen.getByRole("button", { name: "正在刷新本机…" }),
+    ).toBeDisabled();
     expect(layersRadio).toHaveFocus();
     expect(screen.getByText("Layers 中仍保留。")).toBeInTheDocument();
 
@@ -1506,9 +1616,12 @@ describe("本机清单", () => {
       screen.getByRole("searchbox", { name: "搜索 Bundle 或 Skill" }),
     ).toHaveValue("beta");
     expect(
-      screen.getByLabelText("筛选与排序：全部 Bundle · 名称 A–Z", {
-        selector: "summary",
-      }),
+      screen.getByLabelText(
+        "筛选与排序：由 SkillYard 管理 · 写作与沟通 · 名称 A–Z",
+        {
+          selector: "summary",
+        },
+      ),
     ).toBeInTheDocument();
     expect(
       within(layers).getByRole("heading", { name: "Layers Beta" }),
@@ -1516,6 +1629,29 @@ describe("本机清单", () => {
     expect(
       within(layers).queryByRole("button", { name: "Layers Beta" }),
     ).toBeNull();
+
+    await act(async () => {
+      finishRefresh?.(
+        inventoryOutcome([
+          createManagedEntry({
+            id: "managed:layers-beta",
+            memberId: "layers-beta",
+            bundleId: "layers-bundle-beta",
+            bundleDisplayName: "Layers Beta",
+            skillName: "layers-beta",
+            aiExplanation: {
+              category: "writingCommunication",
+              summary: "写作说明。",
+              useCases: ["起草文档"],
+              instructions: "提供写作目标。",
+              language: "zhCn",
+              contentFingerprint: "layers-beta-fingerprint",
+              stale: false,
+            },
+          }),
+        ]),
+      );
+    });
   });
 
   it("从持久化偏好恢复 Layers，并在大量长名称 Bundle 中用键盘切换纸张", async () => {

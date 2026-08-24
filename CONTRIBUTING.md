@@ -14,7 +14,7 @@
 
 ## 本地开发
 
-支持的开发环境是 macOS 14+ Apple Silicon。需要 Xcode Command Line Tools、Rust stable、Node.js 20.19+ 或 22.12+、Corepack，以及仓库指定的 `pnpm@10.33.2`。
+支持的开发环境是 macOS 14+ Apple Silicon。需要 Xcode Command Line Tools、Rust stable、Node.js 20.19+ 或 22.12+、Corepack、`just 1.58.0`，以及仓库指定的 `pnpm@10.33.2`。
 
 ```bash
 xcode-select --install
@@ -37,24 +37,12 @@ pnpm tauri dev
 - 不修改 Codex 官方插件、Host 内置 Skill 或项目仓库维护内容的只读边界。
 - 不引入遥测，不执行外部安装命令，也不执行 Skill 携带的脚本或二进制文件。
 
-## 提交前检查
+## 验证边界
 
-根据修改范围运行相关测试，并在准备 Pull Request 前运行完整检查：
-
-```bash
-pnpm typecheck
-pnpm test
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-pnpm build
-```
-
-若修改影响 macOS 打包或运行行为，再执行：
-
-```bash
-pnpm tauri build --bundles app
-```
+- 修改一个 Rust 行为时，用 `just rust-test <fully-qualified-name>` 运行 canonical integration target 中唯一匹配的测试；短名、零匹配和重复匹配都会失败。
+- 普通切片完成后运行 `just slice`，覆盖格式、frontend、工程 guards、全部离线 Rust 测试、Clippy、wire 和 migration 当前检查，但不构建 App。
+- 阶段完成或修改影响打包时运行 `just stage`；它在 slice 通过后构建 production App。
+- `just release` 只用于发布准备交接。它先完成 stage，再以 exit 3 明确要求 tart、MAC-CONTRACT、人工产品路径和另行授权的真实 Provider 验收；它不会自动调用 Provider 或发布。
 
 ## 提交与 Pull Request
 

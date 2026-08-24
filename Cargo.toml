@@ -1,3 +1,9 @@
 [workspace]
 members = ["src-tauri"]
 resolver = "2"
+
+[profile.dev]
+debug = "limited"
+
+[profile.test]
+debug = "limited"

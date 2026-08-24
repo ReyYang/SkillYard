@@ -4,9 +4,9 @@ use std::{
     io::ErrorKind,
     os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
-    process::Command,
 };
 
+use crate::support::{mark_hard_exit_worker_entered, run_hard_exit_child};
 use rusqlite::{Connection, params};
 use skillyard_lib::{
     ApplicationPaths, BatchMountDisposition, BatchMountPlan, BatchMountRequest, LifecycleFailpoint,
@@ -1298,6 +1298,7 @@ fn hard_exit_batch_mount_worker() {
     if env::var_os(HARD_EXIT_WORKER).is_none() {
         return;
     }
+    mark_hard_exit_worker_entered("hard_exit_batch_mount_worker");
     let data_root =
         PathBuf::from(env::var_os(HARD_EXIT_DATA_ROOT).expect("子进程必须收到数据目录"));
     let home = PathBuf::from(env::var_os(HARD_EXIT_HOME).expect("子进程必须收到 home"));
@@ -1570,17 +1571,15 @@ fn prepared_recovery_batch(root: &Path, label: &str) -> (TestHarness, BatchMount
 
 fn run_hard_exit_worker(harness: &TestHarness, plan: &BatchMountPlan, point: &str) {
     let selected_item_ids = selectable_item_ids(plan).join(",");
-    let status = Command::new(env::current_exe().expect("应定位当前测试二进制"))
-        .args(["--exact", "hard_exit_batch_mount_worker", "--nocapture"])
-        .env(HARD_EXIT_WORKER, "1")
-        .env(HARD_EXIT_DATA_ROOT, &harness.data_root)
-        .env(HARD_EXIT_HOME, &harness.home)
-        .env(HARD_EXIT_PLAN_ID, &plan.id)
-        .env(HARD_EXIT_SELECTED_ITEM_IDS, selected_item_ids)
-        .env(HARD_EXIT_POINT, point)
-        .status()
-        .expect("应启动 Batch Mount hard-exit 子进程");
-    assert_eq!(status.code(), Some(92), "子进程必须在指定阶段强制终止");
+    run_hard_exit_child("hard_exit_batch_mount_worker", 92, |child| {
+        child
+            .env(HARD_EXIT_WORKER, "1")
+            .env(HARD_EXIT_DATA_ROOT, &harness.data_root)
+            .env(HARD_EXIT_HOME, &harness.home)
+            .env(HARD_EXIT_PLAN_ID, &plan.id)
+            .env(HARD_EXIT_SELECTED_ITEM_IDS, selected_item_ids)
+            .env(HARD_EXIT_POINT, point);
+    });
 }
 
 fn plan_targets(plan: &BatchMountPlan) -> Vec<PathBuf> {

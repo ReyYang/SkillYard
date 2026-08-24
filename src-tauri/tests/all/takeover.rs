@@ -3,9 +3,9 @@ use std::{
     env, fs,
     os::unix::fs::{MetadataExt, symlink},
     path::{Path, PathBuf},
-    process::Command,
 };
 
+use crate::support::{mark_hard_exit_worker_entered, run_hard_exit_child};
 use rusqlite::Connection;
 use skillyard_lib::{
     ApplicationPaths, BundleUpdateStatus, InstallationChainKind, InventoryLocationKind,
@@ -3080,6 +3080,7 @@ fn hard_exit_takeover_worker() {
     if env::var_os(HARD_EXIT_TAKEOVER_WORKER).is_none() {
         return;
     }
+    mark_hard_exit_worker_entered("hard_exit_takeover_worker");
     let data_root = env::var_os(HARD_EXIT_TAKEOVER_DATA_ROOT).expect("子进程必须收到数据目录");
     let home = env::var_os(HARD_EXIT_TAKEOVER_HOME).expect("子进程必须收到 home");
     let plan_id = env::var(HARD_EXIT_TAKEOVER_PLAN_ID).expect("子进程必须收到 Takeover Plan ID");
@@ -3258,16 +3259,14 @@ fn prepare_hard_exit_takeover(base: &Path, skill_name: &str) -> TakeoverCrashFix
 }
 
 fn run_hard_exit_takeover_worker(data_root: &Path, home: &Path, plan_id: &str, point: &str) {
-    let status = Command::new(env::current_exe().expect("应找到当前测试二进制"))
-        .args(["--exact", "hard_exit_takeover_worker", "--nocapture"])
-        .env(HARD_EXIT_TAKEOVER_WORKER, "1")
-        .env(HARD_EXIT_TAKEOVER_DATA_ROOT, data_root)
-        .env(HARD_EXIT_TAKEOVER_HOME, home)
-        .env(HARD_EXIT_TAKEOVER_PLAN_ID, plan_id)
-        .env(HARD_EXIT_TAKEOVER_POINT, point)
-        .status()
-        .expect("应启动 Takeover hard-exit 子进程");
-    assert_eq!(status.code(), Some(93), "子进程必须在 failpoint 直接退出");
+    run_hard_exit_child("hard_exit_takeover_worker", 93, |child| {
+        child
+            .env(HARD_EXIT_TAKEOVER_WORKER, "1")
+            .env(HARD_EXIT_TAKEOVER_DATA_ROOT, data_root)
+            .env(HARD_EXIT_TAKEOVER_HOME, home)
+            .env(HARD_EXIT_TAKEOVER_PLAN_ID, plan_id)
+            .env(HARD_EXIT_TAKEOVER_POINT, point);
+    });
 }
 
 fn assert_managed_takeover_state(outcome: &UiOutcome, target: &Path, expected_target: &str) {

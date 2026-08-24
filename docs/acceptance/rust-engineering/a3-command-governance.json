@@ -1,0 +1,706 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-rust-engineering-a3-command-governance-v1",
+  "ticket": "A3 / Issue #76",
+  "captured_at_utc": "2026-08-24T04:17:48Z",
+  "source_identity": {
+    "git_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "engineering_spec": "$REPO/docs/design/0002-rust-engineering-spec.md",
+    "engineering_spec_sha256": "c56868f007192140d72bcdb000aa9271bdefa3b9c480d2841fe59818f51b8e5d",
+    "ticket_batch": "$REPO/.codex/ticket-batches/rust-engineering-g36.json",
+    "ticket_batch_sha256": "a2082cb4ffa68abd77521172f3c0b76a20370500ee2ec8c1cd926621d2bf7755",
+    "path_tokens": {
+      "$REPO": "repository root",
+      "$TARGET": "workspace-default Cargo target_directory returned by locked offline cargo metadata",
+      "$JUST_BIN": "retained temporary official just 1.58.0 binary",
+      "$JUST_BIN_DIR": "retained fresh temporary directory containing the official asset and extracted binary",
+      "$TARGET_REPORT_FIXTURES": "retained operating-system temporary fixture directories created by the engineering guards"
+    },
+    "owned_file_sha256": {
+      "$REPO/justfile": "e2521791b9eb7ea8e7b03832c346f32d6b20fb7a35f76741fed32b845bc12616",
+      "$REPO/scripts/report-cargo-target.mjs": "4cbedebdf433b6bcc513c4b553dd79604dfb06b134208032630f7b142c12ddb5",
+      "$REPO/scripts/report-cargo-target.test.mjs": "15a4c0501b1b91a3c4788a10b9c7d4a3e354c5e12727551107313d1501f4fe39",
+      "$REPO/scripts/engineering-commands.test.mjs": "d8b1505a637fc0fde9edf645abc726e25817d42893b77c177a256ff0f4b8b4ea",
+      "$REPO/.github/workflows/ci.yml": "adee7582bd01af2c90122e153fdcf8facc8efe58925b3cf6bd266b1f529952fe",
+      "$REPO/README.md": "17e28595b4811143930e9b23448e51657f4e5cf34b9abb55e96171f3e646dbb0",
+      "$REPO/README.en.md": "6bb04133f926c1b849780df8bd2b17b925ff083b13222698a37fa97b11fa5cdf",
+      "$REPO/CONTRIBUTING.md": "e3759f91bd2ebbfd35924dda9c29c9903ec40ad72288a11479ee0d59082b8fe1"
+    }
+  },
+  "official_just": {
+    "version": "1.58.0",
+    "release_api": "https://api.github.com/repos/casey/just/releases/tags/1.58.0",
+    "release_page": "https://github.com/casey/just/releases/tag/1.58.0",
+    "asset_name": "just-1.58.0-aarch64-apple-darwin.tar.gz",
+    "asset_url": "https://github.com/casey/just/releases/download/1.58.0/just-1.58.0-aarch64-apple-darwin.tar.gz",
+    "asset_size_bytes": 2146038,
+    "github_api_digest": "sha256:50ae3e996c974a0bf32ea7d10f495070df33f1b43e0616b2769e3d4821ed8f48",
+    "verified_local_asset_sha256": "50ae3e996c974a0bf32ea7d10f495070df33f1b43e0616b2769e3d4821ed8f48",
+    "verified_local_asset_subject": "$JUST_BIN_DIR/just-1.58.0-aarch64-apple-darwin.tar.gz",
+    "archive_member": "just",
+    "archive_member_sha256": "0070dcf46e51756f7b0dd8d2a105c4345231b4201f438f56076a2436b3881107",
+    "extracted_binary_sha256": "0070dcf46e51756f7b0dd8d2a105c4345231b4201f438f56076a2436b3881107",
+    "archive_member_matches_extracted_binary": true,
+    "binary_size_bytes": 5089392,
+    "file_identity": "Mach-O 64-bit executable arm64",
+    "binary": "$JUST_BIN",
+    "retained_directory": "$JUST_BIN_DIR",
+    "directory_initial_entry_count": 0,
+    "version_output": "just 1.58.0",
+    "version_output_subject": "$JUST_BIN",
+    "global_install_performed": false,
+    "temporary_directory_retained": true,
+    "clean_or_delete_performed": false,
+    "ci_installer": {
+      "source": "https://github.com/extractions/setup-just",
+      "action_ref": "extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3",
+      "documented_version": "v4.0.0",
+      "configured_just_version": "1.58.0",
+      "runtime_version_assertion": "test \"$(just --version)\" = \"just 1.58.0\"",
+      "known_risk": "The installer action commit is pinned, but ordinary CI does not independently verify the digest of the release asset downloaded by the action. The local acceptance download independently verified the official GitHub asset digest."
+    },
+    "evidence_correction": {
+      "capture_phase": "post-A3 correction after the first A-FINAL preflight",
+      "original_digest_value_was_correct": true,
+      "original_subject_ambiguity": "verified_local_sha256 named the archive asset digest without identifying the archive as its subject.",
+      "first_a_final_stop_reason": "A-FINAL compared the archive asset digest directly with the extracted binary digest, which are hashes of different byte sequences.",
+      "retained_binary_drift_detected": false,
+      "future_identity_gate": {
+        "asset": "Compare verified_local_asset_sha256 with the GitHub API asset digest for verified_local_asset_subject.",
+        "archive_member": "Compare archive_member_sha256 with the bytes of archive_member extracted from the verified archive asset.",
+        "extracted_binary": "Require the extracted $JUST_BIN bytes and SHA-256 to equal the recorded archive member.",
+        "runtime": "Require $JUST_BIN to match the recorded binary size, Mach-O arm64 file identity, and version output.",
+        "prohibited_comparison": "Do not compare the archive asset SHA-256 directly with the extracted binary SHA-256."
+      }
+    }
+  },
+  "tdd": {
+    "target_report_red": {
+      "command": "cd $REPO && node --test scripts/report-cargo-target.test.mjs",
+      "implementation_present": false,
+      "exit_code": 1,
+      "tests": "0 passed; 1 failed",
+      "observed_failure": "MODULE_NOT_FOUND for $REPO/scripts/report-cargo-target.mjs"
+    },
+    "engineering_commands_red": {
+      "command": "cd $REPO && node --test scripts/engineering-commands.test.mjs",
+      "justfile_and_ci_not_yet_implemented": true,
+      "exit_code": 1,
+      "tests": "0 passed; 4 failed",
+      "observed_failures": [
+        "justfile did not exist",
+        "ordinary CI did not install or confirm pinned just",
+        "README build sections did not point to just 1.58.0 and just stage",
+        "target report implementation did not exist"
+      ]
+    },
+    "fixture_portability_correction": {
+      "first_green_attempt_exit_code": 1,
+      "observed_failure": "A high-offset single-byte write was not sparse enough on the current filesystem to make apparent bytes exceed allocated bytes.",
+      "correction": "The fixture now uses an explicit 128 MiB sparse truncate and one leading byte write. The inode, partition, executable, and nonmutation assertions were not weakened."
+    },
+    "minimal_green": {
+      "target_report_implementation": "$REPO/scripts/report-cargo-target.mjs",
+      "command_governance": [
+        "$REPO/justfile",
+        "$REPO/.github/workflows/ci.yml",
+        "$REPO/README.md",
+        "$REPO/README.en.md",
+        "$REPO/CONTRIBUTING.md"
+      ],
+      "final_command": "cd $REPO && node --test scripts/report-cargo-target.test.mjs scripts/engineering-commands.test.mjs",
+      "exit_code": 0,
+      "tests": "5 passed; 0 failed"
+    }
+  },
+  "recipe_contract": {
+    "shell": [
+      "bash",
+      "-euo",
+      "pipefail",
+      "-c"
+    ],
+    "public_recipes": [
+      "default",
+      "frontend",
+      "format",
+      "rust-test",
+      "wire",
+      "migration",
+      "slice",
+      "stage",
+      "target-report",
+      "mac-contract",
+      "release"
+    ],
+    "private_helpers": [
+      "_engineering-guards",
+      "_rust-all",
+      "_clippy"
+    ],
+    "default": "Lists public recipes and runs no validation.",
+    "frontend": "Runs typecheck and the complete Vitest suite.",
+    "format": "Checks Rust formatting and does not rewrite files.",
+    "rust_test": {
+      "canonical_target": "all",
+      "selector_contract": "One fully-qualified Rust test name matching identifier(::identifier)+.",
+      "discovery": "cargo test --workspace --locked --test all -- --list",
+      "discovery_offline": true,
+      "required_exact_match_count": 1,
+      "execution_uses_exact": true,
+      "accepts_arbitrary_cargo_flags": false,
+      "accepts_arbitrary_test_target": false,
+      "builds_production_app": false
+    },
+    "wire": {
+      "typed_client": "pnpm exec vitest run src/skillyardClient.test.ts",
+      "rust_characterization_prefix": "domain::tests::",
+      "rust_list_must_be_nonempty": true,
+      "guard_output": {
+        "guard": "generated-wire-drift",
+        "status": "not_attached",
+        "owner": "Train B"
+      }
+    },
+    "migration": {
+      "uses_rust_test_recipe": true,
+      "test": "startup_state::version_one_database_migrates_without_losing_inventory",
+      "guard_output": {
+        "guard": "released-migration-prefix",
+        "status": "not_attached",
+        "owner": "A4"
+      }
+    },
+    "slice": {
+      "includes": [
+        "format",
+        "frontend",
+        "engineering JS guards",
+        "all locked offline Rust tests",
+        "locked offline Clippy with -D warnings",
+        "wire",
+        "migration"
+      ],
+      "builds_production_app": false
+    },
+    "stage": {
+      "depends_on": "slice",
+      "production_build": "CARGO_NET_OFFLINE=true pnpm tauri build --bundles app"
+    },
+    "target_report": {
+      "human_output": true,
+      "json_argument": "--json",
+      "unknown_arguments_fail": true,
+      "missing_target_fails_without_creation": true,
+      "mutation_primitives_in_implementation": false
+    },
+    "mac_contract": {
+      "darwin_only": true,
+      "target": "codex_mount_contract",
+      "ignored_test": "current_codex_discovers_global_and_project_directory_symlinks",
+      "uses_exact_and_ignored": true
+    },
+    "release": {
+      "depends_on": "stage",
+      "terminal_status": "manual_gates_required",
+      "manual_gates": [
+        "tart",
+        "MAC-CONTRACT",
+        "manual_product_paths",
+        "authorized_real_provider"
+      ],
+      "provider_execution": "not_automatic",
+      "publish": "not_automatic",
+      "terminal_exit_code": 3
+    },
+    "local_environment": {
+      "persistent_CARGO_INCREMENTAL_assignment": false,
+      "cargo_test_and_clippy_locked": true,
+      "cargo_test_and_clippy_offline": true,
+      "clean_delete_or_cache_rewrite_recipe": false
+    }
+  },
+  "selector_proof": {
+    "nonexistent": {
+      "command": "cd $REPO && $JUST_BIN rust-test startup_state::a3_selector_does_not_exist",
+      "selector_is_syntactically_fully_qualified": true,
+      "list_match_count": 0,
+      "exit_code": 2,
+      "exact_test_was_not_run": true
+    },
+    "valid": {
+      "command": "cd $REPO && $JUST_BIN rust-test engineering_contract::workspace_profiles_use_limited_debug_without_disabling_incremental",
+      "list_match_count": 1,
+      "exit_code": 0,
+      "result": "1 passed; 0 failed; 302 filtered out"
+    },
+    "production_app_nonbuild": {
+      "path": "$TARGET/release/bundle/macos/SkillYard.app",
+      "fingerprint_fields": [
+        "path",
+        "type",
+        "mode",
+        "size",
+        "device",
+        "inode",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "entries_before": 9,
+      "entries_after": 9,
+      "sha256_before": "77113f9d3c494babbe66b36025b8586384686670300d39e304432d21463e4542",
+      "sha256_after": "77113f9d3c494babbe66b36025b8586384686670300d39e304432d21463e4542",
+      "changed": false
+    }
+  },
+  "wire_and_migration": {
+    "wire": {
+      "command": "cd $REPO && $JUST_BIN wire",
+      "exit_code": 0,
+      "typed_client": "47 passed; 0 failed",
+      "domain_serde_characterizations": "8 passed; 0 failed; 133 filtered out",
+      "guard": "generated-wire-drift",
+      "guard_status": "not_attached",
+      "owner": "Train B"
+    },
+    "migration": {
+      "command": "cd $REPO && $JUST_BIN migration",
+      "exit_code": 0,
+      "list_match_count": 1,
+      "result": "1 passed; 0 failed; 302 filtered out",
+      "guard": "released-migration-prefix",
+      "guard_status": "not_attached",
+      "owner": "A4"
+    }
+  },
+  "stage_verification": {
+    "initial_stage_attempt": {
+      "command": "cd $REPO && $JUST_BIN stage",
+      "exit_code": 1,
+      "duration_seconds": {
+        "real": 12.06,
+        "user": 18.61,
+        "system": 4.03
+      },
+      "format_passed": true,
+      "typecheck_passed": true,
+      "existing_frontend_tests": "258 passed",
+      "failed_suites": [
+        "scripts/engineering-commands.test.mjs",
+        "scripts/report-cargo-target.test.mjs"
+      ],
+      "failure": "Vitest discovered the Node test files and transformed import.meta.url to a non-file URL, so fileURLToPath rejected it.",
+      "rust_clippy_and_production_build_reached": false
+    },
+    "in_scope_correction": {
+      "files": [
+        "$REPO/scripts/engineering-commands.test.mjs",
+        "$REPO/scripts/report-cargo-target.test.mjs"
+      ],
+      "change": "Resolve the repository from the canonical repository-root cwd and select the public Vitest or node:test API according to the active runner.",
+      "frontend_retry_command": "cd $REPO && pnpm test",
+      "frontend_retry_exit_code": 0,
+      "frontend_retry_result": "9 files passed; 263 tests passed",
+      "node_guard_retry_result": "5 passed; 0 failed"
+    },
+    "selective_resume": {
+      "reason": "The ticket required preserving the first stage failure and rerunning only necessary layers instead of repeating the full suite.",
+      "full_rust": {
+        "command": "cd $REPO && $JUST_BIN _rust-all",
+        "exit_code": 0,
+        "library": "141 passed; 0 failed; 0 ignored",
+        "all": "303 passed; 0 failed; 0 ignored",
+        "codex_mount_contract": "0 passed; 0 failed; 1 ignored"
+      },
+      "clippy": {
+        "command": "cd $REPO && $JUST_BIN _clippy",
+        "exit_code": 0,
+        "warnings_denied": true
+      },
+      "production_build": {
+        "command": "cd $REPO && $JUST_BIN --no-deps stage",
+        "semantic_body": "CARGO_NET_OFFLINE=true pnpm tauri build --bundles app",
+        "slice_dependencies_repeated": false,
+        "exit_code": 0,
+        "duration_seconds": {
+          "real": 22.3,
+          "user": 106.97,
+          "system": 2.47
+        },
+        "frontend_modules_transformed": 4905,
+        "bundle": "$TARGET/release/bundle/macos/SkillYard.app",
+        "ad_hoc_signing": true,
+        "notarization_performed": false
+      }
+    },
+    "completion_statement": {
+      "second_full_stage_was_not_run": true,
+      "direct_just_stage_exit_zero_is_not_claimed": true,
+      "stage_semantics_complete_by_selective_resume": true,
+      "all_required_layers_green": true
+    },
+    "production_app_build_proof": {
+      "path": "$TARGET/release/bundle/macos/SkillYard.app",
+      "entries_before": 9,
+      "sha256_before": "77113f9d3c494babbe66b36025b8586384686670300d39e304432d21463e4542",
+      "entries_after": 9,
+      "files_after": 4,
+      "apparent_bytes_after": 25083835,
+      "allocated_bytes_after": 25096192,
+      "sha256_after": "24c3538144701a4f533bc01a74a34573c51519bf2515d3e1b7193e159a0e0c29",
+      "changed_as_expected": true
+    }
+  },
+  "target_report": {
+    "commands": {
+      "json": "cd $REPO && $JUST_BIN target-report --json",
+      "human": "cd $REPO && $JUST_BIN target-report"
+    },
+    "both_formats_exit_zero": true,
+    "target": "$TARGET",
+    "target_directory_source": "workspace_default",
+    "metadata_command": "cargo metadata --locked --offline --no-deps --format-version 1",
+    "accounting": {
+      "inode_identity": "(st_dev,st_ino)",
+      "apparent_bytes": "sum st_size once per unique inode",
+      "allocated_bytes": "sum st_blocks * 512 once per unique inode",
+      "partitions_overlap": true,
+      "partitions_must_not_be_summed": true
+    },
+    "target_totals": {
+      "raw_file_entries": 103983,
+      "unique_files": 36121,
+      "apparent_bytes": 16002791914,
+      "allocated_bytes": 16107384832
+    },
+    "partitions": {
+      "debug": {
+        "exists": true,
+        "raw_file_entries": 99382,
+        "unique_files": 31520,
+        "apparent_bytes": 14611227196,
+        "allocated_bytes": 14701408256
+      },
+      "debug_deps": {
+        "exists": true,
+        "raw_file_entries": 74817,
+        "unique_files": 20693,
+        "apparent_bytes": 9088730435,
+        "allocated_bytes": 9131106304
+      },
+      "debug_incremental": {
+        "exists": true,
+        "raw_file_entries": 14793,
+        "unique_files": 8714,
+        "apparent_bytes": 5624141090,
+        "allocated_bytes": 5654446080
+      },
+      "release": {
+        "exists": true,
+        "raw_file_entries": 4597,
+        "unique_files": 4597,
+        "apparent_bytes": 1391156739,
+        "allocated_bytes": 1405554688
+      }
+    },
+    "integration_test_executables": {
+      "expected_targets": [
+        "all",
+        "codex_mount_contract"
+      ],
+      "expected_target_count": 2,
+      "candidate_count": 5,
+      "candidate_count_note": "The developer target is accumulated and contains multiple hashed executable generations; this count is not the integration target topology count.",
+      "missing_targets": [],
+      "candidates": [
+        {
+          "target": "all",
+          "relative_path": "debug/deps/all-216202b24dcb49a8",
+          "apparent_bytes": 41277080,
+          "allocated_bytes": 41279488
+        },
+        {
+          "target": "all",
+          "relative_path": "debug/deps/all-ba75952a57fbd2fa",
+          "apparent_bytes": 43434696,
+          "allocated_bytes": 43438080
+        },
+        {
+          "target": "codex_mount_contract",
+          "relative_path": "debug/deps/codex_mount_contract-1478600808db85d3",
+          "apparent_bytes": 1843544,
+          "allocated_bytes": 1847296
+        },
+        {
+          "target": "codex_mount_contract",
+          "relative_path": "debug/deps/codex_mount_contract-b0371c97af0e78b4",
+          "apparent_bytes": 1893496,
+          "allocated_bytes": 1896448
+        },
+        {
+          "target": "codex_mount_contract",
+          "relative_path": "debug/deps/codex_mount_contract-fb637bed0e9ec9e2",
+          "apparent_bytes": 1893528,
+          "allocated_bytes": 1896448
+        }
+      ]
+    },
+    "largest_unique_files": [
+      {
+        "relative_path": "debug/deps/libskillyard_lib.a",
+        "apparent_bytes": 279967616,
+        "allocated_bytes": 279969792
+      },
+      {
+        "relative_path": "debug/incremental/skillyard_lib-28g1qf2rzyurl/s-hlasbbp71i-1m1ylss-7awnnr7251tefqxxfjz3l9dmn/dep-graph.bin",
+        "apparent_bytes": 116252687,
+        "allocated_bytes": 116256768
+      },
+      {
+        "relative_path": "debug/incremental/skillyard_lib-28g1qf2rzyurl/s-hlmpqbide9-1a6l29p-7awnnr7251tefqxxfjz3l9dmn/dep-graph.bin",
+        "apparent_bytes": 115242103,
+        "allocated_bytes": 115245056
+      },
+      {
+        "relative_path": "debug/incremental/skillyard_lib-0nzwjo08i9awc/s-hku8zm45z3-0tfu762-99kbn1y5tisd7jdpxyr19w0o1/dep-graph.bin",
+        "apparent_bytes": 114243727,
+        "allocated_bytes": 114245632
+      },
+      {
+        "relative_path": "debug/incremental/skillyard_lib-0nzwjo08i9awc/s-hku92iwj81-1bub9hi-b84h5knyea6jafbuxrm8j5xur/dep-graph.bin",
+        "apparent_bytes": 113896048,
+        "allocated_bytes": 113897472
+      }
+    ],
+    "nonmutation": {
+      "fingerprint_fields": [
+        "path",
+        "type",
+        "mode",
+        "size",
+        "device",
+        "inode",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "internal": {
+        "entries_before": 107193,
+        "entries_after": 107193,
+        "sha256_before": "f1c0bb81da5a00eb05a09e52b9cce8ca18877d942839ea6b19dd4d21319a921b",
+        "sha256_after": "f1c0bb81da5a00eb05a09e52b9cce8ca18877d942839ea6b19dd4d21319a921b",
+        "changed": false
+      },
+      "external_independent": {
+        "entries_before": 107193,
+        "entries_after": 107193,
+        "sha256_before": "f433136826cd1c31c14f102e98ac4327da42997427c4117382137d91d2645b29",
+        "sha256_after": "f433136826cd1c31c14f102e98ac4327da42997427c4117382137d91d2645b29",
+        "changed": false,
+        "hash_differs_from_internal_reason": "The independent checker serializes mode without zero padding; each checker is compared only against its own pre/post fingerprint."
+      },
+      "added": 0,
+      "deleted": 0,
+      "modified": 0,
+      "target_created": false,
+      "clean_delete_or_rewrite_performed": false
+    },
+    "fixture_contract": {
+      "hardlink_present": true,
+      "debug_deps_incremental_release_present": true,
+      "sparse_file_distinguishes_apparent_and_allocated": true,
+      "metadata_expected_targets_and_executable_candidates_verified": true,
+      "unknown_destructive_and_rewrite_arguments_rejected": true,
+      "missing_target_not_created": true,
+      "pre_post_fingerprint_equal": true,
+      "fixture_directories": "$TARGET_REPORT_FIXTURES",
+      "fixture_directories_retained": true
+    }
+  },
+  "ci_contract": {
+    "workflow": "$REPO/.github/workflows/ci.yml",
+    "frontend": {
+      "setup_just_action_occurrences": 1,
+      "just_version": "1.58.0",
+      "version_asserted": true,
+      "recipe": "just frontend"
+    },
+    "native": {
+      "setup_just_action_occurrences": 1,
+      "just_version": "1.58.0",
+      "version_asserted": true,
+      "job_environment": {
+        "CARGO_INCREMENTAL": "0"
+      },
+      "network_preparation": "cargo fetch --locked",
+      "only_shared_validation_recipe_after_fetch": "just stage"
+    },
+    "local_CARGO_INCREMENTAL_assignment_present": false,
+    "ordinary_ci_invokes_release": false,
+    "ordinary_ci_invokes_mac_contract": false,
+    "ordinary_ci_invokes_provider": false,
+    "checkout_pin_unchanged": true,
+    "setup_node_pin_unchanged": true,
+    "secrets_job_section_sha256": "77040d0c82d62559927b25cd61b641c9681d41e76f8df3a1acb0d2256c8ed5e5",
+    "secrets_job_changed": false,
+    "yaml_parser": "Ruby Psych.parse_file",
+    "yaml_syntax_valid": true,
+    "real_github_actions_run_performed": false
+  },
+  "test_inventory": {
+    "a0": {
+      "artifact": "$REPO/docs/acceptance/rust-engineering/a0-baseline.json",
+      "artifact_sha256": "500f8646b4be20b90909d3c8e4e0a6a031f182692513e39b16b4e2b647fe765b",
+      "tests_artifact": "$REPO/docs/acceptance/rust-engineering/a0-tests.json",
+      "tests_artifact_sha256": "c2bed4c81b5eaa7ee1d3f981beadaf8b1fd3f6244e820b2ed6c56e745d7575ba",
+      "expected_identities": 442
+    },
+    "a1": {
+      "artifact": "$REPO/docs/acceptance/rust-engineering/a1-aggregation.json",
+      "artifact_sha256": "a8336c8bb445805f765bad4d3166427764435a4b083ed9fb22ab291acf70a990"
+    },
+    "a2": {
+      "artifact": "$REPO/docs/acceptance/rust-engineering/a2-limited-debug.json",
+      "artifact_sha256": "cc4bd932cd6a46544061a74f21aaa4fb728c3fc5a7773519869a7317de6c9747",
+      "additive_engineering_guards": 3
+    },
+    "current": {
+      "all_identities": 445,
+      "library_unit_tests": 141,
+      "integration_tests": 304,
+      "all_target_tests": 303,
+      "codex_mount_contract_tests": 1,
+      "ignored_tests": 1,
+      "integration_targets": 2,
+      "integration_target_names": [
+        "all",
+        "codex_mount_contract"
+      ],
+      "hard_exit_workers": 6
+    },
+    "identity_diff": {
+      "lib": {
+        "expected": 141,
+        "observed": 141,
+        "missing": [],
+        "unexpected": []
+      },
+      "all": {
+        "expected": 303,
+        "observed": 303,
+        "missing": [],
+        "unexpected": []
+      },
+      "codex_mount_contract": {
+        "expected": 1,
+        "observed": 1,
+        "missing": [],
+        "unexpected": []
+      }
+    },
+    "ignored_identity": "current_codex_discovers_global_and_project_directory_symlinks",
+    "test_topology_file_count": 27,
+    "test_topology_sha256": "de8d714155c1cd661b7c7a9c5d32f15d44b13e0d7563409bc22c46003ad539a2",
+    "topology_unchanged_from_a2": true
+  },
+  "verification": {
+    "node_guards": {
+      "command": "cd $REPO && node --test scripts/report-cargo-target.test.mjs scripts/engineering-commands.test.mjs",
+      "exit_code": 0,
+      "result": "5 passed; 0 failed"
+    },
+    "frontend_after_correction": {
+      "command": "cd $REPO && pnpm test",
+      "exit_code": 0,
+      "result": "9 files passed; 263 tests passed"
+    },
+    "just_format": {
+      "command": "cd $REPO && $JUST_BIN --fmt --check",
+      "exit_code": 0
+    },
+    "just_default_list_summary": {
+      "default_exit_code": 0,
+      "list_exit_code": 0,
+      "summary_exit_code": 0,
+      "public_recipe_count": 11
+    },
+    "rust_full": {
+      "exit_code": 0,
+      "library": "141 passed",
+      "all": "303 passed",
+      "contract": "1 ignored"
+    },
+    "clippy": {
+      "exit_code": 0,
+      "warnings_denied": true
+    },
+    "ci_yaml": {
+      "exit_code": 0,
+      "parser": "Ruby Psych.parse_file"
+    },
+    "javascript_syntax": {
+      "files_checked": 3,
+      "exit_code": 0
+    },
+    "git_diff_check": {
+      "exit_code": 0
+    }
+  },
+  "scope_and_privacy": {
+    "owned_files_only": [
+      "$REPO/justfile",
+      "$REPO/scripts/report-cargo-target.mjs",
+      "$REPO/scripts/report-cargo-target.test.mjs",
+      "$REPO/scripts/engineering-commands.test.mjs",
+      "$REPO/.github/workflows/ci.yml",
+      "$REPO/README.md",
+      "$REPO/README.en.md",
+      "$REPO/CONTRIBUTING.md",
+      "$REPO/docs/acceptance/rust-engineering/a3-command-governance.json"
+    ],
+    "preserved_static_sha256": {
+      "$REPO/Cargo.toml": "0ccb45d11710a7267d0d37059ae87c53874f49e341decfa17b566f1c2370257e",
+      "$REPO/Cargo.lock": "47311a278c2bca94af19d45cebbe619e023299cee9e8b9afa443c2f24917d25b",
+      "$REPO/package.json": "0ce47debefb0584aa22e2480dc5bbda1dbc141c820ecf80960c8581e788845a9",
+      "$REPO/pnpm-lock.yaml": "bfeff53d67b31180eae6fc0cebe1dd78d97b095e9f372cef7c892c9080df6575",
+      "$REPO/src-tauri/Cargo.toml": "173a656564a514b065ec35066eecb1872029fb2f6e8b6d73408ac202a0405dd8",
+      "$REPO/src-tauri/tauri.conf.json": "23872c25cd83884e7b0c11c3eeda577d27c4dcf3e0d5ea5adb4aff72bab3c661",
+      "$REPO/src-tauri/build.rs": "487059eaf8a947b80f20a9aacac038a5047b2ad69d2401b827376c67d6fe847f",
+      "$REPO/.github/workflows/release-candidate.yml": "f9bfdc5c3b01aef06a0d94dab6b31391ba8ab9e52c3560cc98ce47f70fd24373",
+      "$REPO/.github/workflows/publish-release.yml": "e5341b2f9df1ade39916d6810c07b80e5017765fc40d112b5ba3c3663626d84a"
+    },
+    "pre_existing_docs_readme_patch_sha256": "f1c9bfd4302ba890360353ba39bf80de02d83018dbf40296523bf12c1d5974c3",
+    "docs_readme_modified_by_a3": false,
+    "production_rust_modified": false,
+    "cargo_files_modified_by_a3": false,
+    "package_or_lock_files_modified": false,
+    "release_or_publish_workflow_modified": false,
+    "migration_modified": false,
+    "a0_a1_or_a2_artifact_modified": false,
+    "real_provider_called": false,
+    "credentials_read": false,
+    "tart_called": false,
+    "mac_contract_called": false,
+    "release_recipe_called": false,
+    "release_or_publish_performed": false,
+    "network_calls": [
+      "Read official casey/just GitHub release metadata",
+      "Download official just 1.58.0 release asset"
+    ],
+    "other_network_calls": false,
+    "developer_target_cleaned_or_deleted": false,
+    "external_target_or_cache_cleaned_or_deleted": false,
+    "temporary_just_directory_retained": true,
+    "target_report_fixture_directories_retained": true,
+    "worktree_created": false,
+    "commit_push_or_issue_operation": false,
+    "artifact_contains_machine_absolute_paths": false,
+    "artifact_contains_credentials": false
+  },
+  "known_boundaries": [
+    "The pinned setup-just action does not make ordinary CI independently verify the downloaded just release asset digest.",
+    "The first direct just stage command failed in the new JavaScript guard discovery layer. The failure is retained; after the in-scope correction, only the required frontend, Node guard, Rust, Clippy, and production-build layers were selectively completed. A second full just stage was intentionally not run.",
+    "The developer target report describes an accumulated target and its multiple hashed executable generations; it is not a clean A0/A2 size comparison.",
+    "The real GitHub Actions workflow was not dispatched. CI syntax and command governance were verified locally and statically.",
+    "release, MAC-CONTRACT, tart, manual product paths, real Provider checks, and publishing were not executed."
+  ]
+}

@@ -2,9 +2,9 @@ use std::{
     env, fs,
     os::unix::fs::{MetadataExt, symlink},
     path::Path,
-    process::Command,
 };
 
+use crate::support::{mark_hard_exit_worker_entered, run_hard_exit_child};
 use rusqlite::{Connection, params};
 use skillyard_lib::{
     ApplicationPaths, LifecycleFailpoint, MountHealth, MountOperation, MountScope, PlatformInfo,
@@ -1140,6 +1140,7 @@ fn hard_exit_mount_worker() {
     if env::var_os(HARD_EXIT_WORKER).is_none() {
         return;
     }
+    mark_hard_exit_worker_entered("hard_exit_mount_worker");
     let data_root = env::var_os(HARD_EXIT_DATA_ROOT).expect("子进程必须收到数据目录");
     let home = env::var_os(HARD_EXIT_HOME).expect("子进程必须收到 home");
     let plan_id = env::var(HARD_EXIT_PLAN_ID).expect("子进程必须收到 Mount Plan ID");
@@ -1316,16 +1317,14 @@ fn mount_id(outcome: &UiOutcome) -> String {
 }
 
 fn run_hard_exit_mount_worker(data_root: &Path, home: &Path, plan_id: &str, point: &str) {
-    let status = Command::new(env::current_exe().expect("应找到当前测试二进制"))
-        .args(["--exact", "hard_exit_mount_worker", "--nocapture"])
-        .env(HARD_EXIT_WORKER, "1")
-        .env(HARD_EXIT_DATA_ROOT, data_root)
-        .env(HARD_EXIT_HOME, home)
-        .env(HARD_EXIT_PLAN_ID, plan_id)
-        .env(HARD_EXIT_POINT, point)
-        .status()
-        .expect("应启动 Mount hard-exit 子进程");
-    assert_eq!(status.code(), Some(92), "子进程必须在 failpoint 直接退出");
+    run_hard_exit_child("hard_exit_mount_worker", 92, |child| {
+        child
+            .env(HARD_EXIT_WORKER, "1")
+            .env(HARD_EXIT_DATA_ROOT, data_root)
+            .env(HARD_EXIT_HOME, home)
+            .env(HARD_EXIT_PLAN_ID, plan_id)
+            .env(HARD_EXIT_POINT, point);
+    });
 }
 
 fn contains_entries(path: &Path) -> bool {

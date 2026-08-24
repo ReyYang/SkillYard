@@ -40,7 +40,7 @@
 - Frontend：`206 passed`，`pnpm typecheck` 通过，`pnpm build` 通过。
 - Rust：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`
   与 `cargo test --workspace` 通过。
-- Archive 主题旧值拒绝测试通过，不会静默映射为 Layers 或 Ledger。
+- `ThemePreset` 领域解析继续拒绝 `archive`；仅对 schema 30 开发版数据库中的旧偏好执行一次显式 forward migration，将其归一化为默认 `Ledger`。
 - macOS：`pnpm tauri build --bundles app` 与 `codesign --verify --deep --strict` 通过。
 
 ## Open Questions

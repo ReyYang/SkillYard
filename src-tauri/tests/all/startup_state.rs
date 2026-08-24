@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -1790,7 +1791,10 @@ fn version_one_database_migrates_without_losing_inventory() {
     let database = data_root.join("skillyard.sqlite3");
     let connection = Connection::open(&database).expect("应创建 v1 SQLite");
     connection
-        .execute_batch(include_str!("../migrations/0001_initial.sql"))
+        .execute_batch(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/0001_initial.sql"
+        )))
         .expect("应执行 v1 migration");
     connection
         .execute(
@@ -1857,7 +1861,7 @@ fn version_one_database_migrates_without_losing_inventory() {
         .expect("应读取 migration 版本");
     assert_eq!(
         versions,
-        "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30"
+        "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31"
     );
 }
 

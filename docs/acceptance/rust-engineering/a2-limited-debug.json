@@ -1,0 +1,453 @@
+{
+  "schema_version": 1,
+  "protocol_id": "skillyard-rust-engineering-a2-limited-debug-v1",
+  "ticket": "A2 / Issue #75",
+  "captured_at_utc": "2026-08-24T03:52:28Z",
+  "a0_baseline": {
+    "artifact": "$REPO/docs/acceptance/rust-engineering/a0-baseline.json",
+    "artifact_sha256": "500f8646b4be20b90909d3c8e4e0a6a031f182692513e39b16b4e2b647fe765b",
+    "tests_artifact": "$REPO/docs/acceptance/rust-engineering/a0-tests.json",
+    "tests_artifact_sha256": "c2bed4c81b5eaa7ee1d3f981beadaf8b1fd3f6244e820b2ed6c56e745d7575ba",
+    "source_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "allocated_bytes": 4219478016,
+    "apparent_bytes": 4196107853,
+    "unique_files": 7823,
+    "integration_test_executables": 24
+  },
+  "comparison_contract": {
+    "required_equal_conditions": [
+      "rustc and cargo toolchain",
+      "host architecture and operating system family",
+      "locked dependency graph",
+      "enabled Cargo features",
+      "offline mode",
+      "fresh initially empty target",
+      "cargo test --workspace --locked --no-run"
+    ],
+    "artifact_reduction_formula": "(A0 allocated bytes - candidate allocated bytes) / A0 allocated bytes",
+    "required_artifact_reduction": 0.3,
+    "candidate_allocated_bytes_max": 2953634611.2,
+    "production_app_is_not_an_optimization_target": true
+  },
+  "source_identity": {
+    "git_head": "6b660f19a83e13cb49402c9d340bada118b4f9cc",
+    "candidate_build_input_file_count": 84,
+    "candidate_build_input_sha256": "a8bcce427be45e18aa0f1333acea61031857a3c8f3d171126b5c06ac28d80688",
+    "candidate_build_input_hash_method": "SHA-256 of newline-terminated rows <file_sha256><two spaces><repo-relative_path>, sorted by repo-relative path. Inputs are root Cargo.toml/Cargo.lock plus src-tauri Cargo/build/Tauri config, production Rust, migrations, and Rust tests.",
+    "test_topology_file_count": 27,
+    "test_topology_content_sha256": "de8d714155c1cd661b7c7a9c5d32f15d44b13e0d7563409bc22c46003ad539a2",
+    "test_topology_hash_method": "SHA-256 of newline-terminated rows <file_sha256><two spaces><repo-relative_path>; inputs are top-level src-tauri/tests/*.rs and src-tauri/tests/all/*.rs, sorted lexicographically by repo-relative path before rows are emitted.",
+    "all_aggregator_sha256": "3e903f567abb3b8884f152e1f9081dbd2eb55d2a4fba273c9d5ba7d6799add04",
+    "engineering_contract_sha256": "dfd32b3d41b01442e18ac71b4edb98968fce96871ca7a8cb6cfbd716f9f3001a",
+    "hard_exit_support_sha256": "dd6eacd9aa93d5920ae1517b2b7c0780574aa68c666b3c76c535dc6aefe6746b"
+  },
+  "environment": {
+    "rustc": {
+      "version": "1.94.1",
+      "commit_hash": "e408947bfd200af42db322daf0fadfe7e26d3bd1",
+      "commit_date": "2026-03-25",
+      "host": "aarch64-apple-darwin",
+      "llvm": "21.1.8"
+    },
+    "cargo": {
+      "version": "1.94.1",
+      "commit": "29ea6fb6a",
+      "commit_date": "2026-03-24"
+    },
+    "operating_system": {
+      "kernel": "Darwin 25.5.0",
+      "architecture": "arm64",
+      "product_version": "26.5.2"
+    },
+    "workspace_resolver": "2",
+    "workspace_packages": [
+      "skillyard 1.1.0"
+    ],
+    "enabled_features": [],
+    "dependency_mode": {
+      "locked": true,
+      "cargo_offline": true
+    },
+    "equal_to_a0_comparison_environment": true
+  },
+  "tdd": {
+    "red": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all engineering_contract::workspace_profiles_use_limited_debug_without_disabling_incremental -- --exact --nocapture",
+      "root_manifest_sha256_before_command": "7c0212cf7a002175e8f408defc52cc275c144e48c60db2cd231c4846484aeeeb",
+      "exit_code": 101,
+      "observed_failure": "workspace manifest must declare [profile.dev] exactly once",
+      "actual_table_count": 0,
+      "expected_table_count": 1,
+      "other_tests_filtered_out": 302
+    },
+    "minimal_green_change": {
+      "file": "$REPO/Cargo.toml",
+      "assignments": {
+        "profile.dev.debug": "limited",
+        "profile.test.debug": "limited"
+      }
+    },
+    "targeted_green": [
+      {
+        "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all engineering_contract::workspace_profiles_use_limited_debug_without_disabling_incremental -- --exact --nocapture",
+        "result": "1 passed; 0 failed; 0 ignored"
+      },
+      {
+        "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all engineering_contract::limited_debug_backtrace_reports_fixture_function_file_and_line -- --exact --nocapture",
+        "result": "1 passed; 0 failed; 0 ignored"
+      },
+      {
+        "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all engineering_contract:: -- --nocapture",
+        "result": "3 passed; 0 failed; 0 ignored"
+      }
+    ]
+  },
+  "profile_contract": {
+    "persistent": {
+      "profile.dev.debug": "limited",
+      "profile.test.debug": "limited",
+      "profile.dev.incremental": "unset; Cargo local default retained",
+      "profile.test.incremental": "unset; Cargo local default retained",
+      "profile.release_table_present": false,
+      "persistent_full_debug_assignment_present": false,
+      "persistent_incremental_false_assignment_present": false
+    },
+    "one_time_full_debug_override": {
+      "command": "cd $REPO && CARGO_PROFILE_TEST_DEBUG=full CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all engineering_contract::limited_debug_backtrace_reports_fixture_function_file_and_line -- --exact --nocapture",
+      "process_scoped": true,
+      "exit_code": 0,
+      "result": "1 passed; 0 failed; 0 ignored",
+      "manifest_modified_by_override": false
+    }
+  },
+  "backtrace_contract": {
+    "parent_test": "engineering_contract::limited_debug_backtrace_reports_fixture_function_file_and_line",
+    "worker_test": "engineering_contract::limited_debug_backtrace_worker",
+    "worker_selector_is_fully_qualified": true,
+    "worker_invocation_arguments": [
+      "engineering_contract::limited_debug_backtrace_worker",
+      "--exact",
+      "--nocapture"
+    ],
+    "worker_environment": {
+      "SKILLYARD_LIMITED_DEBUG_BACKTRACE_WORKER": "1",
+      "RUST_BACKTRACE": "1",
+      "RUST_LIB_BACKTRACE": "removed"
+    },
+    "direct_worker_proof_command": "cd $REPO && env -u RUST_LIB_BACKTRACE SKILLYARD_LIMITED_DEBUG_BACKTRACE_WORKER=1 RUST_BACKTRACE=1 CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all engineering_contract::limited_debug_backtrace_worker -- --exact --nocapture",
+    "direct_worker_exit_code": 101,
+    "worker_failure_expected": true,
+    "sentinel": "SKILLYARD_LIMITED_DEBUG_BACKTRACE_SENTINEL",
+    "fixture_function": "all::engineering_contract::limited_debug_backtrace_fixture",
+    "source_location": "tests/all/engineering_contract.rs:65",
+    "source_line_is_positive_integer": true,
+    "limited_debug_preserved_function_and_source_line": true,
+    "ordinary_worker_without_gate_returns": true
+  },
+  "clean_no_run": {
+    "target_dir_token": "$A2_TARGET",
+    "target_initially_empty": true,
+    "initial_entry_count": 0,
+    "command": "cd $REPO && /usr/bin/time -p env CARGO_TARGET_DIR=$A2_TARGET CARGO_NET_OFFLINE=true cargo test --workspace --locked --no-run",
+    "exit_code": 0,
+    "tests_executed": 0,
+    "duration_seconds": {
+      "real": 63.57,
+      "user": 135.91,
+      "system": 26.28
+    },
+    "accounting": {
+      "apparent_bytes": "sum st_size once per unique (st_dev, st_ino)",
+      "allocated_bytes": "sum st_blocks * 512 once per unique (st_dev, st_ino)",
+      "snapshot": "settled post-build snapshot",
+      "partitions_overlap": true,
+      "warning": "Partition values are independently deduplicated and must not be summed as if they were disjoint."
+    },
+    "artifacts": {
+      "target": {
+        "exists": true,
+        "unique_files": 5609,
+        "apparent_bytes": 2515582047,
+        "allocated_bytes": 2550263808
+      },
+      "partitions": {
+        "debug": {
+          "exists": true,
+          "unique_files": 5608,
+          "apparent_bytes": 2515580361,
+          "allocated_bytes": 2550259712
+        },
+        "debug_deps": {
+          "exists": true,
+          "unique_files": 2744,
+          "apparent_bytes": 1773781589,
+          "allocated_bytes": 1779539968
+        },
+        "debug_incremental": {
+          "exists": true,
+          "unique_files": 1026,
+          "apparent_bytes": 537406764,
+          "allocated_bytes": 558682112,
+          "raw_file_count": 1026,
+          "nonempty": true
+        },
+        "release": {
+          "exists": false,
+          "unique_files": 0,
+          "apparent_bytes": 0,
+          "allocated_bytes": 0,
+          "reason": "The comparison command builds only the Cargo test profile."
+        }
+      },
+      "integration_test_executables": {
+        "count": 2,
+        "count_method": "Executable regular files in debug/deps matching Cargo metadata integration target names all-* or codex_mount_contract-*.",
+        "entries": [
+          {
+            "target": "all",
+            "relative_path": "debug/deps/all-216202b24dcb49a8",
+            "apparent_bytes": 41333352
+          },
+          {
+            "target": "codex_mount_contract",
+            "relative_path": "debug/deps/codex_mount_contract-1478600808db85d3",
+            "apparent_bytes": 1850504
+          }
+        ],
+        "largest_target": "all",
+        "largest_apparent_bytes": 41333352
+      },
+      "largest_unique_files": [
+        {
+          "relative_path": "debug/deps/libskillyard_lib.a",
+          "apparent_bytes": 279967616,
+          "allocated_bytes": 279969792
+        },
+        {
+          "relative_path": "debug/incremental/skillyard_lib-*/dep-graph.bin",
+          "apparent_bytes": 110400556,
+          "allocated_bytes": 117792768
+        },
+        {
+          "relative_path": "debug/incremental/skillyard_lib-*/dep-graph.bin",
+          "apparent_bytes": 90297734,
+          "allocated_bytes": 101322752
+        },
+        {
+          "relative_path": "debug/deps/libskillyard_lib.rlib",
+          "apparent_bytes": 88498592,
+          "allocated_bytes": 88502272
+        },
+        {
+          "relative_path": "debug/deps/libobjc2_foundation-*.rlib",
+          "apparent_bytes": 74055208,
+          "allocated_bytes": 74055680
+        },
+        {
+          "relative_path": "debug/incremental/skillyard_lib-*/query-cache.bin",
+          "apparent_bytes": 71810005,
+          "allocated_bytes": 71811072
+        },
+        {
+          "relative_path": "debug/deps/skillyard-*",
+          "apparent_bytes": 59929448,
+          "allocated_bytes": 59932672
+        },
+        {
+          "relative_path": "debug/skillyard",
+          "apparent_bytes": 59929448,
+          "allocated_bytes": 59932672
+        },
+        {
+          "relative_path": "debug/incremental/skillyard_lib-*/query-cache.bin",
+          "apparent_bytes": 55890650,
+          "allocated_bytes": 55894016
+        },
+        {
+          "relative_path": "debug/deps/libobjc2_foundation-*.rmeta",
+          "apparent_bytes": 46424630,
+          "allocated_bytes": 46428160
+        }
+      ]
+    },
+    "a0_comparison": {
+      "allocated_bytes_difference": 1669214208,
+      "allocated_reduction_fraction": 0.395597323098,
+      "allocated_reduction_percent": 39.559732310,
+      "apparent_bytes_difference": 1680525806,
+      "apparent_reduction_fraction": 0.400496332524,
+      "apparent_reduction_percent": 40.049633252,
+      "integration_test_executable_reduction": {
+        "a0": 24,
+        "candidate": 2
+      },
+      "passes_required_30_percent_allocated_reduction": true
+    }
+  },
+  "measurement_history": {
+    "superseded_target_token": "$A2_SUPERSEDED_TARGET",
+    "superseded_target_was_initially_empty": true,
+    "superseded_target_build_succeeded": true,
+    "superseded_reason": "rustfmt changed the new engineering contract source after the first isolated build; that build is retained but is not reported as the final candidate measurement.",
+    "superseded_target_retained": true,
+    "initial_read_only_accounting_attempt_valid": false,
+    "initial_accounting_attempt_failure": "A zsh local variable named path shadowed the shell's special command-search array; find/awk/sort were not executed.",
+    "initial_accounting_attempt_mutated_target": false,
+    "corrected_accounting_used_non_reserved_variable_names": true,
+    "final_target_rebuilt_from_final_source_in_a_second_fresh_directory": true
+  },
+  "test_inventory": {
+    "a0_identity_equivalence": {
+      "expected": 442,
+      "observed": 442,
+      "missing": [],
+      "target_diffs": {
+        "lib": {
+          "expected": 141,
+          "observed": 141,
+          "missing": 0,
+          "unexpected": 0
+        },
+        "all": {
+          "expected_a0_identities": 300,
+          "observed_a0_identities": 300,
+          "missing": 0
+        },
+        "codex_mount_contract": {
+          "expected": 1,
+          "observed": 1,
+          "missing": 0,
+          "unexpected": 0
+        }
+      }
+    },
+    "additive_engineering_guards": [
+      "engineering_contract::limited_debug_backtrace_reports_fixture_function_file_and_line",
+      "engineering_contract::limited_debug_backtrace_worker",
+      "engineering_contract::workspace_profiles_use_limited_debug_without_disabling_incremental"
+    ],
+    "additive_engineering_guard_count": 3,
+    "current_totals": {
+      "all_tests": 445,
+      "library_unit_tests": 141,
+      "integration_tests": 304,
+      "all_target_tests": 303,
+      "codex_mount_contract_tests": 1,
+      "ignored_tests": 1,
+      "integration_targets": 2,
+      "hard_exit_workers_from_a0": 6
+    },
+    "integration_target_names": [
+      "all",
+      "codex_mount_contract"
+    ],
+    "ignored_identity": {
+      "target": "codex_mount_contract",
+      "name": "current_codex_discovers_global_and_project_directory_symlinks"
+    }
+  },
+  "verification": {
+    "ordinary_aggregator": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked --test all",
+      "exit_code": 0,
+      "result": "303 passed; 0 failed; 0 ignored",
+      "duration_seconds": 168.54
+    },
+    "full_workspace": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo test --workspace --locked",
+      "exit_code": 0,
+      "library": "141 passed; 0 failed; 0 ignored",
+      "all": "303 passed; 0 failed; 0 ignored",
+      "all_duration_seconds": 169.20,
+      "codex_mount_contract": "0 passed; 0 failed; 1 ignored"
+    },
+    "clippy": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "exit_code": 0
+    },
+    "format": {
+      "command": "cd $REPO && CARGO_NET_OFFLINE=true cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    "diff_check": {
+      "command": "cd $REPO && git diff --check",
+      "exit_code": 0
+    }
+  },
+  "production_configuration": {
+    "release_packaging_signing_static_set": [
+      "$REPO/src-tauri/Cargo.toml",
+      "$REPO/src-tauri/build.rs",
+      "$REPO/src-tauri/tauri.conf.json",
+      "$REPO/package.json",
+      "$REPO/pnpm-lock.yaml",
+      "$REPO/.github/workflows/ci.yml",
+      "$REPO/.github/workflows/release-candidate.yml",
+      "$REPO/.github/workflows/publish-release.yml"
+    ],
+    "static_set_hash_method": "SHA-256 of newline-terminated rows <file_sha256><two spaces><repo-relative_path>, sorted in the declared order.",
+    "pre_sha256": "bf208118283ad22f6e24e2ade817ec21f7b1f06f578d2135a443a55aa26cfd3f",
+    "post_sha256": "bf208118283ad22f6e24e2ade817ec21f7b1f06f578d2135a443a55aa26cfd3f",
+    "changed_rows": 0,
+    "unchanged": true,
+    "root_manifest": {
+      "pre_sha256": "7c0212cf7a002175e8f408defc52cc275c144e48c60db2cd231c4846484aeeeb",
+      "post_sha256": "0ccb45d11710a7267d0d37059ae87c53874f49e341decfa17b566f1c2370257e",
+      "only_allowed_dev_test_profile_assignments_added": true,
+      "release_profile_unchanged": true
+    },
+    "cargo_lock": {
+      "pre_sha256": "47311a278c2bca94af19d45cebbe619e023299cee9e8b9afa443c2f24917d25b",
+      "post_sha256": "47311a278c2bca94af19d45cebbe619e023299cee9e8b9afa443c2f24917d25b",
+      "unchanged": true
+    },
+    "src_tauri_manifest_sha256": "173a656564a514b065ec35066eecb1872029fb2f6e8b6d73408ac202a0405dd8",
+    "production_rust_modified": false,
+    "production_app_build_run": false,
+    "production_app_build_note": "A2 validates unchanged release/packaging/signing inputs statically; production App size is not an optimization target."
+  },
+  "retention_privacy_and_scope": {
+    "developer_target_cleaned": false,
+    "developer_target_deleted": false,
+    "isolated_target_cleaned": false,
+    "isolated_target_deleted": false,
+    "isolated_target_retained": true,
+    "isolated_target_token": "$A2_TARGET",
+    "superseded_isolated_target_retained": true,
+    "superseded_isolated_target_token": "$A2_SUPERSEDED_TARGET",
+    "no_clean_or_delete_command_executed": true,
+    "network_accessed": false,
+    "real_provider_called": false,
+    "credentials_read_or_written": false,
+    "production_state_mutated": false,
+    "machine_absolute_paths_present": false,
+    "machine_paths_tokenized_as": [
+      "$REPO",
+      "$A2_TARGET"
+    ],
+    "modified_files": [
+      "$REPO/Cargo.toml",
+      "$REPO/src-tauri/tests/all.rs",
+      "$REPO/src-tauri/tests/all/engineering_contract.rs",
+      "$REPO/docs/acceptance/rust-engineering/a2-limited-debug.json"
+    ],
+    "pre_existing_work_preserved": {
+      "docs_readme_diff_sha256": "f1c9bfd4302ba890360353ba39bf80de02d83018dbf40296523bf12c1d5974c3",
+      "a0_baseline_sha256": "500f8646b4be20b90909d3c8e4e0a6a031f182692513e39b16b4e2b647fe765b",
+      "a0_tests_sha256": "c2bed4c81b5eaa7ee1d3f981beadaf8b1fd3f6244e820b2ed6c56e745d7575ba",
+      "a1_aggregation_sha256": "a8336c8bb445805f765bad4d3166427764435a4b083ed9fb22ab291acf70a990"
+    },
+    "a0_artifacts_modified": false,
+    "support_rs_modified": false,
+    "src_tauri_manifest_modified": false,
+    "cargo_lock_modified": false,
+    "ci_modified": false,
+    "migration_modified": false,
+    "release_profile_modified": false,
+    "custom_profile_added": false,
+    "persistent_incremental_disabled": false,
+    "dependency_added": false,
+    "worktree_created": false,
+    "commit_push_or_issue_operation_performed": false
+  }
+}
