@@ -197,6 +197,52 @@ test("ordinary CI pins just and delegates only to frontend and stage", async () 
   );
 });
 
+test("release candidate freezes 1.1.0 through canonical recipes", async () => {
+  const candidate = await readRepoFile(
+    ".github/workflows/release-candidate.yml",
+  );
+
+  assert.equal(
+    candidate.match(
+      /extractions\/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4\.0\.0/g,
+    )?.length,
+    2,
+  );
+  assert.equal(candidate.match(/just-version: "1\.58\.0"/g)?.length, 2);
+  assert.equal(
+    candidate.match(
+      /test "\$\(just --version\)" = "just 1\.58\.0"/g,
+    )?.length,
+    2,
+  );
+  assert.match(
+    candidate,
+    /quality:\n[\s\S]*?name: Checkout full history\n\s+uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1\n\s+with:\n\s+fetch-depth: 0[\s\S]*?run: just frontend[\s\S]*?\n\n  build:/,
+  );
+  assert.match(
+    candidate,
+    /build:\n[\s\S]*?env:\n\s+CARGO_INCREMENTAL: "0"[\s\S]*?name: Checkout exact commit\n\s+uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1\n\s+with:\n\s+fetch-tags: true[\s\S]*?run: cargo fetch --locked[\s\S]*?run: just stage/,
+  );
+  assert.match(
+    candidate,
+    /packageVersion !== "1\.1\.0" \|\| tauriVersion !== "1\.1\.0"/,
+  );
+  assert.equal(
+    candidate.match(/SkillYard-1\.1\.0-macos-aarch64\.zip/g)?.length,
+    3,
+  );
+  assert.match(
+    candidate,
+    /name: skillyard-1\.1\.0-macos-aarch64-candidate/,
+  );
+  assert.doesNotMatch(candidate, /\b1\.0\.1\b/);
+  assert.doesNotMatch(candidate, /run: just (?:release|mac-contract)/);
+  assert.doesNotMatch(
+    candidate,
+    /^\s+run: (?:pnpm (?:typecheck|test|tauri build)|cargo (?:fmt|clippy|test))/m,
+  );
+});
+
 test("Secret scan ignores only the two verified historical false positives", async () => {
   const ignoredFingerprints = (await readRepoFile(".gitleaksignore"))
     .split("\n")

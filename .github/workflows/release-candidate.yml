@@ -22,6 +22,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+
+      - name: Confirm just version
+        run: test "$(just --version)" = "just 1.58.0"
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -36,11 +44,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Test frontend
-        run: pnpm test
+      - name: Run frontend verification
+        run: just frontend
 
       # 候选 run 必须独立证明同一 commit 没有泄露凭据，不能只依赖另一条 CI run。
       - name: Install and run Gitleaks
@@ -59,12 +64,24 @@ jobs:
     needs: quality
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - name: Confirm Apple Silicon runner
         run: test "$(uname -m)" = "arm64"
 
       - name: Checkout exact commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: true
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+
+      - name: Confirm just version
+        run: test "$(just --version)" = "just 1.58.0"
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -85,34 +102,28 @@ jobs:
           rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
           rustup default 1.94.1
 
-      # 候选 run 自身覆盖完整 Rust 质量门，成功状态才代表该 commit 可发布。
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint Rust
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Test Rust
-        run: cargo test --workspace --locked
-
       - name: Verify release version
         run: |
           node --input-type=module -e '
             import fs from "node:fs";
             const packageVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
             const tauriVersion = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
-            if (packageVersion !== "1.0.1" || tauriVersion !== "1.0.1") {
-              throw new Error(`Expected version 1.0.1, got package=${packageVersion}, tauri=${tauriVersion}`);
+            if (packageVersion !== "1.1.0" || tauriVersion !== "1.1.0") {
+              throw new Error(`Expected version 1.1.0, got package=${packageVersion}, tauri=${tauriVersion}`);
             }
           '
 
-      # tauri.conf.json 使用 signingIdentity "-"，生成 ad-hoc signed 的 .app。
-      - name: Build production application
-        run: pnpm tauri build --bundles app
+      # 只在共享 recipe 前准备依赖网络；stage 内的 Cargo 验证保持 locked + offline。
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+
+      # 候选 run 自身覆盖完整 stage，成功状态才代表该 commit 可以进入人工门禁。
+      - name: Run native stage
+        run: just stage
 
       - name: Verify application and create release files
         env:
-          ZIP_NAME: SkillYard-1.0.1-macos-aarch64.zip
+          ZIP_NAME: SkillYard-1.1.0-macos-aarch64.zip
         run: |
           set -euo pipefail
           APP_PATH="target/release/bundle/macos/SkillYard.app"
@@ -121,7 +132,7 @@ jobs:
           test -d "$APP_PATH"
           test -x "$BINARY_PATH"
           test "$(lipo -archs "$BINARY_PATH")" = "arm64"
-          test "$(plutil -extract CFBundleShortVersionString raw "$APP_PATH/Contents/Info.plist")" = "1.0.1"
+          test "$(plutil -extract CFBundleShortVersionString raw "$APP_PATH/Contents/Info.plist")" = "1.1.0"
           test "$(plutil -extract LSMinimumSystemVersion raw "$APP_PATH/Contents/Info.plist")" = "14.0"
           codesign --verify --deep --strict "$APP_PATH"
           codesign -dv --verbose=4 "$APP_PATH" 2>&1 | grep -F "Signature=adhoc"
@@ -138,9 +149,9 @@ jobs:
       - name: Upload candidate files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: skillyard-1.0.1-macos-aarch64-candidate
+          name: skillyard-1.1.0-macos-aarch64-candidate
           path: |
-            release/SkillYard-1.0.1-macos-aarch64.zip
+            release/SkillYard-1.1.0-macos-aarch64.zip
             release/SHA256SUMS.txt
           if-no-files-found: error
           compression-level: 0
@@ -148,7 +159,7 @@ jobs:
 
       - name: Record candidate identity
         env:
-          ZIP_NAME: SkillYard-1.0.1-macos-aarch64.zip
+          ZIP_NAME: SkillYard-1.1.0-macos-aarch64.zip
         run: |
           {
             echo "## Release candidate"
