@@ -180,7 +180,10 @@ test("ordinary CI pins just and delegates only to frontend and stage", async () 
     )?.length,
     2,
   );
-  assert.match(ci, /frontend:[\s\S]*?run: just frontend\n\n  native:/);
+  assert.match(
+    ci,
+    /frontend:\n[\s\S]*?name: Checkout\n\s+uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1\n\s+with:\n\s+fetch-tags: true[\s\S]*?run: just frontend\n\n  native:/,
+  );
   assert.match(
     ci,
     /native:\n[\s\S]*?env:\n\s+CARGO_INCREMENTAL: "0"[\s\S]*?name: Checkout\n\s+uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1\n\s+with:\n\s+fetch-tags: true[\s\S]*?run: cargo fetch --locked[\s\S]*?run: just stage\n\n  secrets:/,
@@ -192,6 +195,18 @@ test("ordinary CI pins just and delegates only to frontend and stage", async () 
     createHash("sha256").update(secrets).digest("hex"),
     "77040d0c82d62559927b25cd61b641c9681d41e76f8df3a1acb0d2256c8ed5e5",
   );
+});
+
+test("Secret scan ignores only the two verified historical false positives", async () => {
+  const ignoredFingerprints = (await readRepoFile(".gitleaksignore"))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  assert.deepEqual(ignoredFingerprints, [
+    "b50e10bed8ce0f8b62819b6b7a0bfded133b22cb:docs/acceptance/rust-engineering/a3-command-governance.json:generic-api-key:543",
+    "b50e10bed8ce0f8b62819b6b7a0bfded133b22cb:docs/acceptance/rust-engineering/a4-migration-lock.json:generic-api-key:344",
+  ]);
 });
 
 test("public docs point to canonical recipes without duplicating internals", async () => {
