@@ -1882,7 +1882,7 @@ function InventorySettingsPage({
               </div>
               {aiError ? (
                 <p className="inline-error settings-ai-feedback" role="alert">
-                  <strong>{t("AI 设置未保存")}</strong>
+                  <strong>{t("AI 操作失败")}</strong>
                   <span>{aiError}</span>
                 </p>
               ) : null}

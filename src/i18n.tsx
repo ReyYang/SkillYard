@@ -125,7 +125,7 @@ const EN_MESSAGES = {
   "连接测试成功": "Connection test succeeded",
   "正在测试…": "Testing…",
   "测试连接": "Test connection",
-  "AI 设置未保存": "AI settings were not saved",
+  "AI 操作失败": "AI operation failed",
   "AI 说明": "AI explanation",
   "AI 整理": "Organize with AI",
   "AI 整理已在后台开始": "AI organization started in the background",
@@ -896,6 +896,68 @@ const EN_MESSAGES = {
 
 export type TranslationKey = keyof typeof EN_MESSAGES;
 type TranslationValues = Record<string, string | number>;
+
+export function localizeAgentError(message: string): string {
+  // 保留后端给出的验证阶段；英文界面不能把可诊断的 Agent 错误降为通用失败。
+  const verification =
+    /^(DeepSeek Schema Tool|DeepSeek Web Search) 测试失败：(.+)$/u.exec(message);
+  if (verification) {
+    return `${verification[1]} test failed: ${localizeAgentError(verification[2])}`;
+  }
+  const fixedMessages: Record<string, string> = {
+    "无法连接模型 Provider": "Could not connect to the model Provider.",
+    "macOS Keychain 当前不可用": "macOS Keychain is currently unavailable.",
+    "macOS Keychain 中的 API Key 不是有效文本":
+      "The API Key in macOS Keychain is not valid text.",
+    "当前 Provider 还没有保存 API Key":
+      "Save an API Key for the selected Provider first.",
+    "请先阅读并同意 AI 数据发送说明":
+      "Read and accept the AI data-sharing notice first.",
+    "无法连接模型 Provider：连接超时（尚未收到响应头）":
+      "Connection to the model Provider timed out (no response headers received).",
+    "无法连接模型 Provider：连接未建立（尚未收到响应头）":
+      "Could not establish a connection to the model Provider (no response headers received).",
+    "等待模型 Provider 返回 HTTP 响应超时（尚未收到响应头）":
+      "Timed out waiting for the model Provider's HTTP response headers (no response headers received).",
+  };
+  const fixedMessage = fixedMessages[message];
+  if (fixedMessage) return fixedMessage;
+
+  const parameterizedMessages: ReadonlyArray<readonly [RegExp, string]> = [
+    [
+      /^当前 Provider 不支持模型 ([A-Za-z0-9._:-]+)$/u,
+      "The selected Provider does not support model $1.",
+    ],
+    [
+      /^模型 Provider 已返回 HTTP (\d{3})，但读取响应超时$/u,
+      "The model Provider returned HTTP $1, but reading the response timed out.",
+    ],
+    [
+      /^模型 Provider 已返回 HTTP (\d{3})，但读取响应失败$/u,
+      "The model Provider returned HTTP $1, but reading the response failed.",
+    ],
+    [
+      /^模型 Provider 已返回 HTTP (\d{3})，但响应不是有效 JSON$/u,
+      "The model Provider returned HTTP $1, but the response was not valid JSON.",
+    ],
+    [
+      /^模型 Provider 已返回 HTTP (\d{3})，但在流式响应中报告失败$/u,
+      "The model Provider returned HTTP $1, but reported a streaming response error.",
+    ],
+    [
+      /^模型 Provider 拒绝了请求（HTTP (\d{3})）$/u,
+      "The model Provider rejected the request (HTTP $1).",
+    ],
+    [
+      /^模型 Provider 没有返回 SkillYard 需要的 (Structured Tool Output|JSON Mode|Web Search) 能力$/u,
+      "The model Provider did not return the $1 capability required by SkillYard.",
+    ],
+  ];
+  for (const [pattern, translation] of parameterizedMessages) {
+    if (pattern.test(message)) return message.replace(pattern, translation);
+  }
+  return containsCjk(message) ? EN_MESSAGES["AI 操作失败"] : message;
+}
 
 interface I18nValue {
   language: InterfaceLanguage;

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::{BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -31,6 +31,31 @@ const MAX_SKILL_MATERIAL_BYTES: usize = 131_072;
 const MAX_LOCAL_SKILLS: usize = 128;
 const MAX_LOCAL_CATALOG_BYTES: usize = 524_288;
 const MAX_PUBLIC_SEARCH_RESULTS: usize = 8;
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+// DeepSeek 会在服务端排队；buffered 调用需要比交互式流响应更长的无数据等待窗口。
+const DEEPSEEK_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, Copy)]
+struct AgentProviderTimeouts {
+    default_request: Duration,
+    deep_seek_buffered_request: Duration,
+}
+
+impl Default for AgentProviderTimeouts {
+    fn default() -> Self {
+        Self {
+            default_request: PROVIDER_REQUEST_TIMEOUT,
+            deep_seek_buffered_request: DEEPSEEK_REQUEST_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderResponseMode {
+    Buffered,
+    Streaming,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,12 +150,13 @@ impl SecretStore for KeychainSecretStore {
     }
 }
 
-/// Provider 地址属于应用内建协议，测试只能整体替换，用户不能编辑。
+/// Provider transport 的地址与等待策略都属于应用内建协议，测试只能整体替换。
 #[derive(Debug, Clone)]
 pub struct AgentProviderEndpoints {
     open_ai: String,
     glm: String,
     deep_seek: String,
+    timeouts: AgentProviderTimeouts,
 }
 
 impl AgentProviderEndpoints {
@@ -139,6 +165,7 @@ impl AgentProviderEndpoints {
             open_ai: "https://api.openai.com/v1".to_owned(),
             glm: "https://open.bigmodel.cn/api/paas/v4".to_owned(),
             deep_seek: "https://api.deepseek.com/anthropic".to_owned(),
+            timeouts: AgentProviderTimeouts::default(),
         }
     }
 
@@ -166,6 +193,23 @@ impl AgentProviderEndpoints {
         }
     }
 
+    /// Provider 排队测试按比例缩短生产时间，仍然经过真实 HTTP 与 Application seam。
+    #[doc(hidden)]
+    pub fn for_deepseek_timeout_test(
+        deep_seek: String,
+        default_request: Duration,
+        deep_seek_request: Duration,
+    ) -> Self {
+        Self {
+            deep_seek,
+            timeouts: AgentProviderTimeouts {
+                default_request,
+                deep_seek_buffered_request: deep_seek_request,
+            },
+            ..Self::production()
+        }
+    }
+
     fn open_ai_responses(&self) -> String {
         format!("{}/responses", self.open_ai.trim_end_matches('/'))
     }
@@ -176,6 +220,18 @@ impl AgentProviderEndpoints {
 
     fn deep_seek_messages(&self) -> String {
         format!("{}/v1/messages", self.deep_seek.trim_end_matches('/'))
+    }
+
+    fn request_timeout(&self, provider: AiProvider, mode: ProviderResponseMode) -> Duration {
+        match (provider, mode) {
+            (AiProvider::DeepSeek, ProviderResponseMode::Buffered) => {
+                self.timeouts.deep_seek_buffered_request
+            }
+            (AiProvider::OpenAi | AiProvider::Glm, _)
+            | (AiProvider::DeepSeek, ProviderResponseMode::Streaming) => {
+                self.timeouts.default_request
+            }
+        }
     }
 }
 
@@ -230,8 +286,27 @@ pub enum AgentError {
     ConversationTooLarge,
     #[error("无法连接模型 Provider")]
     ProviderUnavailable,
+    #[error("无法连接模型 Provider：连接超时（尚未收到响应头）")]
+    ProviderConnectionTimedOut,
+    #[error("无法连接模型 Provider：连接未建立（尚未收到响应头）")]
+    ProviderConnectionFailed,
+    #[error("等待模型 Provider 返回 HTTP 响应超时（尚未收到响应头）")]
+    ProviderResponseHeadersTimedOut,
+    #[error("模型 Provider 已返回 HTTP {0}，但读取响应超时")]
+    ProviderResponseBodyTimedOut(u16),
+    #[error("模型 Provider 已返回 HTTP {0}，但读取响应失败")]
+    ProviderResponseBodyFailed(u16),
+    #[error("模型 Provider 已返回 HTTP {0}，但响应不是有效 JSON")]
+    ProviderInvalidResponse(u16),
+    #[error("模型 Provider 已返回 HTTP {0}，但在流式响应中报告失败")]
+    ProviderStreamFailed(u16),
     #[error("模型 Provider 拒绝了请求（HTTP {0}）")]
     ProviderRejected(u16),
+    #[error("{stage} 测试失败：{source}")]
+    ProviderVerificationFailed {
+        stage: &'static str,
+        source: Box<AgentError>,
+    },
     #[error("模型 Provider 没有返回 SkillYard 需要的 {0} 能力")]
     InvalidCapability(&'static str),
     #[error("当前 Agent 请求已取消")]
@@ -240,6 +315,15 @@ pub enum AgentError {
     RequestInProgress,
     #[error("Agent Session 状态当前不可用")]
     SessionUnavailable,
+}
+
+impl AgentError {
+    fn during_verification(self, stage: &'static str) -> Self {
+        Self::ProviderVerificationFailed {
+            stage,
+            source: Box::new(self),
+        }
+    }
 }
 
 /// 三家 Provider 都在这里归一为正文增量；调用方看不到任何 Provider 私有事件。
@@ -252,7 +336,11 @@ pub(crate) fn stream_agent_answer(
 ) -> Result<AgentAnswer, AgentError> {
     let messages = sanitize_conversation(messages)?;
     let system = agent_system_prompt(request.language, context);
-    let client = provider_client()?;
+    let client = provider_client(
+        request.endpoints,
+        request.provider,
+        ProviderResponseMode::Streaming,
+    )?;
     let (endpoint, body) = match request.provider {
         AiProvider::OpenAi => (
             request.endpoints.open_ai_responses(),
@@ -348,7 +436,11 @@ pub(crate) fn stream_public_skills(
     mut emit: impl FnMut(String) -> bool,
     cancelled: impl Fn() -> bool,
 ) -> Result<PublicSearchAnswer, AgentError> {
-    let client = provider_client()?;
+    let client = provider_client(
+        request.endpoints,
+        request.provider,
+        ProviderResponseMode::Streaming,
+    )?;
     let instruction = public_search_prompt(request.language);
     let (endpoint, body) = match request.provider {
         AiProvider::OpenAi => (
@@ -442,7 +534,7 @@ pub(crate) fn generate_skill_ai_explanation(
     content_fingerprint: &str,
     material: &str,
 ) -> Result<SkillAiExplanation, AgentError> {
-    let client = provider_client()?;
+    let client = provider_client(endpoints, provider, ProviderResponseMode::Buffered)?;
     let instruction = skill_explanation_prompt(language);
     let response = match provider {
         AiProvider::OpenAi => send_json(
@@ -1081,7 +1173,11 @@ fn verify_deepseek(
     model: &str,
     api_key: &str,
 ) -> Result<(), AgentError> {
-    let client = provider_client()?;
+    let client = provider_client(
+        endpoints,
+        AiProvider::DeepSeek,
+        ProviderResponseMode::Buffered,
+    )?;
     let endpoint = endpoints.deep_seek_messages();
 
     let structured = send_anthropic_json(
@@ -1118,7 +1214,8 @@ fn verify_deepseek(
             },
             "stream": false
         }),
-    )?;
+    )
+    .map_err(|error| error.during_verification("DeepSeek Schema Tool"))?;
     if !contains_deepseek_structured_ok(&structured) {
         return Err(AgentError::InvalidCapability("Structured Tool Output"));
     }
@@ -1144,7 +1241,8 @@ fn verify_deepseek(
             }],
             "stream": false
         }),
-    )?;
+    )
+    .map_err(|error| error.during_verification("DeepSeek Web Search"))?;
     if !contains_anthropic_public_url(&searched) {
         return Err(AgentError::InvalidCapability("Web Search"));
     }
@@ -1156,7 +1254,7 @@ fn verify_glm(
     model: &str,
     api_key: &str,
 ) -> Result<(), AgentError> {
-    let client = provider_client()?;
+    let client = provider_client(endpoints, AiProvider::Glm, ProviderResponseMode::Buffered)?;
     let endpoint = endpoints.glm_chat_completions();
 
     let structured = send_json(
@@ -1210,7 +1308,11 @@ fn verify_openai(
     model: &str,
     api_key: &str,
 ) -> Result<(), AgentError> {
-    let client = provider_client()?;
+    let client = provider_client(
+        endpoints,
+        AiProvider::OpenAi,
+        ProviderResponseMode::Buffered,
+    )?;
     let endpoint = endpoints.open_ai_responses();
 
     let structured = send_json(
@@ -1344,10 +1446,9 @@ fn send_provider_stream(
             .header("anthropic-version", "2023-06-01"),
         AiProvider::OpenAi | AiProvider::Glm => request.bearer_auth(api_key),
     };
-    let response = request
-        .send()
-        .map_err(|_| AgentError::ProviderUnavailable)?;
+    let response = request.send().map_err(map_provider_send_error)?;
     let status = response.status();
+    let status_code = status.as_u16();
     if !status.is_success() {
         return Err(AgentError::ProviderRejected(status.as_u16()));
     }
@@ -1359,9 +1460,15 @@ fn send_provider_stream(
         if cancelled() {
             return Err(AgentError::Cancelled);
         }
-        let line = line.map_err(|_| AgentError::ProviderUnavailable)?;
+        let line = line.map_err(|error| map_provider_read_error(error, status_code))?;
         if line.is_empty() {
-            consume_provider_sse_data(provider, &mut capture, &data, &mut on_fragment)?;
+            consume_provider_sse_data(
+                provider,
+                status_code,
+                &mut capture,
+                &data,
+                &mut on_fragment,
+            )?;
             data.clear();
             continue;
         }
@@ -1372,7 +1479,7 @@ fn send_provider_stream(
             data.push_str(fragment.trim_start());
         }
     }
-    consume_provider_sse_data(provider, &mut capture, &data, &mut on_fragment)?;
+    consume_provider_sse_data(provider, status_code, &mut capture, &data, &mut on_fragment)?;
     if cancelled() {
         return Err(AgentError::Cancelled);
     }
@@ -1381,6 +1488,7 @@ fn send_provider_stream(
 
 fn consume_provider_sse_data(
     provider: AiProvider,
+    status_code: u16,
     capture: &mut ProviderStreamCapture,
     data: &str,
     on_fragment: &mut impl FnMut(&str, &str) -> bool,
@@ -1388,11 +1496,12 @@ fn consume_provider_sse_data(
     if data.is_empty() || data == "[DONE]" {
         return Ok(());
     }
-    let event: Value = serde_json::from_str(data).map_err(|_| AgentError::ProviderUnavailable)?;
+    let event: Value =
+        serde_json::from_str(data).map_err(|_| AgentError::ProviderInvalidResponse(status_code))?;
     if event.get("type").and_then(Value::as_str) == Some("error")
         || event.get("error").is_some_and(|error| !error.is_null())
     {
-        return Err(AgentError::ProviderUnavailable);
+        return Err(AgentError::ProviderStreamFailed(status_code));
     }
     if let Some(fragment) = capture.record_event(provider, &event) {
         capture.text.push_str(&fragment);
@@ -1472,11 +1581,41 @@ fn read_json_hex_quad(chars: &mut impl Iterator<Item = char>) -> Option<u16> {
     Some(value)
 }
 
-fn provider_client() -> Result<Client, AgentError> {
+fn provider_client(
+    endpoints: &AgentProviderEndpoints,
+    provider: AiProvider,
+    mode: ProviderResponseMode,
+) -> Result<Client, AgentError> {
     Client::builder()
-        .timeout(Duration::from_secs(45))
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+        .timeout(endpoints.request_timeout(provider, mode))
         .build()
         .map_err(|_| AgentError::ProviderUnavailable)
+}
+
+fn map_provider_send_error(error: reqwest::Error) -> AgentError {
+    if error.is_connect() && error.is_timeout() {
+        AgentError::ProviderConnectionTimedOut
+    } else if error.is_connect() {
+        AgentError::ProviderConnectionFailed
+    } else if error.is_timeout() {
+        AgentError::ProviderResponseHeadersTimedOut
+    } else {
+        AgentError::ProviderUnavailable
+    }
+}
+
+fn map_provider_read_error(error: io::Error, status_code: u16) -> AgentError {
+    let timed_out = error.kind() == io::ErrorKind::TimedOut
+        || error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout);
+    if timed_out {
+        AgentError::ProviderResponseBodyTimedOut(status_code)
+    } else {
+        AgentError::ProviderResponseBodyFailed(status_code)
+    }
 }
 
 fn send_json(
@@ -1490,8 +1629,9 @@ fn send_json(
         .bearer_auth(api_key)
         .json(body)
         .send()
-        .map_err(|_| AgentError::ProviderUnavailable)?;
+        .map_err(map_provider_send_error)?;
     let status = response.status();
+    let status_code = status.as_u16();
     if !status.is_success() {
         return Err(AgentError::ProviderRejected(status.as_u16()));
     }
@@ -1500,8 +1640,8 @@ fn send_json(
         .by_ref()
         .take(MAX_PROVIDER_RESPONSE_BYTES)
         .read_to_end(&mut bytes)
-        .map_err(|_| AgentError::ProviderUnavailable)?;
-    serde_json::from_slice(&bytes).map_err(|_| AgentError::ProviderUnavailable)
+        .map_err(|error| map_provider_read_error(error, status_code))?;
+    serde_json::from_slice(&bytes).map_err(|_| AgentError::ProviderInvalidResponse(status_code))
 }
 
 fn send_anthropic_json(
@@ -1516,8 +1656,9 @@ fn send_anthropic_json(
         .header("anthropic-version", "2023-06-01")
         .json(body)
         .send()
-        .map_err(|_| AgentError::ProviderUnavailable)?;
+        .map_err(map_provider_send_error)?;
     let status = response.status();
+    let status_code = status.as_u16();
     if !status.is_success() {
         return Err(AgentError::ProviderRejected(status.as_u16()));
     }
@@ -1526,8 +1667,8 @@ fn send_anthropic_json(
         .by_ref()
         .take(MAX_PROVIDER_RESPONSE_BYTES)
         .read_to_end(&mut bytes)
-        .map_err(|_| AgentError::ProviderUnavailable)?;
-    serde_json::from_slice(&bytes).map_err(|_| AgentError::ProviderUnavailable)
+        .map_err(|error| map_provider_read_error(error, status_code))?;
+    serde_json::from_slice(&bytes).map_err(|_| AgentError::ProviderInvalidResponse(status_code))
 }
 
 fn contains_structured_ok(response: &Value) -> bool {

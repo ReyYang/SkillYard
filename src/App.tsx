@@ -60,7 +60,7 @@ import type {
   UiOutcome,
   UserPreferences,
 } from "./domain";
-import { I18nProvider, useI18n } from "./i18n";
+import { I18nProvider, localizeAgentError, useI18n } from "./i18n";
 import {
   tauriSkillYardClient,
   type SkillYardClient,
@@ -2659,6 +2659,7 @@ function formatErrorMessage(
   // Tauri command 会把 Rust 的结构化 UiError 作为普通对象传给前端。
   if (language === "en") {
     const code = errorCode(error);
+    if (code === "agentError" && message) return localizeAgentError(message);
     return {
       storageError: "SkillYard could not access its local data.",
       lifecycleError: "SkillYard could not complete the filesystem operation.",

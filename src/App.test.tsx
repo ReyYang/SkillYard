@@ -1899,8 +1899,145 @@ describe("本机清单", () => {
       .closest("section");
     expect(aiCard).not.toBeNull();
     const feedback = await within(aiCard!).findByRole("alert");
+    expect(feedback).toHaveTextContent("AI 操作失败");
+    expect(feedback).not.toHaveTextContent("AI 设置未保存");
     expect(feedback).toHaveTextContent("连接测试失败");
     expect(feedback).toHaveTextContent("fixture-provider-error");
+  });
+
+  it.each([
+    {
+      reason: "连接超时",
+      message:
+        "DeepSeek Schema Tool 测试失败：无法连接模型 Provider：连接超时（尚未收到响应头）",
+      expected:
+        "DeepSeek Schema Tool test failed: Connection to the model Provider timed out (no response headers received).",
+    },
+    {
+      reason: "连接未建立",
+      message:
+        "DeepSeek Schema Tool 测试失败：无法连接模型 Provider：连接未建立（尚未收到响应头）",
+      expected:
+        "DeepSeek Schema Tool test failed: Could not establish a connection to the model Provider (no response headers received).",
+    },
+    {
+      reason: "响应头等待超时",
+      message:
+        "DeepSeek Schema Tool 测试失败：等待模型 Provider 返回 HTTP 响应超时（尚未收到响应头）",
+      expected:
+        "DeepSeek Schema Tool test failed: Timed out waiting for the model Provider's HTTP response headers (no response headers received).",
+    },
+    {
+      reason: "收到 HTTP 200 后读取超时",
+      message:
+        "DeepSeek Schema Tool 测试失败：模型 Provider 已返回 HTTP 200，但读取响应超时",
+      expected:
+        "DeepSeek Schema Tool test failed: The model Provider returned HTTP 200, but reading the response timed out.",
+    },
+    {
+      reason: "收到 HTTP 503 后读取失败",
+      message:
+        "DeepSeek Schema Tool 测试失败：模型 Provider 已返回 HTTP 503，但读取响应失败",
+      expected:
+        "DeepSeek Schema Tool test failed: The model Provider returned HTTP 503, but reading the response failed.",
+    },
+    {
+      reason: "Schema Tool 返回无效 JSON",
+      message:
+        "DeepSeek Schema Tool 测试失败：模型 Provider 已返回 HTTP 200，但响应不是有效 JSON",
+      expected:
+        "DeepSeek Schema Tool test failed: The model Provider returned HTTP 200, but the response was not valid JSON.",
+    },
+    {
+      reason: "Web Search 返回无效 JSON",
+      message:
+        "DeepSeek Web Search 测试失败：模型 Provider 已返回 HTTP 200，但响应不是有效 JSON",
+      expected:
+        "DeepSeek Web Search test failed: The model Provider returned HTTP 200, but the response was not valid JSON.",
+    },
+    {
+      reason: "Provider 拒绝认证",
+      message: "DeepSeek Schema Tool 测试失败：模型 Provider 拒绝了请求（HTTP 401）",
+      expected:
+        "DeepSeek Schema Tool test failed: The model Provider rejected the request (HTTP 401).",
+    },
+    {
+      reason: "缺少 Web Search 能力",
+      message: "模型 Provider 没有返回 SkillYard 需要的 Web Search 能力",
+      expected:
+        "The model Provider did not return the Web Search capability required by SkillYard.",
+    },
+    {
+      reason: "Provider 不可连接",
+      message: "DeepSeek Schema Tool 测试失败：无法连接模型 Provider",
+      expected:
+        "DeepSeek Schema Tool test failed: Could not connect to the model Provider.",
+    },
+    {
+      reason: "Keychain 不可用",
+      message: "macOS Keychain 当前不可用",
+      expected: "macOS Keychain is currently unavailable.",
+    },
+    {
+      reason: "Keychain 凭据格式错误",
+      message: "macOS Keychain 中的 API Key 不是有效文本",
+      expected: "The API Key in macOS Keychain is not valid text.",
+    },
+    {
+      reason: "没有保存 API Key",
+      message: "当前 Provider 还没有保存 API Key",
+      expected: "Save an API Key for the selected Provider first.",
+    },
+    {
+      reason: "没有同意数据发送",
+      message: "请先阅读并同意 AI 数据发送说明",
+      expected: "Read and accept the AI data-sharing notice first.",
+    },
+    {
+      reason: "不支持当前模型",
+      message: "当前 Provider 不支持模型 deepseek-v4-flash",
+      expected: "The selected Provider does not support model deepseek-v4-flash.",
+    },
+  ])("英文连接测试保留 DeepSeek 失败阶段与 $reason", async ({ message, expected }) => {
+    const user = userEvent.setup();
+    const client = createClient(
+      inventoryOutcome([createManagedEntry({ skillName: "example" })]),
+    );
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      theme: "ledger",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "deepSeek",
+        model: "deepseek-v4-flash",
+        hasApiKey: true,
+        verified: false,
+      },
+    });
+    vi.mocked(client.testAiConnection).mockRejectedValue({
+      code: "agentError",
+      message,
+    });
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "Settings" }));
+    await user.click(
+      screen.getByLabelText(
+        "API Key is saved in macOS Keychain · Connection not tested · Manage Agent Provider",
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Test connection" }));
+
+    const aiCard = screen
+      .getByRole("heading", { name: "Agent Provider" })
+      .closest("section");
+    expect(aiCard).not.toBeNull();
+    const feedback = await within(aiCard!).findByRole("alert");
+    expect(feedback).toHaveTextContent(`Connection test failed: ${expected}`);
+    expect(feedback.textContent).not.toMatch(/[\u3400-\u9fff]/u);
+    expect(client.testAiConnection).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Test connection" })).toBeEnabled();
   });
 
   it("连接测试不可用时说明原因，启用 AI 本身不是测试前提", async () => {
@@ -6801,6 +6938,64 @@ describe("GitHub Source 安装", () => {
     expect(
       screen.getByRole("region", { name: "本机已有" }),
     ).toHaveTextContent("tdd");
+  });
+
+  it("英文发现页保留 Provider 已返回 HTTP 的流式错误", async () => {
+    const user = userEvent.setup();
+    const client = createClient(inventoryOutcome([createEntry()]));
+    vi.mocked(client.getPreferences).mockResolvedValue({
+      language: "en",
+      theme: "ledger",
+      ai: {
+        enabled: true,
+        disclosureAccepted: true,
+        provider: "deepSeek",
+        model: "deepseek-v4-flash",
+        hasApiKey: true,
+        verified: true,
+      },
+    });
+    vi.mocked(client.openDiscover).mockResolvedValue({
+      type: "discover",
+      localSkills: [
+        {
+          inventoryId: "inventory-tdd",
+          skillName: "tdd",
+          description: "Test-driven development",
+          aiSummary: null,
+          managementKind: "takeoverCandidate",
+          bundleId: null,
+          bundleDisplayName: null,
+          sourceId: null,
+          sourceCanonicalIdentity: null,
+          sourceDisplayName: null,
+        },
+      ],
+      sources: [],
+    });
+    vi.mocked(client.searchDiscoverWeb).mockRejectedValue({
+      code: "agentError",
+      message: "模型 Provider 已返回 HTTP 200，但在流式响应中报告失败",
+    });
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "Discover" }));
+    await user.type(
+      screen.getByRole("searchbox", { name: "Search Skills" }),
+      "tdd",
+    );
+    await user.click(screen.getByRole("button", { name: "Search the web" }));
+
+    expect(
+      await screen.findByText(
+        "The model Provider returned HTTP 200, but reported a streaming response error.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "On this Mac" })).toHaveTextContent(
+      "tdd",
+    );
+    expect(client.searchDiscoverWeb).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Search the web" })).toBeEnabled();
   });
 
   it("打开安装页期间保留清单浏览，但禁用全部写入口", async () => {

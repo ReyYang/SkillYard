@@ -3,8 +3,10 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    path::Path,
     sync::{Arc, Mutex, mpsc},
     thread,
+    time::Duration,
 };
 
 use serde_json::Value;
@@ -284,6 +286,134 @@ fn deepseek_configuration_uses_anthropic_schema_tool_and_web_search_result() {
 }
 
 #[test]
+fn deepseek_waits_for_queued_response_beyond_the_shared_provider_timeout() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (endpoint, _requests) =
+        spawn_delayed_deepseek_verification_server(Duration::from_millis(100));
+    let application = configured_deepseek_application(
+        sandbox.path(),
+        AgentProviderEndpoints::for_deepseek_timeout_test(
+            endpoint,
+            Duration::from_millis(40),
+            Duration::from_millis(250),
+        ),
+    );
+
+    let outcome = application
+        .handle(UiIntent::TestAiConnection)
+        .expect("DeepSeek 排队超过共享 timeout、但仍在自身上限内时应完成验证");
+    assert!(matches!(
+        outcome,
+        UiOutcome::Preferences {
+            ai: AiPreferences { verified: true, .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn deepseek_timeout_before_response_headers_reports_that_no_http_response_arrived() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let (endpoint, _requests) =
+        spawn_delayed_deepseek_verification_server(Duration::from_millis(100));
+    let application = configured_deepseek_application(
+        sandbox.path(),
+        AgentProviderEndpoints::for_deepseek_timeout_test(
+            endpoint,
+            Duration::from_millis(40),
+            Duration::from_millis(40),
+        ),
+    );
+
+    let error = application
+        .handle(UiIntent::TestAiConnection)
+        .expect_err("尚未收到 HTTP response headers 时应报告明确 timeout 阶段");
+    assert_eq!(
+        error.to_string(),
+        "DeepSeek Schema Tool 测试失败：等待模型 Provider 返回 HTTP 响应超时（尚未收到响应头）"
+    );
+}
+
+#[test]
+fn deepseek_body_timeout_reports_that_http_status_was_received() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let endpoint = spawn_stalled_deepseek_body_server(Duration::from_millis(100));
+    let application = configured_deepseek_application(
+        sandbox.path(),
+        AgentProviderEndpoints::for_deepseek_timeout_test(
+            endpoint,
+            Duration::from_millis(40),
+            Duration::from_millis(40),
+        ),
+    );
+
+    let error = application
+        .handle(UiIntent::TestAiConnection)
+        .expect_err("收到 HTTP 200 后 body 停滞时应报告读取阶段");
+    assert_eq!(
+        error.to_string(),
+        "DeepSeek Schema Tool 测试失败：模型 Provider 已返回 HTTP 200，但读取响应超时"
+    );
+}
+
+#[test]
+fn deepseek_invalid_json_reports_received_status_without_exposing_body() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let upstream_body = "fixture upstream response body must stay hidden";
+    let application = configured_deepseek_application(
+        sandbox.path(),
+        AgentProviderEndpoints::for_deepseek_test(spawn_error_server(
+            "/anthropic",
+            200,
+            upstream_body,
+        )),
+    );
+
+    let error = application
+        .handle(UiIntent::TestAiConnection)
+        .expect_err("HTTP 200 的非 JSON body 必须报告解析失败");
+    assert_eq!(
+        error.to_string(),
+        "DeepSeek Schema Tool 测试失败：模型 Provider 已返回 HTTP 200，但响应不是有效 JSON"
+    );
+    assert!(!error.to_string().contains(upstream_body));
+}
+
+#[test]
+fn deepseek_second_request_failure_proves_schema_tool_already_returned() {
+    let sandbox = tempdir().expect("应创建隔离测试目录");
+    let second_response = "fixture second response must stay hidden";
+    let (endpoint, requests) = spawn_verification_server(
+        "/anthropic",
+        [
+            r#"{"content":[{"type":"tool_use","id":"tool_1","name":"skillyard_connection_test","input":{"status":"ok"}}]}"#,
+            second_response,
+        ],
+    );
+    let application = configured_deepseek_application(
+        sandbox.path(),
+        AgentProviderEndpoints::for_deepseek_test(endpoint),
+    );
+
+    let error = application
+        .handle(UiIntent::TestAiConnection)
+        .expect_err("第二个请求失败时必须标识 Web Search 阶段");
+    assert_eq!(
+        error.to_string(),
+        "DeepSeek Web Search 测试失败：模型 Provider 已返回 HTTP 200，但响应不是有效 JSON"
+    );
+    assert!(!error.to_string().contains(second_response));
+    assert_eq!(
+        requests
+            .recv()
+            .expect("Fake Server 应返回两个请求的记录")
+            .len(),
+        2,
+        "进入 Web Search 阶段证明 Schema Tool 已经返回并通过能力校验"
+    );
+}
+
+#[test]
 fn deepseek_provider_error_is_normalized_without_exposing_response_content() {
     let sandbox = tempdir().expect("应创建隔离测试目录");
     let home = sandbox.path().join("home");
@@ -315,8 +445,40 @@ fn deepseek_provider_error_is_normalized_without_exposing_response_content() {
     let error = application
         .handle(UiIntent::TestAiConnection)
         .expect_err("401 必须作为 Provider 错误返回");
-    assert_eq!(error.to_string(), "模型 Provider 拒绝了请求（HTTP 401）");
+    assert_eq!(
+        error.to_string(),
+        "DeepSeek Schema Tool 测试失败：模型 Provider 拒绝了请求（HTTP 401）"
+    );
     assert!(!error.to_string().contains("fixture upstream detail"));
+}
+
+fn configured_deepseek_application(
+    sandbox_root: &Path,
+    endpoints: AgentProviderEndpoints,
+) -> SkillYardApplication {
+    let application = SkillYardApplication::new_with_agent_dependencies(
+        ApplicationPaths::for_home(
+            sandbox_root.join("application-support/SkillYard"),
+            sandbox_root.join("home"),
+        ),
+        PlatformInfo::supported_for_test(),
+        Arc::new(FixtureSecretStore::default()),
+        endpoints,
+    );
+    application
+        .handle(UiIntent::SetAiConfiguration {
+            enabled: true,
+            disclosure_accepted: true,
+            provider: AiProvider::DeepSeek,
+            model: "deepseek-v4-flash".to_owned(),
+        })
+        .expect("应保存 DeepSeek 配置");
+    application
+        .handle(UiIntent::SaveAiApiKey {
+            api_key: "skillyard-fixture-diagnostic-deepseek-key".to_owned(),
+        })
+        .expect("应保存 DeepSeek fixture Key");
+    application
 }
 
 fn preferences(ai: AiPreferences) -> UiOutcome {
@@ -396,16 +558,44 @@ fn spawn_deepseek_verification_server() -> (String, mpsc::Receiver<Vec<RecordedR
     )
 }
 
+fn spawn_delayed_deepseek_verification_server(
+    first_response_delay: Duration,
+) -> (String, mpsc::Receiver<Vec<RecordedRequest>>) {
+    spawn_verification_server_with_delays(
+        "/anthropic",
+        [
+            (
+                first_response_delay,
+                r#"{"content":[{"type":"tool_use","id":"tool_1","name":"skillyard_connection_test","input":{"status":"ok"}}]}"#,
+            ),
+            (
+                Duration::ZERO,
+                r#"{"content":[{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{"query":"SkillYard GitHub"}},{"type":"web_search_tool_result","tool_use_id":"srv_1","content":[{"type":"web_search_result","url":"https://github.com/ReyYang/SkillYard","title":"SkillYard"}]},{"type":"text","text":"SkillYard"}]}"#,
+            ),
+        ],
+    )
+}
+
 fn spawn_verification_server(
     base_path: &str,
     responses: [&'static str; 2],
+) -> (String, mpsc::Receiver<Vec<RecordedRequest>>) {
+    spawn_verification_server_with_delays(
+        base_path,
+        responses.map(|response| (Duration::ZERO, response)),
+    )
+}
+
+fn spawn_verification_server_with_delays(
+    base_path: &str,
+    responses: [(Duration, &'static str); 2],
 ) -> (String, mpsc::Receiver<Vec<RecordedRequest>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("应启动 Fake Server");
     let address = listener.local_addr().expect("应读取 Fake Server 地址");
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut recorded = Vec::new();
-        for response in responses {
+        for (delay, response) in responses {
             let (mut stream, _) = listener.accept().expect("应接收 Fake Server 请求");
             let raw = read_http_request(&mut stream);
             let (path, headers, body) = parse_http_request(&raw);
@@ -414,6 +604,7 @@ fn spawn_verification_server(
                 headers,
                 body,
             });
+            thread::sleep(delay);
             let reply = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response.len(),
@@ -444,6 +635,30 @@ fn spawn_error_server(base_path: &str, status: u16, body: &'static str) -> Strin
             .expect("应写入错误 Fake Server 响应");
     });
     format!("http://{address}{base_path}")
+}
+
+fn spawn_stalled_deepseek_body_server(body_delay: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("应启动停滞响应 Fake Server");
+    let address = listener.local_addr().expect("应读取 Fake Server 地址");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("应接收停滞响应测试请求");
+        let _ = read_http_request(&mut stream);
+        let body = r#"{"content":[{"type":"tool_use","id":"tool_1","name":"skillyard_connection_test","input":{"status":"ok"}}]}"#;
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(headers.as_bytes())
+            .expect("应先写入 HTTP response headers");
+        stream
+            .write_all(&body.as_bytes()[..1])
+            .expect("应写入首个 body byte");
+        stream.flush().expect("应刷新部分 body");
+        thread::sleep(body_delay);
+        let _ = stream.write_all(&body.as_bytes()[1..]);
+    });
+    format!("http://{address}/anthropic")
 }
 
 fn read_http_request(stream: &mut impl Read) -> Vec<u8> {
